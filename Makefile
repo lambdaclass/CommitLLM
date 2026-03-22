@@ -9,7 +9,7 @@ paper-watch:
 	$(NIX) develop -c typst watch paper/main.typ paper/main.pdf
 
 paper-stamp: paper
-	ots stamp paper/main.pdf
+	$(NIX) develop -c ots stamp paper/main.pdf
 
 paper-clean:
 	rm -f paper/main.pdf paper/main.pdf.ots
