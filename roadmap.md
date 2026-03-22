@@ -19,7 +19,6 @@
 
 ## Integrations
 - [ ] Decentralized inference network plugin (Ritual, Bittensor, Gensyn): replace redundant execution with receipts
-- [ ] C2PA integration: embed VeriLM receipts as provenance metadata
 
 ## Tools
 - [ ] Inference marketplace: multiple providers, same model, client-verified receipts
