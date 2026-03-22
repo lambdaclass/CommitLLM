@@ -75,7 +75,7 @@ The protocol provides five layers of verification with different guarantee types
 
 == Threat Model
 
-The adversary controls the inference server. They may swap model weights, modify attention computation, fabricate intermediate activations, or lie about earlier context. The adversary does not know which responses will be audited or which tokens within them will be challenged.
+The adversary controls the inference server. They may swap model weights, modify attention computation, fabricate intermediate activations, or lie about earlier context. The adversary does not know which responses will be audited or which tokens within them will be challenged. In the intended deployment, the client's verifier software automatically and randomly audits a small fraction of responses (e.g., 1--5%). Because every response is committed before the provider knows whether it will be challenged, the provider must behave as if any response could be audited.
 
 The client holds a verifier key ($tilde 25$ MB for Llama 70B) derived from the public model weights and a secret random vector. The client audits responses directly --- no trusted third party sees the conversation.
 
@@ -131,7 +131,7 @@ The result is quantized to INT8 and compared against the committed post-attentio
 
 == Unopened Tokens and Layers
 
-No verification. Coverage relies on the provider not knowing which tokens will be challenged.
+No verification on any individual unopened position. Coverage relies on the provider not knowing which responses will be audited, which tokens within them will be challenged, or which layers will be opened. When client software randomly audits 1--5% of responses, the provider faces persistent risk: cheating on any response has a non-negligible probability of triggering an audit that exposes the deviation.
 
 = The Protocol
 

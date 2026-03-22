@@ -221,7 +221,9 @@ Model identity (which weights were used) is verified exactly — a single audit 
 
 ## Who Audits
 
-The client audits directly. Routine verification is CPU-feasible. Shell verification and KV provenance are lightweight (dot products and hash checks). Attention replay scales as O(n²) with sequence length and dominates for long contexts. The client stores the 100-byte receipt, sends a challenge when they choose, and verifies the opening with their own Freivalds key. No third party sees the conversation.
+The client audits directly. In the intended deployment, the client's verifier software automatically and randomly audits a small fraction of responses — typically 1-5%. The provider commits to every response before knowing whether it will be challenged, which tokens will be opened, or which layers will be checked. This unpredictability is what creates the deterrent: the provider must behave as if any response could be audited.
+
+Routine verification is CPU-feasible. Shell verification and KV provenance are lightweight (dot products and hash checks). Attention replay scales as O(n²) with sequence length and dominates for long contexts. The client stores the 100-byte receipt, the verifier software sends a challenge when it decides to audit, and verifies the opening with its own Freivalds key. No third party sees the conversation.
 
 The commitment (100 bytes of hashes) is safe to share — it reveals nothing about the content. The audit opening is not — it contains activations from which the conversation can be reconstructed. This is why the client audits themselves rather than delegating to a third party.
 

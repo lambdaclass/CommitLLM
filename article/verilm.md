@@ -60,6 +60,8 @@ VeriLM is a commit-and-audit protocol. The provider serves responses normally. E
 
 Think of it like a tax audit. Everyone files returns. Most are never examined. But the possibility of an audit keeps people honest — especially when getting caught is catastrophic.
 
+In practice, the client's verifier software automatically and randomly audits a small fraction of responses — say, 1-5%. The provider commits to every response before knowing whether it will be challenged, which tokens will be opened, or which layers will be checked. This unpredictability is what creates the deterrent: cheating on any response carries a non-negligible probability of getting caught. The auditing is programmatic, not human-initiated — the client software makes the challenge decision, sends it, and verifies the opening, all within a short audit window.
+
 ## What a transformer actually computes (and why most of it is easy to verify)
 
 To understand VeriLM, you need to see what happens inside a transformer layer. Here's the computation for a single token at a single layer:
@@ -136,7 +138,7 @@ Beyond that, the receipt provides meaningful computation binding and long-run an
 The right way to describe VeriLM, then, is in two layers:
 
 - **Cryptographic certainty for model identity.** The claimed checkpoint either was used or it was not.
-- **Statistical deterrence for broader response integrity.** Not every response is universally proved, but random audits make tampering risky enough to discipline provider behavior over time.
+- **Statistical deterrence for broader response integrity.** Not every response is universally proved, but when client software randomly audits 1-5% of responses — and the provider cannot predict which — sustained tampering becomes increasingly likely to be caught. The provider commits before knowing whether a response will be challenged, so they cannot selectively cheat on "safe" responses.
 
 ## What's solved, what's not, and why we're telling you
 
