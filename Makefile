@@ -1,6 +1,6 @@
 NIX := nix --extra-experimental-features 'nix-command flakes'
 
-.PHONY: paper paper-watch paper-clean
+.PHONY: paper paper-watch paper-clean paper-stamp
 
 paper:
 	$(NIX) develop -c typst compile paper/main.typ paper/main.pdf
@@ -8,5 +8,8 @@ paper:
 paper-watch:
 	$(NIX) develop -c typst watch paper/main.typ paper/main.pdf
 
+paper-stamp: paper
+	ots stamp paper/main.pdf
+
 paper-clean:
-	rm -f paper/main.pdf
+	rm -f paper/main.pdf paper/main.pdf.ots
