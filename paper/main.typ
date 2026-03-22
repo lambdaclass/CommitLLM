@@ -79,6 +79,8 @@ The adversary controls the inference server. They may swap model weights, modify
 
 The client holds a verifier key ($tilde 25$ MB for Llama 70B) derived from the public model weights and a secret random vector. The client audits responses directly --- no trusted third party sees the conversation.
 
+VeriLM provides interactive, client-held verification. The client who holds the verifier key checks the computation directly. The protocol does not produce a transferable proof that third parties can verify offline --- this is a deliberate tradeoff for low overhead. Audit openings contain intermediate activations from which the conversation content can be reconstructed; this is why the client audits themselves rather than delegating to a third party.
+
 == Design Principles
 
 VeriLM is designed around three constraints:
@@ -156,6 +158,26 @@ The provider returns the response plus a 100-byte receipt ($R_T$, $R_"KV"$, $M$,
 
 The client challenges random tokens and layers. For each opened position, the verifier runs shell verification (Freivalds on all 7 matrices, exact requantization, SiLU, RoPE, RMSNorm), KV provenance sampling, cross-layer consistency checks, and attention replay. Any failure indicates the provider deviated from the claimed model.
 
+= Security Analysis
+
+This section maps concrete adversarial strategies to the protocol layers that detect them.
+
+== Model Swap or Downgrade
+
+Wrong weights fail the Freivalds check at any opened layer. A single audit of a single token is enough to catch a provider serving different model weights, because the Freivalds check at any opened layer will fail against the public checkpoint. False-accept probability is $lt.eq 1\/2^(32)$ per matrix. This is the protocol's strongest guarantee --- it is unconditional and does not depend on statistical sampling or threshold calibration.
+
+== Attention Manipulation
+
+The shell locks the inputs and outputs of every weight matmul --- the adversary cannot change $Q$, $K$, $V$, or the post-attention linear path. Attention replay directly checks that the committed output is consistent with the committed $Q$, $K$, $V$ inputs, catching gross manipulation such as local-window approximations, suppressed context positions, or substituted attention patterns. However, the replay inherits the statistical boundary of KV provenance (unsampled prefix positions are not shell-verified) and cannot match the GPU's FP16 arithmetic exactly. The remaining adversarial freedom is bounded by FP16/FP64 disagreement and the width of the requantization corridor.
+
+== Fabricated Prefix Context
+
+Committed KV values cannot change after $R_"KV"$ is sent. The verifier samples earlier positions and runs full shell verification, anchoring the commitment to real computation. If the prover tampered with $m$ out of $n$ prefix positions and the verifier samples $k$, detection probability is $P("catch") = 1 - (1 - m\/n)^k$. Broader tampering increases the probability of hitting a corrupted position.
+
+== Deployment Configuration Tampering
+
+The deployment manifest $M$ binds the tokenizer, weight Merkle root, quantization scheme, sampling parameters, EOS policy, and system prompt hash into the receipt. The verifier checks $M$ against known-good values (e.g., the published tokenizer for a given model family, the weight Merkle root from the public checkpoint). Any change to the deployment configuration produces a different manifest.
+
 = The Attention Gap
 
 The linear shell is exactly verifiable because INT8 arithmetic is deterministic. Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not bit-reproducible across hardware.
@@ -164,17 +186,11 @@ The protocol constrains the attention interior from both sides: inputs ($Q$, $K$
 
 The remaining adversarial freedom is bounded by the *requantization corridor* --- the fraction of INT8 elements that disagree between FP16 and FP64 computation. This is an open empirical question. High agreement ($> 99%$) means tight constraint; lower agreement means more adversarial room.
 
-Two optional strengthenings exist:
-
-*Score anchoring.* The prover commits pre-softmax scores; the verifier spot-checks $"score"[t,j] eq.quest Q_t dot K_j$ as exact INT32 inner products. Limited by the FP16 softmax gap.
-
-*Batch Freivalds on prefix.* The verifier checks all prefix positions simultaneously using random linear combinations, upgrading KV provenance from statistical sampling to exact weight verification at all positions. Cost: $tilde 4 times$ audit bandwidth.
-
 = Provider Costs
 
 == Storage
 
-Only post-attention INT8 outputs require storage (everything else is re-derivable):
+Only post-attention INT8 outputs and the associated per-tensor quantization scales require storage (everything else is re-derivable):
 
 #figure(
   table(
@@ -216,6 +232,14 @@ Short audit windows require automated auditing --- the client's audit decision m
   caption: [Per-layer verification methods],
 )
 
+= Related Work
+
+The most direct alternative to VeriLM is proving inference in zero knowledge. Systems based on zkSNARKs or zkSTARKs can prove arbitrary computations, producing a static, non-interactive proof that anyone can verify offline. However, current ZK systems impose 100--1000$times$ prover overhead. For a model that costs dollars per response to serve, this translates to hundreds or thousands of dollars per proved response --- prohibitive for production inference.
+
+VeriLM makes the opposite tradeoff: verification is interactive (the provider must respond to challenges) and non-transferable (only the verifier who holds the key can check). In exchange, the normal serving path is unchanged and the per-response overhead is a 100-byte receipt. The expensive part --- verification --- only occurs on the small fraction of responses that are audited.
+
+Trusted execution environments (TEEs) provide hardware-level attestation that specific code ran on specific hardware. TEEs avoid the overhead of proof systems but introduce hardware trust assumptions, limit deployment flexibility, and tie verification to a specific vendor's attestation chain. VeriLM requires no hardware trust beyond standard computation.
+
 = Discussion
 
 VeriLM solves the model identity problem with cryptographic certainty. A provider who swaps, downgrades, or re-quantizes the model is caught on a single audit. This covers the most common economic incentive for cheating.
@@ -223,6 +247,16 @@ VeriLM solves the model identity problem with cryptographic certainty. A provide
 Attention correctness is constrained but not exact --- an irreducible limitation of the sidecar design over unmodified GPU inference. Closing this gap entirely would require either deterministic attention kernels or stronger proof systems, both of which violate the design constraints.
 
 The protocol's practical viability depends on two open questions: the empirical width of the requantization corridor, and whether the storage and bandwidth costs are acceptable to providers at scale.
+
+= Future Directions
+
+Two optional strengthenings could tighten the protocol's guarantees:
+
+*Score anchoring.* The prover commits pre-softmax attention scores; the verifier spot-checks $"score"[t,j] eq.quest Q_t dot K_j$ as exact INT32 inner products. This constrains individual score entries independently of the output-level replay. The limitation is that the GPU computes softmax on FP16 scores, not the INT32 values the verifier checks, so the check cannot chain exactly to the softmax output.
+
+*Batch Freivalds on prefix.* The verifier checks all prefix positions simultaneously using random linear combinations: pick random scalars $alpha_1 dots alpha_n$ and check $v dot (sum alpha_i x_i) eq.quest r^T dot (sum alpha_i z_i)$. One check covers all $n$ positions with false-accept probability $lt.eq 1\/2^(32)$. This upgrades KV provenance from statistical sampling to exact weight verification at all positions. Cost: $tilde 4 times$ audit bandwidth, making it better suited as an optional deep audit mode.
+
+The most important empirical next step is measuring the requantization corridor: running attention in both FP16 and FP64 on real model activations, quantizing both outputs to INT8, and measuring per-element agreement rates. This directly sets the security parameter for attention replay.
 
 = Conclusion
 
