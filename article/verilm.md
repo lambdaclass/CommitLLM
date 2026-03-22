@@ -2,23 +2,23 @@
 
 When you get a response from an LLM, there's no way to know what produced it. Not which model ran. Not whether the output was modified between generation and delivery. Not whether the provider used the weights they claimed.
 
-Today, LLM outputs are unsigned assertions. There is no cryptographic link between a response and the computation that produced it. VeriLM changes that: it gives any response a verifiable tie to a specific set of public model weights.
+Today, LLM outputs are unsigned assertions. There is no cryptographic link between a response and the computation that produced it. VeriLM changes that: it gives any response a verifiable tie to a specific set of public model weights. The verification is interactive and client-held — the client who holds a verifier key audits the provider directly. It is not a transferable proof that third parties can verify offline.
 
 Model swap detection — catching a provider who serves 8B while charging for 70B — is one application of this, and the most obvious one. But provenance is the deeper primitive, and once you have it, the use cases multiply.
 
-The forcing function is data sovereignty. Banks can't send customer financial data to OpenAI. Hospitals can't send patient records to Anthropic. Law firms can't send privileged documents to a third-party API. Government agencies can't send classified material to commercial providers. These industries aren't choosing open-weight models for cost — they're choosing them because they **must** keep data on their own infrastructure. And once you're running open-weight models through a third-party hosting provider or on untrusted compute, the question becomes immediate: who verifies the inference?
+The forcing function is data sovereignty. Banks frequently cannot send customer financial data to third-party AI providers under policy or regulatory constraints. Hospitals face similar restrictions with patient records under HIPAA. Law firms won't send privileged documents to a third-party API. Government agencies can't send classified material to commercial providers. These industries aren't choosing open-weight models primarily for cost — they're choosing them because they need to keep data on their own infrastructure. And once you're running open-weight models through a third-party hosting provider or on untrusted compute, the question becomes immediate: who verifies the inference?
 
 - **Decentralized compute.** Networks like Gensyn, Ritual, or Bittensor run inference on untrusted nodes. The current approach is 2-3x redundant execution — run the same inference multiple times and compare. This is expensive, and it's also weaker than it sounds: honest runs can diverge because of sampling randomness, floating-point non-determinism, or serving-stack differences, so output agreement is an awkward proxy for correctness. VeriLM replaces redundant execution with receipts and random audits — checking the computation path itself, not whether several sampled strings happen to match.
 
 - **Benchmarking and model evaluation.** When a platform like LMSYS or Artificial Analysis evaluates a provider, they need to know the provider actually ran the claimed model and didn't swap in something cheaper to game the benchmark. Model identity is the benchmarker's entire product. The benchmarker is naturally the verifier.
 
-- **Regulated industries.** Finance, insurance, healthcare, and legal are all moving to open-weight models for data sovereignty. They also have the strongest audit trail requirements. A bank's model risk management team already documents which model version is approved for credit decisions. VeriLM turns that documentation from a policy claim into a cryptographic guarantee. The EU AI Act (Article 15, enforcement August 2026) will make this kind of auditability a legal requirement for high-risk AI systems.
+- **Regulated industries.** Finance, insurance, healthcare, and legal are all moving to open-weight models for data sovereignty. They also have the strongest audit trail requirements. A bank's model risk management team already documents which model version is approved for credit decisions. VeriLM turns that documentation from a policy claim into a cryptographic guarantee. The EU AI Act (Article 15, enforcement August 2026) creates regulatory pressure for stronger auditability of high-risk AI systems — requiring appropriate accuracy, robustness, and cybersecurity guarantees that push in this direction.
 
 - **Enterprise AI procurement.** If you're paying for Llama 70B inference from a hosting provider, you want proof you're getting it. Not a promise. Not a dashboard. A cryptographic receipt you can independently verify.
 
 - **Agent platforms.** As AI agents take autonomous actions — executing trades, approving purchases, triaging support tickets — the question of which model produced each decision becomes a liability question. VeriLM receipts at each step create an auditable chain: not just what the agent did, but which exact model decided to do it.
 
-- **Supply chain integrity.** Between the model running on a GPU and the text appearing in your application, there are proxies, gateways, caching layers, and middleware. Any of these can modify the output. A VeriLM receipt, committed at generation time, lets the end consumer verify that what they received matches what was generated — regardless of how many intermediaries touched it.
+- **Supply chain integrity.** Between the model running on a GPU and the text appearing in your application, there are proxies, gateways, caching layers, and middleware. Any of these can modify the output. A VeriLM receipt, committed at generation time, lets any party holding a verifier key audit whether what they received matches what was generated — regardless of how many intermediaries touched it.
 
 The common thread: open-weight models have public weights, and public weights can be audited. VeriLM turns that observation into a protocol.
 
@@ -47,6 +47,8 @@ v · x  =?  r^T · z
 If `z` really equals `W @ x`, this equality always holds. If the provider used the wrong weight matrix, it fails except with probability at most `2^-32`.
 
 That matters because transformer inference is mostly weight matrix multiplication. Once you can audit those multiplies cheaply, you can verify the model's identity without rerunning the model.
+
+During a one-time setup, the verifier precomputes these vectors for every weight matrix at every layer, then deletes the weights. For Llama 70B, the entire verifier key is about 25 MB. The client stores this once and can audit any response, forever, without ever touching the weights again.
 
 ## The key insight: public weights are an auditor's gift
 
@@ -82,27 +84,11 @@ Residual add
 
 Count the operations. There are seven weight matrix multiplications per layer. There's requantization (converting INT32 accumulator outputs back to INT8). There's RoPE (positional encoding), RMSNorm (normalization), and SiLU (activation function).
 
-All of these are deterministic integer arithmetic. Given the same inputs, they produce bit-identical outputs on any hardware. This is the **linear shell** — and it's exactly verifiable.
+All of these are deterministic and canonically recomputable. Given the same inputs, they produce the same verifiable outputs on any hardware. This is the **linear shell** — and it's exactly checkable.
 
 Then there's attention. The GPU computes `Q @ K^T`, softmax, and `α @ V` in FP16 or BF16. Floating-point arithmetic is not bit-reproducible across hardware, or even across runs on the same hardware. This is the one part we can't verify exactly.
 
 The crucial observation: the linear shell is where the weights live. If you want to check which model ran, you check the weight multiplications. Attention is a function of Q, K, V — which are themselves outputs of weight multiplications. So you can verify the model's identity exactly, even though you can't verify attention exactly.
-
-## How Freivalds makes matrix verification cheap
-
-The naive way to verify a matrix multiplication `z = W @ x` is to redo it. For Llama 70B, that means re-multiplying weight matrices with dimensions in the thousands — for every matrix, at every layer, at every token. That's just re-running inference.
-
-Freivalds' algorithm (from 1977) does something much cleverer. During a one-time setup, the verifier picks a secret random vector `r` and precomputes `v = r^T × W` for every weight matrix. This requires having the weights once. After precomputation, the verifier stores just `v` (a vector, not a matrix) and deletes the weights forever.
-
-At audit time, to check that `z = W @ x`, the verifier computes:
-
-```
-v · x  =?  r^T · z
-```
-
-Two dot products. O(n) instead of O(n²). If the provider used the wrong weight matrix, this check fails with probability at least 1 - 1/2³². That's one in four billion. Run it on all seven matrices at even a single layer, and a model swap is caught with overwhelming certainty.
-
-For Llama 70B, the entire verifier key — all the precomputed vectors for all matrices at all layers — is about 25 MB. The client stores this once and can audit any response, forever, without ever touching the weights again.
 
 ## The full protocol in three phases
 
@@ -154,7 +140,7 @@ The right way to describe VeriLM, then, is in two layers:
 
 ## What's solved, what's not, and why we're telling you
 
-**Solved — model provenance.** A single audit cryptographically ties a response to a specific set of weights with certainty ≤ 1/2³². This is the foundation everything else builds on. Whether you're checking for a model swap, establishing an audit trail, or proving which model produced a scientific result, provenance is the primitive. The guarantee is unconditional. No statistical sampling, no threshold calibration. One audit, one Freivalds check, done.
+**Solved — model provenance.** A single audit cryptographically ties a response to a specific set of weights with certainty ≤ 1/2³². This is the foundation everything else builds on. Whether you're checking for a model swap, establishing an audit trail, or proving which model produced a scientific result, provenance is the primitive. The guarantee is unconditional. No statistical sampling, no threshold calibration. A single audit suffices.
 
 **Nearly solved — attention correctness.** The verifier independently recomputes attention from shell-verified inputs and compares the output. Gross manipulation (skipped attention, local-window approximation, suppressed context) is caught. The remaining adversarial freedom is bounded by FP16/FP64 rounding disagreement within the INT8 quantization corridor — a margin that is expected to be very small but hasn't been measured empirically yet.
 
@@ -176,7 +162,7 @@ What remains is the **requantization corridor**: the fraction of INT8 elements t
 
 Most intermediates in the forward pass are deterministic — given the same inputs, they reproduce exactly. The provider doesn't need to store them.
 
-The only thing that must be stored is the post-attention output at each layer. This is the INT8 result after requantizing the FP16 attention output, and it can't be re-derived because re-running attention might produce slightly different FP16 values that land in different quantization buckets.
+The only things that must be stored are the post-attention output at each layer (the INT8 result after requantizing the FP16 attention output) and the associated per-tensor quantization scales. These can't be re-derived because re-running attention might produce slightly different FP16 values that land in different quantization buckets.
 
 | Model | Per token storage |
 |---|---|
@@ -184,7 +170,7 @@ The only thing that must be stored is the post-attention output at each layer. T
 | Llama 70B | ~640 KB |
 | Llama 405B | ~2 MB |
 
-Everything else is re-derivable from: input tokens + output tokens + stored attention outputs.
+Everything else is re-derivable from: input tokens + output tokens + stored attention outputs and scales.
 
 With a short audit window (1-2 minutes), traces fit in a RAM ring buffer. For Llama 70B on 4x H100, that's about 315 GB — 16% of system RAM. No disk I/O required. The tracing overhead is a memcpy per layer per token.
 
