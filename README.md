@@ -143,7 +143,7 @@ This runs on all 7 matrices at the opened layers. Any corruption in any matrix i
 
 `(d)` **RoPE (exact) and RMSNorm (canonical recomputation).** The verifier recomputes RoPE from the position index — this is deterministic integer-scaled arithmetic. RMSNorm is recomputed from the opened residual stream values using a canonical formula; the result is verified in the quantized output space (the recomputed value must requantize to the same `i8` as the committed value).
 
-Result: the verifier has verified the full linear path for the challenged token. All 7 weight matrices (W_q, W_k, W_v, W_o, W_gate, W_up, W_down) are checked by Freivalds; all requantization bridges, RMSNorm, RoPE, and SiLU are recomputed exactly. Concretely, for each opened layer:
+Result: the verifier has verified the full shell for the challenged token. All 7 weight matrices (W_q, W_k, W_v, W_o, W_gate, W_up, W_down) are checked by Freivalds; all requantization bridges, RMSNorm, RoPE, and SiLU are recomputed exactly. Concretely, for each opened layer:
 
 - Freivalds confirms all 7 matrices produced the opened `i32` accumulators
 - Exact recomputation confirms every `i32 → i8` requantization bridge
@@ -263,7 +263,7 @@ At **longer audit windows** (hours to days), traces spill to NVMe or networked s
 
 ## The Attention Gap
 
-The linear shell — all 7 weight matmuls per layer, requantization, RoPE, RMSNorm, SiLU — is exactly verifiable because INT8 arithmetic is deterministic and platform-independent.
+The shell — all 7 weight matmuls per layer, requantization, RoPE, RMSNorm, SiLU — is exactly verifiable. The matmuls are checked cryptographically via Freivalds; the bridge operations (requantization, RoPE, SiLU, RMSNorm) are verified by deterministic or canonical recomputation. The shell includes nonlinear operations (RMSNorm, SiLU), but all are exactly checkable in the quantized output space.
 
 Attention is not. The GPU computes `Q @ K^T`, softmax, and `α @ V` in FP16/BF16, which is not bit-reproducible across hardware. There is no way to verify that the FP16 result matches a verifier-side replay without forcing the prover to change their attention implementation — which defeats the sidecar design.
 

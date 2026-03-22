@@ -84,11 +84,11 @@ Residual add
 
 Count the operations. There are seven weight matrix multiplications per layer. There's requantization (converting INT32 accumulator outputs back to INT8). There's RoPE (positional encoding), RMSNorm (normalization), and SiLU (activation function).
 
-All of these are deterministic and canonically recomputable. Given the same inputs, they produce the same verifiable outputs on any hardware. This is the **linear shell** — and it's exactly checkable.
+All of these are deterministic or canonically recomputable. Given the same inputs, they produce the same verifiable outputs on any hardware. This is the **shell** — and it's exactly checkable. (It's sometimes called the "linear shell," though it includes nonlinear operations like RMSNorm and SiLU that are verified by canonical recomputation rather than Freivalds. The shell's exactness is a composition: cryptographic checks on the matmuls, plus deterministic recomputation on the bridge operations.)
 
 Then there's attention. The GPU computes `Q @ K^T`, softmax, and `α @ V` in FP16 or BF16. Floating-point arithmetic is not bit-reproducible across hardware, or even across runs on the same hardware. This is the one part we can't verify exactly.
 
-The crucial observation: the linear shell is where the weights live. If you want to check which model ran, you check the weight multiplications. Attention is a function of Q, K, V — which are themselves outputs of weight multiplications. So you can verify the model's identity exactly, even though you can't verify attention exactly.
+The crucial observation: the shell is where the weights live. If you want to check which model ran, you check the weight multiplications. Attention is a function of Q, K, V — which are themselves outputs of weight multiplications. So you can verify the model's identity exactly, even though you can't verify attention exactly.
 
 ## The full protocol in three phases
 
@@ -146,13 +146,13 @@ The right way to describe VeriLM, then, is in two layers:
 
 **Statistical — prefix history.** The KV cache for earlier tokens is Merkle-committed and spot-checked. Commitment binding is exact; correctness of unsampled positions depends on sampling rate.
 
-We're being explicit about these boundaries because most verifiable inference work isn't. The honest decomposition is: exact verification on the linear shell, approximate replay on the attention interior, statistical coverage everywhere else. We think this matters more than claiming more than we can deliver.
+We're being explicit about these boundaries because most verifiable inference work isn't. The honest decomposition is: exact verification on the shell, approximate replay on the attention interior, statistical coverage everywhere else. We think this matters more than claiming more than we can deliver.
 
 ## The attention gap
 
 This is the protocol's most interesting limitation, and it's irreducible within the sidecar design.
 
-The linear shell is exactly verifiable because INT8 arithmetic is deterministic. Attention is not. The GPU computes Q@K^T, softmax, and α@V in FP16, which is not bit-reproducible across hardware. There's no way to verify the FP16 result matches a verifier-side replay without forcing the provider to change their attention kernel — which defeats the whole point.
+The shell is exactly verifiable because its operations are deterministic or canonically recomputable. Attention is not. The GPU computes Q@K^T, softmax, and α@V in FP16, which is not bit-reproducible across hardware. There's no way to verify the FP16 result matches a verifier-side replay without forcing the provider to change their attention kernel — which defeats the whole point.
 
 The protocol constrains attention from both sides. The inputs (Q, K, V) and outputs (post-W_o) are exactly verified by the shell. Attention replay checks that the committed output is consistent with the committed inputs. Cross-layer consistency forces fake attention to survive the entire residual stream.
 

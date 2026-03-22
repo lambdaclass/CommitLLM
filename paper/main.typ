@@ -95,7 +95,7 @@ VeriLM's verification is structured in five layers, each with a distinct guarant
 
 == Shell Verification (Exact)
 
-The linear path through each transformer layer consists of seven INT8 weight matrix multiplications ($W_q$, $W_k$, $W_v$, $W_o$, $W_"gate"$, $W_"up"$, $W_"down"$), requantization bridges, RoPE, RMSNorm, and SiLU. All of these are deterministic and exactly verifiable.
+The non-attention path through each transformer layer --- the *shell* --- consists of seven INT8 weight matrix multiplications ($W_q$, $W_k$, $W_v$, $W_o$, $W_"gate"$, $W_"up"$, $W_"down"$), requantization bridges, RoPE, RMSNorm, and SiLU. The shell includes both linear operations (matmuls) and nonlinear ones (RMSNorm, SiLU), but all are deterministic or canonically recomputable and are exactly verifiable in the quantized output space. The shell's exactness is a composition: cryptographic checks (Freivalds) on the weight matmuls, plus deterministic or canonical recomputation on the bridge operations that connect them.
 
 *Freivalds' algorithm* checks each weight multiplication. During setup, the verifier precomputes $v_j^((i)) = r_j^T times W_j^((i))$ for secret random vector $r_j$. At audit time, the verifier checks:
 
@@ -180,7 +180,7 @@ The deployment manifest $M$ binds the tokenizer, weight Merkle root, quantizatio
 
 = The Attention Gap
 
-The linear shell is exactly verifiable because INT8 arithmetic is deterministic. Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not bit-reproducible across hardware.
+The shell is exactly verifiable because its operations are deterministic or canonically recomputable: INT8 matmuls are checked cryptographically via Freivalds, while requantization, RoPE, SiLU, and RMSNorm are verified by exact or canonical recomputation. Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not bit-reproducible across hardware.
 
 The protocol constrains the attention interior from both sides: inputs ($Q$, $K$, $V$) and outputs (post-$W_o$) are exactly verified by the shell. Attention replay directly checks consistency. Cross-layer constraints force fake attention to survive the residual stream.
 
