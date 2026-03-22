@@ -1,5 +1,11 @@
 # Roadmap
 
+## Key Open Questions
+
+- **The Requantization Corridor:** How much do FP16 and FP64 attention outputs differ when quantized to INT8? This determines how tightly attention manipulation is constrained. Without empirical measurement, we don't know the actual bound on adversarial freedom in the attention interior.
+
+---
+
 ## Launch
 - [ ] Write article for blog.lambdaclass.com
 - [ ] Write X thread
