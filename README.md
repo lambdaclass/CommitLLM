@@ -164,7 +164,7 @@ The verifier then:
 
 1. Verifies the Merkle proofs — confirms these are the values the prover committed to in Phase 1.
 2. Randomly selects some earlier token positions (say, `k` of them).
-3. Runs full shell verification on each of those earlier tokens — Freivalds on all 7 matrices + exact requantization + SiLU.
+3. Runs full shell verification on each of those earlier tokens — Freivalds on all 7 matrices + exact requantization + RoPE + RMSNorm + SiLU.
 4. Compares the shell-verified `K`, `V` from those earlier tokens against what was opened from `R_KV`.
 
 If they match: those sampled positions are anchored to real verified computation. If the prover lied about `K,V` at any position, they risk the verifier sampling that exact position.
