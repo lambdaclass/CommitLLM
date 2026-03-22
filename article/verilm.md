@@ -1,10 +1,50 @@
-# VeriLM: Can You Prove Which LLM Actually Ran?
+# VeriLM: Provenance for Open-Weight LLM Inference
 
-When you send a prompt to an inference API, you get tokens back. But you have no idea what actually produced them. The provider says they ran Llama 70B. Maybe they did. Maybe they ran 8B and pocketed the difference. You'd never know.
+When you get a response from an LLM, there's no way to know what produced it. Not which model ran. Not whether the output was modified between generation and delivery. Not whether the provider used the weights they claimed.
 
-This isn't a hypothetical. Running a 70B model costs roughly an order of magnitude more than an 8B. The economic incentive to silently downgrade is obvious, and users regularly accuse providers of doing exactly this. The accusations are impossible to settle because no technical mechanism exists to verify what ran.
+Today, LLM outputs are unsigned assertions. There is no cryptographic link between a response and the computation that produced it. VeriLM changes that: it gives any response a verifiable tie to a specific set of public model weights.
 
-We built VeriLM to fix that.
+Model swap detection — catching a provider who serves 8B while charging for 70B — is one application of this, and the most obvious one. But provenance is the deeper primitive, and once you have it, the use cases multiply:
+
+- **Regulatory compliance.** The EU AI Act (Article 15, enforcement August 2026) mandates accuracy and robustness guarantees for high-risk AI systems. Healthcare, finance, and legal applications need audit trails proving which model produced a given output. VeriLM's receipts provide exactly this: a cryptographic record tying each response to a specific model, tokenizer, quantization scheme, and serving configuration.
+
+- **Content authentication.** As AI-generated content proliferates, the question shifts from "is this AI-generated?" to "which AI generated this, and can you prove it?" A VeriLM receipt is a verifiable claim of origin — not just "an LLM wrote this" but "Llama 70B with these specific weights produced this exact output."
+
+- **Decentralized compute.** Networks like Gensyn, Ritual, or Bittensor run inference on untrusted nodes. The current approach is 2-3x redundant execution for consensus — run the same inference multiple times and compare. VeriLM replaces redundant execution with receipts and random audits, cutting compute costs while providing stronger guarantees.
+
+- **Supply chain integrity.** Between the model running on a GPU and the text appearing in your application, there are proxies, gateways, caching layers, and middleware. Any of these can modify the output. A VeriLM receipt, committed at generation time, lets the end consumer verify that what they received matches what was generated — regardless of how many intermediaries touched it.
+
+- **Contractual SLAs.** If you're paying for Llama 70B inference, you want proof you're getting it. Not a promise. Not a dashboard. A cryptographic receipt that you can independently verify with a 25 MB key and two dot products.
+
+- **Scientific reproducibility.** If a research paper's results depend on LLM outputs, a VeriLM receipt proves which model produced them. Reviewers and replicators can verify the claim without re-running the inference.
+
+The common thread: open-weight models have public weights, and public weights can be audited. VeriLM turns that observation into a protocol.
+
+## The core trick: verify a huge matrix multiply with two dot products
+
+Suppose a provider claims they computed
+
+```
+z = W @ x
+```
+
+for some public weight matrix `W`. The naive way to verify that claim is to recompute `W @ x`. For transformer layers, that's expensive enough that you might as well just rerun inference.
+
+Freivalds' algorithm gives a much cheaper check. During setup, the verifier picks a secret random vector `r` and precomputes
+
+```
+v = r^T @ W
+```
+
+Then, at audit time, instead of recomputing the matrix multiply, the verifier checks
+
+```
+v · x  =?  r^T · z
+```
+
+If `z` really equals `W @ x`, this equality always holds. If the provider used the wrong weight matrix, it fails except with probability at most `2^-32`.
+
+That matters because transformer inference is mostly weight matrix multiplication. Once you can audit those multiplies cheaply, you can verify the model's identity without rerunning the model.
 
 ## The key insight: public weights are an auditor's gift
 
@@ -99,7 +139,7 @@ After this step, the verifier has cryptographically verified Q, K, and V for the
 
 ## What's solved, what's not, and why we're telling you
 
-**Solved — model identity.** A provider who swaps, downgrades, or re-quantizes the model is caught with cryptographic certainty on a single audit. This covers the most common economic incentive for cheating: serving a cheaper model while charging for an expensive one. The guarantee is unconditional. No statistical sampling, no threshold calibration. One audit, one Freivalds check, done.
+**Solved — model provenance.** A single audit cryptographically ties a response to a specific set of weights with certainty ≤ 1/2³². This is the foundation everything else builds on. Whether you're checking for a model swap, establishing an audit trail, or proving which model produced a scientific result, provenance is the primitive. The guarantee is unconditional. No statistical sampling, no threshold calibration. One audit, one Freivalds check, done.
 
 **Nearly solved — attention correctness.** The verifier independently recomputes attention from shell-verified inputs and compares the output. Gross manipulation (skipped attention, local-window approximation, suppressed context) is caught. The remaining adversarial freedom is bounded by FP16/FP64 rounding disagreement within the INT8 quantization corridor — a margin that is expected to be very small but hasn't been measured empirically yet.
 
@@ -143,7 +183,7 @@ Because it's too expensive. Current zkSNARK/zkSTARK systems impose 100-1000x pro
 
 VeriLM's overhead is a 100-byte receipt per response and a memcpy per layer per token for tracing. The expensive part — verification — only happens on the small fraction of responses that get audited. And even then, verification is CPU-feasible for the client: dot products and hash checks for the shell, O(n²) matrix arithmetic for attention replay on longer sequences.
 
-The tradeoff is honest: ZK gives you a proof that anyone can verify without interaction. VeriLM gives you an interactive audit that requires the provider to open their traces. But the audit catches model swaps with the same cryptographic certainty, at a fraction of the cost.
+The tradeoff is honest: ZK gives you a proof that anyone can verify without interaction. VeriLM gives you an interactive audit that requires the provider to open their traces. But the audit establishes provenance with the same cryptographic certainty, at a fraction of the cost.
 
 ## What's next
 
