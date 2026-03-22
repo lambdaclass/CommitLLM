@@ -1,28 +1,66 @@
-#set document(title: "VeriLM: A Commit-and-Audit Protocol for Open-Weight LLM Inference", author: ("",))
-#set page(paper: "a4", margin: (x: 2.5cm, y: 2.5cm))
-#set text(font: "New Computer Modern", size: 10pt)
-#set par(justify: true, leading: 0.65em)
-#set heading(numbering: "1.1")
+#set document(
+  title: "VeriLM: A Commit-and-Audit Protocol for Open-Weight LLM Inference",
+  author: ("Federico Carrone", "Diego Kingston", "Mariano Nicolini", "Pedro Fontana", "Manuel Puebla"),
+  date: auto,
+)
 
-#align(center)[
-  #text(size: 17pt, weight: "bold")[VeriLM: A Commit-and-Audit Protocol for\ Open-Weight LLM Inference]
-  #v(1.5em)
-  // #text(size: 11pt)[Author Name]
-  // #v(0.5em)
-  // #text(size: 10pt, style: "italic")[Affiliation]
-  #v(2em)
+#set text(font: "New Computer Modern", size: 9pt)
+#set page(margin: (x: 1.6cm, y: 1.8cm), numbering: "1", columns: 2)
+#set par(justify: true, leading: 0.58em, spacing: 0.8em)
+#set heading(numbering: "1.1")
+#set math.equation(numbering: "(1)")
+#set enum(indent: 0.5em)
+#set list(indent: 0.5em)
+
+#show heading.where(level: 1): it => {
+  v(0.8em)
+  text(size: 11pt, weight: "bold", it)
+  v(0.4em)
+}
+
+#show heading.where(level: 2): it => {
+  v(0.5em)
+  text(size: 9.5pt, weight: "bold", it)
+  v(0.3em)
+}
+
+#show heading.where(level: 3): it => {
+  v(0.4em)
+  text(size: 9pt, weight: "bold", style: "italic", it)
+  v(0.2em)
+}
+
+// --- Title + Abstract (spans both columns) ---
+
+#place(top + center, scope: "parent", float: true)[
+  #block(width: 100%)[
+    #v(0.5em)
+    #align(center)[
+      #text(size: 15pt, weight: "bold")[
+        VeriLM: A Commit-and-Audit Protocol for\ Open-Weight LLM Inference
+      ]
+      #v(0.8em)
+      #text(size: 10pt)[Federico Carrone, Diego Kingston, Mariano Nicolini, Pedro Fontana, Manuel Puebla \ LambdaClass]
+      #v(0.3em)
+      #text(size: 9pt, style: "italic")[Preprint]
+      #v(0.8em)
+    ]
+
+    #pad(x: 1.5em)[
+      #text(size: 8.5pt)[
+        #text(weight: "bold")[Abstract — ]
+        Users of open-weight LLMs currently have no technical mechanism to verify which model actually ran, or whether the output was altered by the provider or an intermediary. We present VeriLM, a system for auditing open-weight LLM inference that provides computational integrity and verifiable provenance: a verifier can confirm that a response is tied to the claimed model weights and serving configuration, detecting both silent downgrades (for example, serving 8B in place of 70B) and post-commitment tampering (the commitment scheme binds all activations, so any modification after receipt issuance is detectable).
+        The core insight is that public weights permit audit rather than proof-system-heavy verification. VeriLM deploys as a sidecar-style audit layer over existing serving stacks. In the default deployment path, it leaves model weights unchanged, requires no kernel modification, and shifts the main cost to rare audits rather than the normal token-generation path. Each response carries a 100-byte receipt; only audited responses open traces. The verification architecture has five layers: (1) exact shell verification --- cryptographic Freivalds checks on all INT8 weight matmuls plus exact recomputation of requantization, RoPE, RMSNorm, and SiLU; (2) KV provenance --- hash-committed per-token $K,V$ history with exact commitment binding and statistical correctness from sampled shell checks on earlier tokens; (3) cross-layer consistency --- opening multiple layers on the same token creates algebraic coupling through the residual stream, forcing any fake attention to stay consistent across all opened layers; (4) attention replay --- the verifier recomputes attention from shell-verified Q and committed prefix K,V in FP64, quantizes the result, and compares against the committed output; and (5) statistical coverage on unopened tokens and layers. This decomposition gives exact verification on the linear shell (model identity is caught unconditionally, $lt.eq 1\/2^(32)$), statistical provenance on prefix state, and approximate replay on the attention interior --- limited by FP16#sym.arrow.l.r{}FP64 mismatch and the KV sampling boundary. Because receipts are small, VeriLM supports continuous random auditing at low amortized cost, keeping providers under persistent technical accountability.
+      ]
+    ]
+    #v(0.5em)
+    #line(length: 100%, stroke: 0.5pt + luma(180))
+    #v(0.3em)
+  ]
 ]
 
-#set par(first-line-indent: 1em)
 
-#columns(2)[
-
-= Abstract
-
-Users of open-weight LLMs currently have no technical mechanism to verify which model actually ran, or whether the output was altered by the provider or an intermediary. We present VeriLM, a system for auditing open-weight LLM inference that provides computational integrity and verifiable provenance: a verifier can confirm that a response is tied to the claimed model weights and serving configuration, detecting both silent downgrades (for example, serving 8B in place of 70B) and post-commitment tampering (the commitment scheme binds all activations, so any modification after receipt issuance is detectable).
-
-The core insight is that public weights permit audit rather than proof-system-heavy verification. VeriLM deploys as a sidecar-style audit layer over existing serving stacks. In the default deployment path, it leaves model weights unchanged, requires no kernel modification, and shifts the main cost to rare audits rather than the normal token-generation path. Each response carries a 100-byte receipt; only audited responses open traces. The verification architecture has five layers: (1) exact shell verification --- cryptographic Freivalds checks on all INT8 weight matmuls plus exact recomputation of requantization, RoPE, RMSNorm, and SiLU; (2) KV provenance --- hash-committed per-token $K,V$ history with exact commitment binding and statistical correctness from sampled shell checks on earlier tokens; (3) cross-layer consistency --- opening multiple layers on the same token creates algebraic coupling through the residual stream, forcing any fake attention to stay consistent across all opened layers; (4) attention replay --- the verifier recomputes attention from shell-verified Q and committed prefix K,V in FP64, quantizes the result, and compares against the committed output; and (5) statistical coverage on unopened tokens and layers. This decomposition gives exact verification on the linear shell (model identity is caught unconditionally, $lt.eq 1\/2^(32)$), statistical provenance on prefix state, and approximate replay on the attention interior --- limited by FP16#sym.arrow.l.r{}FP64 mismatch and the KV sampling boundary. Because receipts are small, VeriLM supports continuous random auditing at low amortized cost, keeping providers under persistent technical accountability.
-
+// =================================================================
 = Introduction
 
 Open-weight LLM inference presents a trust problem: the client sends a prompt to a provider who claims to run a specific model (e.g., Llama 70B), but the client has no way to verify that the provider actually used those weights. The economic incentive to cheat is clear --- serving a smaller or more aggressively quantized model reduces compute costs while the client pays the same price.
@@ -108,7 +146,9 @@ The provider runs inference normally, capturing intermediates (INT8 inputs, INT3
 
 A deployment manifest binds everything outside the forward pass:
 
-$ M = H("tokenizer_hash" || R_W || "quant_hash" || "sampling_params" || "eos_policy" || "system_prompt_hash") $
+$ M = H(&"tokenizer_hash" || R_W || "quant_hash" \
+  || &"sampling_params" || "eos_policy" \
+  || &"system_prompt_hash") $
 
 The provider returns the response plus a 100-byte receipt ($R_T$, $R_"KV"$, $M$, $N$).
 
@@ -189,5 +229,3 @@ The protocol's practical viability depends on two open questions: the empirical 
 VeriLM demonstrates that meaningful verification of LLM inference is possible without modifying the serving path or requiring expensive proof systems. The protocol's honest decomposition into exact, statistical, and approximate layers allows clients to understand precisely what is and is not guaranteed. The 100-byte receipt imposes negligible overhead on normal serving; the full audit is CPU-feasible for the client.
 
 The most important next step is empirical measurement of the requantization corridor, which will determine how tightly the protocol constrains attention manipulation in practice.
-
-]
