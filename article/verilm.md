@@ -4,19 +4,21 @@ When you get a response from an LLM, there's no way to know what produced it. No
 
 Today, LLM outputs are unsigned assertions. There is no cryptographic link between a response and the computation that produced it. VeriLM changes that: it gives any response a verifiable tie to a specific set of public model weights.
 
-Model swap detection — catching a provider who serves 8B while charging for 70B — is one application of this, and the most obvious one. But provenance is the deeper primitive, and once you have it, the use cases multiply:
+Model swap detection — catching a provider who serves 8B while charging for 70B — is one application of this, and the most obvious one. But provenance is the deeper primitive, and once you have it, the use cases multiply.
 
-- **Regulatory compliance.** The EU AI Act (Article 15, enforcement August 2026) mandates accuracy and robustness guarantees for high-risk AI systems. Healthcare, finance, and legal applications need audit trails proving which model produced a given output. VeriLM's receipts provide exactly this: a cryptographic record tying each response to a specific model, tokenizer, quantization scheme, and serving configuration.
+The forcing function is data sovereignty. Banks can't send customer financial data to OpenAI. Hospitals can't send patient records to Anthropic. Law firms can't send privileged documents to a third-party API. Government agencies can't send classified material to commercial providers. These industries aren't choosing open-weight models for cost — they're choosing them because they **must** keep data on their own infrastructure. And once you're running open-weight models through a third-party hosting provider or on untrusted compute, the question becomes immediate: who verifies the inference?
 
-- **Content authentication.** As AI-generated content proliferates, the question shifts from "is this AI-generated?" to "which AI generated this, and can you prove it?" A VeriLM receipt is a verifiable claim of origin — not just "an LLM wrote this" but "Llama 70B with these specific weights produced this exact output."
+- **Decentralized compute.** Networks like Gensyn, Ritual, or Bittensor run inference on untrusted nodes. The current approach is 2-3x redundant execution — run the same inference multiple times and compare. This is expensive, and it's also weaker than it sounds: honest runs can diverge because of sampling randomness, floating-point non-determinism, or serving-stack differences, so output agreement is an awkward proxy for correctness. VeriLM replaces redundant execution with receipts and random audits — checking the computation path itself, not whether several sampled strings happen to match.
 
-- **Decentralized compute.** Networks like Gensyn, Ritual, or Bittensor run inference on untrusted nodes. The current approach is 2-3x redundant execution for consensus — run the same inference multiple times and compare. VeriLM replaces redundant execution with receipts and random audits, cutting compute costs while providing stronger guarantees.
+- **Benchmarking and model evaluation.** When a platform like LMSYS or Artificial Analysis evaluates a provider, they need to know the provider actually ran the claimed model and didn't swap in something cheaper to game the benchmark. Model identity is the benchmarker's entire product. The benchmarker is naturally the verifier.
+
+- **Regulated industries.** Finance, insurance, healthcare, and legal are all moving to open-weight models for data sovereignty. They also have the strongest audit trail requirements. A bank's model risk management team already documents which model version is approved for credit decisions. VeriLM turns that documentation from a policy claim into a cryptographic guarantee. The EU AI Act (Article 15, enforcement August 2026) will make this kind of auditability a legal requirement for high-risk AI systems.
+
+- **Enterprise AI procurement.** If you're paying for Llama 70B inference from a hosting provider, you want proof you're getting it. Not a promise. Not a dashboard. A cryptographic receipt you can independently verify.
+
+- **Agent platforms.** As AI agents take autonomous actions — executing trades, approving purchases, triaging support tickets — the question of which model produced each decision becomes a liability question. VeriLM receipts at each step create an auditable chain: not just what the agent did, but which exact model decided to do it.
 
 - **Supply chain integrity.** Between the model running on a GPU and the text appearing in your application, there are proxies, gateways, caching layers, and middleware. Any of these can modify the output. A VeriLM receipt, committed at generation time, lets the end consumer verify that what they received matches what was generated — regardless of how many intermediaries touched it.
-
-- **Contractual SLAs.** If you're paying for Llama 70B inference, you want proof you're getting it. Not a promise. Not a dashboard. A cryptographic receipt that you can independently verify with a 25 MB key and two dot products.
-
-One subtle point is that redundant execution is weaker than it sounds for generative inference. Honest runs can diverge because of sampling randomness, floating-point effects, or serving-stack differences, so output agreement is an awkward proxy for correctness. VeriLM checks the computation path itself, not whether several sampled strings happen to match.
 
 The common thread: open-weight models have public weights, and public weights can be audited. VeriLM turns that observation into a protocol.
 
@@ -136,6 +138,19 @@ After this step, the verifier has cryptographically verified Q, K, and V for the
 **Step 4: Cross-layer consistency.** When multiple layers are opened on the same token, fake attention at layer L must produce output that, after passing through W_o and requantization, feeds into layer L+1 consistently with the committed trace. This creates coupled algebraic constraints across layers. The more layers opened, the tighter the constraint.
 
 **Step 5: Attention replay.** The verifier recomputes attention independently using the shell-verified Q and the committed prefix K,V, working in FP64. The result is quantized to INT8 and compared against the committed post-attention output. This catches gross manipulation — local-window approximations that ignore distant context, suppressed attention to specific positions, substituted attention patterns.
+
+## What the receipt actually binds
+
+VeriLM is not just an anti-downgrade check. Each response carries a small cryptographic receipt that binds the audited computation to a specific deployment context. The receipt commits to the traced intermediates and to a manifest covering the claimed checkpoint, quantization, tokenizer, and decoding policy. An audited response is therefore tied not merely to "some model ran," but to a particular claimed model configuration.
+
+The strongest guarantee is model identity. VeriLM computes a public Merkle root over the model weights, so the expected identity of a published checkpoint can be recomputed independently. If a provider claims to serve a known public model but actually runs a modified, downgraded, or re-quantized fork, the audit fails: either the committed weight identity does not match the approved checkpoint, or the opened computation does not verify against the claimed weights. In practical terms, a provider cannot claim one set of weights and compute with another without risking detection. This is the protocol's hard claim: cryptographic certainty for model identity.
+
+Beyond that, the receipt provides meaningful computation binding and long-run anti-tampering pressure. Because the provider commits before knowing whether the response will be audited, which token will be challenged, or which parts of the trace will be opened, it cannot safely rely on post-hoc rewriting or systematic substitution. That does not amount to a universal proof of full end-to-end response integrity on every response. It does, however, create persistent audit risk: if the delivered output is inconsistent with the committed computation, an audit can expose the mismatch, and repeated unpredictable audits make sustained cheating increasingly likely to be caught.
+
+The right way to describe VeriLM, then, is in two layers:
+
+- **Cryptographic certainty for model identity.** The claimed checkpoint either was used or it was not.
+- **Statistical deterrence for broader response integrity.** Not every response is universally proved, but random audits make tampering risky enough to discipline provider behavior over time.
 
 ## What's solved, what's not, and why we're telling you
 
