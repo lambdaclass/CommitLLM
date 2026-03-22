@@ -140,7 +140,7 @@ The right way to describe VeriLM, then, is in two layers:
 
 ## What's solved, what's not, and why we're telling you
 
-**Solved — model provenance.** A single audit cryptographically ties a response to a specific set of weights with certainty ≤ 1/2³². This is the foundation everything else builds on. Whether you're checking for a model swap, establishing an audit trail, or proving which model produced a scientific result, provenance is the primitive. The guarantee is unconditional. No statistical sampling, no threshold calibration. For a model swap or downgrade, a single audit of an opened layer is enough.
+**Solved — model provenance.** A single audit cryptographically ties a response to a specific set of weights with certainty ≤ 1/2³². This is the foundation everything else builds on. Whether you're checking for a model swap, establishing an audit trail, or proving which model produced a scientific result, provenance is the primitive. The guarantee is unconditional. No statistical sampling, no threshold calibration. A single audit of a single token is enough to catch a provider serving different model weights, because any opened layer will mismatch the claimed checkpoint.
 
 **Nearly solved — attention correctness.** The verifier independently recomputes attention from shell-verified inputs and compares the output. Gross manipulation (skipped attention, local-window approximation, suppressed context) is caught. The remaining adversarial freedom is bounded by FP16/FP64 rounding disagreement within the INT8 quantization corridor — a margin that is expected to be very small but hasn't been measured empirically yet.
 
