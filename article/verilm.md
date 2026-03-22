@@ -18,6 +18,8 @@ Model swap detection — catching a provider who serves 8B while charging for 70
 
 - **Scientific reproducibility.** If a research paper's results depend on LLM outputs, a VeriLM receipt proves which model produced them. Reviewers and replicators can verify the claim without re-running the inference.
 
+One subtle point is that redundant execution is weaker than it sounds for generative inference. Honest runs can diverge because of sampling randomness, floating-point effects, or serving-stack differences, so output agreement is an awkward proxy for correctness. VeriLM checks the computation path itself, not whether several sampled strings happen to match.
+
 The common thread: open-weight models have public weights, and public weights can be audited. VeriLM turns that observation into a protocol.
 
 ## The core trick: verify a huge matrix multiply with two dot products
