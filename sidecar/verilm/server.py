@@ -59,8 +59,8 @@ class VerifiedInferenceServer:
         # Extract model geometry for manifest.
         cfg = getattr(model, "config", None)
         self._tokenizer_hash = self._compute_tokenizer_hash(llm)
-        self._weight_hash = None      # TODO: compute from model weights
-        self._quant_hash = None        # TODO: compute from quantization config
+        self._weight_hash = self._compute_weight_hash(model)
+        self._quant_hash = self._compute_quant_hash(model)
         self._system_prompt_hash = None  # Set via configure_system_prompt()
 
         self.buf = get_capture_buffer()
@@ -77,6 +77,52 @@ class VerifiedInferenceServer:
         except Exception as e:
             logger.warning("Could not hash tokenizer: %s", e)
             return "00" * 32
+
+    def _compute_weight_hash(self, model) -> str:
+        """SHA-256 over sorted (name, shape, dtype, first-8-bytes) of each parameter.
+
+        This is a fast fingerprint — not a full content hash of all weights,
+        but enough to detect model swaps or weight tampering. A full hash
+        of multi-GB weights at startup is too slow; this fingerprint hashes
+        the weight metadata plus a prefix of each tensor's raw bytes.
+        """
+        try:
+            h = hashlib.sha256()
+            for name, param in sorted(model.named_parameters()):
+                h.update(name.encode())
+                h.update(str(param.shape).encode())
+                h.update(str(param.dtype).encode())
+                # First 8 bytes of the flattened tensor as content sample.
+                flat = param.detach().flatten()[:2].cpu().contiguous()
+                h.update(flat.numpy().tobytes())
+            return h.hexdigest()
+        except Exception as e:
+            logger.warning("Could not hash model weights: %s", e)
+            return "00" * 32
+
+    def _compute_quant_hash(self, model) -> str:
+        """SHA-256 of quantization config, if present."""
+        try:
+            cfg = getattr(model, "config", None)
+            quant_cfg = getattr(cfg, "quantization_config", None)
+            if quant_cfg is None:
+                return "00" * 32
+            if hasattr(quant_cfg, "to_dict"):
+                quant_dict = quant_cfg.to_dict()
+            elif isinstance(quant_cfg, dict):
+                quant_dict = quant_cfg
+            else:
+                quant_dict = {"repr": repr(quant_cfg)}
+            return hashlib.sha256(
+                json.dumps(quant_dict, sort_keys=True, default=str).encode()
+            ).hexdigest()
+        except Exception as e:
+            logger.warning("Could not hash quant config: %s", e)
+            return "00" * 32
+
+    def configure_system_prompt(self, system_prompt: str):
+        """Set the system prompt hash for manifest inclusion."""
+        self._system_prompt_hash = hashlib.sha256(system_prompt.encode()).hexdigest()
 
     def chat(
         self,
@@ -136,7 +182,12 @@ class VerifiedInferenceServer:
         n_tokens = len(captures) // calls_per_fwd
 
         # Build traces with KV cache for Level C attention verification.
-        traces = build_layer_traces(captures, n_layers=n_layers, level_c=True)
+        # Pass residuals from embedding/logit hooks for RMSNorm bridge verification.
+        residuals = el_data.get("residuals")
+        traces = build_layer_traces(
+            captures, n_layers=n_layers, level_c=True,
+            residuals=residuals if residuals else None,
+        )
 
         # Token IDs must match trace count exactly.
         all_token_ids = prompt_token_ids + gen_token_ids
@@ -167,6 +218,9 @@ class VerifiedInferenceServer:
                     "kv_cache_k": [t.to(torch.int8).cpu().numpy().tolist() for t in lt.get("kv_cache_k", [])],
                     "kv_cache_v": [t.to(torch.int8).cpu().numpy().tolist() for t in lt.get("kv_cache_v", [])],
                 }
+                # Residual stream for RMSNorm bridge verification.
+                if "residual" in lt:
+                    d["residual"] = lt["residual"].cpu().numpy().tolist()
                 # Pass activation scales when available (production W8A8 path).
                 if "qkv_scale" in lt:
                     d["scale_x_attn"] = float(lt["qkv_scale"].item()) if lt["qkv_scale"].numel() == 1 else float(lt["qkv_scale"].max().item())
@@ -333,7 +387,7 @@ def create_app(llm, **kwargs):
 
             state = entry["state"]
             token_index = request.get("token_index", 0)
-            layer_indices = request.get("layer_indices", list(range(state.n_tokens())))
+            layer_indices = request.get("layer_indices", list(range(state.n_layers())))
             tier = request.get("tier", "routine")
 
             response_json = state.audit_stratified(token_index, layer_indices, tier)

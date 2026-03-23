@@ -212,6 +212,11 @@ impl BatchState {
         self.commitment.n_tokens
     }
 
+    /// Number of layers per token.
+    fn n_layers(&self) -> usize {
+        self.inner.all_layers.first().map_or(0, |layers| layers.len())
+    }
+
     /// Per-token KV Merkle roots as hex strings.
     fn kv_roots_hex(&self) -> Vec<String> {
         self.inner

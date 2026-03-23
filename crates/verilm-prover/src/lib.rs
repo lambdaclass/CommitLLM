@@ -368,6 +368,10 @@ pub fn build_audit_response(
     let trace_tree = verilm_core::merkle::build_tree(&leaves);
     let merkle_proof = verilm_core::merkle::prove(&trace_tree, token_idx);
 
+    let final_hidden = all_traces[token_idx]
+        .last()
+        .map(|lt| requantize(&lt.ffn_out));
+
     AuditResponse {
         token_index: challenge.token_index,
         partial_layers,
@@ -377,7 +381,7 @@ pub fn build_audit_response(
         kv_layer_proofs,
         merkle_root: trace_tree.root,
         merkle_proof,
-        final_hidden: None,
+        final_hidden,
         token_id: None,
     }
 }
@@ -409,6 +413,13 @@ pub fn build_audit_response_from_state(
     // Use pre-computed trace tree from BatchState.
     let merkle_proof = verilm_core::merkle::prove(&state.trace_tree, token_idx);
 
+    // Derive final_hidden from last layer's ffn_out (same as normal open path).
+    let final_hidden = token_layers
+        .last()
+        .map(|lt| requantize(&lt.ffn_out));
+
+    let token_id = state.token_ids.as_ref().map(|ids| ids[token_idx]);
+
     AuditResponse {
         token_index: challenge.token_index,
         partial_layers,
@@ -418,8 +429,8 @@ pub fn build_audit_response_from_state(
         kv_layer_proofs,
         merkle_root: state.trace_tree.root,
         merkle_proof,
-        final_hidden: None,
-        token_id: None,
+        final_hidden,
+        token_id,
     }
 }
 

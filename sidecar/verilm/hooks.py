@@ -22,7 +22,7 @@ logger = logging.getLogger("verilm")
 
 
 class EmbeddingLogitCapture:
-    """Captures embeddings and logits via PyTorch forward hooks.
+    """Captures embeddings, logits, and pre-RMSNorm residuals via PyTorch forward hooks.
 
     Install on a vLLM model after loading. Captures are accumulated
     per-request and drained together with the matmul captures.
@@ -31,11 +31,12 @@ class EmbeddingLogitCapture:
     def __init__(self):
         self.embeddings: List[torch.Tensor] = []
         self.logits: List[torch.Tensor] = []
+        self.residuals: List[torch.Tensor] = []
         self._handles: list = []
         self.enabled = True
 
     def install(self, model) -> int:
-        """Install hooks on embedding and LogitsProcessor modules.
+        """Install hooks on embedding, LogitsProcessor, and RMSNorm modules.
 
         Returns the number of hooks installed.
         """
@@ -57,6 +58,14 @@ class EmbeddingLogitCapture:
                 installed += 1
                 logger.info("verilm: installed logit hook on %s (%s)", name, type(mod).__name__)
 
+            # Pre-attention RMSNorm (input_layernorm): capture input = residual stream.
+            # The input to RMSNorm IS the pre-normalization residual connection value.
+            if "input_layernorm" in name and "post" not in name:
+                h = mod.register_forward_hook(self._make_residual_hook())
+                self._handles.append(h)
+                installed += 1
+                logger.info("verilm: installed residual hook on %s", name)
+
         return installed
 
     def _make_embed_hook(self):
@@ -71,14 +80,23 @@ class EmbeddingLogitCapture:
                 self.logits.append(output.detach())
         return hook
 
+    def _make_residual_hook(self):
+        """Hook that captures the INPUT to RMSNorm (= pre-attention residual stream)."""
+        def hook(module, args, output):
+            if self.enabled and len(args) > 0:
+                self.residuals.append(args[0].detach())
+        return hook
+
     def drain(self):
-        """Return and clear all captured embeddings and logits."""
+        """Return and clear all captured embeddings, logits, and residuals."""
         result = {
             "embeddings": self.embeddings,
             "logits": self.logits,
+            "residuals": self.residuals,
         }
         self.embeddings = []
         self.logits = []
+        self.residuals = []
         return result
 
     def remove(self):

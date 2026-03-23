@@ -66,6 +66,7 @@ def build_layer_traces(
     captures: list,
     n_layers: int = 0,
     level_c: bool = False,
+    residuals: Optional[List] = None,
 ) -> List[List[dict]]:
     """Build per-token, per-layer trace dicts from raw captures.
 
@@ -74,12 +75,16 @@ def build_layer_traces(
             from CaptureBuffer.drain().
         n_layers: number of transformer layers. If 0, uses capture._n_layers.
         level_c: if True, accumulate full KV cache snapshots per token.
+        residuals: optional list of pre-attention residual tensors from
+            EmbeddingLogitCapture. One per token per layer (flattened in
+            token-major order). When present, each layer dict gets a
+            "residual" key with the f32 residual stream.
 
     Returns:
         List of tokens, each containing a list of layer dicts matching
         the Rust LayerTrace fields:
             x_attn, q, k, v, a, attn_out, x_ffn, g, u, h, ffn_out,
-            kv_cache_k, kv_cache_v
+            kv_cache_k, kv_cache_v, residual (optional)
     """
     if n_layers == 0:
         n_layers = capture._n_layers
@@ -151,6 +156,13 @@ def build_layer_traces(
             else:
                 layer_dict["kv_cache_k"] = []
                 layer_dict["kv_cache_v"] = []
+
+            # Residual stream (f32) for RMSNorm bridge verification.
+            # Residuals are flattened in token-major order: residuals[t * n_layers + l].
+            if residuals is not None:
+                res_idx = t * n_layers + l
+                if res_idx < len(residuals):
+                    layer_dict["residual"] = residuals[res_idx].float()
 
             token_layers.append(layer_dict)
         all_tokens.append(token_layers)
