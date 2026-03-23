@@ -89,6 +89,35 @@ VeriLM is designed around three constraints:
 + *Minimal per-response overhead.* Each response carries a 100-byte receipt (two Merkle roots, a deployment manifest hash, and a token count). Most responses are never audited.
 + *Client-side verification.* The client performs all verification using CPU-feasible operations (dot products, hash checks, and --- for attention replay --- matrix arithmetic scaling as $O(n^2)$ in sequence length).
 
+#block(
+  width: 100%,
+  inset: 8pt,
+  stroke: 0.5pt + luma(120),
+  radius: 2pt,
+)[
+  *Protocol guarantees at a glance.*
+  + *Exact.* Opened-layer model identity ($lt.eq 1\/2^(32)$ false-accept) and commitment binding (hash-immutable after receipt).
+  + *Statistical.* Prefix KV correctness under sampling: $P("catch") = 1 - (1 - m\/n)^k$.
+  + *Approximate.* Attention replay under the FP16$arrow.l.r$FP64 requantization corridor (@sec-attention-gap).
+]
+
+#figure(
+  table(
+    columns: (auto, auto),
+    align: (left, left),
+    [*Symbol*], [*Meaning*],
+    [$R_W$], [Merkle root over model weights (public identity)],
+    [$R_T$], [Merkle root over trace intermediates],
+    [$R_"KV"$], [Merkle root over per-token $K, V$ history],
+    [$M$], [Deployment manifest hash],
+    [$N$], [Token count in response],
+    [$c, ell$], [Challenged token positions; opened layers per token],
+    [$k$], [Sampled prefix positions for KV provenance],
+    [$tau$], [Acceptance threshold for attention replay],
+  ),
+  caption: [Notation],
+)
+
 = Verification Layers
 
 VeriLM's verification is structured in five layers. This section defines the taxonomy and key terms; the full procedure is specified in @sec-protocol.
@@ -261,21 +290,55 @@ This pins the attention output to a specific computation over the committed valu
   caption: [Per-layer verification methods],
 ) <tab-verification-methods>
 
+== Audit Walkthrough: One Token, Two Layers
+
+Audit token $t = 47$ at layers 12 and 13 of a 70B model, sampling $k = 8$ prefix positions.
+
++ *Challenge.* Verifier sends $(t = 47, {12, 13})$.
++ *Shell.* Provider opens trace at both layers from $R_T$. Verifier runs Freivalds on all 7 matrices per layer (28 dot products total), recomputes all bridges. Yields trusted $Q_(47)$, $K_(47)$, $V_(47)$ at both layers.
++ *KV provenance.* Provider opens $K_(1..46)$, $V_(1..46)$ at both layers from $R_"KV"$. Verifier picks 8 random earlier positions, runs full shell verification at each, confirms committed $K$, $V$ match.
++ *Cross-layer.* Post-attention output at layer 12 feeds into layer 13's RMSNorm --- both sides shell-verified, so boundary must match exactly.
++ *Replay.* At each opened layer, the verifier recomputes attention in FP64 from shell-verified $Q_(47)$ and the commitment-verified prefix. Quantizes to INT8, compares against committed `attn_out_i8`. Passes if $gt.eq tau$ elements agree at both layers.
+
+== Data Lifecycle
+
+@tab-data-lifecycle shows what data exists at each stage of the protocol.
+
+#figure(
+  table(
+    columns: (auto, auto, auto),
+    align: (left, left, left),
+    [*Receipt fields (100 B total)*], [*Provider retains (ring buffer)*], [*Revealed on audit*],
+    [$R_T$ (trace Merkle root)], [INT8 inputs to all 7 matrices], [Merkle openings from $R_T$],
+    [$R_"KV"$ (KV Merkle root)], [INT32 accumulator outputs], [Merkle openings from $R_"KV"$],
+    [Manifest hash $M$], [Requantized INT8 at each bridge], [Opened intermediates at challenged positions],
+    [Token count $N$], [`attn_out_i8` + quantization scales], [Full prefix $K$, $V$ at opened layers],
+    [], [Per-tensor quantization scales], [],
+  ),
+  caption: [Data lifecycle: receipt (every response), retained state (RAM ring buffer, discarded after audit window), and audit openings (revealed only when challenged).],
+) <tab-data-lifecycle>
+
 = Security Analysis
 
 This section maps concrete adversarial strategies to the protocol layers that detect them.
 
 == Model Swap or Downgrade
 
-Wrong weights fail the Freivalds check at any opened layer. A single audit of a single token is enough to catch a provider serving different model weights, because the Freivalds check at any opened layer will fail against the public checkpoint. False-accept probability is $lt.eq 1\/2^(32)$ per matrix. This is the protocol's strongest guarantee --- it is unconditional and does not depend on statistical sampling or threshold calibration.
+*Proposition 1 (Model identity).* _If the provider computes with weights $W' eq.not W$ at any opened layer, the Freivalds check detects this with probability $gt.eq 1 - 2^(-32)$ per matrix._
+
+A single audit of a single token suffices. The guarantee is unconditional --- it does not depend on statistical sampling or threshold calibration.
 
 == Attention Manipulation
 
-The shell locks the inputs and outputs of every weight matmul --- the adversary cannot change $Q$, $K$, $V$, or the post-attention linear path. Attention replay directly checks that the committed output is consistent with the committed $Q$, $K$, $V$ inputs, catching gross manipulation such as local-window approximations, suppressed context positions, or substituted attention patterns. However, the replay inherits the statistical boundary of KV provenance (unsampled prefix positions are not shell-verified) and cannot match the GPU's FP16 arithmetic exactly. The remaining adversarial freedom is bounded by FP16/FP64 disagreement and the width of the requantization corridor.
+*Proposition 2 (Attention replay bound).* _If attention replay with threshold $tau$ accepts, the committed post-attention output agrees with the verifier's FP64 recomputation on at least fraction $tau$ of INT8 elements. Disagreement is bounded by the FP16$arrow.l.r$FP64 requantization corridor and the KV sampling boundary._
+
+The shell locks the inputs ($Q$, $K$, $V$) and outputs (post-$W_o$) of every attention block. Manipulation that alters the INT8 output beyond the corridor --- local-window approximations, suppressed context, substituted patterns --- produces element-wise disagreement exceeding $tau$ and fails the replay. The remaining adversarial freedom is bounded by the corridor width and the KV sampling rate.
 
 == Fabricated Prefix Context
 
-Committed KV values cannot change after $R_"KV"$ is sent. The verifier samples earlier positions and runs full shell verification, anchoring the commitment to real computation. If the prover tampered with $m$ out of $n$ prefix positions and the verifier samples $k$, detection probability is $P("catch") = 1 - (1 - m\/n)^k$. Broader tampering increases the probability of hitting a corrupted position.
+*Proposition 3 (KV tampering detection).* _If the provider tampered with $m$ out of $n$ prefix positions and the verifier samples $k$, detection probability is $P("catch") = 1 - (1 - m\/n)^k$._
+
+Committed KV values cannot change after $R_"KV"$ is sent (hash collision resistance). The verifier anchors the commitment to real computation by sampling earlier positions and running full shell verification. Detection probability increases monotonically with the tampering fraction $m\/n$.
 
 == Deployment Configuration Tampering
 
@@ -327,23 +390,15 @@ VeriLM makes the opposite tradeoff: verification is interactive (the provider mu
 
 Trusted execution environments (TEEs) and remote attestation provide another alternative @birkholz2023rats @menetrey2022attestation. TEEs can attest that specific code ran on specific hardware, avoiding the overhead of proof systems, but they introduce hardware trust assumptions, limit deployment flexibility, and tie verification to a specific vendor's attestation chain. VeriLM requires no hardware trust beyond standard computation.
 
-= Discussion
+= Limitations and Extensions
 
-VeriLM solves the model identity problem with cryptographic certainty. A provider who swaps, downgrades, or re-quantizes the model is caught on a single audit. This covers the most common economic incentive for cheating.
+The protocol's practical viability rests on two open empirical questions: the width of the requantization corridor (which bounds the attention gap) and whether storage and bandwidth costs are acceptable to providers at scale. Closing the attention gap entirely would require deterministic attention kernels or stronger proof systems, both of which violate the sidecar design constraint.
 
-Attention correctness is constrained but not exact --- an irreducible limitation of the sidecar design over unmodified GPU inference. Closing this gap entirely would require either deterministic attention kernels or stronger proof systems, both of which violate the design constraints.
-
-The protocol's practical viability depends on two open questions: the empirical width of the requantization corridor, and whether the storage and bandwidth costs are acceptable to providers at scale.
-
-= Future Directions
-
-Two optional strengthenings could tighten the protocol's guarantees:
+Two extensions could tighten the guarantees:
 
 *Score anchoring.* The prover commits pre-softmax attention scores; the verifier spot-checks $"score"[t,j] eq.quest Q_t dot K_j$ as exact INT32 inner products. This constrains individual score entries independently of the output-level replay. The limitation is that the GPU computes softmax on FP16 scores, not the INT32 values the verifier checks, so the check cannot chain exactly to the softmax output.
 
 *Batch Freivalds on prefix.* The verifier checks all prefix positions simultaneously using random linear combinations: pick random scalars $alpha_1 dots alpha_n$ and check $v dot (sum alpha_i x_i) eq.quest r^T dot (sum alpha_i z_i)$. One check covers all $n$ positions with false-accept probability $lt.eq 1\/2^(32)$. This upgrades KV provenance from statistical sampling to exact weight verification at all positions. Cost: $tilde 4 times$ audit bandwidth, making it better suited as an optional deep audit mode.
-
-The most important empirical next step is measuring the requantization corridor: running attention in both FP16 and FP64 on real model activations, quantizing both outputs to INT8, and measuring per-element agreement rates. This directly sets the security parameter for attention replay.
 
 = Conclusion
 
