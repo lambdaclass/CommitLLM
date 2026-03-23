@@ -23,3 +23,4 @@ import VerifiedInference.ApproximateAttentionReplay
 import VerifiedInference.CanonicalProtocol
 import VerifiedInference.CanonicalProtocolSound
 import VerifiedInference.GameToFreivalds
+import VerifiedInference.ModelIdentitySoundness
