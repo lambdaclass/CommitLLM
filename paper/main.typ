@@ -103,7 +103,7 @@ Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not b
 + *Attention replay (approximate).* The verifier recomputes attention from shell-verified Q and committed prefix K,V in FP64, quantizes to INT8, and compares. Limited by FP16$arrow.l.r$FP64 mismatch.
 + *Unopened positions (none).* No direct verification. Deterrence from the provider not knowing which responses will be audited or which tokens challenged.
 
-@fig-forward-pass traces the full forward pass for one output token. Each operation is labeled with its verification type: Freivalds-checked weight matmuls, canonically recomputable bridge operations, and the single non-exact point --- FP16 attention. The only non-replayable provider-side state is the per-layer `attn_i8` and its quantization scale; everything below that point replays exactly or canonically from the stored values and the public weights.
+@fig-forward-pass traces the full forward pass for one output token. Each operation is labeled with its verification type: Freivalds-checked weight matmuls, canonically recomputable bridge operations, and the single non-exact point --- FP16 attention. The only non-replayable provider-side state is the per-layer `attn_i8` and its quantization scale; everything below that point replays exactly or canonically from the stored values, the output transcript, and the public weights.
 
 #figure(
   block(width: 100%, inset: (x: 4pt, y: 6pt))[
@@ -123,7 +123,7 @@ Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not b
       k = RoPE(dequant(k_i32, ...), pos)   [canonical]
       v = dequant(v_i32, ...)              [canonical]
 
-      attn = softmax(QK^T / sqrt(d)) @ V  [non-exact]
+      attn = softmax(q @ k^T / sqrt(d)) @ v [non-exact]
       attn_i8, sa = quantize(attn)         [STORED]
 
       o_i32 = W_o @ attn_i8                [Freivalds]
@@ -140,8 +140,10 @@ Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not b
       down_i32 = W_down @ x_i8             [Freivalds]
       residual += dequant(down_i32, ...)   [canonical]
 
-    logits = LM_head(RMSNorm(residual))    [Freivalds]
-    token  = sample(logits)                [output]
+    x_norm = RMSNorm(residual)              [canonical]
+    x_i8, s = quantize(x_norm)             [exact]
+    logits_i32 = LM_head @ x_i8            [Freivalds]
+    token = sample(dequant(logits_i32))    [transcript]
     ```
   ],
   caption: [Annotated forward pass for one output token. Each operation is labeled with its verification type. The only non-exact operation is FP16 attention; storing `attn_i8` and its quantization scale bridges the gap.],
