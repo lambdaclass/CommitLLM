@@ -118,6 +118,7 @@ VeriLM is designed around three constraints:
     [$M$], [Deployment manifest hash],
     [$N$], [Token count in response],
     [$c, ell$], [Number of challenged tokens; number of opened layers per token],
+    [$m$], [Output dimension of the checked weight matrix (length of $r_j$)],
     [$k$], [Sampled prefix positions for KV provenance],
     [$tau$], [Acceptance threshold for attention replay],
     [$p$], [Prime modulus for Freivalds checks ($p gt.eq 2^(32)$); arithmetic in $bb(F)_p$],

@@ -2,11 +2,11 @@
 
 VeriLM is a commit-and-audit protocol for open-weight LLM inference. The provider serves responses normally with a 100-byte receipt. On demand, a verifier challenges random tokens and cryptographically checks the computation against the public model weights.
 
-A provider who swaps or downgrades the model is caught with cryptographic certainty (≤ 1/2³²) on the first audited token — this is a hard, unconditional guarantee. Manipulation within the attention interior (softmax, α@V) is directly constrained by attention replay and statistically anchored by KV provenance, but not exactly verifiable due to FP16 non-determinism; see [The Attention Gap](#the-attention-gap).
+A provider who swaps or downgrades the model is caught on the first audited token with probability ≥ 1 − 1/p per checked matrix (≤ 1/2³² for p ≥ 2³²) — this is a hard, unconditional guarantee. Manipulation within the attention interior (softmax, α@V) is directly constrained by attention replay and statistically anchored by KV provenance, but not exactly verifiable due to FP16 non-determinism; see [The Attention Gap](#the-attention-gap).
 
 ### What's solved and what isn't
 
-**Solved — model identity:** a provider who swaps, downgrades, or re-quantizes the model is caught with cryptographic certainty (≤ 1/2³²) on a single audit. This covers the most common economic incentive for cheating (serving a cheaper model while charging for an expensive one). The guarantee is unconditional — no statistical sampling, no threshold calibration.
+**Solved — model identity:** a provider who swaps, downgrades, or re-quantizes the model is caught with probability ≥ 1 − 1/p per checked matrix (≤ 1/2³² for p ≥ 2³²) on a single audit. This covers the most common economic incentive for cheating (serving a cheaper model while charging for an expensive one). The guarantee is unconditional — no statistical sampling, no threshold calibration.
 
 **Nearly solved — attention correctness:** the verifier independently recomputes attention from shell-verified inputs and compares the output. Gross manipulation (skipped attention, local-window approximation, suppressed context) is caught. The remaining adversarial freedom is bounded by FP16↔FP64 rounding disagreement within the INT8 quantization corridor — a margin that is expected to be very small but has not yet been measured empirically.
 
@@ -80,7 +80,7 @@ Public. Compute a Merkle root `R_W` over all weight matrices. This is the model'
 Verifier. Each verifier independently:
 
 1. Fix a prime `p ≥ 2³²`. All Freivalds checks operate modulo `p`: INT8 inputs and INT32 accumulators are lifted into the finite field F_p = Z/pZ.
-2. For each of the 7 matrix types (Q, K, V, O, gate, up, down), sample a secret random vector `r_j` uniformly from F_p.
+2. For each of the 7 matrix types (Q, K, V, O, gate, up, down), sample a secret random vector `r_j` uniformly from F_p^m (where `m` is the output dimension of the weight matrix).
 3. For each layer `i`, precompute `v_j^(i) = r_j^T × W_j^(i) mod p`. This is one matrix-vector multiply per matrix per layer — done once.
 4. Store the verifier key: ~25 MB for Llama 70B.
 5. Delete the weights. The verifier never needs them again.
