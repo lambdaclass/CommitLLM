@@ -9,7 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 vi-core = { path = "../vi-core" }
-vi-test-vectors = { path = "../vi-test-vectors" }
+vi-prover = { path = "../vi-prover" }
 vi-verify = { path = "../vi-verify" }
 pyo3 = { version = "0.28", features = ["extension-module"] }
 serde_json = "1"

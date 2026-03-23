@@ -35,7 +35,7 @@ use vi_core::types::{
     BatchCommitment, BatchProof, CommitmentVersion, DeploymentManifest, LayerTrace, TokenTrace,
     VerificationPolicy, VerifierKey,
 };
-use vi_test_vectors::{commit_with_full_binding, open, FullBindingParams};
+use vi_prover::{commit_with_full_binding, open, FullBindingParams};
 
 /// Extract a Vec<i8> from a Python list of ints.
 fn extract_i8_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<i8>> {
@@ -147,7 +147,7 @@ fn extract_manifest(d: &Bound<'_, PyDict>) -> PyResult<DeploymentManifest> {
 /// - Get KV roots for streaming verification
 #[pyclass]
 struct BatchState {
-    inner: vi_test_vectors::BatchState,
+    inner: vi_prover::BatchState,
     commitment: BatchCommitment,
 }
 

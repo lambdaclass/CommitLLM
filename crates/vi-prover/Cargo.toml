@@ -1,0 +1,8 @@
+[package]
+name = "vi-prover"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vi-core = { path = "../vi-core" }
+bincode = "1"

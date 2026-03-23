@@ -2,6 +2,7 @@
 members = [
     "crates/vi-core",
     "crates/vi-keygen",
+    "crates/vi-prover",
     "crates/vi-verify",
     "crates/vi-test-vectors",
     "crates/vi-py",
