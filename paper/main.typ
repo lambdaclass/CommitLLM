@@ -49,8 +49,7 @@
     #pad(x: 1.5em)[
       #text(size: 8.5pt)[
         #text(weight: "bold")[Abstract — ]
-        Users of open-weight LLMs currently have no technical mechanism to verify which model actually ran, or whether the output was altered by the provider or an intermediary. We present VeriLM, a system for auditing open-weight LLM inference that provides computational integrity and verifiable provenance: a verifier can confirm that a response is tied to the claimed model weights and serving configuration, detecting both silent downgrades (for example, serving 8B in place of 70B) and post-commitment tampering (the commitment scheme binds all activations, so any modification after receipt issuance is detectable).
-        The core insight is that public weights permit audit rather than proof-system-heavy verification. VeriLM deploys as a sidecar-style audit layer over existing serving stacks. In the default deployment path, it leaves model weights unchanged, requires no kernel modification, and shifts the main cost to rare audits rather than the normal token-generation path. Each response carries a 100-byte receipt; only audited responses open traces. The verification architecture has five layers: (1) exact shell verification --- cryptographic Freivalds checks on all INT8 weight matmuls plus exact recomputation of requantization, RoPE, RMSNorm, and SiLU; (2) KV provenance --- hash-committed per-token $K,V$ history with exact commitment binding and statistical correctness from sampled shell checks on earlier tokens; (3) cross-layer consistency --- opening multiple layers on the same token creates algebraic coupling through the residual stream, forcing any fake attention to stay consistent across all opened layers; (4) attention replay --- the verifier recomputes attention from shell-verified Q and committed prefix K,V in FP64, quantizes the result, and compares against the committed output; and (5) statistical coverage on unopened tokens and layers. This decomposition gives exact verification on the shell (model identity is caught unconditionally, $lt.eq 1\/2^(32)$), statistical provenance on prefix state, and approximate replay on the attention interior --- limited by FP16#sym.arrow.l.r{}FP64 mismatch and the KV sampling boundary. Because receipts are small, VeriLM supports continuous random auditing at low amortized cost, keeping providers under persistent technical accountability.
+        Users of open-weight LLMs have no technical mechanism to verify which model actually ran or whether the output was altered. We present VeriLM, a commit-and-audit protocol for open-weight LLM inference. The core insight is that public weights permit lightweight audit rather than expensive proof systems. VeriLM deploys as a sidecar over unmodified serving stacks: each response carries a 100-byte receipt, and only audited responses open traces. The protocol provides three tiers of assurance: exact model-identity checks on opened layers ($lt.eq 1\/2^(32)$ false-accept per matrix via Freivalds on INT8 weight matmuls), statistical prefix-state provenance (Merkle-committed KV history with sampled shell verification), and approximate attention replay (FP64 recomputation compared against the committed quantized post-attention output, bounded by the requantization corridor). Because receipts are small, VeriLM supports continuous random auditing at low amortized cost.
       ]
     ]
     #v(0.5em)
@@ -97,7 +96,7 @@ VeriLM is designed around three constraints:
 )[
   *Protocol guarantees at a glance.*
   + *Exact.* Opened-layer model identity ($lt.eq 1\/2^(32)$ false-accept) and commitment binding (hash-immutable after receipt).
-  + *Statistical.* Prefix KV correctness under sampling: $P("catch") = 1 - (1 - m\/n)^k$.
+  + *Statistical.* Prefix KV correctness under sampling ($k$ positions checked out of $n$; see notation).
   + *Approximate.* Attention replay under the FP16$arrow.l.r$FP64 requantization corridor (@sec-attention-gap).
 ]
 
@@ -111,7 +110,7 @@ VeriLM is designed around three constraints:
     [$R_"KV"$], [Merkle root over per-token $K, V$ history],
     [$M$], [Deployment manifest hash],
     [$N$], [Token count in response],
-    [$c, ell$], [Challenged token positions; opened layers per token],
+    [$c, ell$], [Number of challenged tokens; number of opened layers per token],
     [$k$], [Sampled prefix positions for KV provenance],
     [$tau$], [Acceptance threshold for attention replay],
   ),
@@ -136,46 +135,50 @@ Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not b
 
 #figure(
   block(width: 100%, inset: (x: 4pt, y: 6pt))[
-    #set text(size: 7pt)
-    ```
-    residual = embedding[token_id]          [exact lookup]
-
-    for each layer:
-      x_norm = RMSNorm(residual)           [canonical]
-      x_i8, s = quantize(x_norm)           [exact]
-
-      q_i32 = W_q @ x_i8                   [Freivalds]
-      k_i32 = W_k @ x_i8                   [Freivalds]
-      v_i32 = W_v @ x_i8                   [Freivalds]
-
-      q = RoPE(dequant(q_i32, ...), pos)   [canonical]
-      k = RoPE(dequant(k_i32, ...), pos)   [canonical]
-      v = dequant(v_i32, ...)              [canonical]
-
-      attn = softmax(q @ k^T / sqrt(d)) @ v [non-exact]
-      attn_out_i8, sa = quantize(attn)      [STORED]
-
-      o_i32 = W_o @ attn_out_i8            [Freivalds]
-      residual += dequant(o_i32, ...)      [canonical]
-
-      x_norm = RMSNorm(residual)           [canonical]
-      x_i8, s = quantize(x_norm)           [exact]
-
-      gate_i32 = W_gate @ x_i8             [Freivalds]
-      up_i32   = W_up   @ x_i8             [Freivalds]
-      x = SiLU(dequant(gate_i32))          [canonical]
-          * dequant(up_i32)
-      x_i8, s = quantize(x)                [exact]
-      down_i32 = W_down @ x_i8             [Freivalds]
-      residual += dequant(down_i32, ...)   [canonical]
-
-    x_norm = RMSNorm(residual)              [canonical]
-    x_i8, s = quantize(x_norm)             [exact]
-    logits_i32 = LM_head @ x_i8            [Freivalds]
-    token = sample(dequant(logits_i32))    [transcript]
-    ```
+    #let t(body) = align(right, text(style: "italic", fill: luma(80), size: 7pt)[#body])
+    #let sp = table.cell(colspan: 2)[#v(1pt)]
+    #table(
+      columns: (1fr, auto),
+      stroke: none,
+      inset: (x: 2pt, y: 1.5pt),
+      align: (left, right),
+      raw("residual = embedding[token_id]"), t[exact lookup],
+      sp,
+      table.cell(colspan: 2, raw("for each layer:")),
+      raw("  x_norm = RMSNorm(residual)"), t[canonical],
+      raw("  x_i8, s = quantize(x_norm)"), t[exact],
+      sp,
+      raw("  q_i32 = W_q @ x_i8"), t[Freivalds],
+      raw("  k_i32 = W_k @ x_i8"), t[Freivalds],
+      raw("  v_i32 = W_v @ x_i8"), t[Freivalds],
+      sp,
+      raw("  q = RoPE(dequant(q_i32, ...), pos)"), t[canonical],
+      raw("  k = RoPE(dequant(k_i32, ...), pos)"), t[canonical],
+      raw("  v = dequant(v_i32, ...)"), t[canonical],
+      sp,
+      raw("  attn = softmax(q @ k^T / sqrt(d)) @ v"), t[non-exact],
+      raw("  attn_out_i8, sa = quantize(attn)"), t[*STORED*],
+      sp,
+      raw("  o_i32 = W_o @ attn_out_i8"), t[Freivalds],
+      raw("  residual += dequant(o_i32, ...)"), t[canonical],
+      sp,
+      raw("  x_norm = RMSNorm(residual)"), t[canonical],
+      raw("  x_i8, s = quantize(x_norm)"), t[exact],
+      sp,
+      raw("  gate_i32 = W_gate @ x_i8"), t[Freivalds],
+      raw("  up_i32   = W_up   @ x_i8"), t[Freivalds],
+      raw("  x = SiLU(dequant(gate_i32)) * dequant(up_i32)"), t[canonical],
+      raw("  x_i8, s = quantize(x)"), t[exact],
+      raw("  down_i32 = W_down @ x_i8"), t[Freivalds],
+      raw("  residual += dequant(down_i32, ...)"), t[canonical],
+      sp,
+      raw("x_norm = RMSNorm(residual)"), t[canonical],
+      raw("x_i8, s = quantize(x_norm)"), t[exact],
+      raw("logits_i32 = LM_head @ x_i8"), t[Freivalds],
+      raw("token = sample(dequant(logits_i32))"), t[transcript],
+    )
   ],
-  caption: [Annotated forward pass for one output token. Each operation is labeled with its verification type. The only non-exact stage is FP16 attention and the quantization that depends on it; storing `attn_out_i8` and its scale bridges the gap.],
+  caption: [Annotated forward pass for one output token. Each operation is labeled with its verification type. The only non-exact stage is FP16 attention; storing `attn_out_i8` and its scale bridges the gap.],
 ) <fig-forward-pass>
 
 = The Protocol <sec-protocol>
@@ -298,7 +301,7 @@ Audit token $t = 47$ at layers 12 and 13 of a 70B model, sampling $k = 8$ prefix
 + *Shell.* Provider opens trace at both layers from $R_T$. Verifier runs Freivalds on all 7 matrices per layer (28 dot products total), recomputes all bridges. Yields trusted $Q_(47)$, $K_(47)$, $V_(47)$ at both layers.
 + *KV provenance.* Provider opens $K_(1..46)$, $V_(1..46)$ at both layers from $R_"KV"$. Verifier picks 8 random earlier positions, runs full shell verification at each, confirms committed $K$, $V$ match.
 + *Cross-layer.* Post-attention output at layer 12 feeds into layer 13's RMSNorm --- both sides shell-verified, so boundary must match exactly.
-+ *Replay.* At each opened layer, the verifier recomputes attention in FP64 from shell-verified $Q_(47)$ and the commitment-verified prefix. Quantizes to INT8, compares against committed `attn_out_i8`. Passes if $gt.eq tau$ elements agree at both layers.
++ *Replay.* At each opened layer, the verifier recomputes attention in FP64 from shell-verified $Q_(47)$ and the commitment-verified prefix. Quantizes to INT8, compares against committed `attn_out_i8`. Passes if at least fraction $tau$ of INT8 elements agree at both layers.
 
 == Data Lifecycle
 
@@ -324,7 +327,7 @@ This section maps concrete adversarial strategies to the protocol layers that de
 
 == Model Swap or Downgrade
 
-*Proposition 1 (Model identity).* _If the provider computes with weights $W' eq.not W$ at any opened layer, the Freivalds check detects this with probability $gt.eq 1 - 2^(-32)$ per matrix._
+*Proposition 1 (Model identity).* _For each opened weight matrix, if the provider used $W' eq.not W$, the Freivalds check rejects with probability $gt.eq 1 - 2^(-32)$. With 7 independently checked matrices per layer, the probability of an altered layer passing all checks is $lt.eq 2^(-224)$._
 
 A single audit of a single token suffices. The guarantee is unconditional --- it does not depend on statistical sampling or threshold calibration.
 
