@@ -91,60 +91,40 @@ VeriLM is designed around three constraints:
 
 = Verification Layers
 
-VeriLM's verification is structured in five layers, each with a distinct guarantee type.
+VeriLM's verification is structured in five layers. This section defines the taxonomy and key terms; the full procedure is specified in @sec-protocol.
 
-== Shell Verification (Exact)
+The *shell* is the non-attention path through each transformer layer: seven INT8 weight matrix multiplications ($W_q$, $W_k$, $W_v$, $W_o$, $W_"gate"$, $W_"up"$, $W_"down"$), *requantization bridges* (the $"i32" arrow.r "i8"$ conversions between consecutive matmul stages), RoPE, RMSNorm, and SiLU. The shell includes nonlinear operations (RMSNorm, SiLU), but all shell operations are deterministic or canonically recomputable. Its exactness is a composition: cryptographic checks (Freivalds @freivalds1979) on the weight matmuls, plus deterministic or canonical recomputation on the bridge operations.
 
-The non-attention path through each transformer layer --- the *shell* --- consists of seven INT8 weight matrix multiplications ($W_q$, $W_k$, $W_v$, $W_o$, $W_"gate"$, $W_"up"$, $W_"down"$), requantization bridges, RoPE, RMSNorm, and SiLU. The shell includes both linear operations (matmuls) and nonlinear ones (RMSNorm, SiLU), but all are deterministic or canonically recomputable and are exactly verifiable in the quantized output space. The shell's exactness is a composition: cryptographic checks (Freivalds) on the weight matmuls, plus deterministic or canonical recomputation on the bridge operations that connect them.
+Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not bit-reproducible across hardware --- this is the only non-exact component. The five layers are:
 
-*Freivalds' algorithm* @freivalds1979 checks each weight multiplication. During setup, the verifier precomputes $v_j^((i)) = r_j^T times W_j^((i))$ for secret random vector $r_j$. At audit time, the verifier checks:
++ *Shell verification (exact).* Cryptographic Freivalds checks ($lt.eq 1\/2^(32)$ false-accept) on all weight matmuls, plus deterministic recomputation of requantization bridges, RoPE, RMSNorm, and SiLU.
++ *KV provenance (statistical).* Merkle-committed per-token K,V history; sampled positions are shell-verified. Binding is exact; correctness of unsampled positions depends on sampling rate.
++ *Cross-layer consistency (structural).* Opening multiple layers on the same token creates algebraic coupling through the residual stream --- fake attention must stay consistent across all opened layers.
++ *Attention replay (approximate).* The verifier recomputes attention from shell-verified Q and committed prefix K,V in FP64, quantizes to INT8, and compares. Limited by FP16$arrow.l.r$FP64 mismatch.
++ *Unopened positions (none).* No direct verification. Deterrence from the provider not knowing which responses will be audited or which tokens challenged.
 
-$ v_j^((i)) dot x eq.quest r_j^T dot z $
-
-where $x$ is the opened INT8 input and $z$ is the opened INT32 accumulator. This reduces matrix verification to two dot products. If the prover used wrong weights, false-accept probability is $lt.eq 1\/2^(32)$.
-
-Requantization ($"i32" arrow.r "i8"$) is verified by exact recomputation. SiLU is checked against a 256-entry lookup table. RoPE is recomputed from the position index. RMSNorm is canonically recomputed and verified in the quantized output space.
-
-== KV Provenance (Statistical)
-
-Attention at token $t$ requires the full prefix $K_(1..t)$, $V_(1..t)$. The prover commits per-token KV state in a Merkle tree $R_"KV"$. The verifier samples $k$ earlier positions and runs full shell verification on each, comparing the result against the committed values.
-
-If the prover tampered with $m$ out of $n$ prefix positions:
-
-$ P("catch") = 1 - (1 - m\/n)^k $
-
-Commitment binding is exact (hash collision resistance). Correctness of unsampled positions is statistical.
-
-== Cross-Layer Consistency (Structural)
-
-When multiple layers are opened on the same token, fake attention at layer $L$ must produce a post-attention output that, after requantization and $W_o$, feeds into layer $L+1$'s RMSNorm consistently with the committed trace. More opened layers create tighter algebraic coupling through the residual stream.
-
-== Attention Replay (Approximate)
-
-The verifier recomputes attention from shell-verified $Q_t$ and committed prefix $K$, $V$ in FP64:
-
-+ Scores: $Q_t dot K_j \/ sqrt(d)$ for all prefix positions $j$
-+ Softmax over scores
-+ Weighted sum: $sum alpha_j times V_j$
-
-The result is quantized to INT8 and compared against the committed post-attention output. This catches gross manipulation (local-window approximation, suppressed context, wrong attention pattern) but cannot match FP16 arithmetic exactly.
-
-== Unopened Tokens and Layers
-
-No verification on any individual unopened position. Coverage relies on the provider not knowing which responses will be audited, which tokens within them will be challenged, or which layers will be opened. When client software randomly audits 1--5% of responses, the provider faces persistent risk: cheating on any response has a non-negligible probability of triggering an audit that exposes the deviation.
-
-= The Protocol
+= The Protocol <sec-protocol>
 
 == Phase 0: Setup
 
-A Merkle root @merkle1987 $R_W$ is computed over all weight matrices --- the model's public identity. Each verifier generates secret random vectors $r_j$ and precomputes $v_j^((i)) = r_j^T times W_j^((i))$ for all layers. The resulting verifier key is $tilde 25$ MB for Llama 70B. After precomputation, the verifier deletes the weights.
+*Public identity.* A Merkle root @merkle1987 $R_W$ is computed over all weight matrices of the published checkpoint. This root is the model's public identity --- anyone can recompute it from the published weights.
+
+*Verifier key generation.* Each verifier independently generates, for each of the 7 matrix types ($W_q$, $W_k$, $W_v$, $W_o$, $W_"gate"$, $W_"up"$, $W_"down"$), a secret random vector $r_j$. For each layer $i$, the verifier precomputes $v_j^((i)) = r_j^T times W_j^((i))$ --- one matrix-vector multiply per matrix per layer, performed once. The resulting verifier key is $tilde 25$ MB for Llama 70B. After precomputation, the verifier deletes the weights. The $r_j$ vectors are the verifier's secret; if the prover learns them, it can forge passing checks.
 
 == Phase 1: Commitment
 
-The provider runs inference normally, capturing intermediates (INT8 inputs, INT32 accumulators, post-attention outputs, quantization scales) alongside execution. After generation, two Merkle trees @merkle1987 are built:
+The provider runs inference normally. The serving path is unchanged except for a tracing layer that captures intermediates alongside execution. For every token at every layer (both prefill and decode), the provider records:
 
-- $R_T$ (trace): over all intermediates at all tokens
-- $R_"KV"$: over per-token KV state across all layers
+- The INT8 input to each of the 7 weight matrices
+- The INT32 accumulator output ($W_"i8" times x_"i8"$, exact)
+- The requantized INT8 values at each bridge
+- The post-attention INT8 output
+- The per-tensor quantization scales at each requantization bridge
+
+After generation completes, the provider builds two Merkle trees @merkle1987:
+
+- $R_T$ (trace tree): over all intermediates at all tokens. The provider cannot change any activation after committing.
+- $R_"KV"$ (KV tree): over per-token $K, V$ state across all layers. The provider cannot retroactively rewrite earlier tokens' context.
 
 A deployment manifest binds everything outside the forward pass:
 
@@ -152,11 +132,64 @@ $ M = H(&"tokenizer_hash" || R_W || "quant_hash" \
   || &"sampling_params" || "eos_policy" \
   || &"system_prompt_hash") $
 
-The provider returns the response plus a 100-byte receipt ($R_T$, $R_"KV"$, $M$, $N$).
+The provider returns the response plus a 100-byte receipt ($R_T$, $R_"KV"$, $M$, $N$). Most responses are never audited. The receipt is the only overhead on the normal serving path.
 
 == Phase 2: Verification
 
-The client challenges random tokens and layers. For each opened position, the verifier runs shell verification (Freivalds on all 7 matrices, exact requantization, SiLU, RoPE, RMSNorm), KV provenance sampling, cross-layer consistency checks, and attention replay. Any failure indicates the provider deviated from the claimed model.
+The client decides to audit a response. The provider does not know which responses will be challenged or which tokens within them will be opened.
+
+=== Step 1: Challenge
+
+The verifier selects $c$ random token positions from the $N$-token response and, for each, chooses $ell$ layers to open. Opening multiple layers on the same token is preferred --- this enables cross-layer consistency checks (Step 4).
+
+=== Step 2: Shell Verification
+
+For each challenged token $t$ at each opened layer $i$, the provider opens the INT8 inputs $x_"i8"$ and INT32 accumulators $z_"i32"$ for all 7 weight matrices, with Merkle proofs against $R_T$. The verifier performs four checks:
+
++ *Freivalds on each weight matrix.* For each of the 7 matrices, the verifier checks $v_j^((i)) dot x eq.quest r_j^T dot z$. Each check is two dot products --- $O(n)$. If the prover used wrong weights, false-accept probability is $lt.eq 1\/2^(32)$ per matrix.
+
++ *Requantization bridges (exact).* The verifier recomputes the $"i32" arrow.r "i8"$ conversion elementwise from the opened accumulators and quantization scales. This is deterministic integer arithmetic. Without this check, the prover could pass Freivalds (correct $r dot z$) but feed fabricated $"i8"$ values into the next stage.
+
++ *SiLU (exact).* INT8 inputs take 256 possible values. The verifier checks every element against a precomputed 256-entry lookup table.
+
++ *RoPE and RMSNorm.* RoPE is recomputed from the position index --- deterministic integer-scaled arithmetic. RMSNorm is canonically recomputed from the opened residual stream values; the result is verified in the quantized output space (the recomputed value must requantize to the same $"i8"$ as the committed value).
+
+After this step, the verifier has trusted $Q_t$, $K_t$, $V_t$ (as requantized INT8 values with verified RoPE) for the challenged token.
+
+=== Step 3: KV Provenance
+
+Attention at token $t$ requires the full prefix $K_(1..t)$, $V_(1..t)$. Shell verification gives trusted values for the challenged token but not the prefix.
+
+The provider opens KV values for all prefix positions with Merkle proofs against $R_"KV"$. The verifier then:
+
++ Verifies the Merkle proofs --- confirming these are the values the prover committed in Phase 1.
++ Randomly samples $k$ earlier token positions.
++ Runs full shell verification on each sampled position (Freivalds on all 7 matrices, requantization, RoPE, RMSNorm, SiLU).
++ Compares the shell-verified $K$, $V$ from those sampled positions against the values opened from $R_"KV"$.
+
+If the prover tampered with $m$ out of $n$ prefix positions and the verifier samples $k$:
+
+$ P("catch") = 1 - (1 - m\/n)^k $
+
+Commitment binding is exact (hash collision resistance). Correctness of unsampled positions is statistical --- the prover risks the verifier sampling any corrupted position.
+
+=== Step 4: Cross-Layer Consistency
+
+When the verifier opens multiple layers on the same token, fake attention at layer $L$ must produce a post-attention output that, after requantization and $W_o$, feeds into layer $L+1$'s RMSNorm consistently with the committed trace. This creates coupled algebraic constraints across layers --- much harder to satisfy than manipulating a single layer in isolation. The more layers opened, the tighter the constraint. In full-audit mode (all layers opened), the adversary must produce fake attention at every layer that stays mutually consistent through the entire residual stream.
+
+=== Step 5: Attention Replay
+
+This step combines the trusted $Q_t$ from Step 2 with the commitment-verified prefix $K_(1..t)$, $V_(1..t)$ from Step 3. The verifier recomputes attention independently in FP64. Since the KV cache stores post-RoPE values, the verifier dequantizes directly and computes:
+
++ Scores: $Q_t dot K_j \/ sqrt(d)$ for all prefix positions $j$
++ Softmax over scores
++ Weighted sum: $sum alpha_j times V_j$
+
+The verifier quantizes the result to INT8 using the quantization scales opened from the trace (committed in $R_T$) and compares element-wise against the committed post-attention output. A response passes if at least a fraction $tau$ of INT8 elements agree; $tau$ must be calibrated empirically by measuring the FP16$arrow.l.r$FP64 requantization corridor on real model activations (see @sec-attention-gap).
+
+This pins the attention output to a specific computation over the committed values. Without it, the adversary could fabricate a plausible-looking but wrong attention output --- a local-window approximation, suppressed attention to specific positions, or a cheaper model's attention pattern --- as long as it satisfied cross-layer consistency.
+
+*Limitations.* The replay proves consistency with the _committed_ prefix, not necessarily with true execution at every earlier token. Prefix KV values are commitment-verified (they match $R_"KV"$) but only statistically anchored to real computation via the sampled shell checks in Step 3. The replay also cannot match the GPU's FP16 attention exactly --- the verifier's FP64 reference will differ slightly near quantization bucket boundaries.
 
 = Security Analysis
 
@@ -178,7 +211,7 @@ Committed KV values cannot change after $R_"KV"$ is sent. The verifier samples e
 
 The deployment manifest $M$ binds the tokenizer, weight Merkle root, quantization scheme, sampling parameters, EOS policy, and system prompt hash into the receipt. The verifier checks $M$ against known-good values (e.g., the published tokenizer for a given model family, the weight Merkle root from the public checkpoint). Any change to the deployment configuration produces a different manifest.
 
-= The Attention Gap
+= The Attention Gap <sec-attention-gap>
 
 The shell is exactly verifiable because its operations are deterministic or canonically recomputable: INT8 matmuls are checked cryptographically via Freivalds, while requantization, RoPE, SiLU, and RMSNorm are verified by exact or canonical recomputation. Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not bit-reproducible across hardware.
 
