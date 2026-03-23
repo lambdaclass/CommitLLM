@@ -37,11 +37,7 @@ pub fn matmul_i32(w: &[i8], x: &[i8], rows: usize, cols: usize) -> Vec<i32> {
         .collect()
 }
 
-/// Requantize i32 accumulators to INT8 (simulated with clamping).
-/// In real inference this uses a scale factor; here we just clamp.
-pub fn requantize(acc: &[i32]) -> Vec<i8> {
-    acc.iter().map(|&v| v.clamp(-128, 127) as i8).collect()
-}
+pub use vi_core::requantize;
 
 /// All 7 weight matrices for one layer.
 #[derive(Clone)]

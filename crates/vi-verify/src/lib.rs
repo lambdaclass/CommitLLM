@@ -36,10 +36,7 @@ pub enum VerificationLevel {
     C,
 }
 
-/// Clamp i32 accumulators to INT8 range.
-pub fn requantize(acc: &[i32]) -> Vec<i8> {
-    acc.iter().map(|&v| v.clamp(-128, 127) as i8).collect()
-}
+pub use vi_core::requantize;
 
 /// Structured verification result.
 #[derive(Debug)]

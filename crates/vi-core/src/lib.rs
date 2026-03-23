@@ -9,3 +9,8 @@ pub mod serialize;
 pub mod silu;
 pub mod streaming;
 pub mod types;
+
+/// Clamp i32 accumulators to INT8 range (requantize).
+pub fn requantize(acc: &[i32]) -> Vec<i8> {
+    acc.iter().map(|&v| v.clamp(-128, 127) as i8).collect()
+}
