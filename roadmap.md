@@ -45,8 +45,12 @@ Ship the protocol and explain it clearly.
 
 ### 3.1 Paper
 - [ ] Add graphs and tables with concrete numbers (storage costs, audit windows, detection probabilities)
+- [ ] Add security game + proof sketches for the core soundness claims
+- [ ] Add batched-serving discussion (per-request trace isolation under vLLM / paged attention)
 - [ ] Add adversarial model section — Formal threat model describing provider capabilities, cheating strategies, and protocol guarantees against each
+- [ ] Cut a versioned paper release in GitHub
 - [ ] Upload to arXiv
+- [ ] Claim / create Hugging Face Paper Page and link repo + artifacts
 
 ### 3.2 Demo & Visualization
 - [ ] **Interactive TUI demo** — Terminal interface showing the protocol in action
@@ -57,10 +61,15 @@ Ship the protocol and explain it clearly.
   - Provider randomly cheats (model swap, attention manipulation, KV tampering)
   - Visual feedback: green check for honest, red alert with evidence for caught cheating
   - Shows detection probability in real-time
+- [ ] **Hugging Face Space demo** — Public artifact linked from the paper page
+  - Receipt visualization
+  - One-click audit walkthrough
+  - Example cheating scenarios and caught audits
 
 ### 3.3 Communication
 - [ ] Write article for blog.lambdaclass.com
 - [ ] Write X thread
+- [ ] Prepare publication rollout: GitHub release → arXiv → Hugging Face Paper Page → demo links
 - [ ] Make repo public (squash git history to single commit first)
 
 ## 4. First Product
