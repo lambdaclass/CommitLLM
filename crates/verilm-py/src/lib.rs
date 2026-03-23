@@ -698,14 +698,142 @@ fn compute_weight_hash(model_dir: String) -> PyResult<String> {
     Ok(hex::encode(hash))
 }
 
+// ===========================================================================
+// V4: Minimal retained-state commitment (no _int_mm, no full LayerTrace)
+// ===========================================================================
+
+/// Opaque handle to V4 minimal retained-state commitment.
+///
+/// Same interface as BatchState for commitment inspection, but audit
+/// uses replay from retained state rather than pre-computed full traces.
+#[pyclass]
+struct MinimalBatchStateHandle {
+    #[allow(dead_code)]
+    inner: verilm_prover::MinimalBatchState,
+    commitment: BatchCommitment,
+}
+
+#[pymethods]
+impl MinimalBatchStateHandle {
+    fn commitment_json(&self) -> PyResult<String> {
+        serde_json::to_string(&self.commitment)
+            .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+    }
+
+    fn merkle_root_hex(&self) -> String {
+        hex::encode(self.commitment.merkle_root)
+    }
+
+    fn io_root_hex(&self) -> String {
+        hex::encode(self.commitment.io_root)
+    }
+
+    fn manifest_hash_hex(&self) -> Option<String> {
+        self.commitment.manifest_hash.map(hex::encode)
+    }
+
+    fn n_tokens(&self) -> u32 {
+        self.commitment.n_tokens
+    }
+
+    fn kv_roots_hex(&self) -> Vec<String> {
+        Vec::new() // V4: prefix binding via retained Merkle tree
+    }
+}
+
+/// V4 commitment from minimal captures (no accumulators, no _int_mm).
+///
+/// Args:
+///     o_proj_inputs: list[bytes] — per-layer o_proj a_i8 tensors (n_fwd * n_layers).
+///     scales: list[float] — 4 scales per layer: [scale_x_attn, scale_a, scale_x_ffn, scale_h].
+///     n_layers: int — number of transformer layers.
+///     fwd_batch_sizes: list[int] — batch size for each forward pass.
+///     token_ids: list[int] — emitted token IDs.
+///     prompt: bytes — prompt text.
+///     sampling_seed: bytes — 32-byte sampling seed.
+///     manifest: dict — deployment manifest (optional).
+#[pyfunction]
+#[pyo3(signature = (
+    o_proj_inputs,
+    scales,
+    n_layers,
+    fwd_batch_sizes,
+    token_ids,
+    prompt,
+    sampling_seed,
+    manifest = None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn commit_minimal_from_captures(
+    o_proj_inputs: &Bound<'_, PyList>,
+    scales: Vec<f32>,
+    n_layers: usize,
+    fwd_batch_sizes: Vec<usize>,
+    token_ids: Vec<u32>,
+    prompt: Vec<u8>,
+    sampling_seed: Vec<u8>,
+    manifest: Option<&Bound<'_, PyDict>>,
+) -> PyResult<MinimalBatchStateHandle> {
+    let n_entries = o_proj_inputs.len();
+    let expected_scales = n_entries * 4;
+    if scales.len() != expected_scales {
+        return Err(PyValueError::new_err(format!(
+            "expected {} scales (4 per layer entry), got {}",
+            expected_scales,
+            scales.len()
+        )));
+    }
+
+    let mut captures = Vec::with_capacity(n_entries);
+    for i in 0..n_entries {
+        let a_i8 = extract_i8_vec(&o_proj_inputs.get_item(i)?)?;
+        let base = i * 4;
+        captures.push(verilm_prover::MinimalCaptureEntry {
+            a_i8,
+            scale_x_attn: scales[base],
+            scale_a: scales[base + 1],
+            scale_x_ffn: scales[base + 2],
+            scale_h: scales[base + 3],
+        });
+    }
+
+    let all_retained = verilm_prover::build_retained_from_captures(
+        &captures,
+        n_layers,
+        &fwd_batch_sizes,
+    );
+
+    if sampling_seed.len() != 32 {
+        return Err(PyValueError::new_err("sampling_seed must be exactly 32 bytes"));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&sampling_seed);
+
+    let manifest_obj = manifest.map(extract_manifest).transpose()?;
+
+    let (commitment, inner) = verilm_prover::commit_minimal(
+        all_retained,
+        &FullBindingParams {
+            token_ids: &token_ids,
+            prompt: &prompt,
+            sampling_seed: seed,
+            manifest: manifest_obj.as_ref(),
+        },
+    );
+
+    Ok(MinimalBatchStateHandle { inner, commitment })
+}
+
 #[pymodule]
 fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(commit, m)?)?;
     m.add_function(wrap_pyfunction!(commit_from_captures, m)?)?;
+    m.add_function(wrap_pyfunction!(commit_minimal_from_captures, m)?)?;
     m.add_function(wrap_pyfunction!(build_audit_challenge, m)?)?;
     m.add_function(wrap_pyfunction!(verify_batch, m)?)?;
     m.add_function(wrap_pyfunction!(verify_single, m)?)?;
     m.add_function(wrap_pyfunction!(compute_weight_hash, m)?)?;
     m.add_class::<BatchState>()?;
+    m.add_class::<MinimalBatchStateHandle>()?;
     Ok(())
 }

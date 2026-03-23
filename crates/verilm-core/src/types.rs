@@ -219,6 +219,45 @@ pub struct LayerTrace {
 }
 
 // ===========================================================================
+// Minimal retained-state types (paper-minimal commit path)
+// ===========================================================================
+//
+// The online commit path retains only the non-replayable intermediates.
+// Everything else is reconstructed from public weights at audit time.
+
+/// Minimal per-layer state retained for online commitment.
+///
+/// Only the attention boundary (non-replayable) and the dynamic
+/// quantization scales needed for exact audit replay.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RetainedLayerState {
+    /// Post-attention INT8 output fed into W_o. This is the ONLY
+    /// non-derivable intermediate: it comes from softmax(QK^T/√d)V
+    /// which depends on the full KV prefix and cannot be replayed
+    /// from single-token local state + public weights alone.
+    pub a: Vec<i8>,
+    /// Per-tensor activation scale for `a` (W_o projection input).
+    pub scale_a: f32,
+    /// Per-tensor activation scale for QKV projection input.
+    /// Needed for exact RMSNorm bridge replay at audit time.
+    pub scale_x_attn: f32,
+    /// Per-tensor activation scale for gate_up projection input.
+    pub scale_x_ffn: f32,
+    /// Per-tensor activation scale for down projection input.
+    pub scale_h: f32,
+}
+
+/// Minimal per-token state retained for online commitment.
+///
+/// No residuals — they are replayable from `a` + public weights recursively.
+/// Prefix binding comes from the retained Merkle tree: the auditor opens
+/// prior retained leaves to verify prefix state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RetainedTokenState {
+    pub layers: Vec<RetainedLayerState>,
+}
+
+// ===========================================================================
 // Q8_0 block-aware types
 // ===========================================================================
 //
@@ -592,6 +631,13 @@ pub enum CommitmentVersion {
     /// Adds transcript chaining: each token's IO leaf depends on the previous,
     /// preventing insertion, deletion, reordering, and retroactive edits.
     V3 = 3,
+    /// V4: Retained-state commitment. Trace tree leaf is
+    /// `hash_retained_state_direct(retained)` over per-layer `a_i8 + scale_a`
+    /// plus transitional replay scales.
+    /// IO leaf chains the retained leaf hash (not ad hoc features):
+    /// `H("vi-io-v4" || leaf_hash_t || token_id || prev_io_hash)`.
+    /// Prefix binding via retained Merkle tree — auditor opens prior leaves.
+    V4 = 4,
 }
 
 impl Default for CommitmentVersion {

@@ -5,7 +5,8 @@ use verilm_core::merkle;
 use verilm_core::requantize;
 use verilm_core::types::{
     AuditChallenge, AuditResponse, BatchCommitment, BatchProof, CommitmentVersion,
-    DeploymentManifest, LayerTrace, TokenTrace, VerificationPolicy, VerifierKey,
+    DeploymentManifest, LayerTrace, RetainedLayerState, RetainedTokenState,
+    TokenTrace, VerificationPolicy, VerifierKey,
 };
 
 /// Model geometry for trace construction from raw captures.
@@ -420,6 +421,141 @@ pub fn commit_with_full_binding(
         kv_chain_root: Some(kv_chain_tree.root),
         kv_merkle_roots: Some(kv_merkle_roots),
         token_kvs,
+    };
+
+    (commitment, state)
+}
+
+// ===========================================================================
+// V4: Minimal retained-state commitment (paper-minimal online path)
+// ===========================================================================
+
+/// Prover-side state after V4 (minimal retained-state) commit.
+///
+/// Stores only the non-replayable attention boundary and protocol bindings.
+/// No full LayerTrace, no i32 accumulators, no KV chain at commit time.
+pub struct MinimalBatchState {
+    pub retained_tree: merkle::MerkleTree,
+    pub io_tree: merkle::MerkleTree,
+    pub all_retained: Vec<RetainedTokenState>,
+    pub manifest_hash: Option<[u8; 32]>,
+    pub token_ids: Vec<u32>,
+    pub prompt_hash: [u8; 32],
+    pub seed_commitment: [u8; 32],
+    pub revealed_seed: [u8; 32],
+    pub io_hashes: Vec<[u8; 32]>,
+}
+
+/// Build retained state from minimal captures (no i32 accumulators).
+///
+/// Each `MinimalCaptureEntry` contains only the o_proj input (`a`)
+/// and the four per-layer quantization scales. No `_int_mm` needed.
+pub struct MinimalCaptureEntry {
+    /// Post-attention INT8 output (W_o input). Extracted from o_proj's x_i8.
+    pub a_i8: Vec<i8>,
+    /// Activation scale for QKV projection input.
+    pub scale_x_attn: f32,
+    /// Activation scale for W_o projection input.
+    pub scale_a: f32,
+    /// Activation scale for gate_up projection input.
+    pub scale_x_ffn: f32,
+    /// Activation scale for down projection input.
+    pub scale_h: f32,
+}
+
+/// Build `Vec<RetainedTokenState>` from minimal captures.
+///
+/// `captures` has one entry per layer per forward pass, ordered by
+/// forward pass → layer. Each entry's `a_i8` contains rows for all
+/// tokens in that forward pass's batch (contiguous, row-major).
+pub fn build_retained_from_captures(
+    captures: &[MinimalCaptureEntry],
+    n_layers: usize,
+    fwd_batch_sizes: &[usize],
+) -> Vec<RetainedTokenState> {
+    let mut all_retained = Vec::new();
+    let mut cap_idx = 0;
+
+    for &batch_size in fwd_batch_sizes {
+        for b in 0..batch_size {
+            let mut layers = Vec::with_capacity(n_layers);
+            for l in 0..n_layers {
+                let entry = &captures[cap_idx + l];
+                let a_dim = entry.a_i8.len() / batch_size;
+                let a = entry.a_i8[b * a_dim..(b + 1) * a_dim].to_vec();
+
+                layers.push(RetainedLayerState {
+                    a,
+                    scale_a: entry.scale_a,
+                    scale_x_attn: entry.scale_x_attn,
+                    scale_x_ffn: entry.scale_x_ffn,
+                    scale_h: entry.scale_h,
+                });
+            }
+
+            all_retained.push(RetainedTokenState { layers });
+        }
+        cap_idx += n_layers;
+    }
+
+    all_retained
+}
+
+/// V4 commit: retained-state commitment.
+///
+/// Trace tree: Merkle over `hash_retained_state_direct(token)` leaves.
+/// IO tree: chain `H("vi-io-v4" || leaf_hash || token_id || prev_io)`.
+/// Prefix binding: auditor opens prior retained leaves from the Merkle tree.
+pub fn commit_minimal(
+    all_retained: Vec<RetainedTokenState>,
+    params: &FullBindingParams,
+) -> (BatchCommitment, MinimalBatchState) {
+    assert_eq!(
+        all_retained.len(),
+        params.token_ids.len(),
+        "retained state count must match token_ids"
+    );
+
+    // Trace tree: hash retained state per token.
+    let trace_leaves: Vec<[u8; 32]> = all_retained
+        .iter()
+        .map(|rs| merkle::hash_retained_state_direct(rs))
+        .collect();
+
+    // IO tree: chain the leaf hash (not ad hoc features) for splice resistance.
+    let mut io_leaves = Vec::with_capacity(all_retained.len());
+    let mut prev_io = [0u8; 32];
+    for (i, leaf_hash) in trace_leaves.iter().enumerate() {
+        let io = merkle::io_hash_v4(*leaf_hash, params.token_ids[i], prev_io);
+        io_leaves.push(io);
+        prev_io = io;
+    }
+
+    let trace_tree = merkle::build_tree(&trace_leaves);
+    let io_tree = merkle::build_tree(&io_leaves);
+    let manifest_hash = params.manifest.map(|m| merkle::hash_manifest(m));
+
+    let commitment = BatchCommitment {
+        merkle_root: trace_tree.root,
+        io_root: io_tree.root,
+        n_tokens: all_retained.len() as u32,
+        manifest_hash,
+        version: CommitmentVersion::V4,
+        prompt_hash: Some(merkle::hash_prompt(params.prompt)),
+        seed_commitment: Some(merkle::hash_seed(&params.sampling_seed)),
+        kv_chain_root: None, // prefix binding via retained Merkle tree, not separate KV root
+    };
+
+    let state = MinimalBatchState {
+        retained_tree: trace_tree,
+        io_tree,
+        all_retained,
+        manifest_hash,
+        token_ids: params.token_ids.to_vec(),
+        prompt_hash: merkle::hash_prompt(params.prompt),
+        seed_commitment: merkle::hash_seed(&params.sampling_seed),
+        revealed_seed: params.sampling_seed,
+        io_hashes: io_leaves,
     };
 
     (commitment, state)
@@ -994,4 +1130,142 @@ pub fn verify_trace(key: &VerifierKey, trace: &TokenTrace) -> (bool, Vec<String>
 
     let passed = failures.is_empty();
     (passed, failures)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_minimal_captures(n_layers: usize, n_tokens: usize, hidden: usize) -> Vec<MinimalCaptureEntry> {
+        let mut captures = Vec::new();
+        for t in 0..n_tokens {
+            for l in 0..n_layers {
+                captures.push(MinimalCaptureEntry {
+                    a_i8: vec![(t * n_layers + l) as i8; hidden],
+                    scale_x_attn: 0.1 * (l + 1) as f32,
+                    scale_a: 0.2 * (l + 1) as f32,
+                    scale_x_ffn: 0.3 * (l + 1) as f32,
+                    scale_h: 0.4 * (l + 1) as f32,
+                });
+            }
+        }
+        captures
+    }
+
+    #[test]
+    fn test_build_retained_from_captures() {
+        let n_layers = 2;
+        let captures = make_minimal_captures(n_layers, 3, 8);
+        let fwd_batch_sizes = vec![1, 1, 1];
+
+        let retained = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+        assert_eq!(retained.len(), 3);
+        assert_eq!(retained[0].layers.len(), n_layers);
+        assert_eq!(retained[0].layers[0].a.len(), 8);
+        assert_eq!(retained[0].layers[0].scale_a, 0.2);
+        assert_eq!(retained[0].layers[1].scale_a, 0.4);
+    }
+
+    #[test]
+    fn test_build_retained_batched_prefill() {
+        let n_layers = 2;
+        let hidden = 4;
+        // Batched prefill: 3 tokens in one forward pass.
+        let mut captures = Vec::new();
+        for l in 0..n_layers {
+            captures.push(MinimalCaptureEntry {
+                a_i8: vec![(l + 1) as i8; 3 * hidden],
+                scale_x_attn: 0.1,
+                scale_a: 0.2,
+                scale_x_ffn: 0.3,
+                scale_h: 0.4,
+            });
+        }
+        let fwd_batch_sizes = vec![3];
+        let retained = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+        assert_eq!(retained.len(), 3);
+        for t in 0..3 {
+            assert_eq!(retained[t].layers.len(), n_layers);
+            assert_eq!(retained[t].layers[0].a.len(), hidden);
+        }
+    }
+
+    #[test]
+    fn test_commit_minimal_roundtrip() {
+        let n_layers = 2;
+        let captures = make_minimal_captures(n_layers, 3, 8);
+        let fwd_batch_sizes = vec![1, 1, 1];
+        let retained = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+
+        let params = FullBindingParams {
+            token_ids: &[100, 200, 300],
+            prompt: b"test prompt",
+            sampling_seed: [42u8; 32],
+            manifest: None,
+        };
+
+        let (commitment, state) = commit_minimal(retained, &params);
+
+        assert_eq!(commitment.version, CommitmentVersion::V4);
+        assert_eq!(commitment.n_tokens, 3);
+        assert!(commitment.prompt_hash.is_some());
+        assert!(commitment.seed_commitment.is_some());
+        assert!(commitment.kv_chain_root.is_none());
+        assert_eq!(state.token_ids, vec![100, 200, 300]);
+        assert_eq!(state.all_retained.len(), 3);
+
+        // IO chain: each hash depends on previous.
+        assert_ne!(state.io_hashes[0], state.io_hashes[1]);
+        assert_ne!(state.io_hashes[1], state.io_hashes[2]);
+    }
+
+    #[test]
+    fn test_commit_minimal_io_uses_leaf_hash() {
+        let n_layers = 1;
+        let captures = make_minimal_captures(n_layers, 2, 4);
+        let fwd_batch_sizes = vec![1, 1];
+        let retained = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+
+        let params = FullBindingParams {
+            token_ids: &[10, 20],
+            prompt: b"p",
+            sampling_seed: [0u8; 32],
+            manifest: None,
+        };
+
+        let (_, state) = commit_minimal(retained.clone(), &params);
+
+        // Verify IO chain uses leaf hashes, not ad hoc features.
+        let leaf0 = merkle::hash_retained_state_direct(&retained[0]);
+        let leaf1 = merkle::hash_retained_state_direct(&retained[1]);
+
+        let expected_io0 = merkle::io_hash_v4(leaf0, 10, [0u8; 32]);
+        let expected_io1 = merkle::io_hash_v4(leaf1, 20, expected_io0);
+
+        assert_eq!(state.io_hashes[0], expected_io0);
+        assert_eq!(state.io_hashes[1], expected_io1);
+    }
+
+    #[test]
+    fn test_commit_minimal_deterministic() {
+        let n_layers = 2;
+        let captures = make_minimal_captures(n_layers, 2, 8);
+        let fwd_batch_sizes = vec![1, 1];
+
+        let params = FullBindingParams {
+            token_ids: &[1, 2],
+            prompt: b"hello",
+            sampling_seed: [7u8; 32],
+            manifest: None,
+        };
+
+        let retained1 = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+        let retained2 = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+
+        let (c1, _) = commit_minimal(retained1, &params);
+        let (c2, _) = commit_minimal(retained2, &params);
+
+        assert_eq!(c1.merkle_root, c2.merkle_root);
+        assert_eq!(c1.io_root, c2.io_root);
+    }
 }

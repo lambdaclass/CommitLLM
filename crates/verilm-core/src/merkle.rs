@@ -198,6 +198,51 @@ pub fn hash_trace_direct(layers: &[crate::types::LayerTrace], final_hidden: Opti
     hasher.finalize().into()
 }
 
+/// Compute the Merkle leaf hash for a token's minimal retained state.
+///
+/// Hashes only the non-replayable attention boundary (`a`, `scale_a`)
+/// and the dynamic quantization scales needed for audit replay.
+/// Used for V4 (retained-state) commitments.
+///
+/// Domain separator `"vi-retained-v1"` prevents collisions with
+/// the full-trace hash (`"vi-trace-v2"`).
+pub fn hash_retained_state_direct(state: &crate::types::RetainedTokenState) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"vi-retained-v1");
+
+    for ls in &state.layers {
+        hash_i8_into(&mut hasher, &ls.a);
+        hasher.update(ls.scale_a.to_le_bytes());
+        // Transitional replay scales (dropped in V5 once audit-time
+        // scale derivation is proven to match runtime quantization).
+        hasher.update(ls.scale_x_attn.to_le_bytes());
+        hasher.update(ls.scale_x_ffn.to_le_bytes());
+        hasher.update(ls.scale_h.to_le_bytes());
+    }
+
+    hasher.finalize().into()
+}
+
+/// Compute the V4 IO chain hash for a token.
+///
+/// `io_t = H("vi-io-v4" || leaf_hash_t || token_id_t || prev_io_hash)`
+///
+/// Chains the retained leaf hash (the exact committed object) into the
+/// transcript chain. This ties order/splice resistance to the retained
+/// Merkle tree rather than ad hoc token features.
+pub fn io_hash_v4(
+    leaf_hash: [u8; 32],
+    token_id: u32,
+    prev_io_hash: [u8; 32],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"vi-io-v4");
+    hasher.update(leaf_hash);
+    hasher.update(token_id.to_le_bytes());
+    hasher.update(prev_io_hash);
+    hasher.finalize().into()
+}
+
 // --- Direct hash helpers: feed raw bytes into SHA-256 without allocation ---
 
 fn hash_i8_into(hasher: &mut Sha256, data: &[i8]) {
@@ -537,5 +582,77 @@ mod tests {
             let fast_root = compute_root(&leaves);
             assert_eq!(tree_root, fast_root, "mismatch for {n} leaves");
         }
+    }
+
+    #[test]
+    fn test_retained_state_hash_deterministic() {
+        use crate::types::{RetainedLayerState, RetainedTokenState};
+
+        let state = RetainedTokenState {
+            layers: vec![RetainedLayerState {
+                a: vec![1, 2, 3, 4],
+                scale_a: 0.5,
+                scale_x_attn: 0.1,
+                scale_x_ffn: 0.2,
+                scale_h: 0.3,
+            }],
+        };
+        let h1 = hash_retained_state_direct(&state);
+        let h2 = hash_retained_state_direct(&state);
+        assert_eq!(h1, h2, "same state must produce same hash");
+
+        // Different state must produce different hash.
+        let state2 = RetainedTokenState {
+            layers: vec![RetainedLayerState {
+                a: vec![1, 2, 3, 5], // changed
+                scale_a: 0.5,
+                scale_x_attn: 0.1,
+                scale_x_ffn: 0.2,
+                scale_h: 0.3,
+            }],
+        };
+        assert_ne!(h1, hash_retained_state_direct(&state2));
+    }
+
+    #[test]
+    fn test_io_hash_v4_chains_leaf_hash() {
+        use crate::types::{RetainedLayerState, RetainedTokenState};
+
+        let state = RetainedTokenState {
+            layers: vec![RetainedLayerState {
+                a: vec![10, 20],
+                scale_a: 1.0,
+                scale_x_attn: 0.5,
+                scale_x_ffn: 0.5,
+                scale_h: 0.5,
+            }],
+        };
+        let leaf_hash = hash_retained_state_direct(&state);
+        let prev = [0u8; 32];
+
+        let io = io_hash_v4(leaf_hash, 42, prev);
+
+        // Must be deterministic.
+        assert_eq!(io, io_hash_v4(leaf_hash, 42, prev));
+
+        // Different token ID → different hash.
+        assert_ne!(io, io_hash_v4(leaf_hash, 43, prev));
+
+        // Different prev → different hash (chain property).
+        let prev2 = [1u8; 32];
+        assert_ne!(io, io_hash_v4(leaf_hash, 42, prev2));
+
+        // Different leaf → different hash.
+        let state2 = RetainedTokenState {
+            layers: vec![RetainedLayerState {
+                a: vec![11, 20],
+                scale_a: 1.0,
+                scale_x_attn: 0.5,
+                scale_x_ffn: 0.5,
+                scale_h: 0.5,
+            }],
+        };
+        let leaf_hash2 = hash_retained_state_direct(&state2);
+        assert_ne!(io, io_hash_v4(leaf_hash2, 42, prev));
     }
 }

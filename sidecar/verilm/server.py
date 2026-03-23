@@ -205,7 +205,15 @@ class VerifiedInferenceServer:
 
         # Derive forward pass batch sizes from capture tensor shapes.
         n_fwd = len(captures) // calls_per_fwd
-        fwd_batch_sizes = [captures[i * calls_per_fwd][2].shape[0] for i in range(n_fwd)]
+        # In minimal mode, only o_proj has a tensor (index 1 in each layer's 4 calls).
+        # In full mode, all captures have tensors at index [2].
+        if cap._capture_mode == "minimal":
+            # o_proj is call index 1 within each layer's 4-call group.
+            fwd_batch_sizes = [
+                captures[i * calls_per_fwd + 1][2].shape[0] for i in range(n_fwd)
+            ]
+        else:
+            fwd_batch_sizes = [captures[i * calls_per_fwd][2].shape[0] for i in range(n_fwd)]
 
         all_token_ids = prompt_token_ids + gen_token_ids
         n_tokens = sum(fwd_batch_sizes)
@@ -217,27 +225,7 @@ class VerifiedInferenceServer:
                 f"Cannot commit with mismatched transcript."
             )
 
-        # Convert captures to bytes for Rust. Only .numpy().tobytes() per tensor —
-        # no trace reorganization, no dict construction, no KV cache cloning.
-        capture_inputs = [c[2].numpy().tobytes() for c in captures]
-        capture_accs = [c[3].numpy().tobytes() for c in captures]
-        capture_scales = []
-        for c in captures:
-            s = c[4]
-            if hasattr(s, 'numel') and s.numel() > 1:
-                capture_scales.append(float(s.max().item()))
-            elif hasattr(s, 'item'):
-                capture_scales.append(float(s.item()))
-            else:
-                capture_scales.append(float(s))
-
-        # Convert residuals to f32 bytes if available.
-        residuals = el_data.get("residuals")
-        residual_bytes = None
-        if residuals:
-            residual_bytes = [r.float().numpy().tobytes() for r in residuals]
-
-        # Build manifest.
+        # Build manifest (shared by both paths).
         manifest = {
             "tokenizer_hash": self._tokenizer_hash,
             "temperature": 0.0,
@@ -249,23 +237,16 @@ class VerifiedInferenceServer:
             "system_prompt_hash": self._system_prompt_hash,
         }
 
-        # Trace build + serialize + commit all in Rust.
-        state = verilm_rs.commit_from_captures(
-            capture_inputs=capture_inputs,
-            capture_accumulators=capture_accs,
-            capture_scales=capture_scales,
-            fwd_batch_sizes=fwd_batch_sizes,
-            n_layers=n_layers,
-            q_dim=cap._q_dim,
-            kv_dim=cap._kv_dim,
-            intermediate_size=cap._gate_up_half,
-            level_c=True,
-            token_ids=[int(t) for t in all_token_ids[1:]],
-            prompt=prompt.encode(),
-            sampling_seed=seed,
-            manifest=manifest,
-            residuals=residual_bytes,
-        )
+        if cap._capture_mode == "minimal":
+            state = self._commit_minimal(
+                captures, n_fwd, n_layers, calls_per_fwd, fwd_batch_sizes,
+                all_token_ids, prompt, seed, manifest,
+            )
+        else:
+            state = self._commit_full(
+                captures, fwd_batch_sizes, n_layers, el_data,
+                all_token_ids, prompt, seed, manifest,
+            )
 
         # Store for audit.
         import uuid
@@ -282,6 +263,90 @@ class VerifiedInferenceServer:
             "generated_text": generated_text,
             "n_tokens": state.n_tokens(),
         }
+
+    def _commit_full(self, captures, fwd_batch_sizes, n_layers, el_data,
+                      all_token_ids, prompt, seed, manifest):
+        """Full-trace commitment path (existing V1-V3)."""
+        import verilm_rs
+        from . import capture as cap
+
+        capture_inputs = [c[2].numpy().tobytes() for c in captures]
+        capture_accs = [c[3].numpy().tobytes() for c in captures]
+        capture_scales = []
+        for c in captures:
+            s = c[4]
+            if hasattr(s, 'numel') and s.numel() > 1:
+                capture_scales.append(float(s.max().item()))
+            elif hasattr(s, 'item'):
+                capture_scales.append(float(s.item()))
+            else:
+                capture_scales.append(float(s))
+
+        residuals = el_data.get("residuals")
+        residual_bytes = None
+        if residuals:
+            residual_bytes = [r.float().numpy().tobytes() for r in residuals]
+
+        return verilm_rs.commit_from_captures(
+            capture_inputs=capture_inputs,
+            capture_accumulators=capture_accs,
+            capture_scales=capture_scales,
+            fwd_batch_sizes=fwd_batch_sizes,
+            n_layers=n_layers,
+            q_dim=cap._q_dim,
+            kv_dim=cap._kv_dim,
+            intermediate_size=cap._gate_up_half,
+            level_c=True,
+            token_ids=[int(t) for t in all_token_ids[1:]],
+            prompt=prompt.encode(),
+            sampling_seed=seed,
+            manifest=manifest,
+            residuals=residual_bytes,
+        )
+
+    def _commit_minimal(self, captures, n_fwd, n_layers, calls_per_fwd,
+                         fwd_batch_sizes, all_token_ids, prompt, seed, manifest):
+        """V4 retained-state commitment path (no _int_mm, no full traces).
+
+        Extracts o_proj inputs (a_i8) and per-layer scales from the minimal
+        capture buffer. Groups them for the Rust commit_minimal_from_captures.
+        """
+        import verilm_rs
+
+        o_proj_inputs = []
+        minimal_scales = []
+
+        for fwd_i in range(n_fwd):
+            for l_i in range(n_layers):
+                base = fwd_i * calls_per_fwd + l_i * 4
+                # Call order: qkv=0, o=1, gate_up=2, down=3
+                qkv_cap = captures[base + 0]
+                o_cap = captures[base + 1]
+                gu_cap = captures[base + 2]
+                down_cap = captures[base + 3]
+
+                o_proj_inputs.append(o_cap[2].numpy().tobytes())  # a_i8
+
+                # 4 scales per layer: [scale_x_attn, scale_a, scale_x_ffn, scale_h]
+                for cap_entry in (qkv_cap, o_cap, gu_cap, down_cap):
+                    s = cap_entry[4]
+                    if hasattr(s, 'numel') and s.numel() > 1:
+                        minimal_scales.append(float(s.max().item()))
+                    elif hasattr(s, 'item'):
+                        minimal_scales.append(float(s.item()))
+                    else:
+                        minimal_scales.append(float(s))
+
+        return verilm_rs.commit_minimal_from_captures(
+            o_proj_inputs=o_proj_inputs,
+            scales=minimal_scales,
+            n_layers=n_layers,
+            fwd_batch_sizes=fwd_batch_sizes,
+            token_ids=[int(t) for t in all_token_ids[1:]],
+            prompt=prompt.encode(),
+            sampling_seed=seed,
+            manifest=manifest,
+        )
 
     def audit(
         self,

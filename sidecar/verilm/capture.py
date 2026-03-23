@@ -4,16 +4,16 @@ Core capture logic for verified inference.
 Wraps cutlass_scaled_mm to capture inputs and identifies each capture's
 position in the transformer (layer index, projection name).
 
-What this captures and why:
-  - INT8 matmul inputs (x_i8): verified against public weights via Freivalds
-  - INT32 accumulator (acc_i32 = W_i8 @ x_i8): needed for Freivalds and R_T
-  - Per-token activation scale: dynamic, not in public weights
-  - Layer/projection identity: for trace reconstruction
-  - The W_o input IS the post-attention output (attn_out_i8) — the only
-    non-derivable intermediate in the protocol
+Two capture modes (set via VERILM_CAPTURE_MODE env var):
 
-NOT captured (verifier has these from public weights):
-  - Weight matrices (W_i8), weight scales, biases
+  "full" (default):
+    Captures INT8 inputs, INT32 accumulators (via _int_mm), and scales for
+    all projections. Used with commit_from_captures for full-trace proofs.
+
+  "minimal":
+    Captures only the o_proj input (post-attention 'a') and per-projection
+    scales. Skips _int_mm entirely — the biggest GPU overhead. Used with
+    commit_minimal_from_captures for retained-state (V4) commitments.
 
 Layer/proj identity is derived from call counting (zero overhead) rather
 than PyTorch model hooks. Both Llama and Qwen W8A8 models use fused
@@ -225,9 +225,12 @@ _patched = False
 _call_counter = 0
 _log_interval = 5000
 
-# Reusable padded buffers for decode-path _int_mm (M < 16).
+# "full" = capture x_i8 + acc_i32 for all projections (existing path).
+# "minimal" = capture only o_proj a_i8 + all scales, skip _int_mm (V4 path).
+_capture_mode = "full"
+
+# Reusable padded buffers for decode-path _int_mm (M < 16, full mode only).
 # Keyed by (N, device) to avoid per-call torch.nn.functional.pad allocation.
-# Each buffer is (32, N) int8 with rows [M:] pre-zeroed.
 _pad_buffers: dict = {}
 
 
@@ -235,10 +238,10 @@ def _wrapped_cutlass_scaled_mm(
     a, b, scale_a, scale_b, out_dtype=torch.bfloat16, bias=None
 ):
     """
-    Wrapper around cutlass_scaled_mm that captures inputs and INT32 accumulator.
+    Wrapper around cutlass_scaled_mm that captures inputs for verification.
 
-    Layer/proj identity is derived from call counting (zero overhead).
-    The acc_i32 is computed via torch._int_mm alongside the real kernel.
+    In "full" mode: captures x_i8 + acc_i32 (via _int_mm) for all projections.
+    In "minimal" mode: captures only o_proj input (a_i8) + scales. No _int_mm.
     """
     global _call_counter
 
@@ -256,21 +259,6 @@ def _wrapped_cutlass_scaled_mm(
     if not buf.enabled:
         return output
 
-    # Compute INT32 accumulator (what the verifier needs for Freivalds).
-    # torch._int_mm requires M >= 16; pad small batches (decode tokens).
-    M = a.shape[0]
-    if M <= 16:
-        N = a.shape[1]
-        pad_key = (N, a.device)
-        pad_buf = _pad_buffers.get(pad_key)
-        if pad_buf is None:
-            pad_buf = torch.zeros(32, N, dtype=torch.int8, device=a.device)
-            _pad_buffers[pad_key] = pad_buf
-        pad_buf[:M, :] = a
-        acc_i32 = torch._int_mm(pad_buf, b)[:M, :]
-    else:
-        acc_i32 = torch._int_mm(a, b)
-
     # Derive layer/proj from call count (zero overhead vs PyTorch hooks)
     if _configured:
         idx = _call_counter % _calls_per_fwd
@@ -282,12 +270,28 @@ def _wrapped_cutlass_scaled_mm(
 
     _call_counter += 1
 
-    # Move to CPU here so downstream code doesn't need per-field .cpu() calls.
-    # non_blocking=True allows the DMA to overlap with subsequent GPU kernels;
-    # server.py calls torch.cuda.synchronize() after generate() to ensure
-    # all transfers have completed before draining.
-    buf.append((layer, proj, a.to("cpu", non_blocking=True),
-                acc_i32.to("cpu", non_blocking=True), scale_a))
+    if _capture_mode == "minimal":
+        # V4 path: no _int_mm. Only transfer o_proj input to CPU.
+        # scale_a is stored as-is; server.py extracts after cuda.synchronize().
+        a_cpu = a.to("cpu", non_blocking=True) if proj == "o_proj" else None
+        buf.append((layer, proj, a_cpu, None, scale_a))
+    else:
+        # Full path: compute INT32 accumulator via _int_mm.
+        M = a.shape[0]
+        if M <= 16:
+            N = a.shape[1]
+            pad_key = (N, a.device)
+            pad_buf = _pad_buffers.get(pad_key)
+            if pad_buf is None:
+                pad_buf = torch.zeros(32, N, dtype=torch.int8, device=a.device)
+                _pad_buffers[pad_key] = pad_buf
+            pad_buf[:M, :] = a
+            acc_i32 = torch._int_mm(pad_buf, b)[:M, :]
+        else:
+            acc_i32 = torch._int_mm(a, b)
+
+        buf.append((layer, proj, a.to("cpu", non_blocking=True),
+                    acc_i32.to("cpu", non_blocking=True), scale_a))
 
     if buf.total_captured % _log_interval == 0:
         logger.info(
@@ -338,8 +342,12 @@ def register():
 
     Patches cutlass_scaled_mm for input capture. Call configure_layer_count()
     or configure_from_model() after model loading for layer/proj identification.
+
+    Env vars:
+        VERILM_CAPTURE: "0" to disable capture entirely.
+        VERILM_CAPTURE_MODE: "full" (default) or "minimal" (V4, no _int_mm).
     """
-    global _patched
+    global _patched, _capture_mode
 
     if _patched:
         return
@@ -350,6 +358,12 @@ def register():
         _capture_buffer.enabled = False
         _patched = True
         return
+
+    mode_env = os.environ.get("VERILM_CAPTURE_MODE", "full")
+    if mode_env in ("full", "minimal"):
+        _capture_mode = mode_env
+    else:
+        logger.warning("verilm: unknown VERILM_CAPTURE_MODE=%s, using full", mode_env)
 
     try:
         import vllm._custom_ops as ops
@@ -373,7 +387,6 @@ def register():
     _patched = True
 
     logger.info(
-        "verilm: wrapped cutlass_scaled_mm for input capture "
-        "(buffer max=%d, call-counting mode)",
-        _capture_buffer._max_entries,
+        "verilm: wrapped cutlass_scaled_mm (mode=%s, buffer max=%d)",
+        _capture_mode, _capture_buffer._max_entries,
     )
