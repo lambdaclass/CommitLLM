@@ -98,12 +98,12 @@ While generating, it captures intermediates for every token at every layer:
 - The post-attention output
 - The per-tensor quantization scales at each requantization bridge (needed by the verifier to dequantize for attention replay and to verify requantization)
 
-After generation completes, the server builds two Merkle trees:
+After generation completes, the server builds two separate Merkle trees. The trees are separate because they serve different access patterns: shell verification opens a few positions from `R_T`, while KV provenance opens the full prefix from `R_KV`. A single tree would force opening all intermediates at every prefix position just to extract the KV values.
 
 | Tree | Over what | Binds |
 |---|---|---|
 | `R_T` (trace) | All intermediates at all tokens (inputs, accumulators, nonlinear outputs, embeddings, logits) | Every activation — the prover can't change any intermediate after committing |
-| `R_KV` | Per-token KV state across all layers | The prefix history — the prover can't retroactively rewrite earlier tokens' `K,V` |
+| `R_KV` | Per-token KV state across all layers | The prefix history — the prover can't retroactively rewrite earlier tokens' `K,V`. Allows efficient opening of the full prefix KV without opening the complete trace at every position |
 
 The server also computes a deployment manifest binding everything outside the forward pass:
 

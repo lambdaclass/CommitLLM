@@ -167,10 +167,10 @@ The provider runs inference normally. The serving path is unchanged except for a
 - The post-attention INT8 output
 - The per-tensor quantization scales at each requantization bridge
 
-After generation completes, the provider builds two Merkle trees @merkle1987:
+After generation completes, the provider builds two Merkle trees @merkle1987. The trees are separate because they serve different access patterns: shell verification (Step 2) opens a few positions from $R_T$, while KV provenance (Step 3) opens the full prefix from $R_"KV"$. A single tree would force opening all intermediates at every prefix position just to extract the KV values.
 
 - $R_T$ (trace tree): over all intermediates at all tokens. The provider cannot change any activation after committing.
-- $R_"KV"$ (KV tree): over per-token $K, V$ state across all layers. The provider cannot retroactively rewrite earlier tokens' context.
+- $R_"KV"$ (KV tree): over per-token $K, V$ state across all layers. The provider cannot retroactively rewrite earlier tokens' context. This tree allows efficient opening of the full prefix KV without opening the complete trace at every position.
 
 A deployment manifest binds everything outside the forward pass:
 
@@ -237,6 +237,10 @@ This pins the attention output to a specific computation over the committed valu
 
 *Limitations.* The replay proves consistency with the _committed_ prefix, not necessarily with true execution at every earlier token. Prefix KV values are commitment-verified (they match $R_"KV"$) but only statistically anchored to real computation via the sampled shell checks in Step 3. The replay also cannot match the GPU's FP16 attention exactly --- the verifier's FP64 reference will differ slightly near quantization bucket boundaries.
 
+== Summary
+
+@tab-verification-methods summarizes the verification method applied to each operation in the forward pass.
+
 #figure(
   table(
     columns: (auto, auto),
@@ -255,7 +259,7 @@ This pins the attention output to a specific computation over the committed valu
     [LM head], [Freivalds],
   ),
   caption: [Per-layer verification methods],
-)
+) <tab-verification-methods>
 
 = Security Analysis
 
