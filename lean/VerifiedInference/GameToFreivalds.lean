@@ -51,28 +51,17 @@ theorem single_matrix_game_bound {m n : ℕ} (hm : 0 < m)
 
 /-! ## Multi-matrix bound -/
 
-set_option linter.unusedSectionVars false in
-/-- **Multi-matrix game bound**: for k independent matrices, each satisfying its
-    own 1/p escaping-set bound against the same randomness space, the joint bad
-    event (all k checks fooled) satisfies a (1/p)^k bound.
+/-- **Multi-matrix game bound**: given a uniform per-matrix escaping-set bound
+    `badCard * p ≤ totalVectors`, the amplified bound holds for k checks.
 
-    The key insight is that each of the k Freivalds checks uses an independent
-    random vector, so the per-matrix bound feeds directly into
-    `amplification_inductive`.  The existential `perMatrixBound` packages the
-    hypothesis in a form that matches what the caller (e.g. the protocol layer)
-    already has available. -/
+    This is the composition step: a single-matrix 1/p bound lifts to (1/p)^k
+    across k independent checks. The caller obtains `badCard` from
+    `single_matrix_game_bound` applied to the worst-case cheated matrix. -/
 theorem multi_matrix_game_bound
-    (totalVectors : ℕ) (k : ℕ)
-    (perMatrixBound : ∀ _i : Fin k, ∃ badCard : ℕ, badCard * p ≤ totalVectors) :
-    ∃ jointBadCard : ℕ,
-      jointBadCard ^ k * p ^ k ≤ totalVectors ^ k := by
-  -- Pick badCard = 0 as a simple witness: 0^k * p^k = 0 ≤ totalVectors^k.
-  -- This is intentionally conservative; tighter witnesses come from the
-  -- concrete `single_matrix_game_bound` applied per matrix.
-  refine ⟨0, ?_⟩
-  cases k with
-  | zero => simp
-  | succ k => simp [zero_pow]
+    (totalVectors badCard : ℕ) (k : ℕ)
+    (hBound : badCard * p ≤ totalVectors) :
+    badCard ^ k * p ^ k ≤ totalVectors ^ k :=
+  amplification_inductive totalVectors p badCard hBound k
 
 /-! ## Layer audit bound -/
 

@@ -14,7 +14,7 @@ overwhelming probability**.
 
 ## Composition chain
 
-The proof proceeds by composing four orthogonal components:
+The proof proceeds by composing three components, all proved in this tree:
 
 1. **Security game → per-matrix Freivalds** (`escaping_set_bound`):
    If the adversary supplies a cheating opening (z ≠ Wx), the set of random
@@ -31,9 +31,10 @@ The proof proceeds by composing four orthogonal components:
    two weight leaves must be equal, and collision-resistance of the hash
    function then gives equality of the underlying weights.
 
-4. **Integer-to-field lifting** (`integer_cheating_implies_field_cheating`):
-   Cheating in the integer domain (z_int ≠ Wx_int) implies cheating in
-   ZMod p after lifting, so the field-level Freivalds check can catch it.
+Additionally, `integer_cheating_implies_field_cheating` (in `ProtocolParams.lean`)
+proves that cheating in the integer domain implies cheating in ZMod p. This is
+not used directly in the theorems below (which operate at the field level), but
+completes the end-to-end argument from integer computation to field verification.
 
 ## Concrete security parameters
 

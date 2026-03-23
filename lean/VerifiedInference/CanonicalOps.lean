@@ -66,15 +66,27 @@ structure CanonicalRoPE where
 
 /-! ## RoPE Determinism -/
 
-/-- **RoPE Determinism**: Given fixed cosine and sine tables, the RoPE
-    output is a deterministic function of the position index.
-    Two computations from identical tables at the same position agree. -/
-theorem rope_canonical_deterministic (rope : CanonicalRoPE) (pos : ℕ) :
+/-- Cosine table lookup is deterministic at a given position. -/
+theorem rope_cos_deterministic (rope : CanonicalRoPE) (pos : ℕ) :
     ∀ out₁ out₂ : List ℤ,
       out₁ = rope.cosTable pos →
       out₂ = rope.cosTable pos →
       out₁ = out₂ := by
-  intro out₁ out₂ h₁ h₂
-  rw [h₁, h₂]
+  intro _ _ h₁ h₂; rw [h₁, h₂]
+
+/-- Sine table lookup is deterministic at a given position. -/
+theorem rope_sin_deterministic (rope : CanonicalRoPE) (pos : ℕ) :
+    ∀ out₁ out₂ : List ℤ,
+      out₁ = rope.sinTable pos →
+      out₂ = rope.sinTable pos →
+      out₁ = out₂ := by
+  intro _ _ h₁ h₂; rw [h₁, h₂]
+
+/-- **RoPE Determinism**: Given fixed tables, both cos and sin lookups
+    are deterministic at any position. -/
+theorem rope_canonical_deterministic (rope : CanonicalRoPE) (pos : ℕ) :
+    (∀ c₁ c₂, c₁ = rope.cosTable pos → c₂ = rope.cosTable pos → c₁ = c₂) ∧
+    (∀ s₁ s₂, s₁ = rope.sinTable pos → s₂ = rope.sinTable pos → s₁ = s₂) :=
+  ⟨rope_cos_deterministic rope pos, rope_sin_deterministic rope pos⟩
 
 end VerifiedInference
