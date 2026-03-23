@@ -339,13 +339,13 @@ We formalize model-identity soundness via an interactive game between a challeng
 
 $bold("Game")^("id")_(cal(A))(lambda)$:
 
-+ *Setup.* $cal(C)$ publishes weights $W$ and Merkle root $R_W$. $cal(C)$ samples $r_j in.rev bb(F)_p^m$ for each matrix type $j$, precomputes $v_j^((i)) = r_j^T W_j^((i)) mod p$ for every layer $i$. $cal(A)$ receives $W$, $R_W$ but not $r_j$ or $v_j^((i))$.
++ *Setup.* $cal(C)$ publishes weights $W$ and Merkle root $R_W$. $cal(C)$ samples $r_j in.rev bb(F)_p^m$ for each matrix type $j$, precomputes $v_j^((i)) = r_j^T W_j^((i)) mod p$ for every layer $i$, and stores the secret verifier key $"sk" = {r_j, v_j^((i))}$. $cal(A)$ receives $W$, $R_W$ but never observes $"sk"$.
 + *Commit.* $cal(A)$ receives a prompt, runs inference (using any strategy), and returns a response plus receipt $(R_T, R_"KV", M, N)$.
 + *Challenge.* $cal(C)$ selects $c$ token positions and $ell$ layers per token uniformly at random. $cal(A)$ learns the challenge only now.
 + *Open.* $cal(A)$ opens the trace at challenged positions with Merkle proofs against $R_T$.
 + *Verify.* $cal(C)$ runs Freivalds and bridge checks at every opened position. Outputs accept or reject.
 
-*Definition (Model-identity soundness).* $"Adv"^("id")_(cal(A)) = Pr["Verify accepts" and cal(A) "used" W'_j eq.not W_j "at any opened matrix"]$. The protocol is $epsilon$-sound if $"Adv"^("id")_(cal(A)) lt.eq epsilon$ for all adversaries $cal(A)$.
+*Definition (Model-identity soundness).* $"Adv"^("id")_(cal(A)) = Pr["Verify accepts" and cal(A) "used" W'_j eq.not W_j "at any Freivalds-checked matrix"]$. The protocol is $epsilon$-sound if $"Adv"^("id")_(cal(A)) lt.eq epsilon$ for all adversaries $cal(A)$.
 
 == Model Swap or Downgrade
 
@@ -422,10 +422,10 @@ Trusted execution environments (TEEs) and remote attestation provide another alt
     columns: (auto, auto, auto, auto, auto),
     align: (left, left, left, left, center),
     [*Approach*], [*Provider overhead*], [*Guarantee*], [*Trust assumption*], [*Transf.*],
-    [ZK proofs], [100--1000$times$ prover], [Universal soundness], [None (math)], [Yes],
-    [TEEs], [Attestation HW], [Code identity], [Hardware vendor], [Yes],
-    [Redundant exec.], [2--3$times$ compute], [Output agreement], [Honest majority], [No],
-    [VeriLM], [100 B receipt + rare audits], [Model identity (exact);\ attention (approx.)], [Verifier key secrecy], [No],
+    [ZK proofs], [100--1000$times$ prover], [Full computation correct], [None (math)], [Yes],
+    [TEEs], [Attestation HW], [Claimed code ran on attested HW], [Hardware vendor], [Yes],
+    [Redundant exec.], [2--3$times$ compute], [Outputs agree across replicas], [Honest majority], [No],
+    [VeriLM], [100 B receipt + rare audits], [Claimed weights used (exact);\ attention consistent (approx.)], [Verifier key secrecy], [No],
   ),
   caption: [Comparison of verifiable inference approaches.],
 )
