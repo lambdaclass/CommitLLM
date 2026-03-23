@@ -4,6 +4,7 @@ import VerifiedInference.PrecomputedFreivalds
 import VerifiedInference.LayerDeterminism
 import VerifiedInference.HashCommitment
 import VerifiedInference.MerkleTree
+import VerifiedInference.MerkleAdversarial
 import VerifiedInference.WeightBinding
 import VerifiedInference.MultiVector
 import VerifiedInference.SiLU
