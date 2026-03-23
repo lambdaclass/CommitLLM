@@ -39,7 +39,7 @@ vllm_image = (
     )
     .env(
         {
-            "VI_CAPTURE": "1",
+            "VERILM_CAPTURE": "1",
             "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
         }
     )

@@ -60,7 +60,7 @@ class VerifiedInferenceServer:
         self._tokenizer_hash = self._compute_tokenizer_hash(llm)
         self._weight_hash = self._compute_weight_hash_rw(llm)
         self._quant_hash = self._compute_quant_hash(model)
-        self._system_prompt_hash = None  # Set via configure_system_prompt()
+        self._system_prompt_hash = hashlib.sha256(b"").hexdigest()  # Default: empty prompt
 
         self.buf = get_capture_buffer()
         self._audit_store: Dict[str, dict] = {}
@@ -201,23 +201,26 @@ class VerifiedInferenceServer:
                 f"calls_per_fwd {calls_per_fwd}"
             )
 
-        n_tokens = len(captures) // calls_per_fwd
-
         # Build traces with KV cache for Level C attention verification.
-        # Pass residuals from embedding/logit hooks for RMSNorm bridge verification.
+        # build_layer_traces handles batched prefill (batch_size > 1 per fwd pass)
+        # by splitting each row into a separate token trace.
         residuals = el_data.get("residuals")
         traces = build_layer_traces(
             captures, n_layers=n_layers, level_c=True,
             residuals=residuals if residuals else None,
         )
 
-        # Token IDs must match trace count exactly.
+        n_tokens = len(traces)
+
+        # Trace count = total tokens - 1: the last generated token is sampled
+        # but never processed through the model (generation stops after sampling).
         all_token_ids = prompt_token_ids + gen_token_ids
-        if len(all_token_ids) != n_tokens:
+        expected_traces = len(all_token_ids) - 1
+        if n_tokens != expected_traces:
             raise RuntimeError(
-                f"Token ID count ({len(all_token_ids)}) does not match "
-                f"trace count ({n_tokens}). Cannot commit with mismatched "
-                f"transcript."
+                f"Trace count ({n_tokens}) does not match expected "
+                f"({expected_traces} = {len(all_token_ids)} tokens - 1). "
+                f"Cannot commit with mismatched transcript."
             )
 
         # Convert traces to list-of-list-of-dicts for verilm_rs.
@@ -270,7 +273,7 @@ class VerifiedInferenceServer:
         # Commit via Rust.
         state = verilm_rs.commit(
             traces=trace_dicts,
-            token_ids=[int(t) for t in all_token_ids],
+            token_ids=[int(t) for t in all_token_ids[1:]],
             prompt=prompt.encode(),
             sampling_seed=seed,
             manifest=manifest,

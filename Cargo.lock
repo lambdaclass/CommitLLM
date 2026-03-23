@@ -839,6 +839,7 @@ dependencies = [
  "pyo3",
  "serde_json",
  "verilm-core",
+ "verilm-keygen",
  "verilm-prover",
  "verilm-verify",
 ]

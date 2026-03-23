@@ -26,7 +26,7 @@ image = (
     .env({
         "PATH": "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
-        "VI_CAPTURE": "1",
+        "VERILM_CAPTURE": "1",
     })
     .pip_install("vllm>=0.8", "torch", "numpy", "fastapi", "maturin", "zstandard")
     .add_local_dir("sidecar", remote_path="/opt/verilm", copy=True)
@@ -42,7 +42,8 @@ image = (
         ".git", "target", "scripts/__pycache__", "*.pdf",
     ])
     .run_commands(
-        "cd /build/crates/verilm-py && maturin develop --release",
+        "cd /build/crates/verilm-py && maturin build --release",
+        "bash -c 'pip install /build/target/wheels/verilm_rs-*.whl'",
         "python -c 'import verilm_rs; print(\"verilm_rs OK\")'",
         "rm -rf /build",
     )
@@ -101,14 +102,14 @@ def _run_e2e():
     # ==================================================================
     print("\n--- Test 2: Commitment structure ---")
     commitment = chat_result.get("commitment", {})
-    has_trace_root = "trace_root" in commitment
+    has_merkle_root = "merkle_root" in commitment
     has_n_tokens = "n_tokens" in commitment
     commitment_n_matches = commitment.get("n_tokens") == n_tokens
 
-    results["2_has_trace_root"] = has_trace_root
+    results["2_has_merkle_root"] = has_merkle_root
     results["2_n_tokens_match"] = commitment_n_matches
 
-    print(f"  trace_root: {commitment.get('trace_root', 'MISSING')[:32]}...")
+    print(f"  merkle_root: {commitment.get('merkle_root', 'MISSING')[:32]}...")
     print(f"  n_tokens in commitment: {commitment.get('n_tokens')}")
     print(f"  Matches chat n_tokens: {commitment_n_matches}")
 
@@ -128,7 +129,7 @@ def _run_e2e():
         )
         proof_nonempty = len(proof_bytes) > 0
         dctx = zstandard.ZstdDecompressor()
-        decompressed = dctx.decompress(proof_bytes)
+        decompressed = dctx.decompress(proof_bytes, max_output_size=100_000_000)
         decompress_ok = len(decompressed) > 0
         results["3_proof_nonempty"] = proof_nonempty
         results["3_decompress_ok"] = decompress_ok

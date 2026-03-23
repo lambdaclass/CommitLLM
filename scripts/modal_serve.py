@@ -32,7 +32,7 @@ image = (
     .env({
         "PATH": "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
-        "VI_CAPTURE": "1",
+        "VERILM_CAPTURE": "1",
     })
     .pip_install("vllm>=0.8", "torch", "numpy", "fastapi", "maturin")
     # Install verilm Python package (capture plugin).
@@ -50,7 +50,8 @@ image = (
         ".git", "target", "scripts/__pycache__", "*.pdf",
     ])
     .run_commands(
-        "cd /build/crates/verilm-py && maturin develop --release",
+        "cd /build/crates/verilm-py && maturin build --release",
+        "bash -c 'pip install /build/target/wheels/verilm_rs-*.whl'",
         "python -c 'import verilm_rs; print(\"verilm_rs OK\")'",
         "rm -rf /build",
     )

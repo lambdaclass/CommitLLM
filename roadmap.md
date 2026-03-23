@@ -13,7 +13,15 @@ First, we need empirical data to validate the protocol's security bounds.
 
 The foundation everything else builds on.
 
-### 2.1 Verifier
+### 2.1 Sidecar Audit Path
+- [ ] **Freeze the current sidecar as the reference path** — Keep the existing full-trace `BatchState` path working as the baseline prover implementation.
+- [ ] **Add end-to-end sidecar tests** — `chat -> commit -> audit -> deserialize -> verify` on the current path before refactoring storage.
+- [ ] **Introduce minimal retained-state types** — Replace full-trace retention with prover-side state that stores only the irreducible audit-window artifacts plus commitment metadata.
+- [ ] **Implement replay-from-retained-state** — Reconstruct the opened shell/KV data on demand from transcript + retained post-attention artifacts + model metadata.
+- [ ] **Switch `/audit` to the replay path** — Make selective audit openings come from replayed state rather than cloning stored full traces.
+- [ ] **Differential-test old vs new audit paths** — For the same request/challenge, the replay path must produce verifier-equivalent openings to the current full-trace path.
+
+### 2.2 Verifier
 - [ ] **Rust verifier library** — 25 MB key + receipt + traces → pass/fail
   - Freivalds checks (all 7 matrices)
   - Exact requantization verification
@@ -23,19 +31,19 @@ The foundation everything else builds on.
   - Cross-layer consistency checks
 - [ ] **Client SDKs** — Python and TypeScript libraries for verifying receipts (wrapping the Rust core)
 
-### 2.2 Tracing Plugins
+### 2.3 Tracing Plugins
 - [ ] **vLLM tracing plugin** — Sidecar that captures intermediates and emits 100-byte receipts
 - [ ] **llama.cpp tracing plugin** — Same for llama.cpp deployments
 - [ ] **Fine-tuned models / LoRA support** — How to handle adapters (separate commitment vs merged weights)
 
-### 2.3 Formal Verification
+### 2.4 Formal Verification
 - [ ] **Formalization in Lean** — Prove correctness of Freivalds implementation and protocol composition
 
-### 2.4 Testing & Quality
+### 2.5 Testing & Quality
 - [ ] **Property-based test suite** — Cheat detection should always catch manipulation; fuzzing the verifier
 - [ ] **Batch verification** — Optimizations for verifying many receipts (e.g., a day's traffic)
 
-### 2.5 Standardization
+### 2.6 Standardization
 - [ ] **Receipt format spec** — Documented schema for the 100-byte receipt and all commitment structures
 - [ ] **API extensions** — OpenAI-compatible `receipt` field in response headers/metadata
 
@@ -98,9 +106,17 @@ Where this gets interesting.
 ## Critical Path
 
 ```
-Research (requantization corridor)
+Stabilize current sidecar path
     ↓
-Core Implementation (verifier + vLLM plugin)
+End-to-end sidecar tests
+    ↓
+Minimal retained state
+    ↓
+Replay-from-retained-state audit path
+    ↓
+Verifier + vLLM plugin hardening
+    ↓
+Research (requantization corridor)
     ↓
 Launch (paper + blog + public repo)
     ↓
