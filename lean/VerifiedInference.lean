@@ -16,6 +16,7 @@ import VerifiedInference.SecurityGame
 import VerifiedInference.Storage
 import VerifiedInference.StorageReconstruction
 import VerifiedInference.ReadmeShell
+import VerifiedInference.ConcreteShell
 import VerifiedInference.ReadmeKVProvenance
 import VerifiedInference.ApproximateAttentionReplay
 import VerifiedInference.CanonicalProtocol
