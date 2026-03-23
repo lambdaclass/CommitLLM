@@ -867,6 +867,7 @@ dependencies = [
  "hex",
  "sha2",
  "verilm-core",
+ "verilm-prover",
  "verilm-test-vectors",
 ]
 

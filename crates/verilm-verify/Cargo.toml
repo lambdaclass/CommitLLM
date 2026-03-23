@@ -13,3 +13,4 @@ sha2 = "0.10"
 
 [dev-dependencies]
 verilm-test-vectors = { path = "../verilm-test-vectors" }
+verilm-prover = { path = "../verilm-prover" }

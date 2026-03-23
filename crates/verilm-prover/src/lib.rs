@@ -611,6 +611,7 @@ pub fn open_v4(state: &MinimalBatchState, token_index: u32) -> V4AuditResponse {
         prefix_token_ids,
         commitment,
         revealed_seed: state.revealed_seed,
+        replayed_layers: None, // filled by prover replay at audit time
     }
 }
 

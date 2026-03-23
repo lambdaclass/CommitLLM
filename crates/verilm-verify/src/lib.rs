@@ -20,8 +20,8 @@ use verilm_core::constants::MatrixType;
 use verilm_core::margin;
 use verilm_core::streaming;
 use verilm_core::types::{
-    AuditChallenge, AuditResponse, AuditTier, BatchProof, DeploymentManifest, TokenTrace,
-    VerifierKey,
+    AuditChallenge, AuditResponse, AuditTier, BatchProof, CommitmentVersion, DeploymentManifest,
+    TokenTrace, V4AuditResponse, VerifierKey,
 };
 use verilm_core::{freivalds, merkle};
 
@@ -1565,6 +1565,277 @@ fn make_audit_report(
         checks_run: 0,
         checks_passed: 0,
         failures: failures.to_vec(),
+        duration,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// V4 retained-state verification
+// ---------------------------------------------------------------------------
+
+/// Result from V4 retained-state verification.
+#[derive(Debug)]
+pub struct V4VerifyReport {
+    pub verdict: Verdict,
+    pub token_index: u32,
+    pub checks_run: usize,
+    pub checks_passed: usize,
+    pub failures: Vec<String>,
+    pub duration: Duration,
+}
+
+impl std::fmt::Display for V4VerifyReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self.verdict {
+            Verdict::Pass => write!(
+                f,
+                "V4 PASS: token {} — {}/{} checks ({:.1}ms)",
+                self.token_index,
+                self.checks_passed,
+                self.checks_run,
+                self.duration.as_secs_f64() * 1000.0
+            ),
+            Verdict::Fail => {
+                writeln!(
+                    f,
+                    "V4 FAIL: token {} — {} failures",
+                    self.token_index,
+                    self.failures.len()
+                )?;
+                for fail in &self.failures {
+                    writeln!(f, "  {}", fail)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Verify a V4 retained-state audit response.
+///
+/// **Structural checks** (always run):
+/// 1. Commitment version is V4
+/// 2. Seed commitment: `hash(revealed_seed) == commitment.seed_commitment`
+/// 3. Prompt hash is present
+/// 4. Challenged token retained leaf Merkle proof
+/// 5. Every prefix token retained leaf Merkle proof
+/// 6. IO chain: rebuild from prefix, verify challenged token's IO proof
+/// 7. Prefix count == token_index
+///
+/// **Shell replay checks** (when `response.replayed_layers` is `Some`):
+/// 1. Retained-state binding: replayed `a` matches retained `a` per layer
+/// 2. Freivalds on all 7 matmuls per layer (Wq, Wk, Wv, Wo, Wg, Wu, Wd)
+/// 3. SiLU check
+/// 4. Intra-layer chain: `x_ffn == requantize(attn_out)`
+/// 5. Cross-layer chain: `x_attn[l+1] == requantize(ffn_out[l])`
+pub fn verify_v4(
+    key: &VerifierKey,
+    response: &V4AuditResponse,
+) -> V4VerifyReport {
+    let start = Instant::now();
+    let mut failures = Vec::new();
+    let mut checks_run = 0usize;
+
+    // === STRUCTURAL CHECKS ===
+
+    // 1. Commitment version must be V4
+    checks_run += 1;
+    if response.commitment.version != CommitmentVersion::V4 {
+        failures.push(format!(
+            "expected V4 commitment, got {:?}",
+            response.commitment.version
+        ));
+    }
+
+    // 2. Seed commitment: hash(revealed_seed) == commitment.seed_commitment
+    checks_run += 1;
+    match response.commitment.seed_commitment {
+        Some(expected) => {
+            let computed = merkle::hash_seed(&response.revealed_seed);
+            if computed != expected {
+                failures.push(
+                    "seed commitment mismatch: hash(revealed_seed) != commitment.seed_commitment"
+                        .into(),
+                );
+            }
+        }
+        None => {
+            failures.push("V4 commitment missing seed_commitment".into());
+        }
+    }
+
+    // 3. Prompt hash must be present
+    checks_run += 1;
+    if response.commitment.prompt_hash.is_none() {
+        failures.push("V4 commitment missing prompt_hash".into());
+    }
+
+    // 4. Challenged token retained leaf Merkle proof
+    checks_run += 1;
+    let leaf_hash = merkle::hash_retained_state_direct(&response.retained);
+    if !merkle::verify(
+        &response.commitment.merkle_root,
+        &leaf_hash,
+        &response.merkle_proof,
+    ) {
+        failures.push(format!(
+            "token {}: retained leaf Merkle proof failed",
+            response.token_index
+        ));
+    }
+
+    // 5. Prefix retained leaf Merkle proofs
+    for (j, (prefix_state, proof)) in response
+        .prefix_retained
+        .iter()
+        .zip(response.prefix_merkle_proofs.iter())
+        .enumerate()
+    {
+        checks_run += 1;
+        let prefix_leaf = merkle::hash_retained_state_direct(prefix_state);
+        if !merkle::verify(&response.commitment.merkle_root, &prefix_leaf, proof) {
+            failures.push(format!(
+                "prefix token {}: retained leaf Merkle proof failed",
+                j
+            ));
+        }
+    }
+
+    // 6. IO chain verification
+    // Rebuild the chain from prefix[0] through challenged token.
+    checks_run += 1;
+    let mut prev_io = [0u8; 32];
+    for (j, prefix_state) in response.prefix_retained.iter().enumerate() {
+        let prefix_leaf = merkle::hash_retained_state_direct(prefix_state);
+        prev_io = merkle::io_hash_v4(prefix_leaf, response.prefix_token_ids[j], prev_io);
+    }
+
+    // Verify prev_io_hash matches the recomputed chain
+    if prev_io != response.prev_io_hash {
+        failures.push(format!(
+            "token {}: prev_io_hash doesn't match recomputed chain from prefix",
+            response.token_index
+        ));
+    }
+
+    // Verify IO proof against io_root
+    checks_run += 1;
+    let challenged_io = merkle::io_hash_v4(leaf_hash, response.token_id, prev_io);
+    if !merkle::verify(
+        &response.commitment.io_root,
+        &challenged_io,
+        &response.io_proof,
+    ) {
+        failures.push(format!(
+            "token {}: IO chain proof verification failed",
+            response.token_index
+        ));
+    }
+
+    // 7. Structural consistency: prefix count must equal token_index
+    checks_run += 1;
+    if response.prefix_retained.len() != response.token_index as usize {
+        failures.push(format!(
+            "token {}: expected {} prefix tokens but got {}",
+            response.token_index,
+            response.token_index,
+            response.prefix_retained.len()
+        ));
+    }
+
+    // === SHELL REPLAY CHECKS ===
+    //
+    // When replayed_layers are provided, the prover has replayed
+    // computation from retained state + public weights at audit time.
+    // We verify the replay is consistent with the committed retained
+    // state and passes all matmul / chain checks.
+
+    if let Some(replayed) = &response.replayed_layers {
+        if replayed.len() != response.retained.layers.len() {
+            failures.push(format!(
+                "replayed_layers count {} != retained layers count {}",
+                replayed.len(),
+                response.retained.layers.len()
+            ));
+        } else {
+            for (layer_idx, (lt, rs)) in replayed
+                .iter()
+                .zip(response.retained.layers.iter())
+                .enumerate()
+            {
+                // Retained-state binding: replayed a must match committed a
+                checks_run += 1;
+                if lt.a != rs.a {
+                    failures.push(format!(
+                        "layer {}: replayed a doesn't match retained a",
+                        layer_idx
+                    ));
+                }
+
+                // Freivalds checks for each matrix type (7 per layer)
+                let matmul_checks: [(MatrixType, &[i8], &[i32]); 7] = [
+                    (MatrixType::Wq, &lt.x_attn, &lt.q),
+                    (MatrixType::Wk, &lt.x_attn, &lt.k),
+                    (MatrixType::Wv, &lt.x_attn, &lt.v),
+                    (MatrixType::Wo, &lt.a, &lt.attn_out),
+                    (MatrixType::Wg, &lt.x_ffn, &lt.g),
+                    (MatrixType::Wu, &lt.x_ffn, &lt.u),
+                    (MatrixType::Wd, &lt.h, &lt.ffn_out),
+                ];
+
+                for (mt, input, output) in &matmul_checks {
+                    checks_run += 1;
+                    let v = key.v_for(layer_idx, *mt);
+                    let r = key.r_for(*mt);
+                    if !freivalds::check(v, input, r, output) {
+                        failures.push(format!(
+                            "layer {} {:?}: Freivalds check failed",
+                            layer_idx, mt
+                        ));
+                    }
+                }
+
+                // SiLU check
+                checks_run += 1;
+                let expected_h = verilm_core::silu::compute_h_unit_scale(&lt.g, &lt.u);
+                if lt.h != expected_h {
+                    failures.push(format!("layer {}: SiLU check failed", layer_idx));
+                }
+
+                // Intra-layer chain: x_ffn == requantize(attn_out)
+                checks_run += 1;
+                if lt.x_ffn != requantize(&lt.attn_out) {
+                    failures.push(format!("layer {}: chain x_ffn mismatch", layer_idx));
+                }
+
+                // Cross-layer chain
+                if layer_idx + 1 < replayed.len() {
+                    checks_run += 1;
+                    if replayed[layer_idx + 1].x_attn != requantize(&lt.ffn_out) {
+                        failures.push(format!(
+                            "layer {}->{}: cross-layer chain mismatch",
+                            layer_idx,
+                            layer_idx + 1
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    let duration = start.elapsed();
+    let checks_passed = checks_run.saturating_sub(failures.len());
+
+    V4VerifyReport {
+        verdict: if failures.is_empty() {
+            Verdict::Pass
+        } else {
+            Verdict::Fail
+        },
+        token_index: response.token_index,
+        checks_run,
+        checks_passed,
+        failures,
         duration,
     }
 }
