@@ -94,12 +94,22 @@ class VerifiedInferenceServer:
         self.buf.drain()
         self.el_capture.drain()
 
-        # Generate.
+        # Sampling seed: commit before generation so the same seed
+        # drives both vLLM sampling and the receipt.
+        if temperature > 0:
+            seed = os.urandom(32)
+            vllm_seed = int.from_bytes(seed[:8], "little") & 0x7FFFFFFF
+        else:
+            seed = hashlib.sha256(prompt.encode()).digest()
+            vllm_seed = None  # greedy — seed is irrelevant
+
+        # Generate with the committed seed.
         params = SamplingParams(
             max_tokens=max_tokens,
             temperature=temperature,
             top_k=top_k if top_k > 0 else -1,
             top_p=top_p,
+            seed=vllm_seed,
         )
         outputs = self.llm.generate([prompt], params)
         output = outputs[0]
@@ -125,17 +135,14 @@ class VerifiedInferenceServer:
         # Build traces with KV cache for Level C attention verification.
         traces = build_layer_traces(captures, n_layers=n_layers, level_c=True)
 
-        # Token IDs: prompt + generated, truncated/padded to n_tokens.
+        # Token IDs must match trace count exactly.
         all_token_ids = prompt_token_ids + gen_token_ids
-        token_ids = all_token_ids[:n_tokens]
-        if len(token_ids) < n_tokens:
-            token_ids.extend([0] * (n_tokens - len(token_ids)))
-
-        # Sampling seed: random for non-greedy, deterministic for greedy.
-        if temperature > 0:
-            seed = os.urandom(32)
-        else:
-            seed = hashlib.sha256(prompt.encode()).digest()
+        if len(all_token_ids) != n_tokens:
+            raise RuntimeError(
+                f"Token ID count ({len(all_token_ids)}) does not match "
+                f"trace count ({n_tokens}). Cannot commit with mismatched "
+                f"transcript."
+            )
 
         # Convert traces to list-of-list-of-dicts for verilm_rs.
         trace_dicts = []
@@ -171,7 +178,7 @@ class VerifiedInferenceServer:
         # Commit via Rust.
         state = verilm_rs.commit(
             traces=trace_dicts,
-            token_ids=[int(t) for t in token_ids],
+            token_ids=[int(t) for t in all_token_ids],
             prompt=prompt.encode(),
             sampling_seed=seed,
             manifest=manifest,
@@ -187,7 +194,7 @@ class VerifiedInferenceServer:
         return {
             "request_id": request_id,
             "commitment": commitment,
-            "token_ids": token_ids,
+            "token_ids": all_token_ids,
             "kv_roots": state.kv_roots_hex(),
             "generated_text": generated_text,
             "n_tokens": state.n_tokens(),

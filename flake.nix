@@ -1,5 +1,5 @@
 {
-  description = "VeriLM paper";
+  description = "VeriLM — provenance for open-weight LLM inference";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -14,10 +14,19 @@
       {
         devShells.default = pkgs.mkShell {
           buildInputs = [
-            pkgs.elan
-            pkgs.git
-            pkgs.opentimestamps-client
+            # Rust
+            pkgs.cargo
+            pkgs.rustc
+            pkgs.rust-analyzer
+
+            # Paper
             pkgs.typst
+            pkgs.opentimestamps-client
+
+            # Lean
+            pkgs.elan
+
+            pkgs.git
           ];
         };
       });

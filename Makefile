@@ -1,5 +1,19 @@
-.PHONY: paper paper-watch paper-clean paper-stamp lean-build lean-clean
+.PHONY: build test check clean paper paper-watch paper-clean paper-stamp lean-build lean-clean
 
+# Rust
+build:
+	cargo build --workspace --exclude verilm-py
+
+test:
+	cargo test --workspace --exclude verilm-py
+
+check:
+	cargo check --workspace --exclude verilm-py
+
+clean:
+	cargo clean
+
+# Paper
 paper:
 	typst compile paper/main.typ paper/main.pdf
 
@@ -12,6 +26,7 @@ paper-stamp: paper
 paper-clean:
 	rm -f paper/main.pdf paper/main.pdf.ots
 
+# Lean
 lean-build:
 	cd lean && lake build
 

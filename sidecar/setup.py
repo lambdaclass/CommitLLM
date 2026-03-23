@@ -40,7 +40,12 @@ setup(
     description="VeriLM sidecar: capture, commit, and audit for verified LLM inference",
     packages=find_packages(),
     python_requires=">=3.10",
-    install_requires=["torch"],
+    install_requires=[
+        "torch",
+        "vllm",
+        "fastapi",
+        "uvicorn",
+    ],
     entry_points={
         "vllm.general_plugins": [
             "verilm_capture = verilm:register",
