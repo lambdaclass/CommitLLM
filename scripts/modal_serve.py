@@ -90,9 +90,6 @@ class Inference:
             return self.server.chat(
                 prompt=request.get("prompt", ""),
                 max_tokens=request.get("n_tokens", 4),
-                temperature=request.get("temperature", 0.0),
-                top_k=request.get("top_k", 0),
-                top_p=request.get("top_p", 1.0),
             )
         except Exception as e:
             print(f"Chat error: {traceback.format_exc()}")

@@ -133,36 +133,40 @@ class VerifiedInferenceServer:
         prompt: str,
         max_tokens: int = 4,
         temperature: float = 0.0,
-        top_k: int = 0,
-        top_p: float = 1.0,
     ) -> dict:
-        """Run verified inference: generate → capture → commit."""
+        """Run verified inference: generate → capture → commit.
+
+        Only greedy decoding (temperature=0) is supported. Stochastic
+        sampling cannot be faithfully replayed by the verifier because
+        vLLM's sampler uses an internal RNG that does not match the
+        protocol's canonical sampler. This restriction will be lifted
+        once a canonical ChaCha20-based sampler is integrated.
+        """
         import verilm_rs
         from vllm import SamplingParams
 
         from . import capture as cap
         from .trace import build_layer_traces
 
+        # Enforce greedy-only until canonical stochastic replay exists.
+        if temperature != 0.0:
+            raise ValueError(
+                "verilm: only greedy decoding (temperature=0) is supported. "
+                "Stochastic sampling cannot be faithfully verified — the "
+                "verifier's canonical sampler does not match vLLM's RNG."
+            )
+
         # Clear buffers.
         self.buf.drain()
         self.el_capture.drain()
 
-        # Sampling seed: commit before generation so the same seed
-        # drives both vLLM sampling and the receipt.
-        if temperature > 0:
-            seed = os.urandom(32)
-            vllm_seed = int.from_bytes(seed[:8], "little") & 0x7FFFFFFF
-        else:
-            seed = hashlib.sha256(prompt.encode()).digest()
-            vllm_seed = None  # greedy — seed is irrelevant
+        # Greedy: deterministic seed derived from prompt.
+        seed = hashlib.sha256(prompt.encode()).digest()
 
-        # Generate with the committed seed.
+        # Generate.
         params = SamplingParams(
             max_tokens=max_tokens,
-            temperature=temperature,
-            top_k=top_k if top_k > 0 else -1,
-            top_p=top_p,
-            seed=vllm_seed,
+            temperature=0.0,
         )
         outputs = self.llm.generate([prompt], params)
         output = outputs[0]
@@ -240,9 +244,9 @@ class VerifiedInferenceServer:
         # Build manifest.
         manifest = {
             "tokenizer_hash": self._tokenizer_hash,
-            "temperature": temperature,
-            "top_k": top_k,
-            "top_p": top_p,
+            "temperature": 0.0,
+            "top_k": 0,
+            "top_p": 1.0,
             "eos_policy": "stop",
             "weight_hash": self._weight_hash,
             "quant_hash": self._quant_hash,
@@ -351,9 +355,6 @@ def create_app(llm, **kwargs):
             result = server.chat(
                 prompt=request.get("prompt", ""),
                 max_tokens=request.get("n_tokens", 4),
-                temperature=request.get("temperature", 0.0),
-                top_k=request.get("top_k", 0),
-                top_p=request.get("top_p", 1.0),
             )
             return result
         except Exception as e:
