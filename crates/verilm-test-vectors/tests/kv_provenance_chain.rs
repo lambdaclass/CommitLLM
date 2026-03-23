@@ -35,6 +35,7 @@ fn honest_kv_chain_passes() {
             sampling_seed: [0xAA; 32],
             manifest: None,
         },
+        None,
     );
 
     // Open all 5 tokens
@@ -64,6 +65,7 @@ fn kv_chain_genesis_is_zero() {
             sampling_seed: [0xBB; 32],
             manifest: None,
         },
+        None,
     );
 
     let proof = open(&state, &[0]);
@@ -87,6 +89,7 @@ fn tampered_prev_kv_hash_detected_for_consecutive_tokens() {
             sampling_seed: [0xCC; 32],
             manifest: None,
         },
+        None,
     );
 
     // Open tokens 1 and 2 (consecutive)
@@ -117,6 +120,7 @@ fn fabricated_kv_projections_detected() {
             sampling_seed: [0xDD; 32],
             manifest: None,
         },
+        None,
     );
 
     // Open tokens 2 and 3 (consecutive)
@@ -190,6 +194,7 @@ fn non_consecutive_tokens_no_cross_check_no_false_positive() {
             sampling_seed: [0xEE; 32],
             manifest: None,
         },
+        None,
     );
 
     // Open tokens 0 and 3 (non-consecutive — gap at 1, 2)

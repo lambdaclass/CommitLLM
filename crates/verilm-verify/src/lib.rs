@@ -802,10 +802,9 @@ pub fn verify_weight_hash(key: &VerifierKey, expected: Option<&[u8; 32]>) -> Wei
 pub fn verify_one(key: &VerifierKey, trace: &TokenTrace) -> Vec<String> {
     let mut failures = Vec::new();
 
-    // Step 1: Merkle commitment binding
-    let leaf_data = bincode::serialize(&trace.layers).expect("serialize layers");
-    let leaf_hash = merkle::trace_leaf_hash(
-        &leaf_data,
+    // Step 1: Merkle commitment binding (direct hash, no bincode)
+    let leaf_hash = merkle::hash_trace_direct(
+        &trace.layers,
         trace.final_hidden.as_deref(),
     );
     if !merkle::verify(&trace.merkle_root, &leaf_hash, &trace.merkle_proof) {

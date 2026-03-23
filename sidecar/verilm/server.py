@@ -160,7 +160,6 @@ class VerifiedInferenceServer:
         from vllm import SamplingParams
 
         from . import capture as cap
-        from .trace import build_layer_traces
 
         # Enforce greedy-only until canonical stochastic replay exists.
         if temperature != 0.0:
@@ -204,62 +203,39 @@ class VerifiedInferenceServer:
                 f"calls_per_fwd {calls_per_fwd}"
             )
 
-        # Build traces with KV cache for Level C attention verification.
-        # build_layer_traces handles batched prefill (batch_size > 1 per fwd pass)
-        # by splitting each row into a separate token trace.
-        residuals = el_data.get("residuals")
-        traces = build_layer_traces(
-            captures, n_layers=n_layers, level_c=True,
-            residuals=residuals if residuals else None,
-        )
+        # Derive forward pass batch sizes from capture tensor shapes.
+        n_fwd = len(captures) // calls_per_fwd
+        fwd_batch_sizes = [captures[i * calls_per_fwd][2].shape[0] for i in range(n_fwd)]
 
-        n_tokens = len(traces)
-
-        # Trace count = total tokens - 1: the last generated token is sampled
-        # but never processed through the model (generation stops after sampling).
         all_token_ids = prompt_token_ids + gen_token_ids
+        n_tokens = sum(fwd_batch_sizes)
         expected_traces = len(all_token_ids) - 1
         if n_tokens != expected_traces:
             raise RuntimeError(
-                f"Trace count ({n_tokens}) does not match expected "
+                f"Token count ({n_tokens}) does not match expected "
                 f"({expected_traces} = {len(all_token_ids)} tokens - 1). "
                 f"Cannot commit with mismatched transcript."
             )
 
-        # Convert traces to list-of-list-of-dicts for verilm_rs.
-        # Tensors are already on CPU (non-blocking transfer in capture hook).
-        # Pass raw bytes (tobytes) — Rust reinterprets directly, no Python objects.
-        trace_dicts = []
-        for token_layers in traces:
-            layer_dicts = []
-            for lt in token_layers:
-                d = {
-                    "x_attn": lt["x_attn"].numpy().tobytes(),
-                    "q": lt["q"].numpy().tobytes(),
-                    "k": lt["k"].numpy().tobytes(),
-                    "v": lt["v"].numpy().tobytes(),
-                    "a": lt["a"].numpy().tobytes(),
-                    "attn_out": lt["attn_out"].numpy().tobytes(),
-                    "x_ffn": lt["x_ffn"].numpy().tobytes(),
-                    "g": lt["g"].numpy().tobytes(),
-                    "u": lt["u"].numpy().tobytes(),
-                    "h": lt["h"].numpy().tobytes(),
-                    "ffn_out": lt["ffn_out"].numpy().tobytes(),
-                    "kv_cache_k": [t.numpy().tobytes() for t in lt.get("kv_cache_k", [])],
-                    "kv_cache_v": [t.numpy().tobytes() for t in lt.get("kv_cache_v", [])],
-                }
-                if "residual" in lt:
-                    d["residual"] = lt["residual"].numpy().tobytes()
-                if "qkv_scale" in lt:
-                    d["scale_x_attn"] = float(lt["qkv_scale"].item()) if lt["qkv_scale"].numel() == 1 else float(lt["qkv_scale"].max().item())
-                if "o_scale" in lt:
-                    d["scale_a"] = float(lt["o_scale"].item()) if lt["o_scale"].numel() == 1 else float(lt["o_scale"].max().item())
-                if "gu_scale" in lt:
-                    d["scale_x_ffn"] = float(lt["gu_scale"].item()) if lt["gu_scale"].numel() == 1 else float(lt["gu_scale"].max().item())
-                if "d_scale" in lt:
-                    d["scale_h"] = float(lt["d_scale"].item()) if lt["d_scale"].numel() == 1 else float(lt["d_scale"].max().item())
-                layer_dicts.append(d)
-            trace_dicts.append(layer_dicts)
+        # Convert captures to bytes for Rust. Only .numpy().tobytes() per tensor —
+        # no trace reorganization, no dict construction, no KV cache cloning.
+        capture_inputs = [c[2].numpy().tobytes() for c in captures]
+        capture_accs = [c[3].numpy().tobytes() for c in captures]
+        capture_scales = []
+        for c in captures:
+            s = c[4]
+            if hasattr(s, 'numel') and s.numel() > 1:
+                capture_scales.append(float(s.max().item()))
+            elif hasattr(s, 'item'):
+                capture_scales.append(float(s.item()))
+            else:
+                capture_scales.append(float(s))
+
+        # Convert residuals to f32 bytes if available.
+        residuals = el_data.get("residuals")
+        residual_bytes = None
+        if residuals:
+            residual_bytes = [r.float().numpy().tobytes() for r in residuals]
 
         # Build manifest.
         manifest = {
@@ -273,13 +249,22 @@ class VerifiedInferenceServer:
             "system_prompt_hash": self._system_prompt_hash,
         }
 
-        # Commit via Rust.
-        state = verilm_rs.commit(
-            traces=trace_dicts,
+        # Trace build + serialize + commit all in Rust.
+        state = verilm_rs.commit_from_captures(
+            capture_inputs=capture_inputs,
+            capture_accumulators=capture_accs,
+            capture_scales=capture_scales,
+            fwd_batch_sizes=fwd_batch_sizes,
+            n_layers=n_layers,
+            q_dim=cap._q_dim,
+            kv_dim=cap._kv_dim,
+            intermediate_size=cap._gate_up_half,
+            level_c=True,
             token_ids=[int(t) for t in all_token_ids[1:]],
             prompt=prompt.encode(),
             sampling_seed=seed,
             manifest=manifest,
+            residuals=residual_bytes,
         )
 
         # Store for audit.

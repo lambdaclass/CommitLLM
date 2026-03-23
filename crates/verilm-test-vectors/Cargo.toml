@@ -8,7 +8,6 @@ verilm-core = { path = "../verilm-core" }
 verilm-prover = { path = "../verilm-prover" }
 rand = "0.8"
 rand_chacha = "0.3"
-bincode = "1"
 
 [dev-dependencies]
 verilm-verify = { path = "../verilm-verify" }

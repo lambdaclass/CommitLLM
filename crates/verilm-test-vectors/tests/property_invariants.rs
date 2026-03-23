@@ -40,7 +40,7 @@ fn honest_v3_setup(
         sampling_seed: [42u8; 32],
         manifest: None,
     };
-    let (commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (commitment, state) = commit_with_full_binding(all_layers, &params, None);
     (cfg, model, key, commitment, state)
 }
 

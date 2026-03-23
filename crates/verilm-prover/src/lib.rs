@@ -8,6 +8,156 @@ use verilm_core::types::{
     DeploymentManifest, LayerTrace, TokenTrace, VerificationPolicy, VerifierKey,
 };
 
+/// Model geometry for trace construction from raw captures.
+pub struct ModelGeometry {
+    pub n_layers: usize,
+    pub q_dim: usize,
+    pub kv_dim: usize,
+    pub intermediate_size: usize,
+}
+
+/// A single capture from the cutlass_scaled_mm hook.
+pub struct CaptureEntry {
+    pub x_i8: Vec<i8>,
+    pub acc_i32: Vec<i32>,
+    pub scale_a: f32,
+}
+
+/// Per-token, per-layer requantized K/V (incremental, not prefix snapshot).
+///
+/// `token_kvs[token_idx][layer_idx]` = `(k_i8, v_i8)` for that single token.
+/// Used for KV chain computation and audit prefix reconstruction without
+/// the O(N²) cost of cloning the full prefix into every `LayerTrace`.
+pub type TokenKvs = Vec<Vec<(Vec<i8>, Vec<i8>)>>;
+
+/// Build `Vec<Vec<LayerTrace>>` and per-token KV data from raw captures.
+///
+/// Replaces the Python `build_layer_traces` function. Takes flat capture
+/// tuples (in call order) and reorganizes them into per-token, per-layer
+/// traces with GQA-aware QKV split, gate/up split, and incremental KV storage.
+///
+/// The returned `TokenKvs` stores only each token's own requantized K_t, V_t.
+/// KV cache fields in `LayerTrace` are left empty — KV provenance is committed
+/// via the separate KV chain tree, not embedded in trace objects.
+///
+/// Captures arrive in order: for each forward pass, for each layer,
+/// 4 projections: qkv_proj, o_proj, gate_up_proj, down_proj.
+pub fn build_traces_from_captures(
+    captures: &[CaptureEntry],
+    geom: &ModelGeometry,
+    fwd_batch_sizes: &[usize],
+    level_c: bool,
+    residuals: Option<&[Vec<f32>]>,
+) -> (Vec<Vec<LayerTrace>>, Option<TokenKvs>) {
+    const PROJS_PER_LAYER: usize = 4;
+    let calls_per_fwd = geom.n_layers * PROJS_PER_LAYER;
+    let total_tokens: usize = fwd_batch_sizes.iter().sum();
+
+    let mut all_tokens: Vec<Vec<LayerTrace>> = Vec::with_capacity(total_tokens);
+    let mut all_token_kvs: Option<Vec<Vec<(Vec<i8>, Vec<i8>)>>> = if level_c {
+        Some(Vec::with_capacity(total_tokens))
+    } else {
+        None
+    };
+
+    for (fwd_idx, &batch_size) in fwd_batch_sizes.iter().enumerate() {
+        let base = fwd_idx * calls_per_fwd;
+
+        for b in 0..batch_size {
+            let mut token_layers: Vec<LayerTrace> = Vec::with_capacity(geom.n_layers);
+            let mut token_kv: Vec<(Vec<i8>, Vec<i8>)> = if level_c {
+                Vec::with_capacity(geom.n_layers)
+            } else {
+                Vec::new()
+            };
+
+            for l in 0..geom.n_layers {
+                let cap_base = base + l * PROJS_PER_LAYER;
+                let qkv = &captures[cap_base];
+                let o = &captures[cap_base + 1];
+                let gu = &captures[cap_base + 2];
+                let d = &captures[cap_base + 3];
+
+                // Compute per-row dimensions from data length / batch_size.
+                let qkv_in = qkv.x_i8.len() / batch_size;
+                let qkv_out = qkv.acc_i32.len() / batch_size;
+                let o_in = o.x_i8.len() / batch_size;
+                let o_out = o.acc_i32.len() / batch_size;
+                let gu_in = gu.x_i8.len() / batch_size;
+                let gu_out = gu.acc_i32.len() / batch_size;
+                let d_in = d.x_i8.len() / batch_size;
+                let d_out = d.acc_i32.len() / batch_size;
+
+                // Extract row b from each capture.
+                let x_attn = qkv.x_i8[b * qkv_in..(b + 1) * qkv_in].to_vec();
+                let qkv_row = &qkv.acc_i32[b * qkv_out..(b + 1) * qkv_out];
+                let a = o.x_i8[b * o_in..(b + 1) * o_in].to_vec();
+                let attn_out = o.acc_i32[b * o_out..(b + 1) * o_out].to_vec();
+                let x_ffn = gu.x_i8[b * gu_in..(b + 1) * gu_in].to_vec();
+                let gu_row = &gu.acc_i32[b * gu_out..(b + 1) * gu_out];
+                let h = d.x_i8[b * d_in..(b + 1) * d_in].to_vec();
+                let ffn_out = d.acc_i32[b * d_out..(b + 1) * d_out].to_vec();
+
+                // GQA-aware QKV split.
+                let q = qkv_row[..geom.q_dim].to_vec();
+                let k = qkv_row[geom.q_dim..geom.q_dim + geom.kv_dim].to_vec();
+                let v = qkv_row[geom.q_dim + geom.kv_dim..].to_vec();
+
+                // Gate/up equal split.
+                let half = gu_row.len() / 2;
+                let g = gu_row[..half].to_vec();
+                let u = gu_row[half..].to_vec();
+
+                // Incremental KV: requantize once, store per-token (not prefix).
+                if level_c {
+                    let k_i8 = requantize(&k);
+                    let v_i8 = requantize(&v);
+                    token_kv.push((k_i8, v_i8));
+                }
+
+                // Residual: indexed by fwd_pass * n_layers + layer.
+                let residual = residuals.and_then(|res| {
+                    let res_idx = fwd_idx * geom.n_layers + l;
+                    res.get(res_idx).and_then(|r| {
+                        let dim = r.len() / batch_size;
+                        let start = b * dim;
+                        let end = start + dim;
+                        if end <= r.len() { Some(r[start..end].to_vec()) } else { None }
+                    })
+                });
+
+                token_layers.push(LayerTrace {
+                    x_attn,
+                    q,
+                    k,
+                    v,
+                    a,
+                    attn_out,
+                    x_ffn,
+                    g,
+                    u,
+                    h,
+                    ffn_out,
+                    kv_cache_k: Vec::new(),
+                    kv_cache_v: Vec::new(),
+                    scale_x_attn: Some(qkv.scale_a),
+                    scale_a: Some(o.scale_a),
+                    scale_x_ffn: Some(gu.scale_a),
+                    scale_h: Some(d.scale_a),
+                    residual,
+                });
+            }
+
+            all_tokens.push(token_layers);
+            if let Some(ref mut kvs) = all_token_kvs {
+                kvs.push(token_kv);
+            }
+        }
+    }
+
+    (all_tokens, all_token_kvs)
+}
+
 /// Prover-side state after Phase 1 (commit) but before Phase 2 (open).
 ///
 /// Holds the Merkle trees and raw layer data. Only the commitment is
@@ -38,6 +188,10 @@ pub struct BatchState {
     /// Each root is the Merkle root over per-layer KV hashes for that token.
     /// Published before the challenge so the verifier can build a StreamingKvVerifier.
     pub kv_merkle_roots: Option<Vec<[u8; 32]>>,
+    /// Pre-computed per-token, per-layer requantized K/V (incremental).
+    /// `token_kvs[token_idx][layer_idx]` = `(k_i8, v_i8)`.
+    /// Used for KV prefix reconstruction during audit. `None` for Level A/B.
+    pub token_kvs: Option<TokenKvs>,
 }
 
 /// Full binding parameters for V3 commit.
@@ -92,9 +246,8 @@ fn commit_inner(
     let trace_leaves: Vec<[u8; 32]> = all_layers
         .iter()
         .map(|layers| {
-            let data = bincode::serialize(layers).expect("serialize layers");
             let fh = layers.last().map(|lt| requantize(&lt.ffn_out));
-            merkle::trace_leaf_hash(&data, fh.as_deref())
+            merkle::hash_trace_direct(layers, fh.as_deref())
         })
         .collect();
 
@@ -141,6 +294,7 @@ fn commit_inner(
         kv_chain_hashes: None,
         kv_chain_root: None,
         kv_merkle_roots: None,
+        token_kvs: None,
     };
 
     (commitment, state)
@@ -167,9 +321,15 @@ pub fn commit_with_manifest(
 ///
 /// IO leaves use chained hashing: each token's IO hash depends on the previous.
 /// This prevents insertion, deletion, reordering, and retroactive edits.
+///
+/// `token_kvs`: pre-computed per-token, per-layer requantized K/V from
+/// `build_traces_from_captures`. When `Some`, KV chain and Merkle roots
+/// are computed from these without re-requantizing. When `None`, falls
+/// back to `requantize(&lt.k)` per layer.
 pub fn commit_with_full_binding(
     all_layers: Vec<Vec<LayerTrace>>,
     params: &FullBindingParams,
+    token_kvs: Option<TokenKvs>,
 ) -> (BatchCommitment, BatchState) {
     assert_eq!(
         all_layers.len(),
@@ -180,9 +340,8 @@ pub fn commit_with_full_binding(
     let trace_leaves: Vec<[u8; 32]> = all_layers
         .iter()
         .map(|layers| {
-            let data = bincode::serialize(layers).expect("serialize layers");
             let fh = layers.last().map(|lt| requantize(&lt.ffn_out));
-            merkle::trace_leaf_hash(&data, fh.as_deref())
+            merkle::hash_trace_direct(layers, fh.as_deref())
         })
         .collect();
 
@@ -203,13 +362,21 @@ pub fn commit_with_full_binding(
         prev_io = io;
     }
 
-    // Build KV provenance chain: each token's KV hash depends on the previous
+    // Build KV provenance chain using pre-computed KVs when available.
     let mut kv_chain_leaves: Vec<[u8; 32]> = Vec::with_capacity(all_layers.len());
     let mut kv_merkle_roots: Vec<[u8; 32]> = Vec::with_capacity(all_layers.len());
     let mut prev_kv = [0u8; 32]; // genesis: zero hash for first token
     for (i, layers) in all_layers.iter().enumerate() {
-        let k_per_layer: Vec<Vec<i8>> = layers.iter().map(|lt| requantize(&lt.k)).collect();
-        let v_per_layer: Vec<Vec<i8>> = layers.iter().map(|lt| requantize(&lt.v)).collect();
+        let (k_per_layer, v_per_layer): (Vec<Vec<i8>>, Vec<Vec<i8>>) =
+            if let Some(ref kvs) = token_kvs {
+                // Fast path: use pre-computed requantized K/V (no re-requantize)
+                kvs[i].iter().map(|(k, v)| (k.clone(), v.clone())).unzip()
+            } else {
+                // Fallback: requantize from i32 projections
+                let k: Vec<Vec<i8>> = layers.iter().map(|lt| requantize(&lt.k)).collect();
+                let v: Vec<Vec<i8>> = layers.iter().map(|lt| requantize(&lt.v)).collect();
+                (k, v)
+            };
         let kv = merkle::kv_chain_hash(&prev_kv, &k_per_layer, &v_per_layer, i as u32);
         kv_chain_leaves.push(kv);
         prev_kv = kv;
@@ -250,6 +417,7 @@ pub fn commit_with_full_binding(
         kv_chain_hashes: Some(kv_chain_leaves),
         kv_chain_root: Some(kv_chain_tree.root),
         kv_merkle_roots: Some(kv_merkle_roots),
+        token_kvs,
     };
 
     (commitment, state)
@@ -348,7 +516,13 @@ pub fn build_audit_response(
     assert!(token_idx < all_traces.len(), "token_index out of range");
     let token_layers = &all_traces[token_idx];
 
-    let (partial_layers, kv_k_prefix, kv_v_prefix) = extract_audit_layers(token_layers, &challenge.layer_indices);
+    let partial_layers: Vec<LayerTrace> = challenge.layer_indices.iter()
+        .map(|&l| token_layers[l].clone()).collect();
+
+    // Reconstruct KV prefix from all previous tokens' traces.
+    let (kv_k_prefix, kv_v_prefix) = reconstruct_kv_prefix(
+        all_traces, token_idx, &challenge.layer_indices, None,
+    );
 
     // Build KV layer tree for per-layer Merkle proofs.
     let k_per_layer: Vec<Vec<i8>> = token_layers.iter().map(|lt| requantize(&lt.k)).collect();
@@ -362,8 +536,8 @@ pub fn build_audit_response(
     let n_tokens = all_traces.len();
     let mut leaves = Vec::with_capacity(n_tokens);
     for t in 0..n_tokens {
-        let data = bincode::serialize(&all_traces[t]).expect("serialize layers");
-        leaves.push(verilm_core::merkle::trace_leaf_hash(&data, None));
+        let fh = all_traces[t].last().map(|lt| requantize(&lt.ffn_out));
+        leaves.push(merkle::hash_trace_direct(&all_traces[t], fh.as_deref()));
     }
     let trace_tree = verilm_core::merkle::build_tree(&leaves);
     let merkle_proof = verilm_core::merkle::prove(&trace_tree, token_idx);
@@ -400,11 +574,23 @@ pub fn build_audit_response_from_state(
     assert!(token_idx < state.all_layers.len(), "token_index out of range");
     let token_layers = &state.all_layers[token_idx];
 
-    let (partial_layers, kv_k_prefix, kv_v_prefix) = extract_audit_layers(token_layers, &challenge.layer_indices);
+    let partial_layers: Vec<LayerTrace> = challenge.layer_indices.iter()
+        .map(|&l| token_layers[l].clone()).collect();
 
-    // KV layer tree: must rebuild for per-layer proofs (we only stored the roots).
-    let k_per_layer: Vec<Vec<i8>> = token_layers.iter().map(|lt| requantize(&lt.k)).collect();
-    let v_per_layer: Vec<Vec<i8>> = token_layers.iter().map(|lt| requantize(&lt.v)).collect();
+    // Reconstruct KV prefix: use pre-computed token_kvs if available.
+    let (kv_k_prefix, kv_v_prefix) = reconstruct_kv_prefix(
+        &state.all_layers, token_idx, &challenge.layer_indices, state.token_kvs.as_ref(),
+    );
+
+    // KV layer tree: use pre-computed token_kvs or requantize.
+    let (k_per_layer, v_per_layer): (Vec<Vec<i8>>, Vec<Vec<i8>>) =
+        if let Some(ref kvs) = state.token_kvs {
+            kvs[token_idx].iter().map(|(k, v)| (k.clone(), v.clone())).unzip()
+        } else {
+            let k: Vec<Vec<i8>> = token_layers.iter().map(|lt| requantize(&lt.k)).collect();
+            let v: Vec<Vec<i8>> = token_layers.iter().map(|lt| requantize(&lt.v)).collect();
+            (k, v)
+        };
     let kv_tree = streaming::build_kv_layer_tree(challenge.token_index, &k_per_layer, &v_per_layer);
 
     let kv_layer_proofs: Vec<verilm_core::merkle::MerkleProof> = challenge
@@ -434,15 +620,39 @@ pub fn build_audit_response_from_state(
     }
 }
 
-/// Extract partial layers and KV prefix data for a set of layer indices.
-pub fn extract_audit_layers(
-    token_layers: &[LayerTrace],
+/// Reconstruct KV prefix for audit: collect K/V from tokens 0..=token_idx for each challenged layer.
+///
+/// Uses `token_kvs` (pre-computed requantized K/V) when available. Falls back to
+/// `requantize(&lt.k)` from `all_layers` otherwise.
+fn reconstruct_kv_prefix(
+    all_layers: &[Vec<LayerTrace>],
+    token_idx: usize,
     layer_indices: &[usize],
-) -> (Vec<LayerTrace>, Vec<Vec<Vec<i8>>>, Vec<Vec<Vec<i8>>>) {
-    let partial_layers: Vec<LayerTrace> = layer_indices.iter().map(|&l| token_layers[l].clone()).collect();
-    let kv_k_prefix: Vec<Vec<Vec<i8>>> = layer_indices.iter().map(|&l| token_layers[l].kv_cache_k.clone()).collect();
-    let kv_v_prefix: Vec<Vec<Vec<i8>>> = layer_indices.iter().map(|&l| token_layers[l].kv_cache_v.clone()).collect();
-    (partial_layers, kv_k_prefix, kv_v_prefix)
+    token_kvs: Option<&TokenKvs>,
+) -> (Vec<Vec<Vec<i8>>>, Vec<Vec<Vec<i8>>>) {
+    let mut kv_k_prefix = Vec::with_capacity(layer_indices.len());
+    let mut kv_v_prefix = Vec::with_capacity(layer_indices.len());
+
+    for &l in layer_indices {
+        let mut k_for_layer = Vec::with_capacity(token_idx + 1);
+        let mut v_for_layer = Vec::with_capacity(token_idx + 1);
+
+        for t in 0..=token_idx {
+            if let Some(kvs) = token_kvs {
+                let (ref k, ref v) = kvs[t][l];
+                k_for_layer.push(k.clone());
+                v_for_layer.push(v.clone());
+            } else {
+                k_for_layer.push(requantize(&all_layers[t][l].k));
+                v_for_layer.push(requantize(&all_layers[t][l].v));
+            }
+        }
+
+        kv_k_prefix.push(k_for_layer);
+        kv_v_prefix.push(v_for_layer);
+    }
+
+    (kv_k_prefix, kv_v_prefix)
 }
 
 /// Build a `StreamingKvVerifier` from full trace data.
@@ -719,9 +929,8 @@ pub fn verify_batch_with_policy(
 pub fn verify_trace(key: &VerifierKey, trace: &TokenTrace) -> (bool, Vec<String>) {
     let mut failures = Vec::new();
 
-    // Step 1: Merkle commitment binding (includes final_hidden if present)
-    let leaf_data = bincode::serialize(&trace.layers).expect("serialize layers");
-    let leaf_hash = merkle::trace_leaf_hash(&leaf_data, trace.final_hidden.as_deref());
+    // Step 1: Merkle commitment binding (direct hash, no bincode)
+    let leaf_hash = merkle::hash_trace_direct(&trace.layers, trace.final_hidden.as_deref());
     if !merkle::verify(&trace.merkle_root, &leaf_hash, &trace.merkle_proof) {
         failures.push("Merkle proof verification failed".into());
     }

@@ -20,7 +20,7 @@ pub use verilm_prover::{
     BatchState, FullBindingParams,
     commit, commit_legacy, commit_with_token_ids, commit_with_manifest,
     commit_with_full_binding, open, build_batch,
-    build_audit_response, build_audit_response_from_state, extract_audit_layers,
+    build_audit_response, build_audit_response_from_state,
     build_streaming_kv_verifier,
     verify_batch, verify_batch_with_policy, verify_trace,
 };
@@ -710,8 +710,7 @@ pub fn build_trace_with_hidden(
     let mut leaves = Vec::with_capacity(n_tokens);
     for t in 0..n_tokens {
         if t == token_index as usize {
-            let data = bincode::serialize(&layers).expect("serialize layers");
-            leaves.push(merkle::trace_leaf_hash(&data, final_hidden.as_deref()));
+            leaves.push(merkle::hash_trace_direct(&layers, final_hidden.as_deref()));
         } else {
             // Dummy leaf for other tokens
             leaves.push(merkle::hash_leaf(&(t as u32).to_le_bytes()));

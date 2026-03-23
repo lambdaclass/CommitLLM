@@ -31,7 +31,7 @@ fn test_v3_honest_full_binding_passes() {
         manifest: None,
     };
 
-    let (commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (commitment, state) = commit_with_full_binding(all_layers, &params, None);
     assert_eq!(commitment.version, CommitmentVersion::V3);
     assert!(commitment.prompt_hash.is_some());
     assert!(commitment.seed_commitment.is_some());
@@ -59,7 +59,7 @@ fn test_v3_subset_challenges_pass() {
         manifest: None,
     };
 
-    let (_commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (_commitment, state) = commit_with_full_binding(all_layers, &params, None);
 
     // Challenge only token 0 and 1 (consecutive — chain is reconstructible)
     let challenges = vec![0u32, 1];
@@ -87,7 +87,7 @@ fn test_v3_token_swap_detected() {
         manifest: None,
     };
 
-    let (_commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (_commitment, state) = commit_with_full_binding(all_layers, &params, None);
     let challenges = vec![0u32, 1, 2, 3];
     let mut proof = open(&state, &challenges);
 
@@ -113,7 +113,7 @@ fn test_v3_token_swap_breaks_chain_for_subsequent_tokens() {
         manifest: None,
     };
 
-    let (_commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (_commitment, state) = commit_with_full_binding(all_layers, &params, None);
     let challenges = vec![0u32, 1, 2, 3];
     let mut proof = open(&state, &challenges);
 
@@ -146,7 +146,7 @@ fn test_v3_seed_commitment_honest() {
         manifest: None,
     };
 
-    let (commitment, _state) = commit_with_full_binding(all_layers, &params);
+    let (commitment, _state) = commit_with_full_binding(all_layers, &params, None);
 
     // Verify seed commitment matches hash_seed
     assert_eq!(commitment.seed_commitment, Some(merkle::hash_seed(&seed)));
@@ -165,7 +165,7 @@ fn test_v3_seed_tamper_detected() {
         manifest: None,
     };
 
-    let (_commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (_commitment, state) = commit_with_full_binding(all_layers, &params, None);
     let challenges: Vec<u32> = (0..4).collect();
     let mut proof = open(&state, &challenges);
 
@@ -193,7 +193,7 @@ fn test_v3_missing_revealed_seed_detected() {
         manifest: None,
     };
 
-    let (_commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (_commitment, state) = commit_with_full_binding(all_layers, &params, None);
     let challenges = vec![0u32, 1];
     let mut proof = open(&state, &challenges);
 
@@ -226,7 +226,7 @@ fn test_v3_prompt_hash_present() {
         manifest: None,
     };
 
-    let (commitment, _state) = commit_with_full_binding(all_layers, &params);
+    let (commitment, _state) = commit_with_full_binding(all_layers, &params, None);
     assert_eq!(commitment.prompt_hash, Some(merkle::hash_prompt(prompt)));
 }
 
@@ -254,7 +254,7 @@ fn test_v3_commit_sets_version() {
         manifest: None,
     };
 
-    let (commitment, _) = commit_with_full_binding(all_layers, &params);
+    let (commitment, _) = commit_with_full_binding(all_layers, &params, None);
     assert_eq!(commitment.version, CommitmentVersion::V3);
 }
 
@@ -313,7 +313,7 @@ fn test_v3_missing_token_id_rejected() {
         manifest: None,
     };
 
-    let (_commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (_commitment, state) = commit_with_full_binding(all_layers, &params, None);
     let challenges = vec![0u32, 1];
     let mut proof = open(&state, &challenges);
 
@@ -351,7 +351,7 @@ fn test_v3_full_e2e_serialized() {
         manifest: None,
     };
 
-    let (commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (commitment, state) = commit_with_full_binding(all_layers, &params, None);
     assert_eq!(commitment.version, CommitmentVersion::V3);
 
     let challenges: Vec<u32> = (0..6).collect();
@@ -406,7 +406,7 @@ fn test_v3_sparse_challenges_pass() {
         manifest: None,
     };
 
-    let (_commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (_commitment, state) = commit_with_full_binding(all_layers, &params, None);
 
     // Non-consecutive: tokens 0, 3, 7
     let challenges = vec![0u32, 3, 7];
@@ -436,7 +436,7 @@ fn test_v3_tampered_prev_io_hash_detected() {
         manifest: None,
     };
 
-    let (_commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (_commitment, state) = commit_with_full_binding(all_layers, &params, None);
     let challenges: Vec<u32> = (0..4).collect();
     let mut proof = open(&state, &challenges);
 
@@ -469,7 +469,7 @@ fn test_v3_cross_check_prev_io_hash_consecutive() {
         manifest: None,
     };
 
-    let (_commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (_commitment, state) = commit_with_full_binding(all_layers, &params, None);
     // Open tokens 1 and 2 (consecutive)
     let challenges = vec![1u32, 2];
     let mut proof = open(&state, &challenges);
@@ -557,7 +557,7 @@ fn test_policy_expected_prompt_hash_correct() {
         manifest: None,
     };
 
-    let (_commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (_commitment, state) = commit_with_full_binding(all_layers, &params, None);
     let challenges: Vec<u32> = (0..4).collect();
     let proof = open(&state, &challenges);
 
@@ -585,7 +585,7 @@ fn test_policy_expected_prompt_hash_wrong_rejected() {
         manifest: None,
     };
 
-    let (_commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (_commitment, state) = commit_with_full_binding(all_layers, &params, None);
     let challenges: Vec<u32> = (0..4).collect();
     let proof = open(&state, &challenges);
 
@@ -654,7 +654,7 @@ fn test_v3_with_manifest_binding() {
         manifest: Some(&manifest),
     };
 
-    let (commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (commitment, state) = commit_with_full_binding(all_layers, &params, None);
     assert!(commitment.manifest_hash.is_some(), "V3 with manifest should set manifest_hash");
     assert_eq!(commitment.manifest_hash, Some(merkle::hash_manifest(&manifest)));
 
@@ -696,7 +696,7 @@ fn test_v3_wrong_manifest_rejected() {
         manifest: Some(&manifest),
     };
 
-    let (_commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (_commitment, state) = commit_with_full_binding(all_layers, &params, None);
     let challenges: Vec<u32> = (0..4).collect();
     let proof = open(&state, &challenges);
 

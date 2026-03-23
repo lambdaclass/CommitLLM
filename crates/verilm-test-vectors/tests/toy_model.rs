@@ -70,8 +70,7 @@ fn test_merkle_proof_valid() {
     let trace = build_trace(layers.clone(), 3, 10);
 
     // Verify the Merkle proof
-    let data = bincode::serialize(&layers).expect("serialize");
-    let leaf = verilm_core::merkle::hash_leaf(&data);
+    let leaf = verilm_core::merkle::hash_trace_direct(&layers, None);
 
     // Rebuild tree to get root
     let mut leaves = Vec::new();

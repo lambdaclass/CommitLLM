@@ -251,3 +251,201 @@ class TestBytesBadLengths:
             # If the commitment engine rejects it, that's fine —
             # but it should NOT be a byte-length error.
             assert "not a multiple of 4" not in str(e)
+
+
+# ── commit_from_captures: Rust-side trace building ──
+
+
+def _make_capture_bytes(batch_size, in_dim, out_dim):
+    """Build one capture entry as (x_i8_bytes, acc_i32_bytes, scale)."""
+    x_i8 = _make_i8_bytes(batch_size * in_dim)
+    acc_i32 = _make_i32_bytes(batch_size * out_dim)
+    return x_i8, acc_i32, 0.05
+
+
+def _build_captures_for_commit(n_layers, n_fwd_passes, fwd_batch_sizes,
+                                hidden, q_dim, kv_dim, intermediate):
+    """Build flat capture lists matching the hook call order."""
+    qkv_out = q_dim + 2 * kv_dim
+    gate_up_out = 2 * intermediate
+
+    inputs = []
+    accumulators = []
+    scales = []
+
+    for fwd_idx in range(n_fwd_passes):
+        bs = fwd_batch_sizes[fwd_idx]
+        for _ in range(n_layers):
+            # qkv_proj
+            x, acc, s = _make_capture_bytes(bs, hidden, qkv_out)
+            inputs.append(x); accumulators.append(acc); scales.append(s)
+            # o_proj
+            x, acc, s = _make_capture_bytes(bs, hidden, hidden)
+            inputs.append(x); accumulators.append(acc); scales.append(s)
+            # gate_up_proj
+            x, acc, s = _make_capture_bytes(bs, hidden, gate_up_out)
+            inputs.append(x); accumulators.append(acc); scales.append(s)
+            # down_proj
+            x, acc, s = _make_capture_bytes(bs, intermediate, hidden)
+            inputs.append(x); accumulators.append(acc); scales.append(s)
+
+    return inputs, accumulators, scales
+
+
+class TestCommitFromCaptures:
+    """Tests for verilm_rs.commit_from_captures (Rust-side trace building)."""
+
+    def test_basic_commit(self):
+        """Commit from raw captures produces valid commitment."""
+        n_layers = 2
+        hidden = 64
+        q_dim = 64
+        kv_dim = 16
+        intermediate = 128
+        # 1 prefill (batch=3) + 2 decode (batch=1) = 3+2 = 5 tokens, traces = 4
+        fwd_batch_sizes = [3, 1]
+        n_tokens = sum(fwd_batch_sizes)
+
+        inputs, accs, scales = _build_captures_for_commit(
+            n_layers, len(fwd_batch_sizes), fwd_batch_sizes,
+            hidden, q_dim, kv_dim, intermediate,
+        )
+
+        prompt = b"test"
+        seed = hashlib.sha256(prompt).digest()
+
+        state = verilm_rs.commit_from_captures(
+            capture_inputs=inputs,
+            capture_accumulators=accs,
+            capture_scales=scales,
+            fwd_batch_sizes=fwd_batch_sizes,
+            n_layers=n_layers,
+            q_dim=q_dim,
+            kv_dim=kv_dim,
+            intermediate_size=intermediate,
+            level_c=True,
+            token_ids=list(range(1, n_tokens + 1)),
+            prompt=prompt,
+            sampling_seed=seed,
+            manifest=_manifest(),
+        )
+
+        assert state.n_tokens() == n_tokens
+        assert state.n_layers() == n_layers
+        assert len(state.merkle_root_hex()) == 64
+
+    def test_decode_only(self):
+        """Commit from decode-only captures (all batch_size=1)."""
+        n_layers = 2
+        hidden = 32
+        q_dim = 32
+        kv_dim = 8
+        intermediate = 64
+        fwd_batch_sizes = [1, 1, 1]
+        n_tokens = 3
+
+        inputs, accs, scales = _build_captures_for_commit(
+            n_layers, 3, fwd_batch_sizes,
+            hidden, q_dim, kv_dim, intermediate,
+        )
+
+        prompt = b"test"
+        seed = hashlib.sha256(prompt).digest()
+
+        state = verilm_rs.commit_from_captures(
+            capture_inputs=inputs,
+            capture_accumulators=accs,
+            capture_scales=scales,
+            fwd_batch_sizes=fwd_batch_sizes,
+            n_layers=n_layers,
+            q_dim=q_dim,
+            kv_dim=kv_dim,
+            intermediate_size=intermediate,
+            level_c=False,
+            token_ids=list(range(1, n_tokens + 1)),
+            prompt=prompt,
+            sampling_seed=seed,
+        )
+
+        assert state.n_tokens() == n_tokens
+
+    def test_audit_after_capture_commit(self):
+        """Audit proof works from capture-based commitment."""
+        n_layers = 2
+        hidden = 64
+        q_dim = 64
+        kv_dim = 16
+        intermediate = 128
+        fwd_batch_sizes = [2, 1]
+        n_tokens = 3
+
+        inputs, accs, scales = _build_captures_for_commit(
+            n_layers, 2, fwd_batch_sizes,
+            hidden, q_dim, kv_dim, intermediate,
+        )
+
+        prompt = b"test"
+        seed = hashlib.sha256(prompt).digest()
+
+        state = verilm_rs.commit_from_captures(
+            capture_inputs=inputs,
+            capture_accumulators=accs,
+            capture_scales=scales,
+            fwd_batch_sizes=fwd_batch_sizes,
+            n_layers=n_layers,
+            q_dim=q_dim,
+            kv_dim=kv_dim,
+            intermediate_size=intermediate,
+            level_c=True,
+            token_ids=list(range(1, n_tokens + 1)),
+            prompt=prompt,
+            sampling_seed=seed,
+            manifest=_manifest(),
+        )
+
+        proof = state.audit_stratified(0, [0, 1], "routine")
+        assert len(proof) > 0
+        assert isinstance(proof, bytes)
+
+    def test_with_residuals(self):
+        """Commit from captures with residual data."""
+        n_layers = 2
+        hidden = 32
+        q_dim = 32
+        kv_dim = 8
+        intermediate = 64
+        fwd_batch_sizes = [2, 1]
+
+        inputs, accs, scales = _build_captures_for_commit(
+            n_layers, 2, fwd_batch_sizes,
+            hidden, q_dim, kv_dim, intermediate,
+        )
+
+        # Residuals: one per fwd_pass per layer, shape (batch, hidden) as f32 bytes.
+        residuals = []
+        for fwd_idx, bs in enumerate(fwd_batch_sizes):
+            for _ in range(n_layers):
+                residuals.append(_make_f32_bytes(bs * hidden))
+
+        n_tokens = sum(fwd_batch_sizes)
+        prompt = b"test"
+        seed = hashlib.sha256(prompt).digest()
+
+        state = verilm_rs.commit_from_captures(
+            capture_inputs=inputs,
+            capture_accumulators=accs,
+            capture_scales=scales,
+            fwd_batch_sizes=fwd_batch_sizes,
+            n_layers=n_layers,
+            q_dim=q_dim,
+            kv_dim=kv_dim,
+            intermediate_size=intermediate,
+            level_c=True,
+            token_ids=list(range(1, n_tokens + 1)),
+            prompt=prompt,
+            sampling_seed=seed,
+            manifest=_manifest(),
+            residuals=residuals,
+        )
+
+        assert state.n_tokens() == n_tokens

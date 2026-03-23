@@ -40,7 +40,7 @@ fn test_insertion_between_consecutive_opened_tokens() {
         manifest: None,
     };
 
-    let (_commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (_commitment, state) = commit_with_full_binding(all_layers, &params, None);
     let challenges: Vec<u32> = (0..4).collect();
     let mut proof = open(&state, &challenges);
 
@@ -117,7 +117,7 @@ fn test_deletion_shifts_chain() {
         manifest: None,
     };
 
-    let (_commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (_commitment, state) = commit_with_full_binding(all_layers, &params, None);
     let challenges: Vec<u32> = (0..6).collect();
     let mut proof = open(&state, &challenges);
 
@@ -171,7 +171,7 @@ fn test_reorder_adjacent_tokens() {
         manifest: None,
     };
 
-    let (_commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (_commitment, state) = commit_with_full_binding(all_layers, &params, None);
     let challenges: Vec<u32> = (0..4).collect();
     let mut proof = open(&state, &challenges);
 
@@ -220,7 +220,7 @@ fn test_reorder_swaps_token_ids_detected() {
         manifest: None,
     };
 
-    let (_commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (_commitment, state) = commit_with_full_binding(all_layers, &params, None);
     let challenges: Vec<u32> = (0..4).collect();
     let mut proof = open(&state, &challenges);
 
@@ -274,7 +274,7 @@ fn test_retroactive_replacement_of_streamed_token() {
         manifest: None,
     };
 
-    let (_commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (_commitment, state) = commit_with_full_binding(all_layers, &params, None);
     let challenges: Vec<u32> = (0..4).collect();
     let mut proof = open(&state, &challenges);
 
@@ -340,7 +340,7 @@ fn test_insertion_not_detected_without_consecutive_opening() {
         manifest: None,
     };
 
-    let (_commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (_commitment, state) = commit_with_full_binding(all_layers, &params, None);
 
     // Open only tokens 0 and 7 (no consecutive pair)
     let challenges = vec![0u32, 7];
@@ -381,7 +381,7 @@ fn test_deletion_detected_when_consecutive_opened() {
         manifest: None,
     };
 
-    let (_commitment, state) = commit_with_full_binding(all_layers, &params);
+    let (_commitment, state) = commit_with_full_binding(all_layers, &params, None);
 
     // Open tokens 1 and 2 (consecutive)
     let challenges = vec![1u32, 2];
@@ -448,7 +448,7 @@ fn test_splice_token_from_different_run() {
         manifest: None,
     };
 
-    let (_commitment_a, state_a) = commit_with_full_binding(all_layers_a, &params_a);
+    let (_commitment_a, state_a) = commit_with_full_binding(all_layers_a, &params_a, None);
 
     // Run B: different honest batch with different input and prompt
     let all_layers_b = forward_pass_autoregressive(&cfg, &model, &input_b, 4);
@@ -460,7 +460,7 @@ fn test_splice_token_from_different_run() {
         manifest: None,
     };
 
-    let (_commitment_b, state_b) = commit_with_full_binding(all_layers_b, &params_b);
+    let (_commitment_b, state_b) = commit_with_full_binding(all_layers_b, &params_b, None);
 
     // Open all tokens from both runs
     let challenges: Vec<u32> = (0..4).collect();

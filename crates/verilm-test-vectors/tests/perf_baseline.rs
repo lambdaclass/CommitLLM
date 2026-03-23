@@ -50,6 +50,7 @@ fn commit_under_50ms() {
             sampling_seed: [1u8; 32],
             manifest: None,
         },
+        None,
     );
     let elapsed = start.elapsed();
 
@@ -73,6 +74,7 @@ fn open_all_under_50ms() {
             sampling_seed: [1u8; 32],
             manifest: None,
         },
+        None,
     );
     let all_indices: Vec<u32> = (0..10).collect();
 
@@ -100,6 +102,7 @@ fn verify_batch_under_100ms() {
             sampling_seed: [1u8; 32],
             manifest: None,
         },
+        None,
     );
     let all_indices: Vec<u32> = (0..10).collect();
     let proof = open(&state, &all_indices);
@@ -133,6 +136,7 @@ fn full_pipeline_under_300ms() {
             sampling_seed: [1u8; 32],
             manifest: None,
         },
+        None,
     );
     let proof = open(&state, &all_indices);
     let (passed, failures) = verify_batch(&key, &proof, &all_indices);
@@ -160,6 +164,7 @@ fn serialization_roundtrip_under_10ms() {
             sampling_seed: [1u8; 32],
             manifest: None,
         },
+        None,
     );
     let all_indices: Vec<u32> = (0..10).collect();
     let proof = open(&state, &all_indices);
@@ -190,6 +195,7 @@ fn compact_conversion_under_10ms() {
             sampling_seed: [1u8; 32],
             manifest: None,
         },
+        None,
     );
     let all_indices: Vec<u32> = (0..10).collect();
     let proof = open(&state, &all_indices);
@@ -258,6 +264,7 @@ fn twenty_token_pipeline_under_1s() {
             sampling_seed: [1u8; 32],
             manifest: None,
         },
+        None,
     );
     let proof = open(&state, &all_indices);
     let (passed, failures) = verify_batch(&key, &proof, &all_indices);

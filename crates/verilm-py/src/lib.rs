@@ -341,6 +341,133 @@ fn commit(
             sampling_seed: seed,
             manifest: manifest_obj.as_ref(),
         },
+        None, // dict path: no pre-computed token KVs
+    );
+
+    Ok(BatchState { inner, commitment })
+}
+
+/// Build a commitment directly from raw captures (bypasses Python trace building).
+///
+/// Takes the flat capture buffer from the Python hook and does trace
+/// construction + commitment entirely in Rust. Eliminates the Python
+/// build_layer_traces and serialize phases.
+///
+/// Args:
+///     capture_inputs: list[bytes] — x_i8 tensors as bytes, in call order.
+///     capture_accumulators: list[bytes] — acc_i32 tensors as bytes, in call order.
+///     capture_scales: list[float] — per-capture activation scales.
+///     fwd_batch_sizes: list[int] — batch size for each forward pass.
+///     n_layers: int — number of transformer layers.
+///     q_dim: int — Q dimension (num_heads * head_dim).
+///     kv_dim: int — KV dimension (num_kv_heads * head_dim).
+///     intermediate_size: int — FFN intermediate size (gate_up half).
+///     level_c: bool — whether to accumulate KV cache snapshots.
+///     token_ids: list[int] — emitted token IDs.
+///     prompt: bytes — prompt text.
+///     sampling_seed: bytes — 32-byte sampling seed.
+///     manifest: dict — deployment manifest (optional).
+///     residuals: list[bytes] — f32 residual tensors, per fwd_pass per layer (optional).
+///
+/// Returns:
+///     BatchState — opaque handle for reading commitment and opening proofs.
+#[pyfunction]
+#[pyo3(signature = (
+    capture_inputs,
+    capture_accumulators,
+    capture_scales,
+    fwd_batch_sizes,
+    n_layers,
+    q_dim,
+    kv_dim,
+    intermediate_size,
+    level_c,
+    token_ids,
+    prompt,
+    sampling_seed,
+    manifest = None,
+    residuals = None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn commit_from_captures(
+    capture_inputs: &Bound<'_, PyList>,
+    capture_accumulators: &Bound<'_, PyList>,
+    capture_scales: Vec<f32>,
+    fwd_batch_sizes: Vec<usize>,
+    n_layers: usize,
+    q_dim: usize,
+    kv_dim: usize,
+    intermediate_size: usize,
+    level_c: bool,
+    token_ids: Vec<u32>,
+    prompt: Vec<u8>,
+    sampling_seed: Vec<u8>,
+    manifest: Option<&Bound<'_, PyDict>>,
+    residuals: Option<&Bound<'_, PyList>>,
+) -> PyResult<BatchState> {
+    let n_captures = capture_inputs.len();
+    if capture_accumulators.len() != n_captures || capture_scales.len() != n_captures {
+        return Err(PyValueError::new_err(
+            "capture_inputs, capture_accumulators, and capture_scales must have the same length",
+        ));
+    }
+
+    // Parse captures from Python bytes.
+    let mut captures = Vec::with_capacity(n_captures);
+    for i in 0..n_captures {
+        let x_i8 = extract_i8_vec(&capture_inputs.get_item(i)?)?;
+        let acc_i32 = extract_i32_vec(&capture_accumulators.get_item(i)?)?;
+        captures.push(verilm_prover::CaptureEntry {
+            x_i8,
+            acc_i32,
+            scale_a: capture_scales[i],
+        });
+    }
+
+    // Parse residuals if provided.
+    let residual_vecs: Option<Vec<Vec<f32>>> = residuals.map(|res_list| {
+        let mut vecs = Vec::with_capacity(res_list.len());
+        for i in 0..res_list.len() {
+            let item = res_list.get_item(i).expect("residual item");
+            vecs.push(extract_f32_vec(&item).expect("residual f32 bytes"));
+        }
+        vecs
+    });
+    let residual_refs: Option<&[Vec<f32>]> = residual_vecs.as_deref();
+
+    // Build traces in Rust.
+    let geom = verilm_prover::ModelGeometry {
+        n_layers,
+        q_dim,
+        kv_dim,
+        intermediate_size,
+    };
+    let (all_layers, token_kvs) = verilm_prover::build_traces_from_captures(
+        &captures,
+        &geom,
+        &fwd_batch_sizes,
+        level_c,
+        residual_refs,
+    );
+
+    // Commit.
+    if sampling_seed.len() != 32 {
+        return Err(PyValueError::new_err("sampling_seed must be exactly 32 bytes"));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&sampling_seed);
+
+    let manifest_obj = manifest.map(extract_manifest).transpose()?;
+
+    let (commitment, inner) = commit_with_full_binding(
+        all_layers,
+        &FullBindingParams {
+            token_ids: &token_ids,
+            prompt: &prompt,
+            sampling_seed: seed,
+            manifest: manifest_obj.as_ref(),
+        },
+        token_kvs, // pre-computed: no re-requantize in commit
     );
 
     Ok(BatchState { inner, commitment })
@@ -570,6 +697,7 @@ fn compute_weight_hash(model_dir: String) -> PyResult<String> {
 #[pymodule]
 fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(commit, m)?)?;
+    m.add_function(wrap_pyfunction!(commit_from_captures, m)?)?;
     m.add_function(wrap_pyfunction!(build_audit_challenge, m)?)?;
     m.add_function(wrap_pyfunction!(verify_batch, m)?)?;
     m.add_function(wrap_pyfunction!(verify_single, m)?)?;

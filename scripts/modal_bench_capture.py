@@ -119,23 +119,21 @@ def _run_bench():
         pipeline_times.append(t1 - t0)
 
     # ── 4. Phase breakdown ──
-    # Instrument one iteration to measure each phase separately.
+    # Instrument each phase: generate, drain, bytes conversion, Rust trace+commit.
     import hashlib
     import verilm_rs
     from verilm import capture as cap
-    from verilm.hooks import EmbeddingLogitCapture
-    from verilm.trace import build_layer_traces
 
     print(f"Phase breakdown: {N_ITERS} iterations...")
 
     phase_generate = []
     phase_drain = []
-    phase_traces = []
-    phase_serialize = []
-    phase_commit = []
+    phase_to_bytes = []
+    phase_rust = []
 
     el_capture = server.el_capture
     n_layers = cap._n_layers
+    calls_per_fwd = n_layers * cap.PROJS_PER_LAYER
 
     for _ in range(N_ITERS):
         buf.drain()
@@ -161,53 +159,31 @@ def _run_bench():
         t3 = time.monotonic()
         phase_drain.append(t3 - t2)
 
-        # Phase: build traces
-        residuals = el_data.get("residuals")
+        # Phase: convert captures to bytes
         t4 = time.monotonic()
-        traces = build_layer_traces(
-            captures, n_layers=n_layers, level_c=True,
-            residuals=residuals if residuals else None,
-        )
+        capture_inputs = [c[2].numpy().tobytes() for c in captures]
+        capture_accs = [c[3].numpy().tobytes() for c in captures]
+        capture_scales = []
+        for c in captures:
+            s = c[4]
+            if hasattr(s, 'numel') and s.numel() > 1:
+                capture_scales.append(float(s.max().item()))
+            elif hasattr(s, 'item'):
+                capture_scales.append(float(s.item()))
+            else:
+                capture_scales.append(float(s))
+
+        residuals = el_data.get("residuals")
+        residual_bytes = None
+        if residuals:
+            residual_bytes = [r.float().numpy().tobytes() for r in residuals]
+
+        n_fwd = len(captures) // calls_per_fwd
+        fwd_batch_sizes = [captures[i * calls_per_fwd][2].shape[0] for i in range(n_fwd)]
         t5 = time.monotonic()
-        phase_traces.append(t5 - t4)
+        phase_to_bytes.append(t5 - t4)
 
-        # Phase: serialize to bytes (tensors already on CPU from capture hook)
-        t6 = time.monotonic()
-        trace_dicts = []
-        for token_layers in traces:
-            layer_dicts = []
-            for lt in token_layers:
-                d = {
-                    "x_attn": lt["x_attn"].numpy().tobytes(),
-                    "q": lt["q"].numpy().tobytes(),
-                    "k": lt["k"].numpy().tobytes(),
-                    "v": lt["v"].numpy().tobytes(),
-                    "a": lt["a"].numpy().tobytes(),
-                    "attn_out": lt["attn_out"].numpy().tobytes(),
-                    "x_ffn": lt["x_ffn"].numpy().tobytes(),
-                    "g": lt["g"].numpy().tobytes(),
-                    "u": lt["u"].numpy().tobytes(),
-                    "h": lt["h"].numpy().tobytes(),
-                    "ffn_out": lt["ffn_out"].numpy().tobytes(),
-                    "kv_cache_k": [t.numpy().tobytes() for t in lt.get("kv_cache_k", [])],
-                    "kv_cache_v": [t.numpy().tobytes() for t in lt.get("kv_cache_v", [])],
-                }
-                if "residual" in lt:
-                    d["residual"] = lt["residual"].numpy().tobytes()
-                if "qkv_scale" in lt:
-                    d["scale_x_attn"] = float(lt["qkv_scale"].item()) if lt["qkv_scale"].numel() == 1 else float(lt["qkv_scale"].max().item())
-                if "o_scale" in lt:
-                    d["scale_a"] = float(lt["o_scale"].item()) if lt["o_scale"].numel() == 1 else float(lt["o_scale"].max().item())
-                if "gu_scale" in lt:
-                    d["scale_x_ffn"] = float(lt["gu_scale"].item()) if lt["gu_scale"].numel() == 1 else float(lt["gu_scale"].max().item())
-                if "d_scale" in lt:
-                    d["scale_h"] = float(lt["d_scale"].item()) if lt["d_scale"].numel() == 1 else float(lt["d_scale"].max().item())
-                layer_dicts.append(d)
-            trace_dicts.append(layer_dicts)
-        t7 = time.monotonic()
-        phase_serialize.append(t7 - t6)
-
-        # Phase: Rust commit
+        # Phase: Rust trace build + commit (single call)
         seed = hashlib.sha256(PROMPT.encode()).digest()
         manifest = {
             "tokenizer_hash": server._tokenizer_hash,
@@ -217,16 +193,25 @@ def _run_bench():
             "quant_hash": server._quant_hash,
             "system_prompt_hash": server._system_prompt_hash,
         }
-        t8 = time.monotonic()
-        state = verilm_rs.commit(
-            traces=trace_dicts,
+        t6 = time.monotonic()
+        state = verilm_rs.commit_from_captures(
+            capture_inputs=capture_inputs,
+            capture_accumulators=capture_accs,
+            capture_scales=capture_scales,
+            fwd_batch_sizes=fwd_batch_sizes,
+            n_layers=n_layers,
+            q_dim=cap._q_dim,
+            kv_dim=cap._kv_dim,
+            intermediate_size=cap._gate_up_half,
+            level_c=True,
             token_ids=[int(t) for t in all_token_ids[1:]],
             prompt=PROMPT.encode(),
             sampling_seed=seed,
             manifest=manifest,
+            residuals=residual_bytes,
         )
-        t9 = time.monotonic()
-        phase_commit.append(t9 - t8)
+        t7 = time.monotonic()
+        phase_rust.append(t7 - t6)
 
     # ── Results ──
     def stats(times):
@@ -240,9 +225,8 @@ def _run_bench():
 
     gen_mean, _ = stats(phase_generate)
     drain_mean, _ = stats(phase_drain)
-    trace_mean, _ = stats(phase_traces)
-    ser_mean, _ = stats(phase_serialize)
-    com_mean, _ = stats(phase_commit)
+    bytes_mean, _ = stats(phase_to_bytes)
+    rust_mean, _ = stats(phase_rust)
 
     cap_overhead = ((c_mean - b_mean) / b_mean) * 100
     pipe_overhead = ((p_mean - b_mean) / b_mean) * 100
@@ -265,12 +249,11 @@ def _run_bench():
     print(f"Pipeline overhead: {pipe_overhead:+.1f}%")
 
     print(f"\n--- Phase breakdown (mean, ms) ---")
-    total_phase = gen_mean + drain_mean + trace_mean + ser_mean + com_mean
+    total_phase = gen_mean + drain_mean + bytes_mean + rust_mean
     print(f"{'Generate':<25} {gen_mean*1000:>8.1f}  ({gen_mean/total_phase*100:>5.1f}%)")
     print(f"{'Drain buffers':<25} {drain_mean*1000:>8.1f}  ({drain_mean/total_phase*100:>5.1f}%)")
-    print(f"{'Build traces':<25} {trace_mean*1000:>8.1f}  ({trace_mean/total_phase*100:>5.1f}%)")
-    print(f"{'Serialize (tobytes)':<25} {ser_mean*1000:>8.1f}  ({ser_mean/total_phase*100:>5.1f}%)")
-    print(f"{'Rust commit':<25} {com_mean*1000:>8.1f}  ({com_mean/total_phase*100:>5.1f}%)")
+    print(f"{'Convert to bytes':<25} {bytes_mean*1000:>8.1f}  ({bytes_mean/total_phase*100:>5.1f}%)")
+    print(f"{'Rust trace+commit':<25} {rust_mean*1000:>8.1f}  ({rust_mean/total_phase*100:>5.1f}%)")
     print(f"{'Total':<25} {total_phase*1000:>8.1f}")
     print(f"{'='*65}")
 
@@ -282,9 +265,8 @@ def _run_bench():
         "pipeline_overhead_pct": pipe_overhead,
         "phase_generate_ms": gen_mean * 1000,
         "phase_drain_ms": drain_mean * 1000,
-        "phase_traces_ms": trace_mean * 1000,
-        "phase_serialize_ms": ser_mean * 1000,
-        "phase_commit_ms": com_mean * 1000,
+        "phase_to_bytes_ms": bytes_mean * 1000,
+        "phase_rust_ms": rust_mean * 1000,
     }
 
 

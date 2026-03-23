@@ -848,7 +848,6 @@ dependencies = [
 name = "verilm-test-vectors"
 version = "0.1.0"
 dependencies = [
- "bincode",
  "hex",
  "proptest",
  "rand 0.8.5",
