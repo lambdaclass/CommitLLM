@@ -19,6 +19,7 @@ import VerifiedInference.StorageReconstruction
 import VerifiedInference.ReadmeShell
 import VerifiedInference.ConcreteShell
 import VerifiedInference.ReadmeKVProvenance
+import VerifiedInference.SamplingBound
 import VerifiedInference.ApproximateAttentionReplay
 import VerifiedInference.CanonicalProtocol
 import VerifiedInference.CanonicalProtocolSound
