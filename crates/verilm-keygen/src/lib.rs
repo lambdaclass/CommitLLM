@@ -400,6 +400,61 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
     })
 }
 
+/// Compute the paper's R_W (weight-chain hash) without full keygen.
+///
+/// Loads all safetensors, quantizes to INT8 if needed, and hashes in
+/// canonical order. Returns the 32-byte SHA-256 weight hash.
+///
+/// This is cheaper than `generate_key` — it skips r/v vector generation
+/// and RMSNorm weight extraction.
+pub fn compute_weight_hash(dir: &Path) -> Result<[u8; 32]> {
+    let cfg = detect_config(dir)?;
+    let mapped = open_shards(dir)?;
+    let parsed: Vec<_> = mapped
+        .iter()
+        .map(|s| SafeTensors::deserialize(&s.mmap).map(|st| (st, s)))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("failed to parse safetensors")?;
+
+    // Detect source dtype.
+    let first_name = MatrixType::Wq.weight_name().replace("{}", "0");
+    let (_, _, first_dtype) = find_tensor_raw(&parsed, &first_name)?;
+    let source_dtype = match first_dtype {
+        Dtype::I8 => "I8",
+        Dtype::BF16 => "BF16",
+        Dtype::F16 => "F16",
+        other => bail!("unsupported source dtype {:?}", other),
+    }
+    .to_string();
+
+    // Load weights and scales per layer.
+    let mut quantization_scales: Vec<Vec<f32>> = Vec::with_capacity(cfg.n_layers);
+    let mut all_weights: Vec<Vec<Vec<i8>>> = Vec::with_capacity(cfg.n_layers);
+
+    for layer_idx in 0..cfg.n_layers {
+        let mut layer_scales = Vec::with_capacity(7);
+        let mut layer_weights = Vec::with_capacity(7);
+
+        for mt in MatrixType::ALL.iter() {
+            let name = mt.weight_name().replace("{}", &layer_idx.to_string());
+            let (weights, scale) = load_weights_as_i8(&parsed, &name)?;
+            layer_scales.push(scale);
+            layer_weights.push(weights);
+        }
+
+        quantization_scales.push(layer_scales);
+        all_weights.push(layer_weights);
+    }
+
+    Ok(verilm_core::merkle::hash_weights(
+        &source_dtype,
+        cfg.n_layers,
+        &quantization_scales,
+        |layer, mt_idx| all_weights[layer][mt_idx].clone(),
+        MatrixType::ALL.len(),
+    ))
+}
+
 /// Write a safetensors file from a list of (name, shape, i8 data).
 /// Used for testing.
 pub fn write_safetensors(

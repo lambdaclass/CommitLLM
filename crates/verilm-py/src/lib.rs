@@ -35,7 +35,7 @@ use verilm_core::types::{
     AuditChallenge, AuditTier, BatchCommitment, BatchProof, CommitmentVersion,
     DeploymentManifest, LayerTrace, TokenTrace, VerificationPolicy, VerifierKey,
 };
-use verilm_prover::{commit_with_full_binding, open, FullBindingParams};
+use verilm_prover::{commit_with_full_binding, FullBindingParams};
 
 /// Extract a Vec<i8> from a Python list of ints.
 fn extract_i8_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<i8>> {
@@ -224,21 +224,6 @@ impl BatchState {
             .as_ref()
             .map(|roots| roots.iter().map(hex::encode).collect())
             .unwrap_or_default()
-    }
-
-    /// Open proofs for challenged token indices. Returns JSON string.
-    fn open_json(&self, challenge_indices: Vec<u32>) -> PyResult<String> {
-        let proof = open(&self.inner, &challenge_indices);
-        serde_json::to_string(&proof)
-            .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
-    }
-
-    /// Open proofs and return compact binary (zstd compressed).
-    fn open_compact<'py>(&self, py: Python<'py>, challenge_indices: Vec<u32>) -> PyResult<Bound<'py, PyBytes>> {
-        let proof = open(&self.inner, &challenge_indices);
-        let compact_bytes = serialize::serialize_compact_batch(&proof);
-        let compressed = serialize::compress(&compact_bytes);
-        Ok(PyBytes::new(py, &compressed))
     }
 
     /// Open a stratified audit proof (compact binary, zstd-compressed).
@@ -523,12 +508,28 @@ fn verify_single<'py>(
     Ok(result)
 }
 
+/// Compute the paper's R_W (weight-chain hash) from safetensors files.
+///
+/// Args:
+///     model_dir: str — path to directory containing .safetensors files.
+///
+/// Returns:
+///     str — hex-encoded 32-byte SHA-256 weight hash.
+#[pyfunction]
+fn compute_weight_hash(model_dir: String) -> PyResult<String> {
+    let path = std::path::Path::new(&model_dir);
+    let hash = verilm_keygen::compute_weight_hash(path)
+        .map_err(|e| PyValueError::new_err(format!("weight hash computation failed: {}", e)))?;
+    Ok(hex::encode(hash))
+}
+
 #[pymodule]
 fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(commit, m)?)?;
     m.add_function(wrap_pyfunction!(build_audit_challenge, m)?)?;
     m.add_function(wrap_pyfunction!(verify_batch, m)?)?;
     m.add_function(wrap_pyfunction!(verify_single, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_weight_hash, m)?)?;
     m.add_class::<BatchState>()?;
     Ok(())
 }

@@ -9,6 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 verilm-core = { path = "../verilm-core" }
+verilm-keygen = { path = "../verilm-keygen" }
 verilm-prover = { path = "../verilm-prover" }
 verilm-verify = { path = "../verilm-verify" }
 pyo3 = { version = "0.28", features = ["extension-module"] }

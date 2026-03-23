@@ -99,10 +99,12 @@ class Inference:
     def audit(self, request: dict):
         from fastapi.responses import Response
         try:
+            if "token_index" not in request or "layer_indices" not in request:
+                return {"error": "token_index and layer_indices are required"}
             proof_bytes = self.server.audit(
                 request_id=request["request_id"],
-                token_index=request.get("token_index", 0),
-                layer_indices=request.get("layer_indices"),
+                token_index=request["token_index"],
+                layer_indices=request["layer_indices"],
                 tier=request.get("tier", "routine"),
             )
             return Response(

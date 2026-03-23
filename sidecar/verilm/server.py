@@ -56,10 +56,9 @@ class VerifiedInferenceServer:
         n_hooks = self.el_capture.install(model)
         logger.info("Installed %d embedding/logit hooks", n_hooks)
 
-        # Extract model geometry for manifest.
-        cfg = getattr(model, "config", None)
+        # Manifest hashes.
         self._tokenizer_hash = self._compute_tokenizer_hash(llm)
-        self._weight_hash = self._compute_weight_hash(model)
+        self._weight_hash = self._compute_weight_hash_rw(llm)
         self._quant_hash = self._compute_quant_hash(model)
         self._system_prompt_hash = None  # Set via configure_system_prompt()
 
@@ -78,31 +77,46 @@ class VerifiedInferenceServer:
             logger.warning("Could not hash tokenizer: %s", e)
             return "00" * 32
 
-    def _compute_weight_hash(self, model) -> str:
-        """Heuristic runtime fingerprint over model parameters.
+    def _compute_weight_hash_rw(self, llm) -> str:
+        """Compute the paper's R_W: weight-chain hash over all INT8 weights.
 
-        NOT the paper's R_W (full Merkle root over all weight matrices).
-        This is a fast startup check: SHA-256 over sorted (name, shape,
-        dtype, first-8-bytes) of each parameter. Enough to detect model
-        swaps but not a cryptographic commitment to weight content.
-
-        TODO: Replace with proper R_W computation (full weight Merkle tree)
-        matching crates/verilm-keygen. The full hash is expensive at startup
-        for multi-GB models and should be precomputed or cached.
+        Uses verilm_rs.compute_weight_hash() which loads the safetensors
+        checkpoint and hashes all weight matrices in canonical order.
+        This is the real R_W from the paper, not a fingerprint.
         """
         try:
-            h = hashlib.sha256()
-            for name, param in sorted(model.named_parameters()):
-                h.update(name.encode())
-                h.update(str(param.shape).encode())
-                h.update(str(param.dtype).encode())
-                # First 8 bytes of the flattened tensor as content sample.
-                flat = param.detach().flatten()[:2].cpu().contiguous()
-                h.update(flat.numpy().tobytes())
-            return h.hexdigest()
+            import verilm_rs
+
+            # Get model path from vLLM. HuggingFace models are cached
+            # under ~/.cache/huggingface/hub/ after download.
+            model_dir = self._resolve_model_dir(llm)
+            if model_dir is None:
+                logger.warning("Could not resolve model directory for R_W computation")
+                return "00" * 32
+
+            logger.info("Computing R_W (weight-chain hash) from %s...", model_dir)
+            weight_hash = verilm_rs.compute_weight_hash(model_dir)
+            logger.info("R_W: %s", weight_hash)
+            return weight_hash
         except Exception as e:
-            logger.warning("Could not hash model weights: %s", e)
+            logger.warning("Could not compute R_W: %s", e)
             return "00" * 32
+
+    @staticmethod
+    def _resolve_model_dir(llm) -> Optional[str]:
+        """Resolve the local filesystem path to the model's safetensors."""
+        try:
+            # vLLM stores the model path in model_config.model or
+            # model_config.tokenizer (which points to the same dir).
+            model_id = llm.llm_engine.model_config.model
+            # If it's already a local path, use it directly.
+            if os.path.isdir(model_id):
+                return model_id
+            # Otherwise it's a HuggingFace model ID — resolve via snapshot.
+            from huggingface_hub import snapshot_download
+            return snapshot_download(model_id)
+        except Exception:
+            return None
 
     def _compute_quant_hash(self, model) -> str:
         """SHA-256 of quantization config, if present."""
@@ -282,16 +296,16 @@ class VerifiedInferenceServer:
         self,
         request_id: str,
         *,
-        token_index: int = 0,
-        layer_indices: Optional[List[int]] = None,
+        token_index: int,
+        layer_indices: List[int],
         tier: str = "routine",
     ) -> bytes:
         """Open a stratified audit proof. Returns zstd-compressed binary.
 
         Args:
             request_id: from the /chat response.
-            token_index: which token to audit (default 0).
-            layer_indices: which layers to open. Default: all layers.
+            token_index: which token to audit.
+            layer_indices: which layers to open. The verifier chooses.
             tier: "routine" (shell checks) or "full" (shell + attention replay).
         """
         entry = self._audit_store.get(request_id)
@@ -303,9 +317,6 @@ class VerifiedInferenceServer:
             raise KeyError(f"Audit state expired for: {request_id}")
 
         state = entry["state"]
-        if layer_indices is None:
-            layer_indices = list(range(state.n_layers()))
-
         return state.audit_stratified(token_index, layer_indices, tier)
 
     def _store_audit(self, request_id: str, state):
@@ -354,10 +365,15 @@ def create_app(llm, **kwargs):
     @app.post("/audit")
     def audit(request: dict):
         try:
+            if "token_index" not in request or "layer_indices" not in request:
+                return JSONResponse(
+                    {"error": "token_index and layer_indices are required"},
+                    status_code=400,
+                )
             proof_bytes = server.audit(
                 request_id=request["request_id"],
-                token_index=request.get("token_index", 0),
-                layer_indices=request.get("layer_indices"),
+                token_index=request["token_index"],
+                layer_indices=request["layer_indices"],
                 tier=request.get("tier", "routine"),
             )
             return Response(

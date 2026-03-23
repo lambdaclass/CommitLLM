@@ -118,7 +118,14 @@ def _run_e2e():
     print("\n--- Test 3: Audit (routine, all layers) ---")
     request_id = chat_result["request_id"]
     try:
-        proof_bytes = server.audit(request_id, token_index=0, tier="routine")
+        entry = server._audit_store[request_id]
+        state = entry["state"]
+        n_layers = state.n_layers()
+        all_layers = list(range(n_layers))
+        proof_bytes = server.audit(
+            request_id, token_index=0,
+            layer_indices=all_layers, tier="routine",
+        )
         proof_nonempty = len(proof_bytes) > 0
         dctx = zstandard.ZstdDecompressor()
         decompressed = dctx.decompress(proof_bytes)
@@ -137,9 +144,6 @@ def _run_e2e():
     # ==================================================================
     print("\n--- Test 4: Audit (routine, 3 layers) ---")
     try:
-        entry = server._audit_store[request_id]
-        state = entry["state"]
-        n_layers = state.n_layers()
         layer_indices = [0, n_layers // 2, n_layers - 1]
         proof_partial = server.audit(
             request_id, token_index=0,
@@ -158,9 +162,11 @@ def _run_e2e():
     # ==================================================================
     print("\n--- Test 5: Audit (full, all layers) ---")
     try:
-        proof_full = server.audit(request_id, token_index=0, tier="full")
+        proof_full = server.audit(
+            request_id, token_index=0,
+            layer_indices=all_layers, tier="full",
+        )
         full_ok = len(proof_full) > 0
-        # Full tier should be >= routine tier in size
         results["5_full_tier_audit"] = full_ok
         print(f"  Full audit proof: {len(proof_full)} bytes")
     except Exception as e:
