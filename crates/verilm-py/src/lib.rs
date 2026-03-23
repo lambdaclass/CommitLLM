@@ -59,7 +59,7 @@ fn extract_i8_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<i8>> {
 
 /// Extract a Vec<i32> from bytes (fast path) or a Python list of ints (fallback).
 fn extract_i32_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<i32>> {
-    // Fast path: bytes object — reinterpret as native-endian i32.
+    // Fast path: bytes object — bulk reinterpret as native-endian i32.
     if let Ok(b) = obj.cast::<PyBytes>() {
         let src = b.as_bytes();
         if src.len() % 4 != 0 {
@@ -69,9 +69,11 @@ fn extract_i32_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<i32>> {
         }
         let n = src.len() / 4;
         let mut dst = Vec::with_capacity(n);
-        // SAFETY: we checked alignment to 4 bytes; i32 from ne_bytes is always valid.
-        for chunk in src.chunks_exact(4) {
-            dst.push(i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        // SAFETY: src.len() is a multiple of 4; native-endian bytes from .tobytes()
+        // can be bulk-reinterpreted as i32. Single memcpy instead of per-element loop.
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr() as *const i32, dst.as_mut_ptr(), n);
+            dst.set_len(n);
         }
         return Ok(dst);
     }
@@ -90,8 +92,10 @@ fn extract_f32_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
         }
         let n = src.len() / 4;
         let mut dst = Vec::with_capacity(n);
-        for chunk in src.chunks_exact(4) {
-            dst.push(f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        // SAFETY: same as extract_i32_vec — bulk reinterpret native-endian bytes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr() as *const f32, dst.as_mut_ptr(), n);
+            dst.set_len(n);
         }
         return Ok(dst);
     }

@@ -47,6 +47,34 @@ pub fn build_tree(leaves: &[[u8; 32]]) -> MerkleTree {
     }
 }
 
+/// Compute the Merkle root from leaf hashes without storing intermediate nodes.
+///
+/// Same hash as `build_tree(...).root` but uses O(log N) stack space
+/// instead of O(N) heap for the full node array. Use when only the root
+/// is needed (e.g. commit-time KV Merkle roots).
+pub fn compute_root(leaves: &[[u8; 32]]) -> [u8; 32] {
+    assert!(!leaves.is_empty(), "need at least one leaf");
+
+    let n = leaves.len().next_power_of_two();
+    let zero = [0u8; 32];
+
+    // Build level 0 (padded)
+    let mut level: Vec<[u8; 32]> = Vec::with_capacity(n);
+    level.extend_from_slice(leaves);
+    level.resize(n, zero);
+
+    // Iteratively reduce
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len() / 2);
+        for pair in level.chunks_exact(2) {
+            next.push(hash_pair(&pair[0], &pair[1]));
+        }
+        level = next;
+    }
+
+    level[0]
+}
+
 /// Generate a proof for the leaf at `index`.
 pub fn prove(tree: &MerkleTree, index: usize) -> MerkleProof {
     assert!(index < tree.n_leaves, "leaf index out of range");
@@ -382,16 +410,19 @@ pub fn io_binding(token_id: Option<u32>, prev_io_hash: Option<[u8; 32]>) -> IoHa
 ///
 /// For token 0, `prev_kv_hash` is the genesis zero hash `[0u8; 32]`.
 /// The hash covers all layers' K and V (concatenated in layer order).
-pub fn kv_chain_hash(
+///
+/// Accepts any type that derefs to `[i8]` (`Vec<i8>`, `&[i8]`, etc.).
+pub fn kv_chain_hash<K: AsRef<[i8]>, V: AsRef<[i8]>>(
     prev_kv_hash: &[u8; 32],
-    k_i8_per_layer: &[Vec<i8>],
-    v_i8_per_layer: &[Vec<i8>],
+    k_i8_per_layer: &[K],
+    v_i8_per_layer: &[V],
     token_index: u32,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"vi-kv-v1");
     hasher.update(prev_kv_hash);
     for k in k_i8_per_layer {
+        let k = k.as_ref();
         // Safety: i8 and u8 have identical layout
         let bytes: &[u8] = unsafe {
             std::slice::from_raw_parts(k.as_ptr() as *const u8, k.len())
@@ -399,6 +430,7 @@ pub fn kv_chain_hash(
         hasher.update(bytes);
     }
     for v in v_i8_per_layer {
+        let v = v.as_ref();
         let bytes: &[u8] = unsafe {
             std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len())
         };
@@ -495,5 +527,15 @@ mod tests {
         // Tamper with a sibling
         proof.siblings[0][0] ^= 0xff;
         assert!(!verify(&tree.root, &leaves[0], &proof));
+    }
+
+    #[test]
+    fn test_compute_root_matches_build_tree() {
+        for n in [1, 2, 3, 5, 8, 13, 28, 32] {
+            let leaves: Vec<[u8; 32]> = (0..n as u8).map(|i| hash_leaf(&[i])).collect();
+            let tree_root = build_tree(&leaves).root;
+            let fast_root = compute_root(&leaves);
+            assert_eq!(tree_root, fast_root, "mismatch for {n} leaves");
+        }
     }
 }

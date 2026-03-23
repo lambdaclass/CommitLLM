@@ -225,6 +225,11 @@ _patched = False
 _call_counter = 0
 _log_interval = 5000
 
+# Reusable padded buffers for decode-path _int_mm (M < 16).
+# Keyed by (N, device) to avoid per-call torch.nn.functional.pad allocation.
+# Each buffer is (32, N) int8 with rows [M:] pre-zeroed.
+_pad_buffers: dict = {}
+
 
 def _wrapped_cutlass_scaled_mm(
     a, b, scale_a, scale_b, out_dtype=torch.bfloat16, bias=None
@@ -255,9 +260,14 @@ def _wrapped_cutlass_scaled_mm(
     # torch._int_mm requires M >= 16; pad small batches (decode tokens).
     M = a.shape[0]
     if M <= 16:
-        pad_rows = 32 - M
-        a_padded = torch.nn.functional.pad(a, (0, 0, 0, pad_rows))
-        acc_i32 = torch._int_mm(a_padded, b)[:M, :]
+        N = a.shape[1]
+        buf_key = (N, a.device)
+        buf = _pad_buffers.get(buf_key)
+        if buf is None:
+            buf = torch.zeros(32, N, dtype=torch.int8, device=a.device)
+            _pad_buffers[buf_key] = buf
+        buf[:M, :] = a
+        acc_i32 = torch._int_mm(buf, b)[:M, :]
     else:
         acc_i32 = torch._int_mm(a, b)
 

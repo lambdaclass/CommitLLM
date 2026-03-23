@@ -363,27 +363,29 @@ pub fn commit_with_full_binding(
     }
 
     // Build KV provenance chain using pre-computed KVs when available.
+    // Borrows slices from token_kvs — no cloning.
     let mut kv_chain_leaves: Vec<[u8; 32]> = Vec::with_capacity(all_layers.len());
     let mut kv_merkle_roots: Vec<[u8; 32]> = Vec::with_capacity(all_layers.len());
     let mut prev_kv = [0u8; 32]; // genesis: zero hash for first token
     for (i, layers) in all_layers.iter().enumerate() {
-        let (k_per_layer, v_per_layer): (Vec<Vec<i8>>, Vec<Vec<i8>>) =
-            if let Some(ref kvs) = token_kvs {
-                // Fast path: use pre-computed requantized K/V (no re-requantize)
-                kvs[i].iter().map(|(k, v)| (k.clone(), v.clone())).unzip()
-            } else {
-                // Fallback: requantize from i32 projections
-                let k: Vec<Vec<i8>> = layers.iter().map(|lt| requantize(&lt.k)).collect();
-                let v: Vec<Vec<i8>> = layers.iter().map(|lt| requantize(&lt.v)).collect();
-                (k, v)
-            };
-        let kv = merkle::kv_chain_hash(&prev_kv, &k_per_layer, &v_per_layer, i as u32);
-        kv_chain_leaves.push(kv);
-        prev_kv = kv;
-
-        // Compute per-token KV Merkle root (streaming commitment)
-        let kv_tree = verilm_core::streaming::build_kv_layer_tree(i as u32, &k_per_layer, &v_per_layer);
-        kv_merkle_roots.push(kv_tree.root);
+        if let Some(ref kvs) = token_kvs {
+            // Fast path: borrow pre-computed requantized K/V (no clone, no re-requantize).
+            let k_refs: Vec<&[i8]> = kvs[i].iter().map(|(k, _)| k.as_slice()).collect();
+            let v_refs: Vec<&[i8]> = kvs[i].iter().map(|(_, v)| v.as_slice()).collect();
+            let kv = merkle::kv_chain_hash(&prev_kv, &k_refs, &v_refs, i as u32);
+            kv_chain_leaves.push(kv);
+            prev_kv = kv;
+            // Root-only: no full tree storage at commit time.
+            kv_merkle_roots.push(verilm_core::streaming::kv_layer_root(i as u32, &k_refs, &v_refs));
+        } else {
+            // Fallback: requantize from i32 projections.
+            let k: Vec<Vec<i8>> = layers.iter().map(|lt| requantize(&lt.k)).collect();
+            let v: Vec<Vec<i8>> = layers.iter().map(|lt| requantize(&lt.v)).collect();
+            let kv = merkle::kv_chain_hash(&prev_kv, &k, &v, i as u32);
+            kv_chain_leaves.push(kv);
+            prev_kv = kv;
+            kv_merkle_roots.push(verilm_core::streaming::kv_layer_root(i as u32, &k, &v));
+        };
     }
 
     let trace_tree = merkle::build_tree(&trace_leaves);
@@ -582,16 +584,17 @@ pub fn build_audit_response_from_state(
         &state.all_layers, token_idx, &challenge.layer_indices, state.token_kvs.as_ref(),
     );
 
-    // KV layer tree: use pre-computed token_kvs or requantize.
-    let (k_per_layer, v_per_layer): (Vec<Vec<i8>>, Vec<Vec<i8>>) =
-        if let Some(ref kvs) = state.token_kvs {
-            kvs[token_idx].iter().map(|(k, v)| (k.clone(), v.clone())).unzip()
-        } else {
-            let k: Vec<Vec<i8>> = token_layers.iter().map(|lt| requantize(&lt.k)).collect();
-            let v: Vec<Vec<i8>> = token_layers.iter().map(|lt| requantize(&lt.v)).collect();
-            (k, v)
-        };
-    let kv_tree = streaming::build_kv_layer_tree(challenge.token_index, &k_per_layer, &v_per_layer);
+    // KV layer tree: borrow pre-computed token_kvs or requantize.
+    // Audit needs full tree (for Merkle proofs), not just root.
+    let kv_tree = if let Some(ref kvs) = state.token_kvs {
+        let k_refs: Vec<&[i8]> = kvs[token_idx].iter().map(|(k, _)| k.as_slice()).collect();
+        let v_refs: Vec<&[i8]> = kvs[token_idx].iter().map(|(_, v)| v.as_slice()).collect();
+        streaming::build_kv_layer_tree(challenge.token_index, &k_refs, &v_refs)
+    } else {
+        let k: Vec<Vec<i8>> = token_layers.iter().map(|lt| requantize(&lt.k)).collect();
+        let v: Vec<Vec<i8>> = token_layers.iter().map(|lt| requantize(&lt.v)).collect();
+        streaming::build_kv_layer_tree(challenge.token_index, &k, &v)
+    };
 
     let kv_layer_proofs: Vec<verilm_core::merkle::MerkleProof> = challenge
         .layer_indices.iter().map(|&l| verilm_core::merkle::prove(&kv_tree, l)).collect();
@@ -667,8 +670,7 @@ pub fn build_streaming_kv_verifier(
     for (t, token_layers) in all_traces.iter().enumerate() {
         let k_per_layer: Vec<Vec<i8>> = token_layers.iter().map(|lt| requantize(&lt.k)).collect();
         let v_per_layer: Vec<Vec<i8>> = token_layers.iter().map(|lt| requantize(&lt.v)).collect();
-        let tree = streaming::build_kv_layer_tree(t as u32, &k_per_layer, &v_per_layer);
-        verifier.ingest(tree.root);
+        verifier.ingest(streaming::kv_layer_root(t as u32, &k_per_layer, &v_per_layer));
     }
     verifier
 }

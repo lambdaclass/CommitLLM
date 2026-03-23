@@ -42,27 +42,48 @@ pub fn compute_kv_layer_hash(
 
 /// Build a Merkle tree over per-layer KV hashes for a single token.
 ///
-/// Returns the tree (for proof generation on the prover side).
-/// The tree root is the streaming commitment for this token.
-pub fn build_kv_layer_tree(
+/// Returns the full tree (needed for proof generation at audit time).
+/// For commit-time use where only the root is needed, prefer [`kv_layer_root`].
+pub fn build_kv_layer_tree<K: AsRef<[i8]>, V: AsRef<[i8]>>(
     token_index: u32,
-    k_per_layer: &[Vec<i8>],
-    v_per_layer: &[Vec<i8>],
+    k_per_layer: &[K],
+    v_per_layer: &[V],
 ) -> MerkleTree {
+    let leaves = kv_layer_leaves(token_index, k_per_layer, v_per_layer);
+    merkle::build_tree(&leaves)
+}
+
+/// Compute only the Merkle root over per-layer KV hashes for a single token.
+///
+/// Same hash as `build_kv_layer_tree(...).root` but avoids storing the
+/// full tree. Use at commit time when proofs are not yet needed.
+pub fn kv_layer_root<K: AsRef<[i8]>, V: AsRef<[i8]>>(
+    token_index: u32,
+    k_per_layer: &[K],
+    v_per_layer: &[V],
+) -> [u8; 32] {
+    let leaves = kv_layer_leaves(token_index, k_per_layer, v_per_layer);
+    merkle::compute_root(&leaves)
+}
+
+/// Shared: compute per-layer KV leaf hashes.
+fn kv_layer_leaves<K: AsRef<[i8]>, V: AsRef<[i8]>>(
+    token_index: u32,
+    k_per_layer: &[K],
+    v_per_layer: &[V],
+) -> Vec<[u8; 32]> {
     assert_eq!(
         k_per_layer.len(),
         v_per_layer.len(),
         "k_per_layer and v_per_layer must have the same number of layers"
     );
 
-    let leaves: Vec<[u8; 32]> = k_per_layer
+    k_per_layer
         .iter()
         .zip(v_per_layer.iter())
         .enumerate()
-        .map(|(l, (k, v))| compute_kv_layer_hash(token_index, l as u32, k, v))
-        .collect();
-
-    merkle::build_tree(&leaves)
+        .map(|(l, (k, v))| compute_kv_layer_hash(token_index, l as u32, k.as_ref(), v.as_ref()))
+        .collect()
 }
 
 /// Compute the streaming KV commitment for a single token (flat hash, legacy).
@@ -70,10 +91,10 @@ pub fn build_kv_layer_tree(
 /// This is the original all-layers-at-once hash. Kept for backward
 /// compatibility with existing tests. New code should prefer
 /// [`build_kv_layer_tree`] which enables per-layer opening.
-pub fn compute_kv_commitment(
+pub fn compute_kv_commitment<K: AsRef<[i8]>, V: AsRef<[i8]>>(
     token_index: u32,
-    k_per_layer: &[Vec<i8>],
-    v_per_layer: &[Vec<i8>],
+    k_per_layer: &[K],
+    v_per_layer: &[V],
 ) -> [u8; 32] {
     assert_eq!(
         k_per_layer.len(),
@@ -86,6 +107,8 @@ pub fn compute_kv_commitment(
     hasher.update(token_index.to_le_bytes());
 
     for (k, v) in k_per_layer.iter().zip(v_per_layer.iter()) {
+        let k = k.as_ref();
+        let v = v.as_ref();
         let k_bytes: &[u8] =
             unsafe { std::slice::from_raw_parts(k.as_ptr() as *const u8, k.len()) };
         let v_bytes: &[u8] =
