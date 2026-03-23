@@ -7,6 +7,7 @@ First, we need empirical data to validate the protocol's security bounds.
 - [ ] **Measure the requantization corridor** — Run FP16 vs FP64 attention on real Llama activations, quantize both to INT8, measure per-element agreement rates. This determines the actual bound on adversarial freedom in attention manipulation.
 - [ ] **Calibrate detection probabilities** — Concrete numbers for P(catch) at various sampling rates (k) and tampering fractions (m/n).
 - [ ] **Storage cost benchmarks** — Real measurements across audit windows (30s, 60s, 2min, 1hr) and model sizes.
+- [ ] **Inference overhead measurement** — Quantify the runtime cost of tracing and commitment generation (memcpy overhead, Merkle tree construction, etc.)
 
 ## 2. Core Implementation
 
@@ -34,6 +35,7 @@ Ship the protocol and explain it clearly.
 
 ### 3.1 Paper
 - [ ] Add graphs and tables with concrete numbers (storage costs, audit windows, detection probabilities)
+- [ ] Add adversarial model section — Formal threat model describing provider capabilities, cheating strategies, and protocol guarantees against each
 - [ ] Upload to arXiv
 
 ### 3.2 Demo & Visualization
