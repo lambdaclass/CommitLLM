@@ -65,7 +65,7 @@
 
 Open-weight LLM inference presents a trust problem: the client sends a prompt to a provider who claims to run a specific model (e.g., Llama 70B), but the client has no way to verify that the provider actually used those weights. The economic incentive to cheat is clear --- serving a smaller or more aggressively quantized model reduces compute costs while the client pays the same price.
 
-Existing approaches to verifiable inference fall into two categories. Cryptographic proof systems (zkSNARKs, zkSTARKs) can prove arbitrary computations but impose overhead that makes real-time LLM inference impractical. Trusted execution environments (TEEs) provide attestation but require hardware trust assumptions and limit deployment flexibility.
+Existing approaches to verifiable inference fall into two categories. Cryptographic proof systems and specialized verifiable-inference systems such as SafetyNets @ghodsi2017safetynets and zkCNN @liu2021zkcnn can prove arbitrary or restricted computations, but impose overhead that makes real-time LLM inference impractical. Trusted execution environments (TEEs) provide attestation @birkholz2023rats but require hardware trust assumptions and limit deployment flexibility.
 
 VeriLM takes a different approach: a lightweight sidecar protocol that runs alongside unmodified GPU inference. The key insight is that INT8 quantized inference consists of operations that are either deterministic or canonically recomputable, and can be verified exactly. The only non-deterministic component is FP16/BF16 attention, which the protocol constrains from both sides without requiring exact reproduction.
 
@@ -77,7 +77,7 @@ The protocol provides five layers of verification with different guarantee types
 
 The adversary controls the inference server. They may swap model weights, modify attention computation, fabricate intermediate activations, or lie about earlier context. The adversary does not know which responses will be audited or which tokens within them will be challenged. In the intended deployment, the client's verifier software automatically and randomly audits a small fraction of responses (e.g., 1--5%). Because every response is committed before the provider knows whether it will be challenged, the provider must behave as if any response could be audited.
 
-The client holds a verifier key ($tilde 25$ MB for Llama 70B) derived from the public model weights and a secret random vector. The client audits responses directly --- no trusted third party sees the conversation.
+The client holds a verifier key ($tilde 25$ MB for Llama 70B) derived from the public model weights and a secret random vector. The client audits responses directly --- no trusted third party sees the conversation. The attester / verifier / relying-party terminology here follows standard remote-attestation usage @birkholz2023rats.
 
 VeriLM provides interactive, client-held verification. The client who holds the verifier key checks the computation directly. The protocol does not produce a transferable proof that third parties can verify offline --- this is a deliberate tradeoff for low overhead. Audit openings contain intermediate activations from which the conversation content can be reconstructed; this is why the client audits themselves rather than delegating to a third party.
 
@@ -97,7 +97,7 @@ VeriLM's verification is structured in five layers, each with a distinct guarant
 
 The non-attention path through each transformer layer --- the *shell* --- consists of seven INT8 weight matrix multiplications ($W_q$, $W_k$, $W_v$, $W_o$, $W_"gate"$, $W_"up"$, $W_"down"$), requantization bridges, RoPE, RMSNorm, and SiLU. The shell includes both linear operations (matmuls) and nonlinear ones (RMSNorm, SiLU), but all are deterministic or canonically recomputable and are exactly verifiable in the quantized output space. The shell's exactness is a composition: cryptographic checks (Freivalds) on the weight matmuls, plus deterministic or canonical recomputation on the bridge operations that connect them.
 
-*Freivalds' algorithm* checks each weight multiplication. During setup, the verifier precomputes $v_j^((i)) = r_j^T times W_j^((i))$ for secret random vector $r_j$. At audit time, the verifier checks:
+*Freivalds' algorithm* @freivalds1979 checks each weight multiplication. During setup, the verifier precomputes $v_j^((i)) = r_j^T times W_j^((i))$ for secret random vector $r_j$. At audit time, the verifier checks:
 
 $ v_j^((i)) dot x eq.quest r_j^T dot z $
 
@@ -137,11 +137,11 @@ No verification on any individual unopened position. Coverage relies on the prov
 
 == Phase 0: Setup
 
-A Merkle root $R_W$ is computed over all weight matrices --- the model's public identity. Each verifier generates secret random vectors $r_j$ and precomputes $v_j^((i)) = r_j^T times W_j^((i))$ for all layers. The resulting verifier key is $tilde 25$ MB for Llama 70B. After precomputation, the verifier deletes the weights.
+A Merkle root @merkle1987 $R_W$ is computed over all weight matrices --- the model's public identity. Each verifier generates secret random vectors $r_j$ and precomputes $v_j^((i)) = r_j^T times W_j^((i))$ for all layers. The resulting verifier key is $tilde 25$ MB for Llama 70B. After precomputation, the verifier deletes the weights.
 
 == Phase 1: Commitment
 
-The provider runs inference normally, capturing intermediates (INT8 inputs, INT32 accumulators, post-attention outputs, quantization scales) alongside execution. After generation, two Merkle trees are built:
+The provider runs inference normally, capturing intermediates (INT8 inputs, INT32 accumulators, post-attention outputs, quantization scales) alongside execution. After generation, two Merkle trees @merkle1987 are built:
 
 - $R_T$ (trace): over all intermediates at all tokens
 - $R_"KV"$: over per-token KV state across all layers
@@ -234,11 +234,13 @@ Short audit windows require automated auditing --- the client's audit decision m
 
 = Related Work
 
-The most direct alternative to VeriLM is proving inference in zero knowledge. Systems based on zkSNARKs or zkSTARKs can prove arbitrary computations, producing a static, non-interactive proof that anyone can verify offline. However, current ZK systems impose 100--1000$times$ prover overhead. For a model that costs dollars per response to serve, this translates to hundreds or thousands of dollars per proved response --- prohibitive for production inference.
+The most direct alternative to VeriLM is proving inference in zero knowledge. Earlier verifiable-inference systems such as SafetyNets @ghodsi2017safetynets and later zk approaches such as zkCNN @liu2021zkcnn show that inference correctness can be proved by reducing neural networks to arithmetic-circuit-style verification. However, current ZK systems still impose large prover overheads. For a model that costs dollars per response to serve, this translates to hundreds or thousands of dollars per proved response --- prohibitive for production inference.
+
+Related cryptographic ML systems such as Delphi @mishra2020delphi address a different problem: privacy-preserving neural inference, where neither party should reveal its inputs or model. VeriLM instead targets model-provenance auditing for open weights, where the model is public and the goal is to verify that the claimed weights were actually used.
 
 VeriLM makes the opposite tradeoff: verification is interactive (the provider must respond to challenges) and non-transferable (only the verifier who holds the key can check). In exchange, the normal serving path is unchanged and the per-response overhead is a 100-byte receipt. The expensive part --- verification --- only occurs on the small fraction of responses that are audited.
 
-Trusted execution environments (TEEs) provide hardware-level attestation that specific code ran on specific hardware. TEEs avoid the overhead of proof systems but introduce hardware trust assumptions, limit deployment flexibility, and tie verification to a specific vendor's attestation chain. VeriLM requires no hardware trust beyond standard computation.
+Trusted execution environments (TEEs) and remote attestation provide another alternative @birkholz2023rats @menetrey2022attestation. TEEs can attest that specific code ran on specific hardware, avoiding the overhead of proof systems, but they introduce hardware trust assumptions, limit deployment flexibility, and tie verification to a specific vendor's attestation chain. VeriLM requires no hardware trust beyond standard computation.
 
 = Discussion
 
@@ -263,3 +265,5 @@ The most important empirical next step is measuring the requantization corridor:
 VeriLM demonstrates that meaningful verification of LLM inference is possible without modifying the serving path or requiring expensive proof systems. The protocol's honest decomposition into exact, statistical, and approximate layers allows clients to understand precisely what is and is not guaranteed. The 100-byte receipt imposes negligible overhead on normal serving; the full audit is CPU-feasible for the client.
 
 The most important next step is empirical measurement of the requantization corridor, which will determine how tightly the protocol constrains attention manipulation in practice.
+
+#bibliography("refs.bib", title: [References])
