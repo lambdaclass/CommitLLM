@@ -103,42 +103,48 @@ Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not b
 + *Attention replay (approximate).* The verifier recomputes attention from shell-verified Q and committed prefix K,V in FP64, quantizes to INT8, and compares. Limited by FP16$arrow.l.r$FP64 mismatch.
 + *Unopened positions (none).* No direct verification. Deterrence from the provider not knowing which responses will be audited or which tokens challenged.
 
-@fig-forward-pass traces the full forward pass for one output token. Every operation is deterministic except the two marked `!!` --- the FP16 attention computation and the quantization that depends on it. Storing `attn_i8` and its quantization scale at each layer bridges this gap: every subsequent operation replays identically from the stored values and the public weights.
+@fig-forward-pass traces the full forward pass for one output token. Each operation is labeled with its verification type: Freivalds-checked weight matmuls, canonically recomputable bridge operations, and the single non-exact point --- FP16 attention. The only non-replayable provider-side state is the per-layer `attn_i8` and its quantization scale; everything below that point replays exactly or canonically from the stored values and the public weights.
 
 #figure(
   block(width: 100%, inset: (x: 4pt, y: 6pt))[
     #set text(size: 7pt)
     ```
-    embed = table[token_id]             # lookup
+    residual = embedding[token_id]          [exact lookup]
 
-    For each layer:
-      x = RMSNorm(residual)            # deterministic
-      x_i8, s = quantize(x)            # deterministic
-      z_i32 = W_qkv @ x_i8             # INT8 matmul
-      qkv = dequant(z_i32, s, ws)      # deterministic
-      q, k = RoPE(q, k, pos)           # deterministic
+    for each layer:
+      x_norm = RMSNorm(residual)           [canonical]
+      x_i8, s = quantize(x_norm)           [exact]
 
-      attn = softmax(QK^T/d) @ V       # !! NON-DETERMINISTIC
-      attn_i8, sa = quantize(attn)     # !! depends on above
-      # ^^^^ STORED (non-derivable) ^^^^
+      q_i32 = W_q @ x_i8                   [Freivalds]
+      k_i32 = W_k @ x_i8                   [Freivalds]
+      v_i32 = W_v @ x_i8                   [Freivalds]
 
-      z_i32 = W_o @ attn_i8            # deterministic
-      residual += dequant(z_i32)        # deterministic
+      q = RoPE(dequant(q_i32, ...), pos)   [canonical]
+      k = RoPE(dequant(k_i32, ...), pos)   [canonical]
+      v = dequant(v_i32, ...)              [canonical]
 
-      x = RMSNorm(residual)            # deterministic
-      x_i8, s = quantize(x)            # deterministic
-      z_i32 = W_gate_up @ x_i8         # INT8 matmul
-      gate, up = split(dequant(z_i32)) # deterministic
-      x = SiLU(gate) * up              # deterministic
-      x_i8, s = quantize(x)            # deterministic
-      z_i32 = W_down @ x_i8            # INT8 matmul
-      residual += dequant(z_i32)        # deterministic
+      attn = softmax(QK^T / sqrt(d)) @ V  [non-exact]
+      attn_i8, sa = quantize(attn)         [STORED]
 
-    logits = LM_head(RMSNorm(res))      # deterministic
-    token = sample(logits, params)      # output
+      o_i32 = W_o @ attn_i8                [Freivalds]
+      residual += dequant(o_i32, ...)      [canonical]
+
+      x_norm = RMSNorm(residual)           [canonical]
+      x_i8, s = quantize(x_norm)           [exact]
+
+      gate_i32 = W_gate @ x_i8             [Freivalds]
+      up_i32   = W_up   @ x_i8             [Freivalds]
+      x = SiLU(dequant(gate_i32))          [canonical]
+          * dequant(up_i32)
+      x_i8, s = quantize(x)                [exact]
+      down_i32 = W_down @ x_i8             [Freivalds]
+      residual += dequant(down_i32, ...)   [canonical]
+
+    logits = LM_head(RMSNorm(residual))    [Freivalds]
+    token  = sample(logits)                [output]
     ```
   ],
-  caption: [Annotated forward pass for one output token. Every operation is deterministic except `!!`. Storing `attn_i8` and its quantization scale at each layer bridges the non-deterministic gap.],
+  caption: [Annotated forward pass for one output token. Each operation is labeled with its verification type. The only non-exact operation is FP16 attention; storing `attn_i8` and its quantization scale bridges the gap.],
 ) <fig-forward-pass>
 
 = The Protocol <sec-protocol>
