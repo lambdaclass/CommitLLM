@@ -261,13 +261,13 @@ def _wrapped_cutlass_scaled_mm(
     M = a.shape[0]
     if M <= 16:
         N = a.shape[1]
-        buf_key = (N, a.device)
-        buf = _pad_buffers.get(buf_key)
-        if buf is None:
-            buf = torch.zeros(32, N, dtype=torch.int8, device=a.device)
-            _pad_buffers[buf_key] = buf
-        buf[:M, :] = a
-        acc_i32 = torch._int_mm(buf, b)[:M, :]
+        pad_key = (N, a.device)
+        pad_buf = _pad_buffers.get(pad_key)
+        if pad_buf is None:
+            pad_buf = torch.zeros(32, N, dtype=torch.int8, device=a.device)
+            _pad_buffers[pad_key] = pad_buf
+        pad_buf[:M, :] = a
+        acc_i32 = torch._int_mm(pad_buf, b)[:M, :]
     else:
         acc_i32 = torch._int_mm(a, b)
 
