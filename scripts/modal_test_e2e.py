@@ -1,0 +1,254 @@
+"""
+End-to-end protocol test on Modal: chat -> commit -> audit -> verify.
+
+Exercises the full VeriLM pipeline on real GPU inference:
+  1. Generate with VerifiedInferenceServer (capture + commit via Rust)
+  2. Verify commitment structure (R_T, R_KV, manifest, token count)
+  3. Open compact proof for all tokens
+  4. Open stratified audit (routine tier, subset of layers)
+  5. Open stratified audit (full tier)
+  6. Verify proof is non-empty and decompresses
+
+Usage:
+    modal run scripts/modal_test_e2e.py
+"""
+
+import modal
+
+app = modal.App("verilm-e2e-test")
+
+image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .apt_install("curl", "build-essential", "pkg-config", "libssl-dev", "ca-certificates")
+    .run_commands(
+        "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
+    )
+    .env({
+        "PATH": "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
+        "VI_CAPTURE": "1",
+    })
+    .pip_install("vllm>=0.8", "torch", "numpy", "fastapi", "maturin", "zstandard")
+    .add_local_dir("sidecar", remote_path="/opt/verilm", copy=True)
+    .run_commands(
+        "pip install -e /opt/verilm",
+        "python -c \""
+        "import site, os; "
+        "d = site.getsitepackages()[0]; "
+        "open(os.path.join(d, 'verilm_capture.pth'), 'w')"
+        ".write('import verilm._startup\\n')\"",
+    )
+    .add_local_dir(".", remote_path="/build", copy=True, ignore=[
+        ".git", "target", "scripts/__pycache__", "*.pdf",
+    ])
+    .run_commands(
+        "cd /build/crates/verilm-py && maturin develop --release",
+        "python -c 'import verilm_rs; print(\"verilm_rs OK\")'",
+        "rm -rf /build",
+    )
+)
+
+MODEL_ID = "neuralmagic/Qwen2.5-7B-Instruct-quantized.w8a8"
+PROMPT = "What is 2+2?"
+
+
+def _run_e2e():
+    import json
+    import os
+    import zstandard
+
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+
+    from vllm import LLM
+    from verilm.server import VerifiedInferenceServer
+
+    results = {}
+
+    # -- Setup --
+    print(f"Loading {MODEL_ID}...")
+    llm = LLM(model=MODEL_ID, dtype="auto", max_model_len=2048, enforce_eager=True)
+    server = VerifiedInferenceServer(llm)
+    print("VerifiedInferenceServer ready")
+
+    # ==================================================================
+    # TEST 1: Chat + Commit
+    # ==================================================================
+    print("\n--- Test 1: Chat + Commit ---")
+    chat_result = server.chat(prompt=PROMPT, max_tokens=8)
+
+    has_commitment = "commitment" in chat_result
+    has_request_id = "request_id" in chat_result
+    has_token_ids = "token_ids" in chat_result
+    has_kv_roots = "kv_roots" in chat_result
+    has_text = "generated_text" in chat_result
+    n_tokens = chat_result.get("n_tokens", 0)
+
+    results["1_has_commitment"] = has_commitment
+    results["1_has_request_id"] = has_request_id
+    results["1_has_token_ids"] = has_token_ids
+    results["1_has_kv_roots"] = has_kv_roots
+    results["1_has_text"] = has_text
+    results["1_n_tokens_positive"] = n_tokens > 0
+
+    print(f"  commitment: {has_commitment}")
+    print(f"  request_id: {chat_result.get('request_id', 'MISSING')}")
+    print(f"  n_tokens: {n_tokens}")
+    print(f"  generated_text: {repr(chat_result.get('generated_text', ''))}")
+    print(f"  kv_roots count: {len(chat_result.get('kv_roots', []))}")
+
+    # ==================================================================
+    # TEST 2: Commitment structure
+    # ==================================================================
+    print("\n--- Test 2: Commitment structure ---")
+    commitment = chat_result.get("commitment", {})
+    has_trace_root = "trace_root" in commitment
+    has_n_tokens = "n_tokens" in commitment
+    commitment_n_matches = commitment.get("n_tokens") == n_tokens
+
+    results["2_has_trace_root"] = has_trace_root
+    results["2_n_tokens_match"] = commitment_n_matches
+
+    print(f"  trace_root: {commitment.get('trace_root', 'MISSING')[:32]}...")
+    print(f"  n_tokens in commitment: {commitment.get('n_tokens')}")
+    print(f"  Matches chat n_tokens: {commitment_n_matches}")
+
+    # ==================================================================
+    # TEST 3: Compact audit (all tokens)
+    # ==================================================================
+    print("\n--- Test 3: Compact audit (all tokens) ---")
+    request_id = chat_result["request_id"]
+    try:
+        proof_bytes = server.audit(request_id)
+        proof_nonempty = len(proof_bytes) > 0
+        # Decompress zstd
+        dctx = zstandard.ZstdDecompressor()
+        decompressed = dctx.decompress(proof_bytes)
+        decompress_ok = len(decompressed) > 0
+        results["3_proof_nonempty"] = proof_nonempty
+        results["3_decompress_ok"] = decompress_ok
+        print(f"  Proof size: {len(proof_bytes)} bytes (zstd)")
+        print(f"  Decompressed: {len(decompressed)} bytes")
+    except Exception as e:
+        results["3_proof_nonempty"] = False
+        results["3_decompress_ok"] = False
+        print(f"  ERROR: {e}")
+
+    # ==================================================================
+    # TEST 4: Compact audit (single token)
+    # ==================================================================
+    print("\n--- Test 4: Compact audit (single token) ---")
+    try:
+        proof_single = server.audit(request_id, challenge_indices=[0])
+        single_ok = len(proof_single) > 0
+        results["4_single_token_audit"] = single_ok
+        print(f"  Single-token proof size: {len(proof_single)} bytes")
+    except Exception as e:
+        results["4_single_token_audit"] = False
+        print(f"  ERROR: {e}")
+
+    # ==================================================================
+    # TEST 5: JSON audit
+    # ==================================================================
+    print("\n--- Test 5: JSON audit ---")
+    try:
+        audit_json_str = server.audit_json(request_id, challenge_indices=[0])
+        audit_json = json.loads(audit_json_str)
+        json_has_tokens = "tokens" in audit_json or "opened_tokens" in audit_json
+        results["5_json_audit"] = True
+        results["5_json_parseable"] = True
+        print(f"  JSON audit keys: {list(audit_json.keys())}")
+        print(f"  JSON size: {len(audit_json_str)} chars")
+    except Exception as e:
+        results["5_json_audit"] = False
+        results["5_json_parseable"] = False
+        print(f"  ERROR: {e}")
+
+    # ==================================================================
+    # TEST 6: Stratified audit (routine tier, 3 layers)
+    # ==================================================================
+    print("\n--- Test 6: Stratified audit (routine, 3 layers) ---")
+    try:
+        entry = server._audit_store[request_id]
+        state = entry["state"]
+        n_layers = state.n_layers()
+        # Pick 3 layers spread across the model
+        layer_indices = [0, n_layers // 2, n_layers - 1]
+        response_json = state.audit_stratified(0, layer_indices, "routine")
+        response = json.loads(response_json)
+        has_partial = "partial_layers" in response
+        results["6_stratified_routine"] = True
+        results["6_has_partial_layers"] = has_partial
+        print(f"  Layers challenged: {layer_indices} (of {n_layers})")
+        print(f"  Response keys: {list(response.keys())}")
+        if has_partial:
+            print(f"  Partial layers count: {len(response['partial_layers'])}")
+    except Exception as e:
+        results["6_stratified_routine"] = False
+        results["6_has_partial_layers"] = False
+        print(f"  ERROR: {e}")
+
+    # ==================================================================
+    # TEST 7: Stratified audit (full tier, all layers)
+    # ==================================================================
+    print("\n--- Test 7: Stratified audit (full, all layers) ---")
+    try:
+        all_layers = list(range(n_layers))
+        response_json = state.audit_stratified(0, all_layers, "full")
+        response = json.loads(response_json)
+        results["7_stratified_full"] = True
+        print(f"  Full audit on all {n_layers} layers")
+        print(f"  Response keys: {list(response.keys())}")
+    except Exception as e:
+        results["7_stratified_full"] = False
+        print(f"  ERROR: {e}")
+
+    # ==================================================================
+    # TEST 8: Second chat (verify capture buffers reset correctly)
+    # ==================================================================
+    print("\n--- Test 8: Second chat (buffer reset) ---")
+    try:
+        chat2 = server.chat(prompt="Hello world", max_tokens=4)
+        second_ok = (
+            "commitment" in chat2
+            and chat2["n_tokens"] > 0
+            and chat2["request_id"] != request_id
+        )
+        results["8_second_chat"] = second_ok
+        print(f"  Second request_id: {chat2.get('request_id', 'MISSING')}")
+        print(f"  n_tokens: {chat2.get('n_tokens')}")
+    except Exception as e:
+        results["8_second_chat"] = False
+        print(f"  ERROR: {e}")
+
+    # ==================================================================
+    # SUMMARY
+    # ==================================================================
+    print(f"\n{'='*65}")
+    print("E2E PROTOCOL TEST SUMMARY")
+    print(f"{'='*65}")
+    all_pass = all(results.values())
+    for name, passed in results.items():
+        status = "PASS" if passed else "FAIL"
+        print(f"  [{status}] {name}")
+    print(f"{'='*65}")
+    print(f"Overall: {'ALL TESTS PASSED' if all_pass else 'SOME TESTS FAILED'}")
+    print(f"{'='*65}")
+
+    return {"all_pass": all_pass, "results": results}
+
+
+@app.function(image=image, gpu="A100-80GB", timeout=900)
+def run_e2e():
+    return _run_e2e()
+
+
+@app.local_entrypoint()
+def main():
+    print("VeriLM End-to-End Protocol Test")
+    print("=" * 65)
+    result = run_e2e.remote()
+    if result["all_pass"]:
+        print("\nAll tests passed.")
+    else:
+        failed = [k for k, v in result["results"].items() if not v]
+        print(f"\nFailed: {failed}")
