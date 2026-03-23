@@ -103,7 +103,7 @@ Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not b
 + *Attention replay (approximate).* The verifier recomputes attention from shell-verified Q and committed prefix K,V in FP64, quantizes to INT8, and compares. Limited by FP16$arrow.l.r$FP64 mismatch.
 + *Unopened positions (none).* No direct verification. Deterrence from the provider not knowing which responses will be audited or which tokens challenged.
 
-@fig-forward-pass traces the full forward pass for one output token. Each operation is labeled with its verification type: Freivalds-checked weight matmuls, canonically recomputable bridge operations, and the single non-exact point --- FP16 attention. The only non-replayable provider-side state is the per-layer `attn_i8` and its quantization scale; everything below that point replays exactly or canonically from the stored values, the output transcript, and the public weights.
+@fig-forward-pass traces the full forward pass for one output token. Each operation is labeled with its verification type: Freivalds-checked weight matmuls, canonically recomputable bridge operations, and the single non-exact point --- FP16 attention. The only non-replayable provider-side state is the per-layer `attn_out_i8` and its quantization scale; everything below that point replays exactly or canonically from the stored values, the transcript, and the public weights.
 
 #figure(
   block(width: 100%, inset: (x: 4pt, y: 6pt))[
@@ -124,9 +124,9 @@ Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not b
       v = dequant(v_i32, ...)              [canonical]
 
       attn = softmax(q @ k^T / sqrt(d)) @ v [non-exact]
-      attn_i8, sa = quantize(attn)         [STORED]
+      attn_out_i8, sa = quantize(attn)      [STORED]
 
-      o_i32 = W_o @ attn_i8                [Freivalds]
+      o_i32 = W_o @ attn_out_i8            [Freivalds]
       residual += dequant(o_i32, ...)      [canonical]
 
       x_norm = RMSNorm(residual)           [canonical]
@@ -146,7 +146,7 @@ Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not b
     token = sample(dequant(logits_i32))    [transcript]
     ```
   ],
-  caption: [Annotated forward pass for one output token. Each operation is labeled with its verification type. The only non-exact operation is FP16 attention; storing `attn_i8` and its quantization scale bridges the gap.],
+  caption: [Annotated forward pass for one output token. Each operation is labeled with its verification type. The only non-exact stage is FP16 attention and the quantization that depends on it; storing `attn_out_i8` and its scale bridges the gap.],
 ) <fig-forward-pass>
 
 = The Protocol <sec-protocol>
@@ -206,12 +206,12 @@ After this step, the verifier has trusted $Q_t$, $K_t$, $V_t$ (as requantized IN
 
 Attention at token $t$ requires the full prefix $K_(1..t)$, $V_(1..t)$. Shell verification gives trusted values for the challenged token but not the prefix.
 
-The provider opens KV values for all prefix positions with Merkle proofs against $R_"KV"$. The verifier then:
+For each opened layer $i$, the provider opens the $K$, $V$ values at all prefix positions $j < t$ with Merkle proofs against $R_"KV"$. The verifier then:
 
 + Verifies the Merkle proofs --- confirming these are the values the prover committed in Phase 1.
-+ Randomly samples $k$ earlier token positions.
-+ Runs full shell verification on each sampled position (Freivalds on all 7 matrices, requantization, RoPE, RMSNorm, SiLU).
-+ Compares the shell-verified $K$, $V$ from those sampled positions against the values opened from $R_"KV"$.
++ Randomly samples $k$ earlier token positions $j_1, dots, j_k < t$.
++ For each sampled position $j_s$, runs full shell verification at layer $i$ (Freivalds on all 7 matrices, requantization, RoPE, RMSNorm, SiLU), producing independently verified $K_(j_s)^((i))$, $V_(j_s)^((i))$.
++ Compares these shell-verified values against the corresponding entries opened from $R_"KV"$.
 
 If the prover tampered with $m$ out of $n$ prefix positions and the verifier samples $k$:
 
@@ -221,7 +221,7 @@ Commitment binding is exact (hash collision resistance). Correctness of unsample
 
 === Step 4: Cross-Layer Consistency
 
-When the verifier opens multiple layers on the same token, fake attention at layer $L$ must produce a post-attention output that, after requantization and $W_o$, feeds into layer $L+1$'s RMSNorm consistently with the committed trace. This creates coupled algebraic constraints across layers --- much harder to satisfy than manipulating a single layer in isolation. The more layers opened, the tighter the constraint. In full-audit mode (all layers opened), the adversary must produce fake attention at every layer that stays mutually consistent through the entire residual stream.
+There is no separate proof object here; the consistency check comes from opening multiple layers and verifying the committed bridges between them. When the verifier opens layers $L$ and $L+1$ on the same token, fake attention at layer $L$ must produce a post-attention output that, after requantization and $W_o$, feeds into layer $L+1$'s RMSNorm consistently with the committed trace. Both sides of this boundary are shell-verified, so the adversary cannot fabricate a consistent bridge without matching the committed values exactly. The more layers opened, the tighter the constraint. In full-audit mode (all layers opened), fake attention at every layer must stay mutually consistent through the entire residual stream.
 
 === Step 5: Attention Replay
 
@@ -287,7 +287,11 @@ The shell is exactly verifiable because its operations are deterministic or cano
 
 The protocol constrains the attention interior from both sides: inputs ($Q$, $K$, $V$) and outputs (post-$W_o$) are exactly verified by the shell. Attention replay directly checks consistency. Cross-layer constraints force fake attention to survive the residual stream.
 
-The remaining adversarial freedom is bounded by the *requantization corridor* --- the fraction of INT8 elements that disagree between FP16 and FP64 computation. This is an open empirical question. High agreement ($> 99%$) means tight constraint; lower agreement means more adversarial room.
+The remaining adversarial freedom comes from two sources:
+
++ *FP16$arrow.l.r$FP64 replay mismatch.* The verifier's FP64 reference and the GPU's FP16 computation produce slightly different results. The *requantization corridor* --- the fraction of INT8 elements that disagree --- bounds the adversary's room. This is an open empirical question. High agreement ($> 99%$) means tight constraint; lower agreement means more room.
+
++ *Statistical KV anchoring.* The prefix $K$, $V$ values used in attention replay are commitment-verified (they match $R_"KV"$) but only statistically anchored to real computation via sampled shell checks. Unsampled prefix positions are not independently verified, so the replay proves consistency with the _committed_ prefix, not necessarily with the true execution at every earlier token.
 
 = Provider Costs
 
