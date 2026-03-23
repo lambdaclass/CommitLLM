@@ -37,21 +37,65 @@ use verilm_core::types::{
 };
 use verilm_prover::{commit_with_full_binding, FullBindingParams};
 
-/// Extract a Vec<i8> from a Python list of ints.
+/// Extract a Vec<i8> from bytes (fast path) or a Python list of ints (fallback).
 fn extract_i8_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<i8>> {
-    if let Ok(bytes) = obj.extract::<Vec<i8>>() {
-        return Ok(bytes);
-    }
-    // Try extracting from bytes object
+    // Fast path: bytes object — zero-alloc reinterpret u8 → i8.
     if let Ok(b) = obj.cast::<PyBytes>() {
-        return Ok(b.as_bytes().iter().map(|&v| v as i8).collect());
+        let src = b.as_bytes();
+        let mut dst = Vec::with_capacity(src.len());
+        // SAFETY: i8 and u8 have identical layout; this is a bitwise copy.
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr() as *const i8, dst.as_mut_ptr(), src.len());
+            dst.set_len(src.len());
+        }
+        return Ok(dst);
     }
-    Err(PyValueError::new_err("expected list of i8 or bytes"))
+    // Fallback: Python list of ints.
+    if let Ok(v) = obj.extract::<Vec<i8>>() {
+        return Ok(v);
+    }
+    Err(PyValueError::new_err("expected bytes or list of i8"))
 }
 
-/// Extract a Vec<i32> from a Python list of ints.
+/// Extract a Vec<i32> from bytes (fast path) or a Python list of ints (fallback).
 fn extract_i32_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<i32>> {
+    // Fast path: bytes object — reinterpret as native-endian i32.
+    if let Ok(b) = obj.cast::<PyBytes>() {
+        let src = b.as_bytes();
+        if src.len() % 4 != 0 {
+            return Err(PyValueError::new_err(
+                format!("i32 bytes length {} not a multiple of 4", src.len()),
+            ));
+        }
+        let n = src.len() / 4;
+        let mut dst = Vec::with_capacity(n);
+        // SAFETY: we checked alignment to 4 bytes; i32 from ne_bytes is always valid.
+        for chunk in src.chunks_exact(4) {
+            dst.push(i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+        return Ok(dst);
+    }
+    // Fallback: Python list of ints.
     obj.extract::<Vec<i32>>()
+}
+
+/// Extract a Vec<f32> from bytes (fast path) or a Python list of floats (fallback).
+fn extract_f32_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
+    if let Ok(b) = obj.cast::<PyBytes>() {
+        let src = b.as_bytes();
+        if src.len() % 4 != 0 {
+            return Err(PyValueError::new_err(
+                format!("f32 bytes length {} not a multiple of 4", src.len()),
+            ));
+        }
+        let n = src.len() / 4;
+        let mut dst = Vec::with_capacity(n);
+        for chunk in src.chunks_exact(4) {
+            dst.push(f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+        return Ok(dst);
+    }
+    obj.extract::<Vec<f32>>()
 }
 
 /// Extract a Vec<Vec<i8>> from a Python list of lists of ints.
@@ -99,7 +143,7 @@ fn dict_to_layer_trace(d: &Bound<'_, PyDict>) -> PyResult<LayerTrace> {
             .map(|v| v.extract())
             .transpose()?,
         residual: d.get_item("residual")?
-            .map(|v| v.extract::<Vec<f32>>())
+            .map(|v| extract_f32_vec(&v))
             .transpose()?,
     })
 }

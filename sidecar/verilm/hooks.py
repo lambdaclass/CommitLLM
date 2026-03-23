@@ -71,20 +71,20 @@ class EmbeddingLogitCapture:
     def _make_embed_hook(self):
         def hook(module, args, output):
             if self.enabled:
-                self.embeddings.append(output.detach())
+                self.embeddings.append(output.detach().to("cpu", non_blocking=True))
         return hook
 
     def _make_logit_hook(self):
         def hook(module, args, output):
             if self.enabled:
-                self.logits.append(output.detach())
+                self.logits.append(output.detach().to("cpu", non_blocking=True))
         return hook
 
     def _make_residual_hook(self):
         """Hook that captures the INPUT to RMSNorm (= pre-attention residual stream)."""
         def hook(module, args, output):
             if self.enabled and len(args) > 0:
-                self.residuals.append(args[0].detach())
+                self.residuals.append(args[0].detach().to("cpu", non_blocking=True))
         return hook
 
     def drain(self):

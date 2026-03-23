@@ -272,7 +272,12 @@ def _wrapped_cutlass_scaled_mm(
 
     _call_counter += 1
 
-    buf.append((layer, proj, a, acc_i32, scale_a))
+    # Move to CPU here so downstream code doesn't need per-field .cpu() calls.
+    # non_blocking=True allows the DMA to overlap with subsequent GPU kernels;
+    # server.py calls torch.cuda.synchronize() after generate() to ensure
+    # all transfers have completed before draining.
+    buf.append((layer, proj, a.to("cpu", non_blocking=True),
+                acc_i32.to("cpu", non_blocking=True), scale_a))
 
     if buf.total_captured % _log_interval == 0:
         logger.info(

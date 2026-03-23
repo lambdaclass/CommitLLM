@@ -189,7 +189,10 @@ class VerifiedInferenceServer:
         gen_token_ids = list(output.outputs[0].token_ids)
         prompt_token_ids = list(output.prompt_token_ids)
 
-        # Drain captures.
+        # Ensure all non-blocking GPU→CPU transfers from capture hook completed.
+        torch.cuda.synchronize()
+
+        # Drain captures (tensors are already on CPU).
         captures = self.buf.drain()
         el_data = self.el_capture.drain()
 
@@ -224,29 +227,29 @@ class VerifiedInferenceServer:
             )
 
         # Convert traces to list-of-list-of-dicts for verilm_rs.
+        # Tensors are already on CPU (non-blocking transfer in capture hook).
+        # Pass raw bytes (tobytes) — Rust reinterprets directly, no Python objects.
         trace_dicts = []
         for token_layers in traces:
             layer_dicts = []
             for lt in token_layers:
                 d = {
-                    "x_attn": lt["x_attn"].to(torch.int8).cpu().numpy().tolist(),
-                    "q": lt["q"].to(torch.int32).cpu().numpy().tolist(),
-                    "k": lt["k"].to(torch.int32).cpu().numpy().tolist(),
-                    "v": lt["v"].to(torch.int32).cpu().numpy().tolist(),
-                    "a": lt["a"].to(torch.int8).cpu().numpy().tolist(),
-                    "attn_out": lt["attn_out"].to(torch.int32).cpu().numpy().tolist(),
-                    "x_ffn": lt["x_ffn"].to(torch.int8).cpu().numpy().tolist(),
-                    "g": lt["g"].to(torch.int32).cpu().numpy().tolist(),
-                    "u": lt["u"].to(torch.int32).cpu().numpy().tolist(),
-                    "h": lt["h"].to(torch.int8).cpu().numpy().tolist(),
-                    "ffn_out": lt["ffn_out"].to(torch.int32).cpu().numpy().tolist(),
-                    "kv_cache_k": [t.to(torch.int8).cpu().numpy().tolist() for t in lt.get("kv_cache_k", [])],
-                    "kv_cache_v": [t.to(torch.int8).cpu().numpy().tolist() for t in lt.get("kv_cache_v", [])],
+                    "x_attn": lt["x_attn"].numpy().tobytes(),
+                    "q": lt["q"].numpy().tobytes(),
+                    "k": lt["k"].numpy().tobytes(),
+                    "v": lt["v"].numpy().tobytes(),
+                    "a": lt["a"].numpy().tobytes(),
+                    "attn_out": lt["attn_out"].numpy().tobytes(),
+                    "x_ffn": lt["x_ffn"].numpy().tobytes(),
+                    "g": lt["g"].numpy().tobytes(),
+                    "u": lt["u"].numpy().tobytes(),
+                    "h": lt["h"].numpy().tobytes(),
+                    "ffn_out": lt["ffn_out"].numpy().tobytes(),
+                    "kv_cache_k": [t.numpy().tobytes() for t in lt.get("kv_cache_k", [])],
+                    "kv_cache_v": [t.numpy().tobytes() for t in lt.get("kv_cache_v", [])],
                 }
-                # Residual stream for RMSNorm bridge verification.
                 if "residual" in lt:
-                    d["residual"] = lt["residual"].cpu().numpy().tolist()
-                # Pass activation scales when available (production W8A8 path).
+                    d["residual"] = lt["residual"].numpy().tobytes()
                 if "qkv_scale" in lt:
                     d["scale_x_attn"] = float(lt["qkv_scale"].item()) if lt["qkv_scale"].numel() == 1 else float(lt["qkv_scale"].max().item())
                 if "o_scale" in lt:
