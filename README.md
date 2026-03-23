@@ -18,7 +18,7 @@ For VeriLM as designed — a sidecar commit-and-audit protocol over unmodified G
 
 1. **Approximate replay of native FP16/BF16 attention.** The GPU computes attention in FP16/BF16, which is not bit-reproducible across hardware or even across runs. The verifier's FP64 reference will always differ slightly from the GPU's result. This bounds the precision of attention replay and means the protocol can constrain — but never exactly verify — the attention interior. The requantization corridor (how many INT8 elements disagree between FP16 and FP64) is the concrete manifestation of this gap. Within this sidecar design, no fix exists without replacing the serving computation with a deterministic canonical attention kernel or a stronger proof target.
 
-2. **Statistical anchoring of prefix KV via sampling.** The verifier can only shell-verify a subset of prefix positions. Merkle binding is exact (unsampled positions match `R_KV`), but correctness of unsampled positions is statistical under the current commit-and-open design. Detection probability improves with more sampling (`P(catch) = 1 − (1 − m/n)^k`), but it is always statistical, never exact. Batch Freivalds (see [The Attention Gap](#the-attention-gap)) could make weight correctness exact at all prefix positions, but input correctness would remain statistical. A stronger proof system could eliminate the gap entirely, but not at the cost point of this sidecar design.
+2. **Statistical anchoring of prefix KV via sampling.** The verifier can only shell-verify a subset of prefix positions. Merkle binding is exact (unsampled positions match `R_KV`), but correctness of unsampled positions is statistical under the current commit-and-open design. Detection probability improves with more sampling (`P(catch) = 1 − (1 − f/n)^k`), but it is always statistical, never exact. Batch Freivalds (see [The Attention Gap](#the-attention-gap)) could make weight correctness exact at all prefix positions, but input correctness would remain statistical. A stronger proof system could eliminate the gap entirely, but not at the cost point of this sidecar design.
 
 Everything else in the protocol is either exact (shell verification) or derives its limitations from one of these two sources. The protocol can tighten both — higher-precision GPU attention narrows gap 1, more aggressive sampling narrows gap 2 — but neither reaches zero within the current design.
 
@@ -170,9 +170,9 @@ The verifier then:
 
 If they match: those sampled positions are anchored to real verified computation. If the prover lied about `K,V` at any position, they risk the verifier sampling that exact position.
 
-Detection probability: if the prover tampered with `m` out of `n` prefix positions, and the verifier samples `k`:
+Detection probability: if the prover tampered with `f` out of `n` prefix positions, and the verifier samples `k`:
 
-`P(catch) = 1 − (1 − m/n)^k`
+`P(catch) = 1 − (1 − f/n)^k`
 
 Commitment binding is exact (collision resistance of the hash). Correctness of the committed values is statistical — depends on the sampling rate.
 
@@ -236,6 +236,8 @@ The receipt (100 bytes) and verifier key (~25 MB) describe the client's costs. T
 
 Most intermediates in the forward pass are deterministic INT8 arithmetic — given the same inputs, they produce bit-identical outputs. The provider does not need to store them; they can be re-derived on demand.
 
+This storage discussion is about retained per-token trace state. The deployment manifest `M` is different: it is computed and bound into the receipt at commit time, not treated as non-derivable trace state. The verifier later checks `M` against known-good deployment values.
+
 The only non-derivable data is the post-attention output at each layer. The GPU computes attention in FP16, which is non-deterministic, and the result is requantized to INT8 before entering `W_o`. This INT8 vector cannot be re-derived because re-running attention might produce different FP16 values that cross quantization bucket boundaries.
 
 **Stored per output token:** `attn_out_i8` (one INT8 vector of dimension `hidden_dim` per layer) plus the associated quantization scale (one float per layer).
@@ -285,4 +287,3 @@ Points 1 and 2 are exact — they are part of the shell. Point 3 directly checks
 **Possible future strengthening: score anchoring.** The prover could additionally commit pre-softmax attention scores and the verifier could spot-check `score[t,j] =? Q_t · K_j` at sampled positions. Since shell-verified Q and K are in INT8 with known scales, the dot product `Q_t · K_j` can be computed as an exact INT32 inner product, giving a high-precision reference score. This would constrain individual score entries independently of the output-level replay, but faces a limitation: the GPU computes softmax on FP16 scores, not the INT32 values the verifier checks, so the check cannot chain exactly to the softmax output. Score anchoring may add value on top of attention replay for long sequences where the output-level comparison has more room for cancellation, but this has not been demonstrated.
 
 **Optional strengthening: batch Freivalds on prefix.** The current KV provenance step (Step 3) shell-verifies `k` sampled prefix positions. Freivalds is batchable: for a matrix `W` with `n` input-output pairs `(x_1, z_1)...(x_n, z_n)`, the verifier picks random scalars `α_1...α_n` and checks `v · (Σ αᵢ xᵢ) =? r^T · (Σ αᵢ zᵢ)`. One check, two dot products, covers all `n` positions simultaneously — if any `z_i` was computed with wrong weights, it fails with probability ≥ 1 − 1/2³². Concretely, the provider opens per-prefix inputs `x_j`, INT32 accumulator outputs `z_j`, and quantization scales for `W_k` and `W_v` at all prefix positions at the challenged layers. The verifier applies batch Freivalds, then verifies exact requantization and RoPE on each position. This upgrades KV provenance from "correct K,V derivation at sampled positions" to "exact K,V derivation from committed per-position inputs at all positions" (≤ 1/2³²). It does not prove those inputs were the true upstream hidden states — the input `x_j` at layer `L` depends on layer `L-1`'s attention output, so end-to-end correctness remains limited by the attention gap and the sampling of earlier activations. The cost is audit bandwidth: the provider must open inputs, INT32 accumulators, and Merkle proofs for all prefix positions at challenged layers. For Llama 70B at 4K context with 10 opened layers, this is ~300–400 MB per audit versus ~80 MB in the default protocol. This makes batch Freivalds better suited as an optional deep audit mode rather than the default.
-

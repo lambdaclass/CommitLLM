@@ -121,7 +121,7 @@ The client decides to audit. The provider doesn't know which responses will be c
 
 After this step, the verifier has cryptographically verified Q, K, and V for the challenged token. These are trusted values.
 
-**Step 3: KV provenance.** Attention at token t needs the K,V from all earlier tokens. The provider opens the full prefix from R_KV. The verifier randomly samples some earlier positions and runs full shell verification on those too, checking that the committed K,V values match real computation. If the provider lied about K,V at any position, they risk the verifier hitting that exact position. The detection probability follows a clean formula: if they tampered with m out of n positions and the verifier samples k, P(catch) = 1 − (1 − m/n)^k.
+**Step 3: KV provenance.** Attention at token t needs the K,V from all earlier tokens. The provider opens the full prefix from R_KV. The verifier randomly samples some earlier positions and runs full shell verification on those too, checking that the committed K,V values match real computation. If the provider lied about K,V at any position, they risk the verifier hitting that exact position. The detection probability follows a clean formula: if they tampered with f out of n positions and the verifier samples k, P(catch) = 1 − (1 − f/n)^k.
 
 **Step 4: Cross-layer consistency.** When multiple layers are opened on the same token, fake attention at layer L must produce output that, after passing through W_o and requantization, feeds into layer L+1 consistently with the committed trace. This creates coupled algebraic constraints across layers. The more layers opened, the tighter the constraint.
 

@@ -256,9 +256,9 @@ For each opened layer $i$, the provider opens the $K$, $V$ values at all prefix 
 + For each sampled position $j_s$, runs full shell verification at layer $i$ (Freivalds on all 7 matrices, requantization, RoPE, RMSNorm, SiLU), producing independently verified $K_(j_s)^((i))$, $V_(j_s)^((i))$.
 + Compares these shell-verified values against the corresponding entries opened from $R_"KV"$.
 
-If the prover tampered with $m$ out of $n$ prefix positions and the verifier samples $k$:
+If the prover tampered with $f$ out of $n$ prefix positions and the verifier samples $k$:
 
-$ P("catch") = 1 - (1 - m\/n)^k $
+$ P("catch") = 1 - (1 - f\/n)^k $
 
 Commitment binding is exact (hash collision resistance). Correctness of unsampled positions is statistical --- the prover risks the verifier sampling any corrupted position.
 
@@ -364,9 +364,9 @@ The shell locks the inputs ($Q$, $K$, $V$) and outputs (post-$W_o$) of every att
 
 == Fabricated Prefix Context
 
-*Proposition 3 (KV tampering detection).* _If the provider tampered with $m$ out of $n$ prefix positions and the verifier samples $k$, detection probability is $P("catch") = 1 - (1 - m\/n)^k$._
+*Proposition 3 (KV tampering detection).* _If the provider tampered with $f$ out of $n$ prefix positions and the verifier samples $k$, detection probability is $P("catch") = 1 - (1 - f\/n)^k$._
 
-Committed KV values cannot change after $R_"KV"$ is sent (hash collision resistance). The verifier anchors the commitment to real computation by sampling earlier positions and running full shell verification. Detection probability increases monotonically with the tampering fraction $m\/n$.
+Committed KV values cannot change after $R_"KV"$ is sent (hash collision resistance). The verifier anchors the commitment to real computation by sampling earlier positions and running full shell verification. Detection probability increases monotonically with the tampering fraction $f\/n$.
 
 == Deployment Configuration Tampering
 
@@ -389,6 +389,8 @@ The remaining adversarial freedom comes from two sources:
 == Storage
 
 Only post-attention INT8 outputs and the associated per-tensor quantization scales require storage (everything else is re-derivable):
+
+This storage accounting is only for retained per-token trace state. The deployment manifest $M$ is computed and bound into the receipt at commit time; it is configuration metadata, not non-derivable trace state.
 
 #figure(
   table(
