@@ -11,6 +11,7 @@ import VerifiedInference.Requantization
 import VerifiedInference.ExpLUT
 import VerifiedInference.Protocol
 import VerifiedInference.AccumulatorBound
+import VerifiedInference.ProtocolParams
 import VerifiedInference.Storage
 import VerifiedInference.StorageReconstruction
 import VerifiedInference.ReadmeShell
