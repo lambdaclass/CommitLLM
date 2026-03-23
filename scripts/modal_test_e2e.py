@@ -113,14 +113,13 @@ def _run_e2e():
     print(f"  Matches chat n_tokens: {commitment_n_matches}")
 
     # ==================================================================
-    # TEST 3: Compact audit (all tokens)
+    # TEST 3: Audit (routine, all layers, token 0)
     # ==================================================================
-    print("\n--- Test 3: Compact audit (all tokens) ---")
+    print("\n--- Test 3: Audit (routine, all layers) ---")
     request_id = chat_result["request_id"]
     try:
-        proof_bytes = server.audit(request_id)
+        proof_bytes = server.audit(request_id, token_index=0, tier="routine")
         proof_nonempty = len(proof_bytes) > 0
-        # Decompress zstd
         dctx = zstandard.ZstdDecompressor()
         decompressed = dctx.decompress(proof_bytes)
         decompress_ok = len(decompressed) > 0
@@ -134,72 +133,38 @@ def _run_e2e():
         print(f"  ERROR: {e}")
 
     # ==================================================================
-    # TEST 4: Compact audit (single token)
+    # TEST 4: Audit (routine, 3 layers)
     # ==================================================================
-    print("\n--- Test 4: Compact audit (single token) ---")
-    try:
-        proof_single = server.audit(request_id, challenge_indices=[0])
-        single_ok = len(proof_single) > 0
-        results["4_single_token_audit"] = single_ok
-        print(f"  Single-token proof size: {len(proof_single)} bytes")
-    except Exception as e:
-        results["4_single_token_audit"] = False
-        print(f"  ERROR: {e}")
-
-    # ==================================================================
-    # TEST 5: JSON audit
-    # ==================================================================
-    print("\n--- Test 5: JSON audit ---")
-    try:
-        audit_json_str = server.audit_json(request_id, challenge_indices=[0])
-        audit_json = json.loads(audit_json_str)
-        json_has_tokens = "tokens" in audit_json or "opened_tokens" in audit_json
-        results["5_json_audit"] = True
-        results["5_json_parseable"] = True
-        print(f"  JSON audit keys: {list(audit_json.keys())}")
-        print(f"  JSON size: {len(audit_json_str)} chars")
-    except Exception as e:
-        results["5_json_audit"] = False
-        results["5_json_parseable"] = False
-        print(f"  ERROR: {e}")
-
-    # ==================================================================
-    # TEST 6: Stratified audit (routine tier, 3 layers)
-    # ==================================================================
-    print("\n--- Test 6: Stratified audit (routine, 3 layers) ---")
+    print("\n--- Test 4: Audit (routine, 3 layers) ---")
     try:
         entry = server._audit_store[request_id]
         state = entry["state"]
         n_layers = state.n_layers()
-        # Pick 3 layers spread across the model
         layer_indices = [0, n_layers // 2, n_layers - 1]
-        response_json = state.audit_stratified(0, layer_indices, "routine")
-        response = json.loads(response_json)
-        has_partial = "partial_layers" in response
-        results["6_stratified_routine"] = True
-        results["6_has_partial_layers"] = has_partial
+        proof_partial = server.audit(
+            request_id, token_index=0,
+            layer_indices=layer_indices, tier="routine",
+        )
+        partial_ok = len(proof_partial) > 0
+        results["4_partial_layer_audit"] = partial_ok
         print(f"  Layers challenged: {layer_indices} (of {n_layers})")
-        print(f"  Response keys: {list(response.keys())}")
-        if has_partial:
-            print(f"  Partial layers count: {len(response['partial_layers'])}")
+        print(f"  Proof size: {len(proof_partial)} bytes")
     except Exception as e:
-        results["6_stratified_routine"] = False
-        results["6_has_partial_layers"] = False
+        results["4_partial_layer_audit"] = False
         print(f"  ERROR: {e}")
 
     # ==================================================================
-    # TEST 7: Stratified audit (full tier, all layers)
+    # TEST 5: Audit (full tier, all layers)
     # ==================================================================
-    print("\n--- Test 7: Stratified audit (full, all layers) ---")
+    print("\n--- Test 5: Audit (full, all layers) ---")
     try:
-        all_layers = list(range(n_layers))
-        response_json = state.audit_stratified(0, all_layers, "full")
-        response = json.loads(response_json)
-        results["7_stratified_full"] = True
-        print(f"  Full audit on all {n_layers} layers")
-        print(f"  Response keys: {list(response.keys())}")
+        proof_full = server.audit(request_id, token_index=0, tier="full")
+        full_ok = len(proof_full) > 0
+        # Full tier should be >= routine tier in size
+        results["5_full_tier_audit"] = full_ok
+        print(f"  Full audit proof: {len(proof_full)} bytes")
     except Exception as e:
-        results["7_stratified_full"] = False
+        results["5_full_tier_audit"] = False
         print(f"  ERROR: {e}")
 
     # ==================================================================

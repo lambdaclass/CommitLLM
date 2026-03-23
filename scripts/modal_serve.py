@@ -101,7 +101,9 @@ class Inference:
         try:
             proof_bytes = self.server.audit(
                 request_id=request["request_id"],
-                challenge_indices=request.get("challenge_indices"),
+                token_index=request.get("token_index", 0),
+                layer_indices=request.get("layer_indices"),
+                tier=request.get("tier", "routine"),
             )
             return Response(
                 content=proof_bytes,
@@ -110,30 +112,6 @@ class Inference:
             )
         except KeyError as e:
             return {"error": str(e)}
-
-    @modal.fastapi_endpoint(method="POST")
-    def audit_stratified(self, request: dict):
-        import json
-        import time
-        from fastapi.responses import JSONResponse
-        try:
-            request_id = request["request_id"]
-            entry = self.server._audit_store.get(request_id)
-            if entry is None:
-                return JSONResponse({"error": f"Unknown request_id: {request_id}"}, status_code=404)
-            if time.time() > entry["expires_at"]:
-                del self.server._audit_store[request_id]
-                return JSONResponse({"error": "Audit state expired"}, status_code=404)
-            state = entry["state"]
-            token_index = request.get("token_index", 0)
-            layer_indices = request.get("layer_indices", list(range(state.n_layers())))
-            tier = request.get("tier", "routine")
-            response_json = state.audit_stratified(token_index, layer_indices, tier)
-            return JSONResponse(json.loads(response_json))
-        except Exception as e:
-            import traceback
-            print(f"Stratified audit error: {traceback.format_exc()}")
-            return JSONResponse({"error": str(e)}, status_code=500)
 
     @modal.fastapi_endpoint(method="GET")
     def health(self):

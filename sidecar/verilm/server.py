@@ -281,9 +281,19 @@ class VerifiedInferenceServer:
     def audit(
         self,
         request_id: str,
-        challenge_indices: Optional[List[int]] = None,
+        *,
+        token_index: int = 0,
+        layer_indices: Optional[List[int]] = None,
+        tier: str = "routine",
     ) -> bytes:
-        """Open proof for challenged tokens. Returns compact binary (zstd)."""
+        """Open a stratified audit proof. Returns zstd-compressed binary.
+
+        Args:
+            request_id: from the /chat response.
+            token_index: which token to audit (default 0).
+            layer_indices: which layers to open. Default: all layers.
+            tier: "routine" (shell checks) or "full" (shell + attention replay).
+        """
         entry = self._audit_store.get(request_id)
         if entry is None:
             raise KeyError(f"Unknown request_id: {request_id}")
@@ -293,30 +303,10 @@ class VerifiedInferenceServer:
             raise KeyError(f"Audit state expired for: {request_id}")
 
         state = entry["state"]
-        if challenge_indices is None:
-            challenge_indices = list(range(state.n_tokens()))
+        if layer_indices is None:
+            layer_indices = list(range(state.n_layers()))
 
-        return state.open_compact(challenge_indices)
-
-    def audit_json(
-        self,
-        request_id: str,
-        challenge_indices: Optional[List[int]] = None,
-    ) -> str:
-        """Open proof for challenged tokens. Returns JSON string."""
-        entry = self._audit_store.get(request_id)
-        if entry is None:
-            raise KeyError(f"Unknown request_id: {request_id}")
-
-        if time.time() > entry["expires_at"]:
-            del self._audit_store[request_id]
-            raise KeyError(f"Audit state expired for: {request_id}")
-
-        state = entry["state"]
-        if challenge_indices is None:
-            challenge_indices = list(range(state.n_tokens()))
-
-        return state.open_json(challenge_indices)
+        return state.audit_stratified(token_index, layer_indices, tier)
 
     def _store_audit(self, request_id: str, state):
         """Store audit state with TTL."""
@@ -364,9 +354,12 @@ def create_app(llm, **kwargs):
     @app.post("/audit")
     def audit(request: dict):
         try:
-            request_id = request["request_id"]
-            challenge_indices = request.get("challenge_indices")
-            proof_bytes = server.audit(request_id, challenge_indices)
+            proof_bytes = server.audit(
+                request_id=request["request_id"],
+                token_index=request.get("token_index", 0),
+                layer_indices=request.get("layer_indices"),
+                tier=request.get("tier", "routine"),
+            )
             return Response(
                 content=proof_bytes,
                 media_type="application/octet-stream",
@@ -376,29 +369,6 @@ def create_app(llm, **kwargs):
             return JSONResponse({"error": str(e)}, status_code=404)
         except Exception as e:
             logger.exception("Audit error")
-            return JSONResponse({"error": str(e)}, status_code=500)
-
-    @app.post("/audit/stratified")
-    def audit_stratified(request: dict):
-        try:
-            request_id = request["request_id"]
-            entry = server._audit_store.get(request_id)
-            if entry is None:
-                return JSONResponse({"error": f"Unknown request_id: {request_id}"}, status_code=404)
-
-            if time.time() > entry["expires_at"]:
-                del server._audit_store[request_id]
-                return JSONResponse({"error": "Audit state expired"}, status_code=404)
-
-            state = entry["state"]
-            token_index = request.get("token_index", 0)
-            layer_indices = request.get("layer_indices", list(range(state.n_layers())))
-            tier = request.get("tier", "routine")
-
-            response_json = state.audit_stratified(token_index, layer_indices, tier)
-            return JSONResponse(json.loads(response_json))
-        except Exception as e:
-            logger.exception("Stratified audit error")
             return JSONResponse({"error": str(e)}, status_code=500)
 
     return app

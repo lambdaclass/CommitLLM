@@ -241,7 +241,7 @@ impl BatchState {
         Ok(PyBytes::new(py, &compressed))
     }
 
-    /// Build a stratified audit response for a challenge.
+    /// Open a stratified audit proof (compact binary, zstd-compressed).
     ///
     /// Args:
     ///     token_index: int — which token to audit
@@ -249,8 +249,8 @@ impl BatchState {
     ///     tier: str — "routine" or "full"
     ///
     /// Returns:
-    ///     JSON string of the AuditResponse.
-    fn audit_stratified(&self, token_index: u32, layer_indices: Vec<usize>, tier: String) -> PyResult<String> {
+    ///     bytes — zstd-compressed compact audit response.
+    fn audit_stratified<'py>(&self, py: Python<'py>, token_index: u32, layer_indices: Vec<usize>, tier: String) -> PyResult<Bound<'py, PyBytes>> {
         let tier = match tier.as_str() {
             "routine" => AuditTier::Routine,
             "full" => AuditTier::Full,
@@ -264,8 +264,9 @@ impl BatchState {
         };
 
         let response = verilm_prover::build_audit_response_from_state(&self.inner, &challenge);
-        serde_json::to_string(&response)
-            .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+        let compact_bytes = serialize::serialize_compact_audit(&response);
+        let compressed = serialize::compress(&compact_bytes);
+        Ok(PyBytes::new(py, &compressed))
     }
 }
 
