@@ -6,7 +6,7 @@ use verilm_core::requantize;
 use verilm_core::types::{
     AuditChallenge, AuditResponse, BatchCommitment, BatchProof, CommitmentVersion,
     DeploymentManifest, LayerTrace, RetainedLayerState, RetainedTokenState,
-    TokenTrace, VerificationPolicy, VerifierKey,
+    TokenTrace, V4AuditResponse, VerificationPolicy, VerifierKey,
 };
 
 /// Model geometry for trace construction from raw captures.
@@ -559,6 +559,59 @@ pub fn commit_minimal(
     };
 
     (commitment, state)
+}
+
+/// V4 open: open a challenged token's retained leaf plus all prefix tokens.
+///
+/// The verifier needs:
+/// - The challenged token's retained state + Merkle/IO proofs
+/// - All prior tokens' retained states + Merkle proofs (prefix replay)
+///
+/// This is O(t * log N) where t is the challenged token index.
+pub fn open_v4(state: &MinimalBatchState, token_index: u32) -> V4AuditResponse {
+    let i = token_index as usize;
+    assert!(i < state.all_retained.len(), "token_index out of range");
+
+    let commitment = BatchCommitment {
+        merkle_root: state.retained_tree.root,
+        io_root: state.io_tree.root,
+        n_tokens: state.all_retained.len() as u32,
+        manifest_hash: state.manifest_hash,
+        version: CommitmentVersion::V4,
+        prompt_hash: Some(state.prompt_hash),
+        seed_commitment: Some(state.seed_commitment),
+        kv_chain_root: None,
+    };
+
+    // Prefix: all tokens [0, i) — needed for replay from initial state.
+    let mut prefix_retained = Vec::with_capacity(i);
+    let mut prefix_merkle_proofs = Vec::with_capacity(i);
+    let mut prefix_token_ids = Vec::with_capacity(i);
+    for j in 0..i {
+        prefix_retained.push(state.all_retained[j].clone());
+        prefix_merkle_proofs.push(merkle::prove(&state.retained_tree, j));
+        prefix_token_ids.push(state.token_ids[j]);
+    }
+
+    let prev_io_hash = if i == 0 {
+        [0u8; 32]
+    } else {
+        state.io_hashes[i - 1]
+    };
+
+    V4AuditResponse {
+        token_index,
+        retained: state.all_retained[i].clone(),
+        merkle_proof: merkle::prove(&state.retained_tree, i),
+        io_proof: merkle::prove(&state.io_tree, i),
+        token_id: state.token_ids[i],
+        prev_io_hash,
+        prefix_retained,
+        prefix_merkle_proofs,
+        prefix_token_ids,
+        commitment,
+        revealed_seed: state.revealed_seed,
+    }
 }
 
 /// Phase 2 — Open.
@@ -1267,5 +1320,78 @@ mod tests {
 
         assert_eq!(c1.merkle_root, c2.merkle_root);
         assert_eq!(c1.io_root, c2.io_root);
+    }
+
+    #[test]
+    fn test_open_v4_returns_prefix_and_proofs() {
+        let n_layers = 2;
+        let captures = make_minimal_captures(n_layers, 4, 8);
+        let fwd_batch_sizes = vec![1, 1, 1, 1];
+        let retained = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+
+        let params = FullBindingParams {
+            token_ids: &[10, 20, 30, 40],
+            prompt: b"test",
+            sampling_seed: [5u8; 32],
+            manifest: None,
+        };
+
+        let (commitment, state) = commit_minimal(retained, &params);
+
+        // Open token 2 — should include prefix tokens 0, 1.
+        let response = open_v4(&state, 2);
+        assert_eq!(response.token_index, 2);
+        assert_eq!(response.token_id, 30);
+        assert_eq!(response.prefix_retained.len(), 2);
+        assert_eq!(response.prefix_merkle_proofs.len(), 2);
+        assert_eq!(response.prefix_token_ids, vec![10, 20]);
+        assert_eq!(response.commitment.merkle_root, commitment.merkle_root);
+
+        // Verify challenged token's Merkle proof.
+        let leaf_hash = merkle::hash_retained_state_direct(&response.retained);
+        assert!(merkle::verify(
+            &commitment.merkle_root,
+            &leaf_hash,
+            &response.merkle_proof,
+        ));
+
+        // Verify each prefix token's Merkle proof.
+        for (j, prefix_rs) in response.prefix_retained.iter().enumerate() {
+            let prefix_leaf = merkle::hash_retained_state_direct(prefix_rs);
+            assert!(merkle::verify(
+                &commitment.merkle_root,
+                &prefix_leaf,
+                &response.prefix_merkle_proofs[j],
+            ));
+        }
+
+        // Verify IO chain.
+        let leaf_hash_0 = merkle::hash_retained_state_direct(&response.prefix_retained[0]);
+        let leaf_hash_1 = merkle::hash_retained_state_direct(&response.prefix_retained[1]);
+        let io_0 = merkle::io_hash_v4(leaf_hash_0, 10, [0u8; 32]);
+        let io_1 = merkle::io_hash_v4(leaf_hash_1, 20, io_0);
+        assert_eq!(response.prev_io_hash, io_1);
+    }
+
+    #[test]
+    fn test_open_v4_token_zero_has_empty_prefix() {
+        let n_layers = 1;
+        let captures = make_minimal_captures(n_layers, 2, 4);
+        let fwd_batch_sizes = vec![1, 1];
+        let retained = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+
+        let params = FullBindingParams {
+            token_ids: &[1, 2],
+            prompt: b"p",
+            sampling_seed: [0u8; 32],
+            manifest: None,
+        };
+
+        let (_, state) = commit_minimal(retained, &params);
+        let response = open_v4(&state, 0);
+
+        assert_eq!(response.prefix_retained.len(), 0);
+        assert_eq!(response.prefix_merkle_proofs.len(), 0);
+        assert_eq!(response.prev_io_hash, [0u8; 32]);
     }
 }

@@ -708,7 +708,6 @@ fn compute_weight_hash(model_dir: String) -> PyResult<String> {
 /// uses replay from retained state rather than pre-computed full traces.
 #[pyclass]
 struct MinimalBatchStateHandle {
-    #[allow(dead_code)]
     inner: verilm_prover::MinimalBatchState,
     commitment: BatchCommitment,
 }
@@ -738,6 +737,24 @@ impl MinimalBatchStateHandle {
 
     fn kv_roots_hex(&self) -> Vec<String> {
         Vec::new() // V4: prefix binding via retained Merkle tree
+    }
+
+    /// Open a V4 audit response for a challenged token.
+    ///
+    /// Returns JSON-serialized V4AuditResponse containing the challenged
+    /// token's retained state, Merkle/IO proofs, and all prefix tokens'
+    /// retained states + proofs needed for replay verification.
+    fn audit_v4(&self, token_index: u32) -> PyResult<String> {
+        if token_index >= self.inner.all_retained.len() as u32 {
+            return Err(PyValueError::new_err(format!(
+                "token_index {} out of range (n_tokens={})",
+                token_index,
+                self.inner.all_retained.len()
+            )));
+        }
+        let response = verilm_prover::open_v4(&self.inner, token_index);
+        serde_json::to_string(&response)
+            .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
     }
 }
 

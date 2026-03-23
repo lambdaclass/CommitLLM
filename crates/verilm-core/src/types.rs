@@ -257,6 +257,39 @@ pub struct RetainedTokenState {
     pub layers: Vec<RetainedLayerState>,
 }
 
+/// V4 audit response: opens retained leaves for challenged and prefix tokens.
+///
+/// The verifier receives the retained state for the challenged token plus
+/// all prior tokens needed for prefix replay. Each comes with a Merkle
+/// proof against the committed retained-state root and IO chain proof.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct V4AuditResponse {
+    /// Challenged token index.
+    pub token_index: u32,
+    /// Retained state for the challenged token.
+    pub retained: RetainedTokenState,
+    /// Merkle proof for the challenged token's retained leaf.
+    pub merkle_proof: MerkleProof,
+    /// IO chain proof for the challenged token.
+    pub io_proof: MerkleProof,
+    /// Token ID at this position.
+    pub token_id: u32,
+    /// Previous IO hash (for chain verification).
+    pub prev_io_hash: [u8; 32],
+    /// Retained states for all prior tokens (prefix), ordered by position.
+    /// The verifier replays from token 0 to verify the prefix leads to
+    /// the challenged token's state.
+    pub prefix_retained: Vec<RetainedTokenState>,
+    /// Merkle proofs for each prefix token's retained leaf.
+    pub prefix_merkle_proofs: Vec<MerkleProof>,
+    /// Token IDs for prefix tokens.
+    pub prefix_token_ids: Vec<u32>,
+    /// Commitment this response was opened from.
+    pub commitment: BatchCommitment,
+    /// Revealed sampling seed.
+    pub revealed_seed: [u8; 32],
+}
+
 // ===========================================================================
 // Q8_0 block-aware types
 // ===========================================================================

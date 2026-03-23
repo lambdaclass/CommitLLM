@@ -36,6 +36,7 @@ class VerifiedInferenceServer:
     def __init__(self, llm, *, max_audit_entries: int = 10_000, ttl_secs: int = 600):
         from vllm import LLM
 
+        from . import capture as cap
         from .capture import (
             configure_from_model,
             get_capture_buffer,
@@ -51,10 +52,14 @@ class VerifiedInferenceServer:
         model = get_model_from_llm(llm)
         configure_from_model(model)
 
-        # Install embedding/logit hooks.
-        self.el_capture = EmbeddingLogitCapture()
-        n_hooks = self.el_capture.install(model)
-        logger.info("Installed %d embedding/logit hooks", n_hooks)
+        # Install embedding/logit hooks (skip in minimal mode — data unused).
+        if cap._capture_mode != "minimal":
+            self.el_capture = EmbeddingLogitCapture()
+            n_hooks = self.el_capture.install(model)
+            logger.info("Installed %d embedding/logit hooks", n_hooks)
+        else:
+            self.el_capture = None
+            logger.info("Minimal mode: skipping embedding/logit hooks")
 
         # Manifest hashes.
         self._tokenizer_hash = self._compute_tokenizer_hash(llm)
@@ -171,7 +176,8 @@ class VerifiedInferenceServer:
 
         # Clear buffers.
         self.buf.drain()
-        self.el_capture.drain()
+        if self.el_capture is not None:
+            self.el_capture.drain()
 
         # Greedy: deterministic seed derived from prompt.
         seed = hashlib.sha256(prompt.encode()).digest()
@@ -193,7 +199,7 @@ class VerifiedInferenceServer:
 
         # Drain captures (tensors are already on CPU).
         captures = self.buf.drain()
-        el_data = self.el_capture.drain()
+        el_data = self.el_capture.drain() if self.el_capture is not None else {}
 
         n_layers = cap._n_layers
         calls_per_fwd = n_layers * cap.PROJS_PER_LAYER
@@ -355,8 +361,11 @@ class VerifiedInferenceServer:
         token_index: int,
         layer_indices: List[int],
         tier: str = "routine",
-    ) -> bytes:
-        """Open a stratified audit proof. Returns zstd-compressed binary.
+    ):
+        """Open an audit proof.
+
+        For full-trace (V1-V3) state: returns zstd-compressed binary.
+        For V4 retained-state: returns JSON string (V4AuditResponse).
 
         Args:
             request_id: from the /chat response.
@@ -373,6 +382,12 @@ class VerifiedInferenceServer:
             raise KeyError(f"Audit state expired for: {request_id}")
 
         state = entry["state"]
+
+        # V4 retained-state path.
+        if hasattr(state, 'audit_v4'):
+            return state.audit_v4(token_index)
+
+        # V1-V3 full-trace path.
         return state.audit_stratified(token_index, layer_indices, tier)
 
     def _store_audit(self, request_id: str, state):
@@ -426,14 +441,20 @@ def create_app(llm, **kwargs):
                     {"error": "token_index and layer_indices are required"},
                     status_code=400,
                 )
-            proof_bytes = server.audit(
+            result = server.audit(
                 request_id=request["request_id"],
                 token_index=request["token_index"],
-                layer_indices=request["layer_indices"],
+                layer_indices=request.get("layer_indices", []),
                 tier=request.get("tier", "routine"),
             )
+            # V4 returns JSON string; V1-V3 returns bytes.
+            if isinstance(result, str):
+                return JSONResponse(
+                    json.loads(result),
+                    media_type="application/json",
+                )
             return Response(
-                content=proof_bytes,
+                content=result,
                 media_type="application/octet-stream",
                 headers={"Content-Encoding": "zstd"},
             )
