@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "crates/vi-core",
+    "crates/vi-keygen",
+    "crates/vi-verify",
+    "crates/vi-test-vectors",
+    "crates/vi-py",
+]
+exclude = ["crates/vi-core/fuzz"]
+resolver = "2"

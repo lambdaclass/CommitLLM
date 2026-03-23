@@ -1,0 +1,88 @@
+"""
+PyTorch hooks for capturing data outside the cutlass_scaled_mm path.
+
+Captures:
+  - Input embeddings (token embedding lookup output)
+  - Logits (LogitsProcessor output)
+
+These are needed for R_T but aren't INT8 matmuls, so they don't go
+through the cutlass_scaled_mm wrapper in capture.py.
+
+Note: vLLM's ParallelLMHead.forward() raises RuntimeError by design —
+logits are computed via LogitsProcessor, not lm_head.forward(). We hook
+LogitsProcessor instead.
+"""
+
+import logging
+from typing import List, Optional
+
+import torch
+
+logger = logging.getLogger("verilm")
+
+
+class EmbeddingLogitCapture:
+    """Captures embeddings and logits via PyTorch forward hooks.
+
+    Install on a vLLM model after loading. Captures are accumulated
+    per-request and drained together with the matmul captures.
+    """
+
+    def __init__(self):
+        self.embeddings: List[torch.Tensor] = []
+        self.logits: List[torch.Tensor] = []
+        self._handles: list = []
+        self.enabled = True
+
+    def install(self, model) -> int:
+        """Install hooks on embedding and LogitsProcessor modules.
+
+        Returns the number of hooks installed.
+        """
+        installed = 0
+
+        for name, mod in model.named_modules():
+            # Embedding layer: usually model.embed_tokens or model.model.embed_tokens
+            if name.endswith("embed_tokens"):
+                h = mod.register_forward_hook(self._make_embed_hook())
+                self._handles.append(h)
+                installed += 1
+                logger.info("verilm: installed embedding hook on %s", name)
+
+            # LogitsProcessor: vLLM computes logits through this module,
+            # not through lm_head.forward() (which raises RuntimeError).
+            if name == "logits_processor" or type(mod).__name__ == "LogitsProcessor":
+                h = mod.register_forward_hook(self._make_logit_hook())
+                self._handles.append(h)
+                installed += 1
+                logger.info("verilm: installed logit hook on %s (%s)", name, type(mod).__name__)
+
+        return installed
+
+    def _make_embed_hook(self):
+        def hook(module, args, output):
+            if self.enabled:
+                self.embeddings.append(output.detach())
+        return hook
+
+    def _make_logit_hook(self):
+        def hook(module, args, output):
+            if self.enabled:
+                self.logits.append(output.detach())
+        return hook
+
+    def drain(self):
+        """Return and clear all captured embeddings and logits."""
+        result = {
+            "embeddings": self.embeddings,
+            "logits": self.logits,
+        }
+        self.embeddings = []
+        self.logits = []
+        return result
+
+    def remove(self):
+        """Remove all installed hooks."""
+        for h in self._handles:
+            h.remove()
+        self._handles.clear()

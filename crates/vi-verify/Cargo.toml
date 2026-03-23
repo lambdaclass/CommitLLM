@@ -1,0 +1,15 @@
+[package]
+name = "vi-verify"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vi-core = { path = "../vi-core" }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+bincode = "1.3"
+hex = "0.4"
+sha2 = "0.10"
+
+[dev-dependencies]
+vi-test-vectors = { path = "../vi-test-vectors" }

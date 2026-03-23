@@ -1,0 +1,10 @@
+target/
+*.vkey
+*.vtrace
+.cache/
+models/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
