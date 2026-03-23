@@ -190,7 +190,7 @@ The verifier selects $c$ random token positions from the $N$-token response and,
 
 === Step 2: Shell Verification
 
-For each challenged token $t$ at each opened layer $i$, the provider opens the INT8 inputs $x_"i8"$ and INT32 accumulators $z_"i32"$ for all 7 weight matrices, with Merkle proofs against $R_T$. The verifier performs four checks:
+For each challenged token $t$ at each opened layer $i$, the provider opens the INT8 inputs $x_"i8"$, INT32 accumulators $z_"i32"$, per-tensor quantization scales, the residual stream values at the layer boundaries, and the post-attention output $"attn_out_i8"$ --- all with Merkle proofs against $R_T$. The verifier performs four checks:
 
 + *Freivalds on each weight matrix.* For each of the 7 matrices, the verifier checks $v_j^((i)) dot x eq.quest r_j^T dot z$. Each check is two dot products --- $O(n)$. If the prover used wrong weights, false-accept probability is $lt.eq 1\/2^(32)$ per matrix.
 
