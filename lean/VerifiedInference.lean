@@ -12,6 +12,7 @@ import VerifiedInference.ExpLUT
 import VerifiedInference.Protocol
 import VerifiedInference.AccumulatorBound
 import VerifiedInference.ProtocolParams
+import VerifiedInference.SecurityGame
 import VerifiedInference.Storage
 import VerifiedInference.StorageReconstruction
 import VerifiedInference.ReadmeShell
