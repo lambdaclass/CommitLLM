@@ -103,6 +103,44 @@ Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not b
 + *Attention replay (approximate).* The verifier recomputes attention from shell-verified Q and committed prefix K,V in FP64, quantizes to INT8, and compares. Limited by FP16$arrow.l.r$FP64 mismatch.
 + *Unopened positions (none).* No direct verification. Deterrence from the provider not knowing which responses will be audited or which tokens challenged.
 
+@fig-forward-pass traces the full forward pass for one output token. Every operation is deterministic except the two marked `!!` --- the FP16 attention computation and the quantization that depends on it. Storing `attn_i8` and its quantization scale at each layer bridges this gap: every subsequent operation replays identically from the stored values and the public weights.
+
+#figure(
+  block(width: 100%, inset: (x: 4pt, y: 6pt))[
+    #set text(size: 7pt)
+    ```
+    embed = table[token_id]             # lookup
+
+    For each layer:
+      x = RMSNorm(residual)            # deterministic
+      x_i8, s = quantize(x)            # deterministic
+      z_i32 = W_qkv @ x_i8             # INT8 matmul
+      qkv = dequant(z_i32, s, ws)      # deterministic
+      q, k = RoPE(q, k, pos)           # deterministic
+
+      attn = softmax(QK^T/d) @ V       # !! NON-DETERMINISTIC
+      attn_i8, sa = quantize(attn)     # !! depends on above
+      # ^^^^ STORED (non-derivable) ^^^^
+
+      z_i32 = W_o @ attn_i8            # deterministic
+      residual += dequant(z_i32)        # deterministic
+
+      x = RMSNorm(residual)            # deterministic
+      x_i8, s = quantize(x)            # deterministic
+      z_i32 = W_gate_up @ x_i8         # INT8 matmul
+      gate, up = split(dequant(z_i32)) # deterministic
+      x = SiLU(gate) * up              # deterministic
+      x_i8, s = quantize(x)            # deterministic
+      z_i32 = W_down @ x_i8            # INT8 matmul
+      residual += dequant(z_i32)        # deterministic
+
+    logits = LM_head(RMSNorm(res))      # deterministic
+    token = sample(logits, params)      # output
+    ```
+  ],
+  caption: [Annotated forward pass for one output token. Every operation is deterministic except `!!`. Storing `attn_i8` and its quantization scale at each layer bridges the non-deterministic gap.],
+) <fig-forward-pass>
+
 = The Protocol <sec-protocol>
 
 == Phase 0: Setup
