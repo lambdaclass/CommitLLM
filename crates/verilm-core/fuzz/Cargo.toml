@@ -1,0 +1,39 @@
+[workspace]
+
+[package]
+name = "verilm-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+verilm-core = { path = ".." }
+arbitrary = { version = "1", features = ["derive"] }
+
+[[bin]]
+name = "fuzz_deserialize_compact_batch"
+path = "fuzz_targets/deserialize_compact_batch.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_deserialize_key"
+path = "fuzz_targets/deserialize_key.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_deserialize_trace"
+path = "fuzz_targets/deserialize_trace.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_decompress"
+path = "fuzz_targets/decompress.rs"
+test = false
+doc = false

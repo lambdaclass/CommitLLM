@@ -1,0 +1,19 @@
+[package]
+name = "verilm-keygen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+verilm-core = { path = "../verilm-core" }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+safetensors = "0.4"
+memmap2 = "0.9"
+rand = "0.8"
+rand_chacha = "0.3"
+hex = "0.4"
+getrandom = "0.2"
+
+[dev-dependencies]
+verilm-test-vectors = { path = "../verilm-test-vectors" }
+tempfile = "3"

@@ -3,7 +3,7 @@ Restructure raw captures into LayerTrace-compatible format.
 
 Takes the flat (layer, proj, x_i8, acc_i32, scale_a) tuples from
 capture.py and builds per-token, per-layer trace dicts matching
-the Rust LayerTrace struct in crates/vi-core/src/types.rs.
+the Rust LayerTrace struct in crates/verilm-core/src/types.rs.
 
 Handles:
   - GQA-aware QKV split (Q width != K/V width)

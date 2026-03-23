@@ -1,11 +1,11 @@
 [workspace]
 members = [
-    "crates/vi-core",
-    "crates/vi-keygen",
-    "crates/vi-prover",
-    "crates/vi-verify",
-    "crates/vi-test-vectors",
-    "crates/vi-py",
+    "crates/verilm-core",
+    "crates/verilm-keygen",
+    "crates/verilm-prover",
+    "crates/verilm-verify",
+    "crates/verilm-test-vectors",
+    "crates/verilm-py",
 ]
-exclude = ["crates/vi-core/fuzz"]
+exclude = ["crates/verilm-core/fuzz"]
 resolver = "2"

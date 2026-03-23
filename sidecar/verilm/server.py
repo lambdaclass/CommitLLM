@@ -7,7 +7,7 @@ capture, and verilm_rs (PyO3) for Rust commitment engine.
 Architecture:
     User → HTTP → this server → vLLM (GPU) + verilm_rs (commitment)
 
-No vi-server sidecar, no JSON serialization of captures, no HTTP hop.
+Direct in-process integration — no separate server, no JSON serialization of captures, no HTTP hop.
 
 Usage:
     # As a module (for Modal or direct deployment):

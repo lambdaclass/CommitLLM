@@ -1,0 +1,8 @@
+[package]
+name = "verilm-prover"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+verilm-core = { path = "../verilm-core" }
+bincode = "1"
