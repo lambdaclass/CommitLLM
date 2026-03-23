@@ -329,9 +329,9 @@ def register():
     if _patched:
         return
 
-    capture_env = os.environ.get("VI_CAPTURE", "1")
+    capture_env = os.environ.get("VERILM_CAPTURE", "1")
     if capture_env == "0":
-        logger.info("verilm loaded but capture disabled (VI_CAPTURE=0)")
+        logger.info("verilm loaded but capture disabled (VERILM_CAPTURE=0)")
         _capture_buffer.enabled = False
         _patched = True
         return

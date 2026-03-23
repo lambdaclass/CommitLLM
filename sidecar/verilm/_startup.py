@@ -21,8 +21,8 @@ import sys
 
 def _should_activate():
     """Check if capture should be active in this process."""
-    if os.environ.get("VI_CAPTURE", "0") == "0":
-        if "vi_capture" not in os.environ.get("VLLM_PLUGINS", ""):
+    if os.environ.get("VERILM_CAPTURE", "0") == "0":
+        if "verilm_capture" not in os.environ.get("VLLM_PLUGINS", ""):
             return False
     return True
 

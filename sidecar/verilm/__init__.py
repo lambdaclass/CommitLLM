@@ -6,9 +6,9 @@ Restructures captures into LayerTrace format for Merkle tree commitment.
 Loaded automatically via vllm.general_plugins entry point.
 
 Enable/disable:
-    VLLM_PLUGINS=vi_capture vllm serve ...
-    VI_CAPTURE=1 vllm serve ...       # capture on
-    VI_CAPTURE=0 vllm serve ...       # capture off (plugin still loaded, no overhead)
+    VLLM_PLUGINS=verilm_capture vllm serve ...
+    VERILM_CAPTURE=1 vllm serve ...       # capture on
+    VERILM_CAPTURE=0 vllm serve ...       # capture off (plugin still loaded, no overhead)
 
 After model loading:
     from verilm import configure_from_model, get_model_from_llm

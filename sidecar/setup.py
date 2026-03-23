@@ -43,7 +43,7 @@ setup(
     install_requires=["torch"],
     entry_points={
         "vllm.general_plugins": [
-            "vi_capture = verilm:register",
+            "verilm_capture = verilm:register",
         ],
     },
     cmdclass={
