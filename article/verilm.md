@@ -44,7 +44,7 @@ Then, at audit time, instead of recomputing the matrix multiply, the verifier ch
 v · x  =?  r^T · z
 ```
 
-If `z` really equals `W @ x`, this equality always holds. If the provider used the wrong weight matrix, it fails except with probability at most `2^-32`.
+All arithmetic is done modulo a prime `p ≥ 2³²`, and `r` is sampled uniformly from this finite field (F_p = Z/pZ). If `z` really equals `W @ x`, the equality always holds. If the provider used the wrong weight matrix, it fails except with probability at most `1/p` — by the Schwartz–Zippel lemma, a nonzero linear form over a finite field vanishes on at most a `1/p` fraction of the domain. With `p ≥ 2³²`, this gives at most `2^-32`.
 
 That matters because transformer inference is mostly weight matrix multiplication. Once you can audit those multiplies cheaply, you can verify the model's identity without rerunning the model.
 

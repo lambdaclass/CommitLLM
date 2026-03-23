@@ -79,10 +79,11 @@ Public. Compute a Merkle root `R_W` over all weight matrices. This is the model'
 
 Verifier. Each verifier independently:
 
-1. For each of the 7 matrix types (Q, K, V, O, gate, up, down), generate a secret random vector `r_j`.
-2. For each layer `i`, precompute `v_j^(i) = r_j^T × W_j^(i)`. This is one matrix-vector multiply per matrix per layer — done once.
-3. Store the verifier key: ~25 MB for Llama 70B.
-4. Delete the weights. The verifier never needs them again.
+1. Fix a prime `p ≥ 2³²`. All Freivalds checks operate modulo `p`: INT8 inputs and INT32 accumulators are lifted into the finite field F_p = Z/pZ.
+2. For each of the 7 matrix types (Q, K, V, O, gate, up, down), sample a secret random vector `r_j` uniformly from F_p.
+3. For each layer `i`, precompute `v_j^(i) = r_j^T × W_j^(i) mod p`. This is one matrix-vector multiply per matrix per layer — done once.
+4. Store the verifier key: ~25 MB for Llama 70B.
+5. Delete the weights. The verifier never needs them again.
 
 The `r_j` vectors are the verifier's secret. If the prover learns them, they can forge passing checks.
 
@@ -132,8 +133,8 @@ For the challenged token `t` at each opened layer `i`, the prover opens:
 The verifier checks:
 
 `(a)` **Freivalds on each weight matrix.**
-`v_j^(i) · x =? r_j^T · z`
-Left side: dot product of precomputed vector with the opened input. Right side: dot product of secret vector with the opened output. Both are `O(n)` — two dot products. If the prover used the wrong weight matrix, the false-accept probability is ≤ `1/2³²`.
+`v_j^(i) · x ≡ r_j^T · z (mod p)`
+Left side: dot product of precomputed vector with the opened input. Right side: dot product of secret vector with the opened output. Both are two dot products in F_p — `O(n)`. If the prover used the wrong weight matrix, the false-accept probability is ≤ `1/p` per matrix. The bound follows from the Schwartz–Zippel lemma: a nonzero linear form over F_p vanishes on at most a `1/p` fraction of inputs. With `p ≥ 2³²`, this gives ≤ `1/2³²`.
 
 This runs on all 7 matrices at the opened layers. Any corruption in any matrix is caught independently.
 

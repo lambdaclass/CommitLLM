@@ -74,7 +74,14 @@ The protocol provides five layers of verification with different guarantee types
 
 == Threat Model
 
-The adversary controls the inference server. They may swap model weights, modify attention computation, fabricate intermediate activations, or lie about earlier context. The adversary does not know which responses will be audited or which tokens within them will be challenged. In the intended deployment, the client's verifier software automatically and randomly audits a small fraction of responses (e.g., 1--5%). Because every response is committed before the provider knows whether it will be challenged, the provider must behave as if any response could be audited.
+The adversary controls the inference server. They may swap model weights, modify attention computation, fabricate intermediate activations, or lie about earlier context. The adversary may cheat adaptively --- choosing different strategies for different responses. The following timing and knowledge constraints apply:
+
++ *Commitment precedes challenge.* The provider sends the receipt ($R_T$, $R_"KV"$, $M$, $N$) before learning whether the response will be audited.
++ *Unpredictable selection.* The provider cannot predict which response, token position, or layer the verifier will challenge.
++ *Secret key.* The verifier holds $r_j$ and $v_j^((i))$ secret; the provider never observes them or the audit decision rule.
++ *Local verification.* The verifier checks locally --- no third party sees the challenge, the opening, or the conversation.
+
+In the intended deployment, the client's verifier software automatically and randomly audits a small fraction of responses (e.g., 1--5%).
 
 The client holds a verifier key ($tilde 25$ MB for Llama 70B) derived from the public model weights and a secret random vector. The client audits responses directly --- no trusted third party sees the conversation. The attester / verifier / relying-party terminology here follows standard remote-attestation usage @birkholz2023rats.
 
@@ -96,7 +103,7 @@ VeriLM is designed around three constraints:
 )[
   *Protocol guarantees at a glance.*
   + *Exact.* Opened-layer model identity ($lt.eq 1\/2^(32)$ false-accept) and commitment binding (hash-immutable after receipt).
-  + *Statistical.* Prefix KV correctness under sampling ($k$ positions checked out of $n$; see notation).
+  + *Statistical.* Prefix KV correctness under sampling ($k$ prefix positions checked).
   + *Approximate.* Attention replay under the FP16$arrow.l.r$FP64 requantization corridor (@sec-attention-gap).
 ]
 
@@ -113,6 +120,7 @@ VeriLM is designed around three constraints:
     [$c, ell$], [Number of challenged tokens; number of opened layers per token],
     [$k$], [Sampled prefix positions for KV provenance],
     [$tau$], [Acceptance threshold for attention replay],
+    [$p$], [Prime modulus for Freivalds checks ($p gt.eq 2^(32)$); arithmetic in $bb(F)_p$],
   ),
   caption: [Notation],
 )
@@ -187,11 +195,13 @@ Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not b
 
 *Public identity.* A Merkle root @merkle1987 $R_W$ is computed over all weight matrices of the published checkpoint. This root is the model's public identity --- anyone can recompute it from the published weights.
 
-*Verifier key generation.* Each verifier independently generates, for each of the 7 matrix types ($W_q$, $W_k$, $W_v$, $W_o$, $W_"gate"$, $W_"up"$, $W_"down"$), a secret random vector $r_j$. For each layer $i$, the verifier precomputes $v_j^((i)) = r_j^T times W_j^((i))$ --- one matrix-vector multiply per matrix per layer, performed once. The resulting verifier key is $tilde 25$ MB for Llama 70B. After precomputation, the verifier deletes the weights. The $r_j$ vectors are the verifier's secret; if the prover learns them, it can forge passing checks.
+*Verifier key generation.* The verifier fixes a prime $p gt.eq 2^(32)$. All Freivalds checks operate in $bb(F)_p = ZZ \/ p ZZ$: INT8 inputs and INT32 accumulators are lifted into this field. For each of the 7 matrix types ($W_q$, $W_k$, $W_v$, $W_o$, $W_"gate"$, $W_"up"$, $W_"down"$), the verifier samples a secret random vector $r_j$ uniformly from $bb(F)_p^m$. For each layer $i$, the verifier precomputes $v_j^((i)) = r_j^T W_j^((i)) mod p$ --- one matrix-vector multiply per matrix per layer, performed once. The resulting verifier key is $tilde 25$ MB for Llama 70B. After precomputation, the verifier deletes the weights. The $r_j$ vectors are the verifier's secret; if the prover learns them, it can forge passing checks.
 
 == Phase 1: Commitment
 
-The provider runs inference normally. The serving path is unchanged except for a tracing layer that captures intermediates alongside execution. For every token at every layer (both prefill and decode), the provider records:
+The provider runs inference normally. The serving path is unchanged except for a tracing layer that captures intermediates alongside execution. In batched serving (e.g., vLLM with paged attention), multiple requests share GPU resources; the tracing layer captures per-request intermediates, extracting per-request activations from the batched computation without modifying the batched kernels.
+
+For every token at every layer (both prefill and decode), the provider records:
 
 - The INT8 input to each of the 7 weight matrices
 - The INT32 accumulator output ($W_"i8" times x_"i8"$, exact)
@@ -224,7 +234,7 @@ The verifier selects $c$ random token positions from the $N$-token response and,
 
 For each challenged token $t$ at each opened layer $i$, the provider opens the INT8 inputs $x_"i8"$, INT32 accumulators $z_"i32"$, per-tensor quantization scales, the residual stream values at the layer boundaries, and the post-attention output $"attn_out_i8"$ --- all with Merkle proofs against $R_T$. The verifier performs four checks:
 
-+ *Freivalds on each weight matrix.* For each of the 7 matrices, the verifier checks $v_j^((i)) dot x eq.quest r_j^T dot z$. Each check is two dot products --- $O(n)$. If the prover used wrong weights, false-accept probability is $lt.eq 1\/2^(32)$ per matrix.
++ *Freivalds on each weight matrix.* For each of the 7 matrices, the verifier checks $v_j^((i)) dot x equiv r_j^T dot z space (mod p)$. Each check is two dot products in $bb(F)_p$ --- $O(n)$. If the prover used wrong weights, false-accept probability is $lt.eq 1\/p$ per matrix. The bound follows from the Schwartz--Zippel lemma: a nonzero linear form over $bb(F)_p$ vanishes on at most a $1\/p$ fraction of inputs.
 
 + *Requantization bridges (exact).* The verifier recomputes the $"i32" arrow.r "i8"$ conversion elementwise from the opened accumulators and quantization scales. This is deterministic integer arithmetic. Without this check, the prover could pass Freivalds (correct $r dot z$) but feed fabricated $"i8"$ values into the next stage.
 
@@ -323,11 +333,25 @@ Audit token $t = 47$ at layers 12 and 13 of a 70B model, sampling $k = 8$ prefix
 
 = Security Analysis
 
-This section maps concrete adversarial strategies to the protocol layers that detect them.
+== Security Game
+
+We formalize model-identity soundness via an interactive game between a challenger $cal(C)$ (verifier) and an adversary $cal(A)$ (provider).
+
+$bold("Game")^("id")_(cal(A))(lambda)$:
+
++ *Setup.* $cal(C)$ publishes weights $W$ and Merkle root $R_W$. $cal(C)$ samples $r_j in.rev bb(F)_p^m$ for each matrix type $j$, precomputes $v_j^((i)) = r_j^T W_j^((i)) mod p$ for every layer $i$. $cal(A)$ receives $W$, $R_W$ but not $r_j$ or $v_j^((i))$.
++ *Commit.* $cal(A)$ receives a prompt, runs inference (using any strategy), and returns a response plus receipt $(R_T, R_"KV", M, N)$.
++ *Challenge.* $cal(C)$ selects $c$ token positions and $ell$ layers per token uniformly at random. $cal(A)$ learns the challenge only now.
++ *Open.* $cal(A)$ opens the trace at challenged positions with Merkle proofs against $R_T$.
++ *Verify.* $cal(C)$ runs Freivalds and bridge checks at every opened position. Outputs accept or reject.
+
+*Definition (Model-identity soundness).* $"Adv"^("id")_(cal(A)) = Pr["Verify accepts" and cal(A) "used" W'_j eq.not W_j "at any opened matrix"]$. The protocol is $epsilon$-sound if $"Adv"^("id")_(cal(A)) lt.eq epsilon$ for all adversaries $cal(A)$.
 
 == Model Swap or Downgrade
 
-*Proposition 1 (Model identity).* _For each opened weight matrix, if the provider used $W' eq.not W$, the Freivalds check rejects with probability $gt.eq 1 - 2^(-32)$. With 7 independently checked matrices per layer, the probability of an altered layer passing all checks is $lt.eq 2^(-224)$._
+*Proposition 1 (Model identity).* _For each opened weight matrix, if the provider used $W'_j^((i)) eq.not W_j^((i))$, the Freivalds check rejects with probability $gt.eq 1 - 1\/p$._
+
+_Proof sketch._ The adversary commits $(x, z)$ via $R_T$ before learning $r_j$. If $z eq.not W_j^((i)) x$ (wrong weights), let $d = W_j^((i)) x - z eq.not 0$. The check $v_j^((i)) dot x equiv r_j^T dot z space (mod p)$ reduces to $r_j^T dot d equiv 0 space (mod p)$. Since $d eq.not 0$ is fixed before $r_j$ is revealed, and $r_j$ is uniform over $bb(F)_p^m$, exactly $p^(m-1)$ of $p^m$ vectors satisfy this linear equation. Thus $Pr["accept"] = 1\/p lt.eq 2^(-32)$. $square$
 
 A single audit of a single token suffices. The guarantee is unconditional --- it does not depend on statistical sampling or threshold calibration.
 
@@ -392,6 +416,19 @@ Related cryptographic ML systems such as Delphi @mishra2020delphi address a diff
 VeriLM makes the opposite tradeoff: verification is interactive (the provider must respond to challenges) and non-transferable (only the verifier who holds the key can check). In exchange, the normal serving path is unchanged and the per-response overhead is a 100-byte receipt. The expensive part --- verification --- only occurs on the small fraction of responses that are audited.
 
 Trusted execution environments (TEEs) and remote attestation provide another alternative @birkholz2023rats @menetrey2022attestation. TEEs can attest that specific code ran on specific hardware, avoiding the overhead of proof systems, but they introduce hardware trust assumptions, limit deployment flexibility, and tie verification to a specific vendor's attestation chain. VeriLM requires no hardware trust beyond standard computation.
+
+#figure(
+  table(
+    columns: (auto, auto, auto, auto, auto),
+    align: (left, left, left, left, center),
+    [*Approach*], [*Provider overhead*], [*Guarantee*], [*Trust assumption*], [*Transf.*],
+    [ZK proofs], [100--1000$times$ prover], [Universal soundness], [None (math)], [Yes],
+    [TEEs], [Attestation HW], [Code identity], [Hardware vendor], [Yes],
+    [Redundant exec.], [2--3$times$ compute], [Output agreement], [Honest majority], [No],
+    [VeriLM], [100 B receipt + rare audits], [Model identity (exact);\ attention (approx.)], [Verifier key secrecy], [No],
+  ),
+  caption: [Comparison of verifiable inference approaches.],
+)
 
 = Limitations and Extensions
 
