@@ -4,6 +4,7 @@ import VerifiedInference.ReadmeKVProvenance
 import VerifiedInference.ApproximateAttentionReplay
 import VerifiedInference.MerkleTree
 import VerifiedInference.HashCommitment
+import VerifiedInference.WeightBinding
 
 /-!
 # Canonical README Protocol
@@ -106,6 +107,23 @@ theorem deployment_manifest_binding
     hash_commitment_binding H _ _ hHash
   exact henc hEnc
 
+/-- Weight openings are bound exactly by the weight root committed in the
+deployment manifest. -/
+theorem manifest_weight_binding
+    (H : HashFunction α) [CollisionResistant H]
+    (manifest : DeploymentManifest α)
+    (weight₁ weight₂ : α)
+    (leaf₁ leaf₂ : α)
+    (hLeaf₁ : leaf₁ = H.hash weight₁)
+    (hLeaf₂ : leaf₂ = H.hash weight₂)
+    (siblings : List α) (idx : Nat)
+    (hVerify₁ : verifyMerkleRec H leaf₁ siblings idx = manifest.weightRoot)
+    (hVerify₂ : verifyMerkleRec H leaf₂ siblings idx = manifest.weightRoot) :
+    weight₁ = weight₂ := by
+  exact end_to_end_weight_binding
+    H manifest.weightRoot weight₁ weight₂ leaf₁ leaf₂
+    hLeaf₁ hLeaf₂ siblings idx hVerify₁ hVerify₂
+
 /-- A canonical accepted audit exposes the exact shell as a separately exact
 guarantee, matching the README composition table. -/
 theorem canonical_audit_exact_shell
@@ -129,5 +147,35 @@ theorem canonical_audit_attention_replay
     (hAccept : canonicalAuditAccepts checks) :
     checks.crossLayerConsistency ∧ checks.attentionReplay := by
   exact ⟨hAccept.2.2.2.1, hAccept.2.2.2.2⟩
+
+/-- Exact opened-layer model identity in the canonical README protocol:
+trace openings are bound by `R_T`, the deployment manifest is bound by the
+receipt hash, and the opened shell exposes the exact Freivalds-checked weight
+matmuls for that slice. -/
+theorem canonical_opened_layer_model_identity_exact
+    (H : HashFunction α) [CollisionResistant H]
+    (checks : CanonicalAuditChecks α β)
+    (hAccept : canonicalAuditAccepts checks)
+    (traceLeaf₁ traceLeaf₂ : α)
+    (traceSiblings : List α) (traceIdx : Nat)
+    (hTrace₁ : verifyMerkleRec H traceLeaf₁ traceSiblings traceIdx = checks.receipt.traceRoot)
+    (hTrace₂ : verifyMerkleRec H traceLeaf₂ traceSiblings traceIdx = checks.receipt.traceRoot)
+    (encodeManifest : DeploymentManifest α → α)
+    (henc : Function.Injective encodeManifest)
+    (manifestCandidate : DeploymentManifest α)
+    (hReceiptManifest :
+      checks.receipt.manifestHash = H.hash (encodeManifest checks.manifest))
+    (hCandidateManifest :
+      checks.receipt.manifestHash = H.hash (encodeManifest manifestCandidate)) :
+    traceLeaf₁ = traceLeaf₂ ∧
+    checks.manifest = manifestCandidate ∧
+    checks.exactShell.weightFreivaldsHold := by
+  refine ⟨?_, ?_, ?_⟩
+  · exact receipt_trace_binding
+      H checks.receipt traceLeaf₁ traceLeaf₂ traceSiblings traceIdx hTrace₁ hTrace₂
+  · exact deployment_manifest_binding
+      H encodeManifest henc checks.manifest manifestCandidate
+      (by rw [← hReceiptManifest, hCandidateManifest])
+  · exact exact_shell_implies_model_identity_on_opened_slice checks.exactShell hAccept.1
 
 end VerifiedInference

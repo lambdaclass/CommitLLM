@@ -55,6 +55,35 @@ structure ApproximateReplayWitness (n : Nat) where
   committedMatchesServed : committed = honestServed
   replayMatchesServedOutside : quantizedAgreementOutside unstable replayed honestServed
 
+/-- Explicit assumption boundary for the README replay layer.
+
+This is the piece the protocol does not try to prove from first principles:
+measurements or calibration establish that an honest serving implementation
+differs from the verifier's FP64 replay only on a bounded set of unstable
+coordinates. -/
+structure ReplayCalibrationAssumption (n : Nat) where
+  corridor : ReplayCorridor
+  replayed : Fin n → Int
+  honestServed : Fin n → Int
+  committed : Fin n → Int
+  unstable : Finset (Fin n)
+  committedMatchesServed : committed = honestServed
+  replayMatchesServedOutside : quantizedAgreementOutside unstable replayed honestServed
+  unstableWithinCorridor : unstable.card ≤ corridor.maxDisagreements
+
+/-- A replay calibration assumption packages directly into the README replay
+witness used by the top-level protocol theorem. -/
+def ReplayCalibrationAssumption.toWitness
+    {n : Nat}
+    (a : ReplayCalibrationAssumption n) :
+    ApproximateReplayWitness n :=
+  { replayed := a.replayed
+    honestServed := a.honestServed
+    committed := a.committed
+    unstable := a.unstable
+    committedMatchesServed := a.committedMatchesServed
+    replayMatchesServedOutside := a.replayMatchesServedOutside }
+
 /-- Exact agreement is always accepted, regardless of the corridor. -/
 theorem approximate_replay_accepts_of_equal {n : Nat}
     (corridor : ReplayCorridor)
@@ -119,6 +148,14 @@ theorem ApproximateReplayWitness.accepts
   exact approximate_replay_accepts_of_agreementOutside
     corridor w.replayed w.honestServed w.committed w.unstable
     w.committedMatchesServed w.replayMatchesServedOutside hBound
+
+/-- An explicit replay calibration assumption suffices to justify replay
+acceptance. This keeps the floating-point boundary assumption named and local. -/
+theorem ReplayCalibrationAssumption.accepts
+    {n : Nat}
+    (a : ReplayCalibrationAssumption n) :
+    approximateReplayAccepts a.corridor a.replayed a.committed := by
+  exact (a.toWitness).accepts a.corridor a.unstableWithinCorridor
 
 /-- Acceptance proves only bounded disagreement with the replayed output on the
 committed prefix, not semantic correctness of unsampled earlier-token state. -/

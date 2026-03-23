@@ -113,6 +113,14 @@ def LayerState.wellFormed (ls : LayerState) (hiddenDim ffnDim : ℕ)
   ls.h.length = ffnDim ∧
   ls.ffnOut.length = hiddenDim
 
+/-- Elementwise INT8 requantization of a list of accumulator values. -/
+def requantizeList (xs : List ℤ) : List ℤ :=
+  xs.map clampI8
+
+@[simp] theorem requantizeList_length (xs : List ℤ) :
+    (requantizeList xs).length = xs.length := by
+  simp [requantizeList]
+
 /-! ## Cross-Layer Chain Predicate -/
 
 /-- Intra-layer chain: xFfn = clamp(attnOut) element-wise. -/
@@ -124,6 +132,76 @@ def intraLayerChainValid (ls : LayerState) : Prop :=
 def interLayerChainValid (prev next : LayerState) : Prop :=
   ∀ (i : Fin prev.ffnOut.length) (h : i.val < next.xAttn.length),
     next.xAttn.get ⟨i.val, h⟩ = clampI8 (prev.ffnOut.get i)
+
+/-- If the opened FFN input is literally the requantized attention output,
+then the intra-layer chain check holds. -/
+theorem intraLayerChainValid_of_eq_requantizeList
+    (ls : LayerState)
+    (hEq : ls.xFfn = requantizeList ls.attnOut) :
+    intraLayerChainValid ls := by
+  intro i h
+  have hReq : i.val < (requantizeList ls.attnOut).length := by
+    simpa [hEq, requantizeList] using h
+  calc
+    ls.xFfn.get ⟨i.val, h⟩ = (requantizeList ls.attnOut).get ⟨i.val, hReq⟩ := by
+      simpa [hEq]
+    _ = clampI8 (ls.attnOut.get i) := by
+      simpa [requantizeList] using
+        (List.getElem_map (f := clampI8) (l := ls.attnOut) (n := i.val) (h := i.isLt))
+
+/-- With matching lengths, the intra-layer chain check is equivalent to the
+opened FFN input being the elementwise requantization of the attention output. -/
+theorem intraLayerChainValid_eq_requantizeList
+    (ls : LayerState)
+    (hLen : ls.xFfn.length = ls.attnOut.length)
+    (hValid : intraLayerChainValid ls) :
+    ls.xFfn = requantizeList ls.attnOut := by
+  apply List.ext_getElem
+  · simpa [requantizeList] using hLen
+  · intro n hnX hnReq
+    let i : Fin ls.attnOut.length := ⟨n, by simpa [requantizeList] using hnReq⟩
+    have hChain : ls.xFfn[n]'hnX = clampI8 (ls.attnOut.get i) :=
+      hValid i hnX
+    calc
+      ls.xFfn[n]'hnX = clampI8 (ls.attnOut.get i) := hChain
+      _ = (requantizeList ls.attnOut)[n]'hnReq := by
+        simpa [requantizeList, i] using
+          (List.getElem_map_rev (f := clampI8) (l := ls.attnOut) (n := n) (h := i.isLt))
+
+/-- If the next layer's attention input is literally the requantized previous
+FFN output, then the inter-layer chain check holds. -/
+theorem interLayerChainValid_of_eq_requantizeList
+    (prev next : LayerState)
+    (hEq : next.xAttn = requantizeList prev.ffnOut) :
+    interLayerChainValid prev next := by
+  intro i h
+  have hReq : i.val < (requantizeList prev.ffnOut).length := by
+    simpa [hEq, requantizeList] using h
+  calc
+    next.xAttn.get ⟨i.val, h⟩ = (requantizeList prev.ffnOut).get ⟨i.val, hReq⟩ := by
+      simpa [hEq]
+    _ = clampI8 (prev.ffnOut.get i) := by
+      simpa [requantizeList] using
+        (List.getElem_map (f := clampI8) (l := prev.ffnOut) (n := i.val) (h := i.isLt))
+
+/-- With matching lengths, the inter-layer chain check is equivalent to the
+next layer consuming the elementwise requantized previous FFN output. -/
+theorem interLayerChainValid_eq_requantizeList
+    (prev next : LayerState)
+    (hLen : next.xAttn.length = prev.ffnOut.length)
+    (hValid : interLayerChainValid prev next) :
+    next.xAttn = requantizeList prev.ffnOut := by
+  apply List.ext_getElem
+  · simpa [requantizeList] using hLen
+  · intro n hnX hnReq
+    let i : Fin prev.ffnOut.length := ⟨n, by simpa [requantizeList] using hnReq⟩
+    have hChain : next.xAttn[n]'hnX = clampI8 (prev.ffnOut.get i) :=
+      hValid i hnX
+    calc
+      next.xAttn[n]'hnX = clampI8 (prev.ffnOut.get i) := hChain
+      _ = (requantizeList prev.ffnOut)[n]'hnReq := by
+        simpa [requantizeList, i] using
+          (List.getElem_map_rev (f := clampI8) (l := prev.ffnOut) (n := n) (h := i.isLt))
 
 /-- SiLU check for one layer: h[i] = computeH(lut, g[i], u[i]). -/
 def siluLayerValid (lut : Fin 256 -> ℤ) (ls : LayerState) : Prop :=
@@ -153,6 +231,74 @@ def crossLayerChainValid {nLayers : ℕ} (layers : Fin nLayers -> LayerState) : 
   -- Inter-layer chain: consecutive layers linked by clamp(ffnOut)
   (∀ (i : Fin nLayers) (hi : i.val + 1 < nLayers),
     interLayerChainValid (layers i) (layers ⟨i.val + 1, hi⟩))
+
+/-- A well-formed cross-layer trace determines the requantized bridge values
+between the opened attention and FFN subpaths. -/
+theorem crossLayerChainValid_requantized_links
+    {nLayers hiddenDim ffnDim : ℕ}
+    {hH : 0 < hiddenDim} {hF : 0 < ffnDim}
+    (layers : Fin nLayers → LayerState)
+    (hWell : ∀ i : Fin nLayers, (layers i).wellFormed hiddenDim ffnDim hH hF)
+    (hValid : crossLayerChainValid layers) :
+    (∀ i : Fin nLayers, (layers i).xFfn = requantizeList (layers i).attnOut) ∧
+    (∀ (i : Fin nLayers) (hi : i.val + 1 < nLayers),
+      (layers ⟨i.val + 1, hi⟩).xAttn = requantizeList (layers i).ffnOut) := by
+  rcases hValid with ⟨hIntra, hInter⟩
+  refine ⟨?_, ?_⟩
+  · intro i
+    rcases hWell i with ⟨_, _, hAttnOut, hXFfn, _, _, _, _⟩
+    exact intraLayerChainValid_eq_requantizeList
+      (layers i) (hXFfn.trans hAttnOut.symm) (hIntra i)
+  · intro i hi
+    rcases hWell i with ⟨_, _, _, _, _, _, _, hFfnOut⟩
+    rcases hWell ⟨i.val + 1, hi⟩ with ⟨hXAttn, _, _, _, _, _, _, _⟩
+    exact interLayerChainValid_eq_requantizeList
+      (layers i) (layers ⟨i.val + 1, hi⟩)
+      (hXAttn.trans hFfnOut.symm) (hInter i hi)
+
+/-- Two intra-layer traces with the same opened attention output must have the
+same requantized FFN input, provided both satisfy the chain check. -/
+theorem xFfn_eq_of_attnOut_eq
+    {hiddenDim ffnDim : ℕ}
+    {hH : 0 < hiddenDim} {hF : 0 < ffnDim}
+    {ls₁ ls₂ : LayerState}
+    (hWell₁ : ls₁.wellFormed hiddenDim ffnDim hH hF)
+    (hWell₂ : ls₂.wellFormed hiddenDim ffnDim hH hF)
+    (hValid₁ : intraLayerChainValid ls₁)
+    (hValid₂ : intraLayerChainValid ls₂)
+    (hAttn : ls₁.attnOut = ls₂.attnOut) :
+    ls₁.xFfn = ls₂.xFfn := by
+  rcases hWell₁ with ⟨_, _, hAttnOut₁, hXFfn₁, _, _, _, _⟩
+  rcases hWell₂ with ⟨_, _, hAttnOut₂, hXFfn₂, _, _, _, _⟩
+  rw [intraLayerChainValid_eq_requantizeList
+        ls₁ (hXFfn₁.trans hAttnOut₁.symm) hValid₁,
+      intraLayerChainValid_eq_requantizeList
+        ls₂ (hXFfn₂.trans hAttnOut₂.symm) hValid₂,
+      hAttn]
+
+/-- Two consecutive-layer openings with the same previous FFN output must have
+the same next attention input, provided both satisfy the inter-layer check. -/
+theorem xAttn_eq_of_prevFfnOut_eq
+    {hiddenDim ffnDim : ℕ}
+    {hH : 0 < hiddenDim} {hF : 0 < ffnDim}
+    {prev₁ prev₂ next₁ next₂ : LayerState}
+    (hPrev₁ : prev₁.wellFormed hiddenDim ffnDim hH hF)
+    (hPrev₂ : prev₂.wellFormed hiddenDim ffnDim hH hF)
+    (hNext₁ : next₁.wellFormed hiddenDim ffnDim hH hF)
+    (hNext₂ : next₂.wellFormed hiddenDim ffnDim hH hF)
+    (hValid₁ : interLayerChainValid prev₁ next₁)
+    (hValid₂ : interLayerChainValid prev₂ next₂)
+    (hFfnOut : prev₁.ffnOut = prev₂.ffnOut) :
+    next₁.xAttn = next₂.xAttn := by
+  rcases hPrev₁ with ⟨_, _, _, _, _, _, _, hFfnOut₁⟩
+  rcases hPrev₂ with ⟨_, _, _, _, _, _, _, hFfnOut₂⟩
+  rcases hNext₁ with ⟨hXAttn₁, _, _, _, _, _, _, _⟩
+  rcases hNext₂ with ⟨hXAttn₂, _, _, _, _, _, _, _⟩
+  rw [interLayerChainValid_eq_requantizeList
+        prev₁ next₁ (hXAttn₁.trans hFfnOut₁.symm) hValid₁,
+      interLayerChainValid_eq_requantizeList
+        prev₂ next₂ (hXAttn₂.trans hFfnOut₂.symm) hValid₂,
+      hFfnOut]
 
 /-- Intra-layer chain validity WITH explicit length requirement.
     When lengths match, the predicate is non-vacuous. -/

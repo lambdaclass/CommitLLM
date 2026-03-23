@@ -119,6 +119,25 @@ theorem sampled_prefix_tampering_caught
       hShellTruth hAnchored
   exact hTampered (hSemantic idx hIdx)
 
+/-- The verifier detects prefix tampering whenever its sampled set intersects a
+tampered position. -/
+def sampledHitsTampered (tampered : Finset Nat) (sampled : List Nat) : Prop :=
+  ∃ idx : Nat, idx ∈ sampled ∧ idx ∈ tampered
+
+/-- A packaged sampled-prefix witness rejects any tampering scenario that hits
+one of the sampled prefix positions. -/
+theorem SampledPrefixWitness.rejects_if_sampled_tampered
+    (w : SampledPrefixWitness β)
+    (tampered : Finset Nat)
+    (hTampered : ∀ idx : Nat, idx ∈ tampered → w.truthful idx ≠ w.opened idx)
+    (hHit : sampledHitsTampered tampered w.sampled) :
+    False := by
+  rcases hHit with ⟨idx, hSampled, hTamperedIdx⟩
+  exact sampled_prefix_tampering_caught
+    w.truthful w.shellVerified w.opened w.sampled
+    w.shellMatchesTruth w.openedMatchesShell hSampled
+    (hTampered idx hTamperedIdx)
+
 /-- README detection probability for `m` tampered positions out of `n`
 prefix positions when the verifier samples `k` positions. -/
 noncomputable def catchProbability (m n k : Nat) : ℝ :=
@@ -128,5 +147,23 @@ noncomputable def catchProbability (m n k : Nat) : ℝ :=
 `P(catch) = 1 - (1 - m / n)^k`. -/
 theorem catchProbability_readme_formula (m n k : Nat) :
     catchProbability m n k = 1 - (1 - (m : ℝ) / (n : ℝ)) ^ k := rfl
+
+/-- README-native statistical statement for sampled KV provenance:
+if the sample hits a tampered prefix position, rejection is exact, and the
+probability of such a hit is the README formula instantiated with the number
+of tampered positions and the sample size. -/
+theorem SampledPrefixWitness.statistical_detection_theorem
+    (w : SampledPrefixWitness β)
+    (tampered : Finset Nat)
+    (prefixLength : Nat)
+    (hTampered : ∀ idx : Nat, idx ∈ tampered → w.truthful idx ≠ w.opened idx) :
+    (sampledHitsTampered tampered w.sampled → False) ∧
+    catchProbability tampered.card prefixLength w.sampled.length =
+      1 - (1 - (tampered.card : ℝ) / (prefixLength : ℝ)) ^ w.sampled.length := by
+  refine ⟨?_, ?_⟩
+  · intro hHit
+    exact w.rejects_if_sampled_tampered tampered hTampered hHit
+  · exact catchProbability_readme_formula
+      tampered.card prefixLength w.sampled.length
 
 end VerifiedInference
