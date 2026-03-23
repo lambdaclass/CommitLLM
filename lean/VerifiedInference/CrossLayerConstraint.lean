@@ -47,4 +47,34 @@ theorem cross_layer_pins_requantized_output {hiddenDim : ℕ}
   -- Both equal nextInput i, so they equal each other.
   exact (h₁ i).symm.trans (h₂ i)
 
+/-! ## Adversarial Counting -/
+
+/-- The cross-layer constraint uniquely determines `nextInput` from `wo_times_a` and `residual`.
+    Security implication: an adversary who observes the residual stream and the next-layer input
+    has no freedom — the requantized value is fully pinned and cannot be manipulated by choosing
+    a different `nextInput` while keeping the same `wo_times_a` and `residual`. -/
+theorem cross_layer_determines_next_input {hiddenDim : ℕ}
+    (wo_times_a residual : Fin hiddenDim → ℤ) :
+    ∃! nextInput, crossLayerConstraint wo_times_a residual nextInput :=
+  ⟨fun i => clampI8 (wo_times_a i + residual i),
+   fun _ => rfl,
+   fun next hNext => funext fun i => hNext i⟩
+
+/-- In the interior of the INT8 range (strictly between -128 and 127), two pre-activations that
+    produce the same clamped output must have identical sums with the residual.
+    Security implication: when the output is not at a saturation boundary, the adversary cannot
+    find two distinct `wo_times_a` values that collide after INT8 clamping — the preimage
+    width is exactly one, giving no adversarial slack to forge activations. -/
+theorem cross_layer_preimage_width {hiddenDim : ℕ}
+    (residual nextInput : Fin hiddenDim → ℤ)
+    (i : Fin hiddenDim)
+    (hInterior : -128 < nextInput i ∧ nextInput i < 127) :
+    ∀ a₁ a₂ : ℤ,
+      clampI8 (a₁ + residual i) = nextInput i →
+      clampI8 (a₂ + residual i) = nextInput i →
+      a₁ + residual i = a₂ + residual i := by
+  intro a₁ a₂ h₁ h₂
+  unfold clampI8 at h₁ h₂
+  omega
+
 end VerifiedInference

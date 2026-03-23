@@ -27,3 +27,5 @@ import VerifiedInference.GameToFreivalds
 import VerifiedInference.ModelIdentitySoundness
 import VerifiedInference.CanonicalOps
 import VerifiedInference.CrossLayerConstraint
+import VerifiedInference.EndToEnd
+import VerifiedInference.IndependentChecks

@@ -2,6 +2,7 @@ import Mathlib.Data.ZMod.Basic
 import Mathlib.Data.Fintype.BigOperators
 import Mathlib.Tactic.Linarith
 import VerifiedInference.Basic
+import VerifiedInference.AccumulatorBound
 
 /-!
 # Protocol Parameters and Integer-to-Field Lifting
@@ -112,5 +113,25 @@ theorem integer_cheating_implies_field_cheating
   rw [← lift_dotProduct_commutes] at hrow
   -- Apply injectivity to conclude the integer values agree
   exact liftInt_injective_on_int32 (z_int i) (∑ j, W i j * x j) (hz i) (hdot i) hrow
+
+/-- Combined bridge: if weights and inputs are INT8 and the dimension
+    satisfies the accumulator bound, integer cheating implies field cheating.
+    Eliminates the need for callers to separately prove isInt32 on the dot product. -/
+theorem int8_cheating_implies_field_cheating
+    {m n : ℕ}
+    (W : Fin m → Fin n → ℤ) (x : Fin n → ℤ) (z_int : Fin m → ℤ)
+    (hW : ∀ i j, isInt8 (W i j))
+    (hx : ∀ j, isInt8 (x j))
+    (hz : ∀ i, isInt32 (z_int i))
+    (hn : n * 16384 < 2147483648)
+    (hcheat : z_int ≠ (fun i => ∑ j, W i j * x j)) :
+    (fun i => (↑(z_int i) : ZMod protocolPrime)) ≠
+    (fun i => ∑ j, (↑(W i j) : ZMod protocolPrime) * ↑(x j)) :=
+  integer_cheating_implies_field_cheating W x z_int
+    (fun i j => ⟨by linarith [(hW i j).1], by linarith [(hW i j).2]⟩)
+    (fun j => ⟨by linarith [(hx j).1], by linarith [(hx j).2]⟩)
+    hz
+    (fun i => accumulator_bound_sufficient n hn _ _ (hW i) hx)
+    hcheat
 
 end VerifiedInference
