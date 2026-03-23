@@ -1,4 +1,4 @@
-.PHONY: paper paper-watch paper-clean paper-stamp
+.PHONY: paper paper-watch paper-clean paper-stamp lean-build lean-clean
 
 paper:
 	typst compile paper/main.typ paper/main.pdf
@@ -11,3 +11,9 @@ paper-stamp: paper
 
 paper-clean:
 	rm -f paper/main.pdf paper/main.pdf.ots
+
+lean-build:
+	cd lean && lake build
+
+lean-clean:
+	rm -rf lean/.lake/build

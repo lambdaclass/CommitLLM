@@ -13,7 +13,12 @@
       in
       {
         devShells.default = pkgs.mkShell {
-          buildInputs = [ pkgs.typst pkgs.opentimestamps-client ];
+          buildInputs = [
+            pkgs.elan
+            pkgs.git
+            pkgs.opentimestamps-client
+            pkgs.typst
+          ];
         };
       });
 }
