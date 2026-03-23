@@ -21,13 +21,23 @@ The foundation everything else builds on.
   - Attention replay (FP64)
   - KV provenance sampling
   - Cross-layer consistency checks
+- [ ] **Client SDKs** — Python and TypeScript libraries for verifying receipts (wrapping the Rust core)
 
 ### 2.2 Tracing Plugins
 - [ ] **vLLM tracing plugin** — Sidecar that captures intermediates and emits 100-byte receipts
 - [ ] **llama.cpp tracing plugin** — Same for llama.cpp deployments
+- [ ] **Fine-tuned models / LoRA support** — How to handle adapters (separate commitment vs merged weights)
 
 ### 2.3 Formal Verification
 - [ ] **Formalization in Lean** — Prove correctness of Freivalds implementation and protocol composition
+
+### 2.4 Testing & Quality
+- [ ] **Property-based test suite** — Cheat detection should always catch manipulation; fuzzing the verifier
+- [ ] **Batch verification** — Optimizations for verifying many receipts (e.g., a day's traffic)
+
+### 2.5 Standardization
+- [ ] **Receipt format spec** — Documented schema for the 100-byte receipt and all commitment structures
+- [ ] **API extensions** — OpenAI-compatible `receipt` field in response headers/metadata
 
 ## 3. Launch & Documentation
 
