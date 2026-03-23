@@ -2,6 +2,7 @@ target/
 *.vkey
 *.vtrace
 .cache/
+.direnv/
 models/
 
 # Python
