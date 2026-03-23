@@ -71,7 +71,7 @@ VeriLM takes a different approach: a lightweight sidecar protocol that runs alon
 
 The protocol provides five layers of verification with different guarantee types, ranging from exact cryptographic checks on weight matrices to statistical sampling of prefix history.
 
-= Protocol Overview
+= System Model
 
 == Threat Model
 
@@ -191,6 +191,26 @@ This pins the attention output to a specific computation over the committed valu
 
 *Limitations.* The replay proves consistency with the _committed_ prefix, not necessarily with true execution at every earlier token. Prefix KV values are commitment-verified (they match $R_"KV"$) but only statistically anchored to real computation via the sampled shell checks in Step 3. The replay also cannot match the GPU's FP16 attention exactly --- the verifier's FP64 reference will differ slightly near quantization bucket boundaries.
 
+#figure(
+  table(
+    columns: (auto, auto),
+    align: (left, left),
+    [*Operation*], [*Verification*],
+    [Input embedding], [Table lookup (exact)],
+    [$W_q, W_k, W_v$ (INT8)], [Freivalds],
+    [Requantize i32 $arrow.r$ i8], [Exact recomputation],
+    [RoPE on $Q$, $K$], [Exact recomputation],
+    [Attention], [Replay + cross-layer],
+    [$W_o$ (INT8)], [Freivalds],
+    [RMSNorm], [Canonical recomputation],
+    [$W_"gate"$, $W_"up"$ (INT8)], [Freivalds],
+    [SiLU $dot.o$ up], [256-entry LUT + exact],
+    [$W_"down"$ (INT8)], [Freivalds],
+    [LM head], [Freivalds],
+  ),
+  caption: [Per-layer verification methods],
+)
+
 = Security Analysis
 
 This section maps concrete adversarial strategies to the protocol layers that detect them.
@@ -242,28 +262,6 @@ Only post-attention INT8 outputs and the associated per-tensor quantization scal
 With a short audit window (1--2 minutes), traces fit in a RAM ring buffer with no disk I/O. For Llama 70B on 4$times$ H100, write rate is $tilde 1.3$ GB/s, requiring $tilde 315$ GB ($tilde 16%$ of 2 TB system RAM) for a 2-minute window. Longer windows spill to NVMe or networked storage.
 
 Short audit windows require automated auditing --- the client's audit decision must be programmatic.
-
-= What Gets Verified
-
-#figure(
-  table(
-    columns: (auto, auto),
-    align: (left, left),
-    [*Operation*], [*Verification*],
-    [Input embedding], [Table lookup (exact)],
-    [$W_q, W_k, W_v$ (INT8)], [Freivalds],
-    [Requantize i32 $arrow.r$ i8], [Exact recomputation],
-    [RoPE on $Q$, $K$], [Exact recomputation],
-    [Attention], [Replay + cross-layer],
-    [$W_o$ (INT8)], [Freivalds],
-    [RMSNorm], [Canonical recomputation],
-    [$W_"gate"$, $W_"up"$ (INT8)], [Freivalds],
-    [SiLU $dot.o$ up], [256-entry LUT + exact],
-    [$W_"down"$ (INT8)], [Freivalds],
-    [LM head], [Freivalds],
-  ),
-  caption: [Per-layer verification methods],
-)
 
 = Related Work
 
