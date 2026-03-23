@@ -350,7 +350,7 @@ $bold("Game")^("id")_(cal(A))(lambda)$:
 
 == Model Swap or Downgrade
 
-*Proposition 1 (Model identity).* _For each opened weight matrix, if the provider used $W'_j^((i)) eq.not W_j^((i))$, the Freivalds check rejects with probability $gt.eq 1 - 1\/p$._
+*Proposition 1 (Model identity).* _For each Freivalds-checked matrix, if the provider used $W'_j^((i)) eq.not W_j^((i))$, the Freivalds check rejects with probability $gt.eq 1 - 1\/p$._
 
 _Proof sketch._ The adversary commits $(x, z)$ via $R_T$ before learning $r_j$. If $z eq.not W_j^((i)) x$ (wrong weights), let $d = W_j^((i)) x - z eq.not 0$. The check $v_j^((i)) dot x equiv r_j^T dot z space (mod p)$ reduces to $r_j^T dot d equiv 0 space (mod p)$. Since $d eq.not 0$ is fixed before $r_j$ is revealed, and $r_j$ is uniform over $bb(F)_p^m$, exactly $p^(m-1)$ of $p^m$ vectors satisfy this linear equation. Thus $Pr["accept"] = 1\/p lt.eq 2^(-32)$. $square$
 
