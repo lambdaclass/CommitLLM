@@ -59,6 +59,9 @@ class VerifiedInferenceServer:
         # Extract model geometry for manifest.
         cfg = getattr(model, "config", None)
         self._tokenizer_hash = self._compute_tokenizer_hash(llm)
+        self._weight_hash = None      # TODO: compute from model weights
+        self._quant_hash = None        # TODO: compute from quantization config
+        self._system_prompt_hash = None  # Set via configure_system_prompt()
 
         self.buf = get_capture_buffer()
         self._audit_store: Dict[str, dict] = {}
@@ -149,7 +152,7 @@ class VerifiedInferenceServer:
         for token_layers in traces:
             layer_dicts = []
             for lt in token_layers:
-                layer_dicts.append({
+                d = {
                     "x_attn": lt["x_attn"].to(torch.int8).cpu().numpy().tolist(),
                     "q": lt["q"].to(torch.int32).cpu().numpy().tolist(),
                     "k": lt["k"].to(torch.int32).cpu().numpy().tolist(),
@@ -163,7 +166,17 @@ class VerifiedInferenceServer:
                     "ffn_out": lt["ffn_out"].to(torch.int32).cpu().numpy().tolist(),
                     "kv_cache_k": [t.to(torch.int8).cpu().numpy().tolist() for t in lt.get("kv_cache_k", [])],
                     "kv_cache_v": [t.to(torch.int8).cpu().numpy().tolist() for t in lt.get("kv_cache_v", [])],
-                })
+                }
+                # Pass activation scales when available (production W8A8 path).
+                if "qkv_scale" in lt:
+                    d["scale_x_attn"] = float(lt["qkv_scale"].item()) if lt["qkv_scale"].numel() == 1 else float(lt["qkv_scale"].max().item())
+                if "o_scale" in lt:
+                    d["scale_a"] = float(lt["o_scale"].item()) if lt["o_scale"].numel() == 1 else float(lt["o_scale"].max().item())
+                if "gu_scale" in lt:
+                    d["scale_x_ffn"] = float(lt["gu_scale"].item()) if lt["gu_scale"].numel() == 1 else float(lt["gu_scale"].max().item())
+                if "d_scale" in lt:
+                    d["scale_h"] = float(lt["d_scale"].item()) if lt["d_scale"].numel() == 1 else float(lt["d_scale"].max().item())
+                layer_dicts.append(d)
             trace_dicts.append(layer_dicts)
 
         # Build manifest.
@@ -173,6 +186,9 @@ class VerifiedInferenceServer:
             "top_k": top_k,
             "top_p": top_p,
             "eos_policy": "stop",
+            "weight_hash": self._weight_hash,
+            "quant_hash": self._quant_hash,
+            "system_prompt_hash": self._system_prompt_hash,
         }
 
         # Commit via Rust.

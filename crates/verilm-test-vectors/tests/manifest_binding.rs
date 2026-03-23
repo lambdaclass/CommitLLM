@@ -15,6 +15,7 @@ fn toy_config() -> verilm_core::constants::ModelConfig {
         n_kv_heads: 2,
         d_head: 4,
         vocab_size: 32,
+        rope_theta: 10000.0,
     }
 }
 
@@ -25,6 +26,9 @@ fn sample_manifest() -> DeploymentManifest {
         top_k: 50,
         top_p: 0.9,
         eos_policy: "stop".into(),
+        weight_hash: None,
+        quant_hash: None,
+        system_prompt_hash: None,
     }
 }
 

@@ -229,6 +229,7 @@ pub fn detect_config(dir: &Path) -> Result<ModelConfig> {
         n_q_heads,
         n_kv_heads,
         vocab_size: 0,
+        rope_theta: 10000.0,
     };
 
     eprintln!(
@@ -347,6 +348,10 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         max_v_norm: 0.0,
         lm_head: None,
         weight_hash: Some(weight_hash),
+        rmsnorm_attn_weights: Vec::new(),
+        rmsnorm_ffn_weights: Vec::new(),
+        weight_scales: Vec::new(),
+        rmsnorm_eps: 1e-5,
     })
 }
 

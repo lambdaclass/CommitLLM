@@ -158,6 +158,10 @@ mod tests {
             max_v_norm: 0.0,
             lm_head: None,
             weight_hash: None,
+            rmsnorm_attn_weights: Vec::new(),
+            rmsnorm_ffn_weights: Vec::new(),
+            weight_scales: Vec::new(),
+            rmsnorm_eps: 1e-5,
         };
         let data = serialize_key(&key);
         let key2 = deserialize_key(&data).unwrap();
@@ -184,6 +188,10 @@ mod tests {
                 ffn_out: vec![24i32, 25, 26],
                 kv_cache_k: Vec::new(),
                 kv_cache_v: Vec::new(),
+                scale_x_attn: None,
+                scale_a: None,
+                scale_x_ffn: None,
+                scale_h: None,
             }],
             merkle_root: [0xbb; 32],
             merkle_proof: MerkleProof {
@@ -234,6 +242,10 @@ mod tests {
             ffn_out: vec![24i32, 25, 26],
             kv_cache_k: Vec::new(),
             kv_cache_v: Vec::new(),
+            scale_x_attn: None,
+            scale_a: None,
+            scale_x_ffn: None,
+            scale_h: None,
         };
 
         // Verify reconstruction matches
@@ -318,6 +330,10 @@ mod tests {
             ffn_out: vec![24i32, 25, 26],
             kv_cache_k: vec![vec![1i8, 2]],
             kv_cache_v: vec![vec![3i8, 4]],
+            scale_x_attn: None,
+            scale_a: None,
+            scale_x_ffn: None,
+            scale_h: None,
         };
 
         let resp = AuditResponse {

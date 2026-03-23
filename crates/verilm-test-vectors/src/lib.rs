@@ -172,6 +172,10 @@ pub fn forward_pass(cfg: &ModelConfig, model: &[LayerWeights], input: &[i8]) -> 
             ffn_out,
             kv_cache_k: Vec::new(),
             kv_cache_v: Vec::new(),
+            scale_x_attn: None,
+            scale_a: None,
+            scale_x_ffn: None,
+            scale_h: None,
         });
     }
 
@@ -278,6 +282,10 @@ pub fn forward_pass_multi(
                 x_attn, q, k, v, a, attn_out, x_ffn, g, u, h, ffn_out,
                 kv_cache_k: Vec::new(),
                 kv_cache_v: Vec::new(),
+                scale_x_attn: None,
+                scale_a: None,
+                scale_x_ffn: None,
+                scale_h: None,
             });
         }
 
@@ -385,6 +393,10 @@ pub fn forward_pass_autoregressive(
                 x_attn, q, k, v, a, attn_out, x_ffn, g, u, h, ffn_out,
                 kv_cache_k: Vec::new(),
                 kv_cache_v: Vec::new(),
+                scale_x_attn: None,
+                scale_a: None,
+                scale_x_ffn: None,
+                scale_h: None,
             });
         }
 
@@ -434,6 +446,10 @@ pub fn forward_pass_level_c(cfg: &ModelConfig, model: &[LayerWeights], input: &[
             x_attn, q, k, v, a, attn_out, x_ffn, g, u, h, ffn_out,
             kv_cache_k: vec![k_i8],
             kv_cache_v: vec![v_i8],
+            scale_x_attn: None,
+            scale_a: None,
+            scale_x_ffn: None,
+            scale_h: None,
         });
     }
 
@@ -535,6 +551,10 @@ pub fn forward_pass_autoregressive_level_c(
                 x_attn, q, k, v, a, attn_out, x_ffn, g, u, h, ffn_out,
                 kv_cache_k: kv_cache[layer_idx].0.clone(),
                 kv_cache_v: kv_cache[layer_idx].1.clone(),
+                scale_x_attn: None,
+                scale_a: None,
+                scale_x_ffn: None,
+                scale_h: None,
             });
         }
 
@@ -618,6 +638,10 @@ pub fn generate_key(cfg: &ModelConfig, model: &[LayerWeights], seed: [u8; 32]) -
         max_v_norm: 0.0,
         lm_head: None,
         weight_hash: Some(weight_hash),
+        rmsnorm_attn_weights: Vec::new(),
+        rmsnorm_ffn_weights: Vec::new(),
+        weight_scales: Vec::new(),
+        rmsnorm_eps: 1e-5,
     }
 }
 

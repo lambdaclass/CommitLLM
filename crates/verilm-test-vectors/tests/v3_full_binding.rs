@@ -642,6 +642,9 @@ fn test_v3_with_manifest_binding() {
         top_k: 50,
         top_p: 1.0,
         eos_policy: "stop".into(),
+        weight_hash: None,
+        quant_hash: None,
+        system_prompt_hash: None,
     };
 
     let params = FullBindingParams {
@@ -681,6 +684,9 @@ fn test_v3_wrong_manifest_rejected() {
         top_k: 50,
         top_p: 1.0,
         eos_policy: "stop".into(),
+        weight_hash: None,
+        quant_hash: None,
+        system_prompt_hash: None,
     };
 
     let params = FullBindingParams {
@@ -701,6 +707,9 @@ fn test_v3_wrong_manifest_rejected() {
         top_k: 50,
         top_p: 1.0,
         eos_policy: "stop".into(),
+        weight_hash: None,
+        quant_hash: None,
+        system_prompt_hash: None,
     };
     let policy = VerificationPolicy {
         expected_manifest_hash: Some(merkle::hash_manifest(&wrong_manifest)),

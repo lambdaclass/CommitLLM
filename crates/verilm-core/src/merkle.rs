@@ -146,12 +146,33 @@ pub struct MerkleProof {
 ///   5. `eos_policy` as UTF-8 bytes
 pub fn hash_manifest(manifest: &crate::types::DeploymentManifest) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"vi-manifest-v1");
+    hasher.update(b"vi-manifest-v2");
     hasher.update(manifest.tokenizer_hash);
     hasher.update(manifest.temperature.to_le_bytes());
     hasher.update(manifest.top_k.to_le_bytes());
     hasher.update(manifest.top_p.to_le_bytes());
     hasher.update(manifest.eos_policy.as_bytes());
+    // R_W: weight root binds the commitment to a specific quantized checkpoint.
+    if let Some(wh) = manifest.weight_hash {
+        hasher.update(b"\x01"); // presence tag
+        hasher.update(wh);
+    } else {
+        hasher.update(b"\x00");
+    }
+    // Quantization scheme hash.
+    if let Some(qh) = manifest.quant_hash {
+        hasher.update(b"\x01");
+        hasher.update(qh);
+    } else {
+        hasher.update(b"\x00");
+    }
+    // System prompt hash.
+    if let Some(sph) = manifest.system_prompt_hash {
+        hasher.update(b"\x01");
+        hasher.update(sph);
+    } else {
+        hasher.update(b"\x00");
+    }
     hasher.finalize().into()
 }
 

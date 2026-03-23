@@ -86,6 +86,18 @@ fn dict_to_layer_trace(d: &Bound<'_, PyDict>) -> PyResult<LayerTrace> {
             .map(|v| extract_nested_i8(&v))
             .transpose()?
             .unwrap_or_default(),
+        scale_x_attn: d.get_item("scale_x_attn")?
+            .map(|v| v.extract())
+            .transpose()?,
+        scale_a: d.get_item("scale_a")?
+            .map(|v| v.extract())
+            .transpose()?,
+        scale_x_ffn: d.get_item("scale_x_ffn")?
+            .map(|v| v.extract())
+            .transpose()?,
+        scale_h: d.get_item("scale_h")?
+            .map(|v| v.extract())
+            .transpose()?,
     })
 }
 
@@ -136,6 +148,24 @@ fn extract_manifest(d: &Bound<'_, PyDict>) -> PyResult<DeploymentManifest> {
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or_else(|| "stop".to_string()),
+        weight_hash: d.get_item("weight_hash")?
+            .map(|v| {
+                let hex_str: String = v.extract()?;
+                decode_hex32(&hex_str, "weight_hash")
+            })
+            .transpose()?,
+        quant_hash: d.get_item("quant_hash")?
+            .map(|v| {
+                let hex_str: String = v.extract()?;
+                decode_hex32(&hex_str, "quant_hash")
+            })
+            .transpose()?,
+        system_prompt_hash: d.get_item("system_prompt_hash")?
+            .map(|v| {
+                let hex_str: String = v.extract()?;
+                decode_hex32(&hex_str, "system_prompt_hash")
+            })
+            .transpose()?,
     })
 }
 

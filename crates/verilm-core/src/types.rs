@@ -38,6 +38,18 @@ pub struct DeploymentManifest {
     pub top_p: f32,
     /// EOS/stop policy identifier (e.g. "stop", "sample").
     pub eos_policy: String,
+    /// Merkle root over all INT8 weight matrices (R_W).
+    /// Binds the commitment to a specific quantized checkpoint.
+    #[serde(default)]
+    pub weight_hash: Option<[u8; 32]>,
+    /// Hash of the quantization scheme (e.g. W8A8, Q8_0).
+    /// Prevents substitution of a differently-quantized checkpoint.
+    #[serde(default)]
+    pub quant_hash: Option<[u8; 32]>,
+    /// SHA-256 of the system prompt prepended to user input.
+    /// Prevents system-prompt injection or substitution.
+    #[serde(default)]
+    pub system_prompt_hash: Option<[u8; 32]>,
 }
 
 /// VERIFIER-SECRET material. Must never be sent to the prover.
@@ -109,6 +121,34 @@ pub struct VerifierKey {
     /// `None` for legacy keys generated before the weight-chain feature.
     #[serde(default)]
     pub weight_hash: Option<[u8; 32]>,
+
+    /// Per-layer RMSNorm weight vectors for attention input normalization.
+    /// `rmsnorm_attn_weights[layer]` has length `hidden_dim`.
+    /// Empty for toy model (no RMSNorm in simplified chain).
+    #[serde(default)]
+    pub rmsnorm_attn_weights: Vec<Vec<f32>>,
+
+    /// Per-layer RMSNorm weight vectors for FFN input normalization.
+    /// `rmsnorm_ffn_weights[layer]` has length `hidden_dim`.
+    /// Empty for toy model (no RMSNorm in simplified chain).
+    #[serde(default)]
+    pub rmsnorm_ffn_weights: Vec<Vec<f32>>,
+
+    /// Per-layer weight scales for each matrix type.
+    /// `weight_scales[layer][matrix_type_idx]` is the per-tensor absmax scale.
+    /// Used for dequantizing i32 accumulators to f32 in the real requantization
+    /// bridge: `output_f32 = acc_i32 * scale_w * scale_x`.
+    /// Empty for toy model (unit scale) or native INT8 weights.
+    #[serde(default)]
+    pub weight_scales: Vec<Vec<f32>>,
+
+    /// RMSNorm epsilon. Default 1e-5 for Llama-family models.
+    #[serde(default = "default_rmsnorm_eps")]
+    pub rmsnorm_eps: f64,
+}
+
+fn default_rmsnorm_eps() -> f64 {
+    1e-5
 }
 
 impl VerifierKey {
@@ -150,6 +190,19 @@ pub struct LayerTrace {
     /// (Level C only). Each inner Vec has length kv_dim. Empty for Level A/B.
     #[serde(default)]
     pub kv_cache_v: Vec<Vec<i8>>,
+    /// Per-tensor activation scale for x_attn (QKV projection input).
+    /// `None` for toy model (unit scale / simplified clamp requantization).
+    #[serde(default)]
+    pub scale_x_attn: Option<f32>,
+    /// Per-tensor activation scale for a (W_o projection input).
+    #[serde(default)]
+    pub scale_a: Option<f32>,
+    /// Per-tensor activation scale for x_ffn (gate_up projection input).
+    #[serde(default)]
+    pub scale_x_ffn: Option<f32>,
+    /// Per-tensor activation scale for h (down projection input).
+    #[serde(default)]
+    pub scale_h: Option<f32>,
 }
 
 // ===========================================================================
@@ -300,6 +353,14 @@ pub struct CompactLayerTrace {
     /// KV cache V vectors (Level C only). Empty for Level A/B.
     #[serde(default)]
     pub kv_cache_v: Vec<Vec<i8>>,
+    #[serde(default)]
+    pub scale_x_attn: Option<f32>,
+    #[serde(default)]
+    pub scale_a: Option<f32>,
+    #[serde(default)]
+    pub scale_x_ffn: Option<f32>,
+    #[serde(default)]
+    pub scale_h: Option<f32>,
 }
 
 impl CompactLayerTrace {
@@ -317,6 +378,10 @@ impl CompactLayerTrace {
             ffn_out: lt.ffn_out.clone(),
             kv_cache_k: lt.kv_cache_k.clone(),
             kv_cache_v: lt.kv_cache_v.clone(),
+            scale_x_attn: lt.scale_x_attn,
+            scale_a: lt.scale_a,
+            scale_x_ffn: lt.scale_x_ffn,
+            scale_h: lt.scale_h,
         }
     }
 
@@ -356,6 +421,10 @@ impl CompactLayerTrace {
             ffn_out: self.ffn_out.clone(),
             kv_cache_k: self.kv_cache_k.clone(),
             kv_cache_v: self.kv_cache_v.clone(),
+            scale_x_attn: self.scale_x_attn,
+            scale_a: self.scale_a,
+            scale_x_ffn: self.scale_x_ffn,
+            scale_h: self.scale_h,
         })
     }
 }

@@ -85,6 +85,13 @@ pub struct ModelConfig {
     /// Vocabulary size (number of logit entries). 0 if not applicable.
     #[serde(default)]
     pub vocab_size: usize,
+    /// RoPE base frequency (theta). Default 10000.0 for Llama-family models.
+    #[serde(default = "default_rope_theta")]
+    pub rope_theta: f64,
+}
+
+fn default_rope_theta() -> f64 {
+    10000.0
 }
 
 impl ModelConfig {
@@ -99,6 +106,7 @@ impl ModelConfig {
             n_q_heads: 64,
             n_kv_heads: 8,
             vocab_size: 128256,
+            rope_theta: 500000.0,
         }
     }
 
@@ -113,6 +121,7 @@ impl ModelConfig {
             n_q_heads: 32,
             n_kv_heads: 8,
             vocab_size: 128256,
+            rope_theta: 500000.0,
         }
     }
 
@@ -127,6 +136,7 @@ impl ModelConfig {
             n_q_heads: 128,
             n_kv_heads: 8,
             vocab_size: 128256,
+            rope_theta: 500000.0,
         }
     }
 
@@ -142,6 +152,7 @@ impl ModelConfig {
             n_q_heads: 8,
             n_kv_heads: 2,
             vocab_size: 64,
+            rope_theta: 10000.0,
         }
     }
 }
