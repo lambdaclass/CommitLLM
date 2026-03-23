@@ -384,6 +384,20 @@ The remaining adversarial freedom comes from two sources:
 
 + *Statistical KV anchoring.* The prefix $K$, $V$ values used in attention replay are commitment-verified (they match $R_"KV"$) but only statistically anchored to real computation via sampled shell checks. Unsampled prefix positions are not independently verified, so the replay proves consistency with the _committed_ prefix, not necessarily with the true execution at every earlier token.
 
+= The Sampling Gap <sec-sampling-gap>
+
+Greedy decoding (temperature $= 0$) is fully verifiable. The logits are committed in $R_T$, the argmax is deterministic, and the verifier can reproduce the exact token selection independently.
+
+Sampled decoding (temperature $> 0$) is not. The provider commits a sampling seed and the token sequence, but the verifier cannot independently prove that the committed seed faithfully drove the observed token choices. The obstacle is practical, not theoretical: serving engines (vLLM, TensorRT-LLM) use internal RNG implementations that are not standardized or bit-reproducible. There is no canonical sampling function the verifier can replay against. A ChaCha20-based canonical sampler would close this gap but requires patching the serving engine, which conflicts with the sidecar design constraint.
+
+What the protocol provides for sampled decoding:
+
++ *Margin checks.* The verifier inspects the committed logits and verifies that the chosen token was within the top-$k$/top-$p$ support and that its probability was not pathologically low. This catches gross manipulation --- forcing a low-probability token, or choosing from a distribution inconsistent with the committed logits.
+
++ *Policy checks.* The manifest commits the declared temperature, top-$k$, and top-$p$. The verifier checks that the chosen tokens are plausible under those parameters.
+
+These are weaker integrity claims, not a proof of honest stochastic sampling. They detect a provider who substitutes tokens inconsistent with the committed logit distribution, but they cannot prove that the provider sampled faithfully from that distribution using the committed seed. The honest statement: greedy decoding admits exact replay; sampled decoding admits margin and policy plausibility checks only, not randomness-faithful replay.
+
 = Provider Costs
 
 == Storage
@@ -435,7 +449,7 @@ Trusted execution environments (TEEs) and remote attestation provide another alt
 
 = Limitations and Extensions
 
-The protocol's practical viability rests on two open empirical questions: the width of the requantization corridor (which bounds the attention gap) and whether storage and bandwidth costs are acceptable to providers at scale. Closing the attention gap entirely would require deterministic attention kernels or stronger proof systems, both of which violate the sidecar design constraint.
+The protocol's practical viability rests on two open empirical questions: the width of the requantization corridor (which bounds the attention gap) and whether storage and bandwidth costs are acceptable to providers at scale. Closing the attention gap entirely would require deterministic attention kernels or stronger proof systems, both of which violate the sidecar design constraint. For sampled decoding, the protocol provides margin and policy plausibility checks but not randomness-faithful replay (@sec-sampling-gap).
 
 Two extensions could tighten the guarantees:
 

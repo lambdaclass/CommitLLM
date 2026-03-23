@@ -79,12 +79,16 @@ class VerifiedInferenceServer:
             return "00" * 32
 
     def _compute_weight_hash(self, model) -> str:
-        """SHA-256 over sorted (name, shape, dtype, first-8-bytes) of each parameter.
+        """Heuristic runtime fingerprint over model parameters.
 
-        This is a fast fingerprint — not a full content hash of all weights,
-        but enough to detect model swaps or weight tampering. A full hash
-        of multi-GB weights at startup is too slow; this fingerprint hashes
-        the weight metadata plus a prefix of each tensor's raw bytes.
+        NOT the paper's R_W (full Merkle root over all weight matrices).
+        This is a fast startup check: SHA-256 over sorted (name, shape,
+        dtype, first-8-bytes) of each parameter. Enough to detect model
+        swaps but not a cryptographic commitment to weight content.
+
+        TODO: Replace with proper R_W computation (full weight Merkle tree)
+        matching crates/verilm-keygen. The full hash is expensive at startup
+        for multi-GB models and should be precomputed or cached.
         """
         try:
             h = hashlib.sha256()
