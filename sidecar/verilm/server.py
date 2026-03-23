@@ -319,4 +319,27 @@ def create_app(llm, **kwargs):
             logger.exception("Audit error")
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    @app.post("/audit/stratified")
+    def audit_stratified(request: dict):
+        try:
+            request_id = request["request_id"]
+            entry = server._audit_store.get(request_id)
+            if entry is None:
+                return JSONResponse({"error": f"Unknown request_id: {request_id}"}, status_code=404)
+
+            if time.time() > entry["expires_at"]:
+                del server._audit_store[request_id]
+                return JSONResponse({"error": "Audit state expired"}, status_code=404)
+
+            state = entry["state"]
+            token_index = request.get("token_index", 0)
+            layer_indices = request.get("layer_indices", list(range(state.n_tokens())))
+            tier = request.get("tier", "routine")
+
+            response_json = state.audit_stratified(token_index, layer_indices, tier)
+            return JSONResponse(json.loads(response_json))
+        except Exception as e:
+            logger.exception("Stratified audit error")
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     return app

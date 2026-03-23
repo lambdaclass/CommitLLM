@@ -32,8 +32,8 @@ use pyo3::types::{PyBytes, PyDict, PyList};
 
 use verilm_core::serialize;
 use verilm_core::types::{
-    BatchCommitment, BatchProof, CommitmentVersion, DeploymentManifest, LayerTrace, TokenTrace,
-    VerificationPolicy, VerifierKey,
+    AuditChallenge, AuditTier, BatchCommitment, BatchProof, CommitmentVersion,
+    DeploymentManifest, LayerTrace, TokenTrace, VerificationPolicy, VerifierKey,
 };
 use verilm_prover::{commit_with_full_binding, open, FullBindingParams};
 
@@ -97,6 +97,9 @@ fn dict_to_layer_trace(d: &Bound<'_, PyDict>) -> PyResult<LayerTrace> {
             .transpose()?,
         scale_h: d.get_item("scale_h")?
             .map(|v| v.extract())
+            .transpose()?,
+        residual: d.get_item("residual")?
+            .map(|v| v.extract::<Vec<f32>>())
             .transpose()?,
     })
 }
@@ -232,6 +235,33 @@ impl BatchState {
         let compressed = serialize::compress(&compact_bytes);
         Ok(PyBytes::new(py, &compressed))
     }
+
+    /// Build a stratified audit response for a challenge.
+    ///
+    /// Args:
+    ///     token_index: int — which token to audit
+    ///     layer_indices: list[int] — which layers to open
+    ///     tier: str — "routine" or "full"
+    ///
+    /// Returns:
+    ///     JSON string of the AuditResponse.
+    fn audit_stratified(&self, token_index: u32, layer_indices: Vec<usize>, tier: String) -> PyResult<String> {
+        let tier = match tier.as_str() {
+            "routine" => AuditTier::Routine,
+            "full" => AuditTier::Full,
+            _ => return Err(PyValueError::new_err(format!("invalid tier: {}", tier))),
+        };
+
+        let challenge = AuditChallenge {
+            token_index,
+            layer_indices,
+            tier,
+        };
+
+        let response = verilm_prover::build_audit_response_from_state(&self.inner, &challenge);
+        serde_json::to_string(&response)
+            .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+    }
 }
 
 /// Build a commitment from per-token per-layer traces.
@@ -279,6 +309,45 @@ fn commit(
     );
 
     Ok(BatchState { inner, commitment })
+}
+
+/// Build an audit challenge from a seed.
+///
+/// Args:
+///     seed: bytes (32) — challenge derivation seed
+///     n_tokens: int — number of tokens in the batch
+///     n_layers: int — number of layers in the model
+///     tier: str — "routine" or "full"
+///
+/// Returns:
+///     dict with token_index (int), layer_indices (list[int]), tier (str)
+#[pyfunction]
+fn build_audit_challenge(
+    py: Python<'_>,
+    seed: Vec<u8>,
+    n_tokens: u32,
+    n_layers: usize,
+    tier: String,
+) -> PyResult<Bound<'_, PyDict>> {
+    if seed.len() != 32 {
+        return Err(PyValueError::new_err("seed must be exactly 32 bytes"));
+    }
+    let mut seed_arr = [0u8; 32];
+    seed_arr.copy_from_slice(&seed);
+
+    let tier_enum = match tier.as_str() {
+        "routine" => AuditTier::Routine,
+        "full" => AuditTier::Full,
+        _ => return Err(PyValueError::new_err(format!("invalid tier: {}", tier))),
+    };
+
+    let challenge = verilm_verify::build_audit_challenge(&seed_arr, n_tokens, n_layers, tier_enum);
+
+    let d = PyDict::new(py);
+    d.set_item("token_index", challenge.token_index)?;
+    d.set_item("layer_indices", challenge.layer_indices)?;
+    d.set_item("tier", tier)?;
+    Ok(d)
 }
 
 /// Helper: decode a 32-byte hex string into `[u8; 32]`.
@@ -451,6 +520,7 @@ fn verify_single<'py>(
 #[pymodule]
 fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(commit, m)?)?;
+    m.add_function(wrap_pyfunction!(build_audit_challenge, m)?)?;
     m.add_function(wrap_pyfunction!(verify_batch, m)?)?;
     m.add_function(wrap_pyfunction!(verify_single, m)?)?;
     m.add_class::<BatchState>()?;

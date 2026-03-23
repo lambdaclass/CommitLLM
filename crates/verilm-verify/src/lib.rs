@@ -524,82 +524,99 @@ pub fn verify_rmsnorm_chain(
         return failures;
     }
 
+    let wo_idx = MatrixType::ALL.iter().position(|&m| m == MatrixType::Wo).unwrap();
+    let wd_idx = MatrixType::ALL.iter().position(|&m| m == MatrixType::Wd).unwrap();
+
     for (layer_idx, lt) in trace.layers.iter().enumerate() {
-        // Skip if no activation scales (toy model trace)
+        // Skip layers without the pre-attention residual stream
+        let residual = match &lt.residual {
+            Some(r) => r,
+            None => continue,
+        };
         let scale_x_attn = match lt.scale_x_attn {
             Some(s) => s,
             None => continue,
         };
-        let scale_x_ffn = match lt.scale_x_ffn {
-            Some(s) => s,
-            None => continue,
-        };
 
-        // Get weight scales for this layer
         if layer_idx >= key.weight_scales.len() {
             continue;
         }
         let layer_wscales = &key.weight_scales[layer_idx];
 
-        // Intra-layer: x_ffn should equal RMSNorm(dequant(attn_out) + residual_attn)
-        // The residual for the attention sublayer is x_attn (the input to the attention block)
-        if layer_idx < key.rmsnorm_ffn_weights.len() {
-            let wo_idx = MatrixType::ALL.iter().position(|&m| m == MatrixType::Wo).unwrap();
-            if wo_idx < layer_wscales.len() {
-                let scale_w_o = layer_wscales[wo_idx];
-                let scale_a_val = lt.scale_a.unwrap_or(1.0);
-                let residual: Vec<f64> = lt.x_attn.iter().map(|&v| {
-                    (v as f64) * (scale_x_attn as f64)
-                }).collect();
+        let residual_f64: Vec<f64> = residual.iter().map(|&v| v as f64).collect();
 
-                let expected = rmsnorm::requantize_bridge(
-                    &lt.attn_out,
-                    scale_w_o,
-                    scale_a_val,
-                    &residual,
-                    &key.rmsnorm_ffn_weights[layer_idx],
-                    key.rmsnorm_eps,
-                    scale_x_ffn,
-                );
-
-                if lt.x_ffn != expected {
-                    failures.push(format!(
-                        "layer {}: RMSNorm FFN bridge mismatch",
-                        layer_idx
-                    ));
-                }
+        // 1. Verify x_attn via RMSNorm: x_attn == quantize(RMSNorm_attn(residual), scale_x_attn)
+        if layer_idx < key.rmsnorm_attn_weights.len() {
+            let normed = rmsnorm::rmsnorm_f64_input(
+                &residual_f64,
+                &key.rmsnorm_attn_weights[layer_idx],
+                key.rmsnorm_eps,
+            );
+            let expected = rmsnorm::quantize_f64_to_i8(&normed, scale_x_attn as f64);
+            if lt.x_attn != expected {
+                failures.push(format!(
+                    "layer {}: RMSNorm attention input mismatch (x_attn != quantize(RMSNorm_attn(residual)))",
+                    layer_idx
+                ));
             }
         }
 
-        // Cross-layer: next layer's x_attn should equal RMSNorm(dequant(ffn_out) + residual_ffn)
-        // The residual for the FFN sublayer is x_ffn (the input to the FFN block)
-        if layer_idx + 1 < trace.layers.len() && layer_idx + 1 < key.rmsnorm_attn_weights.len() {
-            let next_scale_x = match trace.layers[layer_idx + 1].scale_x_attn {
-                Some(s) => s,
-                None => continue,
-            };
-            let wd_idx = MatrixType::ALL.iter().position(|&m| m == MatrixType::Wd).unwrap();
-            if wd_idx < layer_wscales.len() {
-                let scale_w_d = layer_wscales[wd_idx];
+        // 2. Verify x_ffn via intra-layer bridge:
+        //    x_ffn == quantize(RMSNorm_ffn(residual + dequant(attn_out)), scale_x_ffn)
+        let scale_x_ffn = match lt.scale_x_ffn {
+            Some(s) => s,
+            None => continue,
+        };
+        if layer_idx < key.rmsnorm_ffn_weights.len() && wo_idx < layer_wscales.len() {
+            let scale_w_o = layer_wscales[wo_idx];
+            let scale_a_val = lt.scale_a.unwrap_or(1.0);
+
+            let residual_ffn: Vec<f64> = residual_f64.iter().enumerate().map(|(i, &r)| {
+                r + (lt.attn_out[i] as f64) * (scale_w_o as f64) * (scale_a_val as f64)
+            }).collect();
+
+            let normed = rmsnorm::rmsnorm_f64_input(
+                &residual_ffn,
+                &key.rmsnorm_ffn_weights[layer_idx],
+                key.rmsnorm_eps,
+            );
+            let expected = rmsnorm::quantize_f64_to_i8(&normed, scale_x_ffn as f64);
+
+            if lt.x_ffn != expected {
+                failures.push(format!(
+                    "layer {}: RMSNorm FFN bridge mismatch (x_ffn != quantize(RMSNorm_ffn(residual + dequant(attn_out))))",
+                    layer_idx
+                ));
+            }
+        }
+
+        // 3. Cross-layer residual chain: for consecutive layers l, l+1 where both
+        //    have residuals, verify residual[l+1] == residual[l] + dequant(attn_out[l]) + dequant(ffn_out[l])
+        if layer_idx + 1 < trace.layers.len() {
+            if let Some(next_residual) = &trace.layers[layer_idx + 1].residual {
+                let scale_w_o = if wo_idx < layer_wscales.len() { layer_wscales[wo_idx] } else { continue };
+                let scale_w_d = if wd_idx < layer_wscales.len() { layer_wscales[wd_idx] } else { continue };
+                let scale_a_val = lt.scale_a.unwrap_or(1.0);
                 let scale_h_val = lt.scale_h.unwrap_or(1.0);
-                let residual: Vec<f64> = lt.x_ffn.iter().map(|&v| {
-                    (v as f64) * (scale_x_ffn as f64)
-                }).collect();
 
-                let expected = rmsnorm::requantize_bridge(
-                    &lt.ffn_out,
-                    scale_w_d,
-                    scale_h_val,
-                    &residual,
-                    &key.rmsnorm_attn_weights[layer_idx + 1],
-                    key.rmsnorm_eps,
-                    next_scale_x,
-                );
-
-                if trace.layers[layer_idx + 1].x_attn != expected {
+                let mut max_diff: f64 = 0.0;
+                let mut worst_idx = 0usize;
+                for i in 0..residual.len().min(next_residual.len()) {
+                    let expected_i = residual_f64[i]
+                        + (lt.attn_out[i] as f64) * (scale_w_o as f64) * (scale_a_val as f64)
+                        + (lt.ffn_out[i] as f64) * (scale_w_d as f64) * (scale_h_val as f64);
+                    let diff = (next_residual[i] as f64 - expected_i).abs();
+                    if diff > max_diff {
+                        max_diff = diff;
+                        worst_idx = i;
+                    }
+                }
+                // Tolerance for bf16-vs-f64 rounding in residual accumulation
+                let tolerance = 0.5;
+                if max_diff > tolerance {
                     failures.push(format!(
-                        "layer {}->{}: RMSNorm attention bridge mismatch",
-                        layer_idx, layer_idx + 1
+                        "layer {}->{}: cross-layer residual mismatch (max abs diff {:.4} at idx {}, tolerance {})",
+                        layer_idx, layer_idx + 1, max_diff, worst_idx, tolerance
                     ));
                 }
             }
@@ -664,7 +681,7 @@ pub fn verify_rope(
             &key.config,
             scale_w,
             lt.scale_x_attn,
-            None, // KV cache requantization scale not tracked separately
+            lt.scale_x_attn, // KV cache K is requantized with the attention input scale
         ) {
             failures.push(format!("layer {}: {}", layer_idx, err));
         }

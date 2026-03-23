@@ -203,6 +203,19 @@ pub struct LayerTrace {
     /// Per-tensor activation scale for h (down projection input).
     #[serde(default)]
     pub scale_h: Option<f32>,
+    /// Pre-attention residual stream (f32).
+    ///
+    /// This is the layer input BEFORE RMSNorm — the actual residual connection
+    /// value. For layer 0 it's the embedding output; for layer l>0 it's
+    /// `residual[l-1] + dequant(attn_out[l-1]) + dequant(ffn_out[l-1])`.
+    ///
+    /// Required for paper-correct RMSNorm bridge verification:
+    ///   `x_attn = quantize(RMSNorm_attn(residual), scale_x_attn)`
+    ///   `x_ffn  = quantize(RMSNorm_ffn(residual + dequant(attn_out)), scale_x_ffn)`
+    ///
+    /// `None` for toy model (simplified clamp chain, no residual/RMSNorm).
+    #[serde(default)]
+    pub residual: Option<Vec<f32>>,
 }
 
 // ===========================================================================
@@ -361,6 +374,8 @@ pub struct CompactLayerTrace {
     pub scale_x_ffn: Option<f32>,
     #[serde(default)]
     pub scale_h: Option<f32>,
+    #[serde(default)]
+    pub residual: Option<Vec<f32>>,
 }
 
 impl CompactLayerTrace {
@@ -382,6 +397,7 @@ impl CompactLayerTrace {
             scale_a: lt.scale_a,
             scale_x_ffn: lt.scale_x_ffn,
             scale_h: lt.scale_h,
+            residual: lt.residual.clone(),
         }
     }
 
@@ -425,6 +441,7 @@ impl CompactLayerTrace {
             scale_a: self.scale_a,
             scale_x_ffn: self.scale_x_ffn,
             scale_h: self.scale_h,
+            residual: self.residual.clone(),
         })
     }
 }

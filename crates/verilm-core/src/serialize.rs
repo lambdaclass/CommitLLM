@@ -192,6 +192,7 @@ mod tests {
                 scale_a: None,
                 scale_x_ffn: None,
                 scale_h: None,
+                residual: None,
             }],
             merkle_root: [0xbb; 32],
             merkle_proof: MerkleProof {
@@ -246,6 +247,7 @@ mod tests {
             scale_a: None,
             scale_x_ffn: None,
             scale_h: None,
+            residual: None,
         };
 
         // Verify reconstruction matches
@@ -334,6 +336,7 @@ mod tests {
             scale_a: None,
             scale_x_ffn: None,
             scale_h: None,
+            residual: None,
         };
 
         let resp = AuditResponse {

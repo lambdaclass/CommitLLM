@@ -176,6 +176,7 @@ pub fn forward_pass(cfg: &ModelConfig, model: &[LayerWeights], input: &[i8]) -> 
             scale_a: None,
             scale_x_ffn: None,
             scale_h: None,
+            residual: None,
         });
     }
 
@@ -286,6 +287,7 @@ pub fn forward_pass_multi(
                 scale_a: None,
                 scale_x_ffn: None,
                 scale_h: None,
+                residual: None,
             });
         }
 
@@ -397,6 +399,7 @@ pub fn forward_pass_autoregressive(
                 scale_a: None,
                 scale_x_ffn: None,
                 scale_h: None,
+                residual: None,
             });
         }
 
@@ -450,6 +453,7 @@ pub fn forward_pass_level_c(cfg: &ModelConfig, model: &[LayerWeights], input: &[
             scale_a: None,
             scale_x_ffn: None,
             scale_h: None,
+            residual: None,
         });
     }
 
@@ -555,6 +559,7 @@ pub fn forward_pass_autoregressive_level_c(
                 scale_a: None,
                 scale_x_ffn: None,
                 scale_h: None,
+                residual: None,
             });
         }
 

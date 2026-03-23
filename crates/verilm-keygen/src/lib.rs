@@ -170,6 +170,26 @@ fn load_weights_as_i8(
     }
 }
 
+/// Load a 1D tensor as f32. Supports F32, BF16, and F16 source dtypes.
+fn load_1d_f32(
+    shards: &[(SafeTensors<'_>, &MappedShard)],
+    name: &str,
+) -> Result<Vec<f32>> {
+    let (data, shape, dtype) = find_tensor_raw(shards, name)?;
+    if shape.len() != 1 {
+        bail!("tensor {} has shape {:?}, expected 1D", name, shape);
+    }
+    match dtype {
+        Dtype::F32 => Ok(data
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect()),
+        Dtype::BF16 => Ok(bf16_to_f32(data)),
+        Dtype::F16 => Ok(fp16_to_f32(data)),
+        other => bail!("tensor {} has unsupported dtype {:?}", name, other),
+    }
+}
+
 /// Detect model config by inspecting tensor shapes.
 pub fn detect_config(dir: &Path) -> Result<ModelConfig> {
     let mapped = open_shards(dir)?;
@@ -219,6 +239,9 @@ pub fn detect_config(dir: &Path) -> Result<ModelConfig> {
     let n_q_heads = hidden_dim / d_head;
     let n_kv_heads = kv_dim / d_head;
 
+    // Llama-3 family uses rope_theta=500000.0; smaller/toy models use 10000.0
+    let rope_theta = if hidden_dim >= 4096 { 500000.0 } else { 10000.0 };
+
     let config = ModelConfig {
         name: format!("detected-{}L-{}d", n_layers, hidden_dim),
         hidden_dim,
@@ -229,7 +252,7 @@ pub fn detect_config(dir: &Path) -> Result<ModelConfig> {
         n_q_heads,
         n_kv_heads,
         vocab_size: 0,
-        rope_theta: 10000.0,
+        rope_theta,
     };
 
     eprintln!(
@@ -290,6 +313,8 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
     let mut v_vectors: Vec<Vec<Vec<Fp>>> = Vec::with_capacity(cfg.n_layers);
     let mut quantization_scales: Vec<Vec<f32>> = Vec::with_capacity(cfg.n_layers);
     let mut all_weights: Vec<Vec<Vec<i8>>> = Vec::with_capacity(cfg.n_layers);
+    let mut rmsnorm_attn_weights: Vec<Vec<f32>> = Vec::with_capacity(cfg.n_layers);
+    let mut rmsnorm_ffn_weights: Vec<Vec<f32>> = Vec::with_capacity(cfg.n_layers);
 
     for layer_idx in 0..cfg.n_layers {
         let mut layer_vs = Vec::with_capacity(7);
@@ -319,6 +344,26 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
             layer_weights.push(weights);
         }
 
+        // Extract RMSNorm weights for this layer (attention + FFN)
+        let attn_norm_name = format!("model.layers.{}.input_layernorm.weight", layer_idx);
+        match load_1d_f32(&parsed, &attn_norm_name) {
+            Ok(w) => rmsnorm_attn_weights.push(w),
+            Err(e) => {
+                eprintln!("  warning: could not load {}: {}", attn_norm_name, e);
+                rmsnorm_attn_weights.push(Vec::new());
+            }
+        }
+
+        let ffn_norm_name =
+            format!("model.layers.{}.post_attention_layernorm.weight", layer_idx);
+        match load_1d_f32(&parsed, &ffn_norm_name) {
+            Ok(w) => rmsnorm_ffn_weights.push(w),
+            Err(e) => {
+                eprintln!("  warning: could not load {}: {}", ffn_norm_name, e);
+                rmsnorm_ffn_weights.push(Vec::new());
+            }
+        }
+
         v_vectors.push(layer_vs);
         quantization_scales.push(layer_scales);
         all_weights.push(layer_weights);
@@ -341,6 +386,7 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         config: cfg,
         seed,
         source_dtype,
+        weight_scales: quantization_scales.clone(),
         quantization_scales,
         r_vectors,
         v_vectors,
@@ -348,9 +394,8 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         max_v_norm: 0.0,
         lm_head: None,
         weight_hash: Some(weight_hash),
-        rmsnorm_attn_weights: Vec::new(),
-        rmsnorm_ffn_weights: Vec::new(),
-        weight_scales: Vec::new(),
+        rmsnorm_attn_weights,
+        rmsnorm_ffn_weights,
         rmsnorm_eps: 1e-5,
     })
 }
