@@ -4,6 +4,7 @@ import VerifiedInference.PrecomputedFreivalds
 import VerifiedInference.LayerDeterminism
 import VerifiedInference.HashCommitment
 import VerifiedInference.MerkleTree
+import VerifiedInference.MerkleAdversarial
 import VerifiedInference.WeightBinding
 import VerifiedInference.MultiVector
 import VerifiedInference.SiLU
@@ -11,10 +12,18 @@ import VerifiedInference.Requantization
 import VerifiedInference.ExpLUT
 import VerifiedInference.Protocol
 import VerifiedInference.AccumulatorBound
+import VerifiedInference.ProtocolParams
+import VerifiedInference.SecurityGame
 import VerifiedInference.Storage
 import VerifiedInference.StorageReconstruction
 import VerifiedInference.ReadmeShell
+import VerifiedInference.ConcreteShell
 import VerifiedInference.ReadmeKVProvenance
+import VerifiedInference.SamplingBound
 import VerifiedInference.ApproximateAttentionReplay
 import VerifiedInference.CanonicalProtocol
 import VerifiedInference.CanonicalProtocolSound
+import VerifiedInference.GameToFreivalds
+import VerifiedInference.ModelIdentitySoundness
+import VerifiedInference.CanonicalOps
+import VerifiedInference.CrossLayerConstraint
