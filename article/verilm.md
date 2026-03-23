@@ -160,23 +160,6 @@ The protocol constrains attention from both sides. The inputs (Q, K, V) and outp
 
 What remains is the **requantization corridor**: the fraction of INT8 elements that disagree between FP16 and FP64 computation of the same attention operation. This is an open empirical question. If the agreement is >99% (which we expect), the adversary's freedom is tightly bounded. Measuring this corridor is the single most important next step.
 
-## The sampling gap
-
-Greedy decoding (temperature = 0) is fully verifiable. The logits are committed, the argmax is deterministic, and the verifier can reproduce the exact token selection independently.
-
-Sampled decoding (temperature > 0) is not. The provider commits a sampling seed and the token sequence, but the verifier cannot independently prove that the committed seed faithfully drove the observed token choices. This is because vLLM's sampler uses its own RNG implementation — there is no standardized, bit-reproducible sampling specification that a verifier can replay against.
-
-This is not a gap in the protocol design. It's a gap in the serving stack: the sampler's internal RNG is not part of any public specification, so there's no canonical function to replay. A ChaCha20-based canonical sampler could close this gap, but it would require patching the serving engine, which conflicts with the sidecar constraint.
-
-What VeriLM can do for sampled decoding today:
-
-- **Margin checks.** The verifier can inspect the committed logits and verify that the chosen token was within the top-k/top-p support and that its probability was not pathologically low. This catches gross manipulation — forcing a low-probability token, or choosing from a distribution that doesn't match the committed logits.
-- **Policy checks.** The manifest commits the declared temperature, top-k, and top-p. The verifier can check that the chosen tokens are plausible under those parameters.
-
-These are weaker integrity claims, not a proof of honest stochastic sampling. They catch a provider who substitutes tokens that are inconsistent with the committed logit distribution, but they cannot prove that the provider sampled faithfully from that distribution using the committed seed.
-
-The honest statement: greedy = exact replay; sampled = margin and policy plausibility, not randomness-faithful replay.
-
 ## What providers pay
 
 Most intermediates in the forward pass are deterministic — given the same inputs, they reproduce exactly. The provider doesn't need to store them.
