@@ -579,6 +579,369 @@ pub fn commit_minimal(
     (commitment, state)
 }
 
+// ── Packed commit path ──────────────────────────────────────────────
+//
+// Eliminates per-token Vec<RetainedLayerState> materialization at commit
+// time. All capture data stays in contiguous packed buffers; individual
+// tokens are hashed directly from buffer slices (parallel), and only
+// the challenged token is reconstructed at audit time.
+
+/// Precomputed index mapping global token index → (fwd_pass, batch_position).
+#[derive(Debug, Clone)]
+pub struct TokenIndex {
+    /// cumulative[f] = sum of fwd_batch_sizes[0..f].
+    /// cumulative[0] = 0, cumulative[n_fwd] = n_tokens.
+    pub cumulative: Vec<usize>,
+}
+
+impl TokenIndex {
+    pub fn new(fwd_batch_sizes: &[usize]) -> Self {
+        let mut cumulative = Vec::with_capacity(fwd_batch_sizes.len() + 1);
+        cumulative.push(0);
+        for &bs in fwd_batch_sizes {
+            cumulative.push(cumulative.last().unwrap() + bs);
+        }
+        TokenIndex { cumulative }
+    }
+
+    /// Returns (fwd_pass_index, position_within_batch).
+    pub fn locate(&self, token_global: usize) -> (usize, usize) {
+        // Binary search for the fwd pass containing this token.
+        let fwd = match self.cumulative.binary_search(&token_global) {
+            Ok(f) => f,             // token is first in fwd pass f
+            Err(f) => f - 1,        // token is in the middle of fwd pass f-1
+        };
+        let pos = token_global - self.cumulative[fwd];
+        (fwd, pos)
+    }
+
+    pub fn n_tokens(&self) -> usize {
+        *self.cumulative.last().unwrap_or(&0)
+    }
+
+    pub fn n_fwd(&self) -> usize {
+        self.cumulative.len().saturating_sub(1)
+    }
+}
+
+/// Packed batch state: stores capture data in contiguous buffers.
+///
+/// Drop-in replacement for `MinimalBatchState` that avoids per-token
+/// Vec allocations. Individual tokens are reconstructed on demand
+/// (audit time only).
+#[derive(Debug, Clone)]
+pub struct PackedBatchState {
+    pub retained_tree: merkle::MerkleTree,
+    pub io_tree: merkle::MerkleTree,
+    // ── packed capture data ──
+    /// Contiguous i8 bytes, layout: fwd-major × layer-major × batch-row-major.
+    /// For fwd f, layer l, batch pos b: offset = cum[f]*n_layers*hidden_dim + l*batch_sz*hidden_dim + b*hidden_dim.
+    pub packed_a: Vec<u8>,
+    /// 4 scales per (fwd, layer): [scale_x_attn, scale_a, scale_x_ffn, scale_h].
+    pub packed_scales: Vec<f32>,
+    pub n_layers: usize,
+    pub hidden_dim: usize,
+    pub fwd_batch_sizes: Vec<usize>,
+    pub token_index: TokenIndex,
+    // ── binding data (same as MinimalBatchState) ──
+    pub manifest_hash: Option<[u8; 32]>,
+    pub token_ids: Vec<u32>,
+    pub prompt_hash: [u8; 32],
+    pub seed_commitment: [u8; 32],
+    pub revealed_seed: [u8; 32],
+    pub io_hashes: Vec<[u8; 32]>,
+    pub manifest: Option<DeploymentManifest>,
+    /// Contiguous f32 bytes for per-token final residuals (pre-final-norm).
+    /// Layout: token-major, each entry is `final_res_dim` f32 values.
+    pub packed_final_res: Option<Vec<u8>>,
+    pub final_res_dim: usize,
+}
+
+impl PackedBatchState {
+    /// Hash one token directly from packed buffers (no intermediate alloc).
+    ///
+    /// Produces the same hash as `merkle::hash_retained_with_residual()`
+    /// on the equivalent `RetainedTokenState`.
+    pub fn hash_token(&self, token_global: usize) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let (fwd, pos) = self.token_index.locate(token_global);
+        let batch_sz = self.fwd_batch_sizes[fwd];
+        let hd = self.hidden_dim;
+
+        // Base byte offset for this fwd pass in packed_a.
+        let fwd_byte_offset = self.token_index.cumulative[fwd] * self.n_layers * hd;
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"vi-retained-v1");
+
+        for l in 0..self.n_layers {
+            // a slice for (fwd, layer, batch_pos)
+            let layer_base = fwd_byte_offset + l * batch_sz * hd;
+            let a_start = layer_base + pos * hd;
+            hasher.update(&self.packed_a[a_start..a_start + hd]);
+
+            // Scales: same order as hash_retained_state_direct.
+            let s_base = (fwd * self.n_layers + l) * 4;
+            hasher.update(self.packed_scales[s_base + 1].to_le_bytes()); // scale_a
+            hasher.update(self.packed_scales[s_base + 0].to_le_bytes()); // scale_x_attn
+            hasher.update(self.packed_scales[s_base + 2].to_le_bytes()); // scale_x_ffn
+            hasher.update(self.packed_scales[s_base + 3].to_le_bytes()); // scale_h
+        }
+
+        let base: [u8; 32] = hasher.finalize().into();
+
+        // Bind final residual if present.
+        match &self.packed_final_res {
+            Some(fr_buf) => {
+                let fr_bytes = self.final_res_dim * 4; // f32
+                let fr_start = token_global * fr_bytes;
+                let mut h2 = Sha256::new();
+                h2.update(b"vi-retained-fr-v1");
+                h2.update(base);
+                h2.update(&fr_buf[fr_start..fr_start + fr_bytes]);
+                h2.finalize().into()
+            }
+            None => base,
+        }
+    }
+
+    /// Reconstruct one token's `RetainedTokenState` from packed buffers.
+    ///
+    /// Used at audit time for the challenged token (passed to
+    /// `compute_shell_opening`).
+    pub fn extract_token(&self, token_global: usize) -> RetainedTokenState {
+        let (fwd, pos) = self.token_index.locate(token_global);
+        let batch_sz = self.fwd_batch_sizes[fwd];
+        let hd = self.hidden_dim;
+        let fwd_byte_offset = self.token_index.cumulative[fwd] * self.n_layers * hd;
+
+        let mut layers = Vec::with_capacity(self.n_layers);
+        for l in 0..self.n_layers {
+            let layer_base = fwd_byte_offset + l * batch_sz * hd;
+            let a_start = layer_base + pos * hd;
+            let a_bytes = &self.packed_a[a_start..a_start + hd];
+            // Reinterpret u8 → i8 (identical memory layout).
+            let a: Vec<i8> = a_bytes.iter().map(|&b| b as i8).collect();
+
+            let s_base = (fwd * self.n_layers + l) * 4;
+            layers.push(RetainedLayerState {
+                a,
+                scale_x_attn: self.packed_scales[s_base],
+                scale_a: self.packed_scales[s_base + 1],
+                scale_x_ffn: self.packed_scales[s_base + 2],
+                scale_h: self.packed_scales[s_base + 3],
+            });
+        }
+        RetainedTokenState { layers }
+    }
+
+    /// Extract final residual for one token as `Vec<f32>`.
+    pub fn extract_final_residual(&self, token_global: usize) -> Option<Vec<f32>> {
+        self.packed_final_res.as_ref().map(|fr_buf| {
+            let fr_bytes = self.final_res_dim * 4;
+            let fr_start = token_global * fr_bytes;
+            let raw = &fr_buf[fr_start..fr_start + fr_bytes];
+            // Reinterpret &[u8] → &[f32] (native-endian).
+            let mut out = vec![0f32; self.final_res_dim];
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    raw.as_ptr(),
+                    out.as_mut_ptr() as *mut u8,
+                    fr_bytes,
+                );
+            }
+            out
+        })
+    }
+
+    pub fn n_tokens(&self) -> usize {
+        self.token_index.n_tokens()
+    }
+}
+
+/// V4 commit from packed buffers: hash directly from contiguous capture data.
+///
+/// Produces identical Merkle roots and IO chain as `commit_minimal()` on
+/// the equivalent `Vec<RetainedTokenState>`, but without materializing
+/// per-token Vecs.
+pub fn commit_minimal_packed(
+    packed_a: Vec<u8>,
+    packed_scales: Vec<f32>,
+    n_layers: usize,
+    hidden_dim: usize,
+    fwd_batch_sizes: Vec<usize>,
+    params: &FullBindingParams,
+    packed_final_res: Option<Vec<u8>>,
+    final_res_dim: usize,
+) -> (BatchCommitment, PackedBatchState) {
+    let idx = TokenIndex::new(&fwd_batch_sizes);
+    let n_tokens = idx.n_tokens();
+
+    assert_eq!(n_tokens, params.token_ids.len(), "token count must match token_ids");
+
+    // Validate buffer sizes.
+    let expected_a_bytes: usize = fwd_batch_sizes.iter().sum::<usize>() * n_layers * hidden_dim;
+    assert_eq!(
+        packed_a.len(), expected_a_bytes,
+        "packed_a length ({}) != expected ({} tokens × {} layers × {} dim)",
+        packed_a.len(), n_tokens, n_layers, hidden_dim
+    );
+    let expected_scales = fwd_batch_sizes.len() * n_layers * 4;
+    assert_eq!(
+        packed_scales.len(), expected_scales,
+        "packed_scales length ({}) != expected ({} fwd × {} layers × 4)",
+        packed_scales.len(), fwd_batch_sizes.len(), n_layers
+    );
+    if let Some(ref fr) = packed_final_res {
+        let expected_fr = n_tokens * final_res_dim * 4;
+        assert_eq!(
+            fr.len(), expected_fr,
+            "packed_final_res length ({}) != expected ({} tokens × {} dim × 4)",
+            fr.len(), n_tokens, final_res_dim
+        );
+    }
+
+    // Build temporary state for hashing (borrows only, no ownership transfer).
+    let dummy_tree = merkle::MerkleTree { root: [0u8; 32], nodes: vec![], n_leaves: 0, padded_size: 0 };
+    let state = PackedBatchState {
+        retained_tree: dummy_tree.clone(),
+        io_tree: dummy_tree,
+        packed_a,
+        packed_scales,
+        n_layers,
+        hidden_dim,
+        fwd_batch_sizes: fwd_batch_sizes.clone(),
+        token_index: idx,
+        manifest_hash: None,
+        token_ids: Vec::new(),
+        prompt_hash: [0u8; 32],
+        seed_commitment: [0u8; 32],
+        revealed_seed: [0u8; 32],
+        io_hashes: Vec::new(),
+        manifest: None,
+        packed_final_res,
+        final_res_dim,
+    };
+
+    // Trace tree: hash each token in parallel.
+    let trace_leaves: Vec<[u8; 32]> = (0..n_tokens)
+        .into_par_iter()
+        .map(|t| state.hash_token(t))
+        .collect();
+
+    // IO tree: sequential chain.
+    let mut io_leaves = Vec::with_capacity(n_tokens);
+    let mut prev_io = [0u8; 32];
+    for (i, leaf_hash) in trace_leaves.iter().enumerate() {
+        let io = merkle::io_hash_v4(*leaf_hash, params.token_ids[i], prev_io);
+        io_leaves.push(io);
+        prev_io = io;
+    }
+
+    let trace_tree = merkle::build_tree(&trace_leaves);
+    let io_tree = merkle::build_tree(&io_leaves);
+    let manifest_hash = params.manifest.map(|m| merkle::hash_manifest(m));
+
+    let commitment = BatchCommitment {
+        merkle_root: trace_tree.root,
+        io_root: io_tree.root,
+        n_tokens: n_tokens as u32,
+        manifest_hash,
+        version: CommitmentVersion::V4,
+        prompt_hash: Some(merkle::hash_prompt(params.prompt)),
+        seed_commitment: Some(merkle::hash_seed(&params.sampling_seed)),
+        kv_chain_root: None,
+    };
+
+    // Reconstitute final state with real trees.
+    let final_state = PackedBatchState {
+        retained_tree: trace_tree,
+        io_tree,
+        packed_a: state.packed_a,
+        packed_scales: state.packed_scales,
+        n_layers,
+        hidden_dim,
+        fwd_batch_sizes,
+        token_index: state.token_index,
+        manifest_hash,
+        token_ids: params.token_ids.to_vec(),
+        prompt_hash: merkle::hash_prompt(params.prompt),
+        seed_commitment: merkle::hash_seed(&params.sampling_seed),
+        revealed_seed: params.sampling_seed,
+        io_hashes: io_leaves,
+        manifest: params.manifest.cloned(),
+        packed_final_res: state.packed_final_res,
+        final_res_dim,
+    };
+
+    (commitment, final_state)
+}
+
+/// V4 audit from packed state: structural proofs + shell opening.
+pub fn open_v4_packed(
+    state: &PackedBatchState,
+    token_index: u32,
+    weights: &dyn ShellWeights,
+    cfg: &verilm_core::constants::ModelConfig,
+    weight_scales: &[Vec<f32>],
+    bridge: Option<&BridgeParams>,
+    layer_filter: Option<&[usize]>,
+) -> V4AuditResponse {
+    let i = token_index as usize;
+    assert!(i < state.n_tokens(), "token_index out of range");
+
+    let commitment = BatchCommitment {
+        merkle_root: state.retained_tree.root,
+        io_root: state.io_tree.root,
+        n_tokens: state.n_tokens() as u32,
+        manifest_hash: state.manifest_hash,
+        version: CommitmentVersion::V4,
+        prompt_hash: Some(state.prompt_hash),
+        seed_commitment: Some(state.seed_commitment),
+        kv_chain_root: None,
+    };
+
+    // Prefix leaf hashes: hash from packed buffers (no materialization).
+    let mut prefix_leaf_hashes = Vec::with_capacity(i);
+    let mut prefix_merkle_proofs = Vec::with_capacity(i);
+    let mut prefix_token_ids = Vec::with_capacity(i);
+    for j in 0..i {
+        prefix_leaf_hashes.push(state.hash_token(j));
+        prefix_merkle_proofs.push(merkle::prove(&state.retained_tree, j));
+        prefix_token_ids.push(state.token_ids[j]);
+    }
+
+    let prev_io_hash = if i == 0 {
+        [0u8; 32]
+    } else {
+        state.io_hashes[i - 1]
+    };
+
+    // Reconstruct ONLY the challenged token for shell computation.
+    let retained_token = state.extract_token(i);
+
+    let mut shell = compute_shell_opening(
+        &retained_token, weights, cfg, weight_scales, bridge, layer_filter,
+    );
+    shell.final_residual = state.extract_final_residual(i);
+
+    V4AuditResponse {
+        token_index,
+        retained: retained_token,
+        merkle_proof: merkle::prove(&state.retained_tree, i),
+        io_proof: merkle::prove(&state.io_tree, i),
+        token_id: state.token_ids[i],
+        prev_io_hash,
+        prefix_leaf_hashes,
+        prefix_merkle_proofs,
+        prefix_token_ids,
+        commitment,
+        revealed_seed: state.revealed_seed,
+        shell_opening: Some(shell),
+        manifest: state.manifest.clone(),
+    }
+}
+
 /// Compute shell opening for a single token from retained state + public weights.
 ///
 /// The prover reconstructs all matmul intermediates that the verifier
@@ -1575,5 +1938,288 @@ mod tests {
         assert_eq!(response.prefix_leaf_hashes.len(), 0);
         assert_eq!(response.prefix_merkle_proofs.len(), 0);
         assert_eq!(response.prev_io_hash, [0u8; 32]);
+    }
+
+    // ── Packed commit equivalence tests ────────────────────────────────
+
+    /// Build packed buffers from the same test data that make_minimal_captures uses.
+    /// Layout matches what Python would produce: fwd-major × layer-major.
+    fn make_packed_data(
+        n_layers: usize, n_tokens: usize, hidden: usize, fwd_batch_sizes: &[usize],
+    ) -> (Vec<u8>, Vec<f32>) {
+        let mut packed_a = Vec::new();
+        let mut packed_scales = Vec::new();
+        let mut token_counter = 0;
+
+        for &batch_sz in fwd_batch_sizes {
+            for l in 0..n_layers {
+                // Each layer in this fwd pass: batch_sz rows of `hidden` bytes.
+                for b in 0..batch_sz {
+                    let t = token_counter + b;
+                    let val = ((t * n_layers + l) & 0xFF) as u8;
+                    packed_a.extend(std::iter::repeat(val).take(hidden));
+                }
+                // 4 scales per (fwd, layer)
+                packed_scales.push(0.1 * (l + 1) as f32);  // scale_x_attn
+                packed_scales.push(0.2 * (l + 1) as f32);  // scale_a
+                packed_scales.push(0.3 * (l + 1) as f32);  // scale_x_ffn
+                packed_scales.push(0.4 * (l + 1) as f32);  // scale_h
+            }
+            token_counter += batch_sz;
+        }
+        assert_eq!(token_counter, n_tokens);
+        (packed_a, packed_scales)
+    }
+
+    #[test]
+    fn test_packed_commit_roots_match_unpacked() {
+        let n_layers = 2;
+        let hidden = 8;
+        let n_tokens = 3;
+        let fwd_batch_sizes = vec![1, 1, 1];
+
+        // Unpacked path.
+        let captures = make_minimal_captures(n_layers, n_tokens, hidden);
+        let retained = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+        let params = FullBindingParams {
+            token_ids: &[100, 200, 300],
+            prompt: b"test prompt",
+            sampling_seed: [42u8; 32],
+            manifest: None,
+        };
+        let (commit_old, state_old) = commit_minimal(retained, &params, None);
+
+        // Packed path.
+        let (packed_a, packed_scales) = make_packed_data(n_layers, n_tokens, hidden, &fwd_batch_sizes);
+        let (commit_new, state_new) = commit_minimal_packed(
+            packed_a, packed_scales, n_layers, hidden, fwd_batch_sizes, &params, None, 0,
+        );
+
+        assert_eq!(commit_old.merkle_root, commit_new.merkle_root, "trace Merkle root mismatch");
+        assert_eq!(commit_old.io_root, commit_new.io_root, "IO root mismatch");
+        assert_eq!(commit_old.n_tokens, commit_new.n_tokens);
+        assert_eq!(commit_old.prompt_hash, commit_new.prompt_hash);
+        assert_eq!(commit_old.seed_commitment, commit_new.seed_commitment);
+        assert_eq!(state_old.io_hashes, state_new.io_hashes, "IO chain hashes mismatch");
+    }
+
+    #[test]
+    fn test_packed_commit_roots_match_batched_prefill() {
+        // Batched prefill: 3 tokens in first fwd pass, then 2 decode steps.
+        let n_layers = 2;
+        let hidden = 4;
+        let fwd_batch_sizes = vec![3, 1, 1];
+        let n_tokens = 5;
+
+        // Build captures in fwd-major order for unpacked path.
+        let mut captures = Vec::new();
+        let mut token_counter = 0;
+        for &batch_sz in &fwd_batch_sizes {
+            for l in 0..n_layers {
+                let mut a_i8 = Vec::new();
+                for b in 0..batch_sz {
+                    let t = token_counter + b;
+                    a_i8.extend(std::iter::repeat((t * n_layers + l) as i8).take(hidden));
+                }
+                captures.push(MinimalCaptureEntry {
+                    a_i8,
+                    scale_x_attn: 0.1 * (l + 1) as f32,
+                    scale_a: 0.2 * (l + 1) as f32,
+                    scale_x_ffn: 0.3 * (l + 1) as f32,
+                    scale_h: 0.4 * (l + 1) as f32,
+                });
+            }
+            token_counter += batch_sz;
+        }
+        let retained = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+
+        let params = FullBindingParams {
+            token_ids: &[10, 20, 30, 40, 50],
+            prompt: b"batched",
+            sampling_seed: [7u8; 32],
+            manifest: None,
+        };
+        let (commit_old, state_old) = commit_minimal(retained, &params, None);
+
+        // Packed path.
+        let (packed_a, packed_scales) = make_packed_data(n_layers, n_tokens, hidden, &fwd_batch_sizes);
+        let (commit_new, state_new) = commit_minimal_packed(
+            packed_a, packed_scales, n_layers, hidden, fwd_batch_sizes, &params, None, 0,
+        );
+
+        assert_eq!(commit_old.merkle_root, commit_new.merkle_root, "batched: trace root mismatch");
+        assert_eq!(commit_old.io_root, commit_new.io_root, "batched: IO root mismatch");
+        assert_eq!(state_old.io_hashes, state_new.io_hashes, "batched: IO chain mismatch");
+    }
+
+    #[test]
+    fn test_packed_extract_token_matches_retained() {
+        let n_layers = 2;
+        let hidden = 8;
+        let fwd_batch_sizes = vec![1, 1, 1];
+        let n_tokens = 3;
+
+        let captures = make_minimal_captures(n_layers, n_tokens, hidden);
+        let retained = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+
+        let params = FullBindingParams {
+            token_ids: &[1, 2, 3],
+            prompt: b"p",
+            sampling_seed: [0u8; 32],
+            manifest: None,
+        };
+        let (packed_a, packed_scales) = make_packed_data(n_layers, n_tokens, hidden, &fwd_batch_sizes);
+        let (_, packed_state) = commit_minimal_packed(
+            packed_a, packed_scales, n_layers, hidden, fwd_batch_sizes, &params, None, 0,
+        );
+
+        for t in 0..n_tokens {
+            let extracted = packed_state.extract_token(t);
+            assert_eq!(
+                extracted, retained[t],
+                "token {} extraction mismatch", t
+            );
+        }
+    }
+
+    #[test]
+    fn test_packed_prefix_hashes_match_unpacked() {
+        let n_layers = 2;
+        let hidden = 8;
+        let fwd_batch_sizes = vec![1, 1, 1];
+        let n_tokens = 3;
+
+        let captures = make_minimal_captures(n_layers, n_tokens, hidden);
+        let retained = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+
+        let params = FullBindingParams {
+            token_ids: &[10, 20, 30],
+            prompt: b"p",
+            sampling_seed: [0u8; 32],
+            manifest: None,
+        };
+
+        let (_, state_old) = commit_minimal(retained.clone(), &params, None);
+        let (packed_a, packed_scales) = make_packed_data(n_layers, n_tokens, hidden, &fwd_batch_sizes);
+        let (_, packed_state) = commit_minimal_packed(
+            packed_a, packed_scales, n_layers, hidden, fwd_batch_sizes, &params, None, 0,
+        );
+
+        // Open token 2 from both paths and compare prefix leaf hashes.
+        let old_response = open_v4_structural(&state_old, 2);
+
+        let mut packed_prefix = Vec::new();
+        for j in 0..2 {
+            packed_prefix.push(packed_state.hash_token(j));
+        }
+
+        assert_eq!(
+            old_response.prefix_leaf_hashes, packed_prefix,
+            "prefix leaf hashes mismatch"
+        );
+    }
+
+    #[test]
+    fn test_packed_with_final_residuals_matches() {
+        let n_layers = 1;
+        let hidden = 4;
+        let fwd_batch_sizes = vec![1, 1];
+        let n_tokens = 2;
+        let fr_dim = 4;
+
+        // Unpacked path with final residuals.
+        let captures = make_minimal_captures(n_layers, n_tokens, hidden);
+        let retained = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+        let final_residuals = Some(vec![
+            vec![1.0f32, 2.0, 3.0, 4.0],
+            vec![5.0f32, 6.0, 7.0, 8.0],
+        ]);
+
+        let params = FullBindingParams {
+            token_ids: &[10, 20],
+            prompt: b"fr",
+            sampling_seed: [0u8; 32],
+            manifest: None,
+        };
+        let (commit_old, _) = commit_minimal(retained, &params, final_residuals);
+
+        // Packed path: pack final residuals as contiguous f32 bytes.
+        let (packed_a, packed_scales) = make_packed_data(n_layers, n_tokens, hidden, &fwd_batch_sizes);
+        let mut packed_fr = Vec::new();
+        for v in &[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0] {
+            packed_fr.extend_from_slice(&v.to_ne_bytes());
+        }
+
+        let (commit_new, packed_state) = commit_minimal_packed(
+            packed_a, packed_scales, n_layers, hidden, fwd_batch_sizes, &params,
+            Some(packed_fr), fr_dim,
+        );
+
+        assert_eq!(commit_old.merkle_root, commit_new.merkle_root, "roots with final_residuals mismatch");
+        assert_eq!(commit_old.io_root, commit_new.io_root);
+
+        // Verify extract_final_residual roundtrips correctly.
+        let fr0 = packed_state.extract_final_residual(0).unwrap();
+        assert_eq!(fr0, vec![1.0f32, 2.0, 3.0, 4.0]);
+        let fr1 = packed_state.extract_final_residual(1).unwrap();
+        assert_eq!(fr1, vec![5.0f32, 6.0, 7.0, 8.0]);
+    }
+
+    #[test]
+    fn test_token_index_locate() {
+        let idx = TokenIndex::new(&[3, 1, 2]);
+        assert_eq!(idx.n_tokens(), 6);
+        assert_eq!(idx.locate(0), (0, 0));
+        assert_eq!(idx.locate(1), (0, 1));
+        assert_eq!(idx.locate(2), (0, 2));
+        assert_eq!(idx.locate(3), (1, 0));
+        assert_eq!(idx.locate(4), (2, 0));
+        assert_eq!(idx.locate(5), (2, 1));
+    }
+
+    #[test]
+    fn test_packed_scale_ordering_matches_hash() {
+        // Directly verify that hash_token on packed data produces the same
+        // hash as hash_retained_state_direct on the equivalent RetainedTokenState.
+        let n_layers = 3;
+        let hidden = 16;
+
+        // Build a single-token retained state with distinctive scale values.
+        let mut layers = Vec::new();
+        for l in 0..n_layers {
+            layers.push(RetainedLayerState {
+                a: vec![(l * 7 + 3) as i8; hidden],
+                scale_x_attn: 0.11 * (l + 1) as f32,
+                scale_a: 0.22 * (l + 1) as f32,
+                scale_x_ffn: 0.33 * (l + 1) as f32,
+                scale_h: 0.44 * (l + 1) as f32,
+            });
+        }
+        let state = RetainedTokenState { layers };
+        let expected = merkle::hash_retained_state_direct(&state);
+
+        // Build packed representation: 1 fwd pass, 1 token.
+        let mut packed_a = Vec::new();
+        let mut packed_scales = Vec::new();
+        for l in 0..n_layers {
+            packed_a.extend(std::iter::repeat(((l * 7 + 3) & 0xFF) as u8).take(hidden));
+            packed_scales.push(0.11 * (l + 1) as f32);  // scale_x_attn
+            packed_scales.push(0.22 * (l + 1) as f32);  // scale_a
+            packed_scales.push(0.33 * (l + 1) as f32);  // scale_x_ffn
+            packed_scales.push(0.44 * (l + 1) as f32);  // scale_h
+        }
+
+        let params = FullBindingParams {
+            token_ids: &[1],
+            prompt: b"s",
+            sampling_seed: [0u8; 32],
+            manifest: None,
+        };
+        let (_, packed_state) = commit_minimal_packed(
+            packed_a, packed_scales, n_layers, hidden, vec![1], &params, None, 0,
+        );
+        let got = packed_state.hash_token(0);
+
+        assert_eq!(got, expected, "packed hash_token scale ordering mismatch vs hash_retained_state_direct");
     }
 }

@@ -353,7 +353,9 @@ class VerifiedInferenceServer:
         }
 
         if cap._capture_mode == "minimal":
-            state = self._commit_minimal(
+            use_packed = os.environ.get("VERILM_PACKED_COMMIT", "1") == "1"
+            commit_fn = self._commit_minimal_packed if use_packed else self._commit_minimal
+            state = commit_fn(
                 captures, n_fwd, n_layers, calls_per_fwd, fwd_batch_sizes,
                 all_token_ids, prompt, seed, manifest, final_residuals_raw,
             )
@@ -484,6 +486,76 @@ class VerifiedInferenceServer:
             manifest=manifest,
             weight_provider=self._weight_provider,
             final_residuals=final_residuals,
+        )
+
+    def _commit_minimal_packed(self, captures, n_fwd, n_layers, calls_per_fwd,
+                               fwd_batch_sizes, all_token_ids, prompt, seed, manifest,
+                               final_residuals_raw=None):
+        """Packed V4 commit: passes contiguous buffers to Rust, avoiding
+        per-entry Python→Rust crossing and intermediate Vec allocations.
+
+        Drop-in replacement for _commit_minimal with the same return type.
+        """
+        import verilm_rs
+        from . import capture as cap
+
+        hidden_dim = cap._hidden_size
+
+        # Pack all o_proj activations into one contiguous bytearray.
+        # Layout: fwd-major × layer-major, each segment is (batch_sz × hidden_dim) i8 bytes.
+        packed_a = bytearray()
+        packed_scales = []
+
+        for fwd_i in range(n_fwd):
+            for l_i in range(n_layers):
+                base = fwd_i * calls_per_fwd + l_i * 4
+                # Call order: qkv=0, o=1, gate_up=2, down=3
+                o_cap = captures[base + 1]
+                packed_a += bytes(o_cap[2].numpy().data)
+
+                # 4 scales per (fwd, layer): [scale_x_attn, scale_a, scale_x_ffn, scale_h]
+                for cap_entry in (captures[base + 0], captures[base + 1],
+                                  captures[base + 2], captures[base + 3]):
+                    s = cap_entry[4]
+                    if hasattr(s, 'numel') and s.numel() > 1:
+                        packed_scales.append(float(s.max().item()))
+                    elif hasattr(s, 'item'):
+                        packed_scales.append(float(s.item()))
+                    else:
+                        packed_scales.append(float(s))
+
+        # Pack final residuals as contiguous f32 bytes, token-major.
+        packed_fr = None
+        fr_dim = 0
+        if final_residuals_raw:
+            if len(final_residuals_raw) != len(fwd_batch_sizes):
+                raise RuntimeError(
+                    f"final_residual count ({len(final_residuals_raw)}) != "
+                    f"forward pass count ({len(fwd_batch_sizes)}). "
+                    f"Hook capture misaligned."
+                )
+            packed_fr = bytearray()
+            for fwd_tensor, batch_sz in zip(final_residuals_raw, fwd_batch_sizes):
+                for pos in range(batch_sz):
+                    if fwd_tensor.dim() >= 2:
+                        packed_fr += bytes(fwd_tensor[pos].numpy().data)
+                    else:
+                        packed_fr += bytes(fwd_tensor.numpy().data)
+            fr_dim = final_residuals_raw[0].shape[-1]
+
+        return verilm_rs.commit_minimal_packed(
+            packed_a=packed_a,
+            packed_scales=packed_scales,
+            n_layers=n_layers,
+            hidden_dim=hidden_dim,
+            fwd_batch_sizes=fwd_batch_sizes,
+            token_ids=[int(t) for t in all_token_ids[1:]],
+            prompt=prompt.encode(),
+            sampling_seed=seed,
+            manifest=manifest,
+            weight_provider=self._weight_provider,
+            packed_final_res=packed_fr,
+            final_res_dim=fr_dim,
         )
 
     def audit(

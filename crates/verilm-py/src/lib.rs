@@ -1024,6 +1024,203 @@ fn commit_minimal_from_captures(
     })
 }
 
+// ── Packed commit path (fewer allocations) ────────────────────────
+
+/// Python handle wrapping PackedBatchState.
+///
+/// Drop-in replacement for MinimalBatchStateHandle — same Python API,
+/// but commit was done from packed buffers without per-token Vecs.
+#[pyclass]
+struct PackedBatchStateHandle {
+    inner: verilm_prover::PackedBatchState,
+    commitment: BatchCommitment,
+    provider: Option<Arc<verilm_keygen::SafetensorsWeightProvider>>,
+}
+
+#[pymethods]
+impl PackedBatchStateHandle {
+    fn commitment_json(&self) -> PyResult<String> {
+        serde_json::to_string(&self.commitment)
+            .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+    }
+
+    fn merkle_root_hex(&self) -> String {
+        hex::encode(self.commitment.merkle_root)
+    }
+
+    fn io_root_hex(&self) -> String {
+        hex::encode(self.commitment.io_root)
+    }
+
+    fn manifest_hash_hex(&self) -> Option<String> {
+        self.commitment.manifest_hash.map(hex::encode)
+    }
+
+    fn n_tokens(&self) -> u32 {
+        self.commitment.n_tokens
+    }
+
+    fn kv_roots_hex(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn audit_v4(&self, token_index: u32, layer_indices: Option<Vec<usize>>) -> PyResult<String> {
+        let response = self.build_v4_response(token_index, layer_indices.as_deref())?;
+        serde_json::to_string(&response)
+            .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+    }
+
+    fn audit_v4_binary<'py>(&self, py: Python<'py>, token_index: u32, layer_indices: Option<Vec<usize>>) -> PyResult<Bound<'py, PyBytes>> {
+        let response = self.build_v4_response(token_index, layer_indices.as_deref())?;
+        let data = verilm_core::serialize::serialize_v4_audit(&response);
+        Ok(PyBytes::new(py, &data))
+    }
+}
+
+impl PackedBatchStateHandle {
+    fn build_v4_response(
+        &self, token_index: u32, layer_filter: Option<&[usize]>,
+    ) -> PyResult<verilm_core::types::V4AuditResponse> {
+        if token_index >= self.inner.n_tokens() as u32 {
+            return Err(PyValueError::new_err(format!(
+                "token_index {} out of range (n_tokens={})",
+                token_index, self.inner.n_tokens()
+            )));
+        }
+
+        let provider = self.provider.as_ref().ok_or_else(|| {
+            PyValueError::new_err(
+                "V4 audit requires WeightProvider; none was provided at commit time"
+            )
+        })?;
+        let token_id = self.inner.token_ids[token_index as usize] as usize;
+        let bridge_data: Option<(Vec<f32>, Option<verilm_core::merkle::MerkleProof>)> =
+            if !provider.rmsnorm_attn_weights().is_empty() {
+                let embedding_row = provider.load_embedding_row(token_id)
+                    .map_err(|e| PyValueError::new_err(format!(
+                        "failed to load embedding row for token {}: {}", token_id, e
+                    )))?;
+                let embedding_proof = provider.embedding_proof(token_id);
+                Some((embedding_row, embedding_proof))
+            } else {
+                None
+            };
+        let bridge = bridge_data.as_ref().map(|(emb_row, emb_proof)| {
+            verilm_core::types::BridgeParams {
+                rmsnorm_attn_weights: provider.rmsnorm_attn_weights(),
+                rmsnorm_ffn_weights: provider.rmsnorm_ffn_weights(),
+                rmsnorm_eps: provider.rmsnorm_eps(),
+                initial_residual: emb_row,
+                embedding_proof: emb_proof.clone(),
+            }
+        });
+        Ok(verilm_prover::open_v4_packed(
+            &self.inner, token_index, provider.as_ref(), provider.config(),
+            provider.weight_scales(), bridge.as_ref(), layer_filter,
+        ))
+    }
+}
+
+/// V4 commitment from packed contiguous buffers (fewer allocations).
+///
+/// Accepts capture data as contiguous buffers via the buffer protocol
+/// (bytearray, numpy arrays, memoryview), avoiding per-entry Python→Rust
+/// crossing overhead and intermediate Vec allocations.
+///
+/// Args:
+///     packed_a: buffer — contiguous i8 bytes, fwd-major × layer-major × batch-row-major.
+///     packed_scales: list[float] — 4 f32 scales per (fwd, layer): [scale_x_attn, scale_a, scale_x_ffn, scale_h].
+///     n_layers: int — number of transformer layers.
+///     hidden_dim: int — hidden dimension (a_i8 row length).
+///     fwd_batch_sizes: list[int] — batch size for each forward pass.
+///     token_ids: list[int] — emitted token IDs.
+///     prompt: bytes — prompt text.
+///     sampling_seed: bytes — 32-byte sampling seed.
+///     manifest: dict — deployment manifest (optional).
+///     weight_provider: WeightProvider — for audit-time shell computation (optional).
+///     packed_final_res: buffer — contiguous f32 bytes for final residuals (optional).
+///     final_res_dim: int — per-token final residual dimension.
+#[pyfunction]
+#[pyo3(signature = (
+    packed_a,
+    packed_scales,
+    n_layers,
+    hidden_dim,
+    fwd_batch_sizes,
+    token_ids,
+    prompt,
+    sampling_seed,
+    manifest = None,
+    weight_provider = None,
+    packed_final_res = None,
+    final_res_dim = 0,
+))]
+#[allow(clippy::too_many_arguments)]
+fn commit_minimal_packed(
+    packed_a: &Bound<'_, PyAny>,
+    packed_scales: Vec<f32>,
+    n_layers: usize,
+    hidden_dim: usize,
+    fwd_batch_sizes: Vec<usize>,
+    token_ids: Vec<u32>,
+    prompt: Vec<u8>,
+    sampling_seed: Vec<u8>,
+    manifest: Option<&Bound<'_, PyDict>>,
+    weight_provider: Option<&WeightProvider>,
+    packed_final_res: Option<&Bound<'_, PyAny>>,
+    final_res_dim: usize,
+) -> PyResult<PackedBatchStateHandle> {
+    // Extract packed_a via buffer protocol (one copy into Rust Vec<u8>).
+    let a_bytes: Vec<u8> = if let Ok(b) = packed_a.cast::<PyBytes>() {
+        b.as_bytes().to_vec()
+    } else if let Some(raw) = try_buffer_as_bytes(packed_a) {
+        raw
+    } else {
+        return Err(PyValueError::new_err("packed_a must support buffer protocol (bytes, bytearray, numpy, memoryview)"));
+    };
+
+    // Extract packed final residuals similarly.
+    let fr_bytes: Option<Vec<u8>> = packed_final_res.map(|obj| {
+        if let Ok(b) = obj.cast::<PyBytes>() {
+            Ok(b.as_bytes().to_vec())
+        } else if let Some(raw) = try_buffer_as_bytes(obj) {
+            Ok(raw)
+        } else {
+            Err(PyValueError::new_err("packed_final_res must support buffer protocol"))
+        }
+    }).transpose()?;
+
+    if sampling_seed.len() != 32 {
+        return Err(PyValueError::new_err("sampling_seed must be exactly 32 bytes"));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&sampling_seed);
+
+    let manifest_obj = manifest.map(extract_manifest).transpose()?;
+
+    let (commitment, inner) = verilm_prover::commit_minimal_packed(
+        a_bytes,
+        packed_scales,
+        n_layers,
+        hidden_dim,
+        fwd_batch_sizes,
+        &FullBindingParams {
+            token_ids: &token_ids,
+            prompt: &prompt,
+            sampling_seed: seed,
+            manifest: manifest_obj.as_ref(),
+        },
+        fr_bytes,
+        final_res_dim,
+    );
+
+    Ok(PackedBatchStateHandle {
+        inner,
+        commitment,
+        provider: weight_provider.map(|wp| Arc::clone(&wp.inner)),
+    })
+}
+
 /// Generate a verifier key from safetensors model weights.
 ///
 /// Args:
@@ -1184,5 +1381,7 @@ fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<WeightProvider>()?;
     m.add_class::<BatchState>()?;
     m.add_class::<MinimalBatchStateHandle>()?;
+    m.add_function(wrap_pyfunction!(commit_minimal_packed, m)?)?;
+    m.add_class::<PackedBatchStateHandle>()?;
     Ok(())
 }
