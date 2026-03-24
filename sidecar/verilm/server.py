@@ -180,6 +180,8 @@ class VerifiedInferenceServer:
         prompt: str,
         max_tokens: int = 4,
         temperature: float = 0.0,
+        top_k: int = 0,
+        top_p: float = 1.0,
     ) -> dict:
         """Run verified inference: generate → capture → commit.
 
@@ -298,12 +300,12 @@ class VerifiedInferenceServer:
                 f"prompt_tokens={len(prompt_token_ids)}, gen_tokens={len(gen_token_ids)}"
             )
 
-        # Build manifest (shared by both paths).
+        # Build manifest from actual request parameters.
         manifest = {
             "tokenizer_hash": self._tokenizer_hash,
-            "temperature": 0.0,
-            "top_k": 0,
-            "top_p": 1.0,
+            "temperature": temperature,
+            "top_k": top_k,
+            "top_p": top_p,
             "eos_policy": "stop",
             "weight_hash": self._weight_hash,
             "quant_hash": self._quant_hash,
