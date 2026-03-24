@@ -1,7 +1,10 @@
 """
 A/B overhead benchmark: 5 scenarios, interleaved, two prompts.
 
-Scenarios (all on same GPU, interleaved per round):
+Each config runs on its own A100 in parallel via Modal.
+RunPod path runs sequentially on a single pod.
+
+Scenarios (all on same GPU per config, interleaved per round):
   1. Baseline — llm.generate, no capture, no hooks
   2. + capture wrapper — matmul wrapper active, no hooks
   3. + hooks + sync — capture + final_residual hook + cuda.synchronize, no commit
@@ -20,8 +23,11 @@ Reports:
   - per-phase subphase timers (when VERILM_COMMIT_TIMERS=1)
 
 Usage:
-    python scripts/runpod/test.py --script scripts/modal/bench_ab_overhead.py
+    # Parallel on Modal (one A100 per config, ~6 min total):
     modal run --detach scripts/modal/bench_ab_overhead.py
+
+    # Sequential on RunPod (single pod, prints per-config):
+    python scripts/runpod/test.py --script scripts/modal/bench_ab_overhead.py
 """
 
 import modal
@@ -71,6 +77,14 @@ SHORT_PROMPT = "What is 2+2? Answer with just the number."
 N_WARMUP = 3
 N_ROUNDS = 8  # interleaved rounds
 
+# Each config: (key, prompt_label, prompt, max_tokens)
+CONFIGS = [
+    ("long_64", "long", LONG_PROMPT, 64),
+    ("long_128", "long", LONG_PROMPT, 128),
+    ("long_256", "long", LONG_PROMPT, 256),
+    ("short_eos_256", "short_eos", SHORT_PROMPT, 256),
+]
+
 
 def _median(times):
     s = sorted(times)
@@ -90,7 +104,8 @@ def _stats(times):
     return {"mean": mean, "med": med, "p5": p5, "p95": p95}
 
 
-def _run_bench():
+def _run_single_config(config_key, prompt_label, prompt, max_tokens):
+    """Run one config's 5-scenario interleaved benchmark. One GPU."""
     import logging
     import os
     import time
@@ -108,7 +123,7 @@ def _run_bench():
     from verilm.hooks import FinalResidualCapture
     from verilm.server import VerifiedInferenceServer
 
-    print(f"Loading {MODEL_ID}...")
+    print(f"[{config_key}] Loading {MODEL_ID}...")
     llm = LLM(
         model=MODEL_ID, dtype="auto", max_model_len=8192,
         enforce_eager=True, enable_prefix_caching=False,
@@ -121,157 +136,166 @@ def _run_bench():
 
     server = VerifiedInferenceServer(llm)
 
-    # Warmup with everything enabled.
-    print(f"\nWarmup: {N_WARMUP} iterations...")
+    # Warmup.
+    print(f"[{config_key}] Warmup: {N_WARMUP} iterations...")
     cap._capture_mode = "minimal"
     buf.enabled = True
     fr_capture.enabled = True
     for _ in range(N_WARMUP):
-        server.chat(prompt=LONG_PROMPT, max_tokens=64)
-    print("Warmup done.\n")
+        server.chat(prompt=prompt, max_tokens=min(max_tokens, 64))
+    print(f"[{config_key}] Warmup done.\n")
 
+    params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
+
+    # Collect times per scenario across interleaved rounds.
+    times = {s: [] for s in ["baseline", "capture", "hooks_sync", "full_unpacked", "full_packed"]}
+    gen_tokens = {}
+
+    for round_i in range(N_ROUNDS):
+        # ── 1. Baseline ──
+        buf.enabled = False
+        fr_capture.enabled = False
+        buf.drain()
+        fr_capture.drain()
+
+        t0 = time.monotonic()
+        out = llm.generate([prompt], params)
+        t1 = time.monotonic()
+        times["baseline"].append(t1 - t0)
+        gen_tokens["baseline"] = len(out[0].outputs[0].token_ids)
+
+        # ── 2. + capture wrapper ──
+        buf.enabled = True
+        cap._capture_mode = "minimal"
+        fr_capture.enabled = False
+        buf.drain()
+
+        t0 = time.monotonic()
+        out = llm.generate([prompt], params)
+        t1 = time.monotonic()
+        times["capture"].append(t1 - t0)
+        gen_tokens["capture"] = len(out[0].outputs[0].token_ids)
+        buf.drain()
+
+        # ── 3. + hooks + sync, no commit ──
+        buf.enabled = True
+        cap._capture_mode = "minimal"
+        fr_capture.enabled = True
+        buf.drain()
+        fr_capture.drain()
+
+        t0 = time.monotonic()
+        out = llm.generate([prompt], params)
+        torch.cuda.synchronize()
+        buf.drain()
+        fr_capture.drain()
+        t1 = time.monotonic()
+        times["hooks_sync"].append(t1 - t0)
+        gen_tokens["hooks_sync"] = len(out[0].outputs[0].token_ids)
+
+        # ── 4. Full path (unpacked) ──
+        buf.enabled = True
+        cap._capture_mode = "minimal"
+        fr_capture.enabled = True
+        os.environ["VERILM_PACKED_COMMIT"] = "0"
+
+        t0 = time.monotonic()
+        result = server.chat(prompt=prompt, max_tokens=max_tokens)
+        t1 = time.monotonic()
+        times["full_unpacked"].append(t1 - t0)
+        gen_tokens["full_unpacked"] = result["n_tokens"]
+
+        # ── 5. Full path (packed) ──
+        os.environ["VERILM_PACKED_COMMIT"] = "1"
+
+        t0 = time.monotonic()
+        result = server.chat(prompt=prompt, max_tokens=max_tokens)
+        t1 = time.monotonic()
+        times["full_packed"].append(t1 - t0)
+        gen_tokens["full_packed"] = result["n_tokens"]
+
+    # Reset.
+    buf.enabled = False
+    fr_capture.enabled = False
+    os.environ["VERILM_PACKED_COMMIT"] = "1"
+
+    # ── Report ──
+    stats = {s: _stats(t) for s, t in times.items()}
+    baseline_med = stats["baseline"]["med"]
+
+    print(f"\n[{config_key}] prompt={prompt_label}, max_tokens={max_tokens}, rounds={N_ROUNDS}")
+    print(f"{'Scenario':<30} {'Tokens':>6} {'Med ms':>9} {'Delta ms':>10} {'ms/tok':>8}")
+    print(f"{'-'*68}")
+    for scenario in ["baseline", "capture", "hooks_sync", "full_unpacked", "full_packed"]:
+        s = stats[scenario]
+        tok = gen_tokens.get(scenario, 0)
+        delta = (s["med"] - baseline_med) * 1000
+        ms_tok = delta / max(tok, 1)
+        label = {
+            "baseline": "1. Baseline (no capture)",
+            "capture": "2. + capture wrapper",
+            "hooks_sync": "3. + hooks + sync (no commit)",
+            "full_unpacked": "4. Full (unpacked commit)",
+            "full_packed": "5. Full (packed commit)",
+        }[scenario]
+        print(f"{label:<30} {tok:>6} {s['med']*1000:>8.1f}ms {delta:>+9.1f}ms {ms_tok:>+7.2f}")
+
+    # Marginal cost breakdown.
+    b = stats["baseline"]["med"]
+    c = stats["capture"]["med"]
+    h = stats["hooks_sync"]["med"]
+    fu = stats["full_unpacked"]["med"]
+    fp = stats["full_packed"]["med"]
+    tok = gen_tokens.get("full_packed", gen_tokens.get("baseline", 1))
+
+    print(f"\n  Marginal breakdown (median, ms):")
+    print(f"    Capture wrapper:         {(c - b)*1000:>+8.1f}ms  ({(c - b)*1000/max(tok,1):>+6.2f}ms/tok)")
+    print(f"    Hooks + sync:            {(h - c)*1000:>+8.1f}ms  ({(h - c)*1000/max(tok,1):>+6.2f}ms/tok)")
+    print(f"    Commit (unpacked):       {(fu - h)*1000:>+8.1f}ms  ({(fu - h)*1000/max(tok,1):>+6.2f}ms/tok)")
+    print(f"    Commit (packed):         {(fp - h)*1000:>+8.1f}ms  ({(fp - h)*1000/max(tok,1):>+6.2f}ms/tok)")
+    print(f"    Packed vs unpacked:      {(fp - fu)*1000:>+8.1f}ms")
+    print(f"    Total overhead (packed):  {(fp - b)*1000:>+8.1f}ms  ({(fp - b)*1000/max(tok,1):>+6.2f}ms/tok)")
+
+    return {
+        "config_key": config_key,
+        "prompt": prompt_label,
+        "max_tokens": max_tokens,
+        "gen_tokens": gen_tokens,
+        "stats_ms": {s: {k: v * 1000 for k, v in st.items()} for s, st in stats.items()},
+        "marginal_capture_ms": (c - b) * 1000,
+        "marginal_hooks_sync_ms": (h - c) * 1000,
+        "marginal_commit_unpacked_ms": (fu - h) * 1000,
+        "marginal_commit_packed_ms": (fp - h) * 1000,
+        "packed_vs_unpacked_ms": (fp - fu) * 1000,
+        "total_overhead_packed_ms": (fp - b) * 1000,
+    }
+
+
+# ── RunPod path: sequential (single pod) ──
+
+def _run_bench():
+    """Sequential fallback for RunPod (single GPU)."""
     all_results = {}
+    for config_key, prompt_label, prompt, max_tokens in CONFIGS:
+        result = _run_single_config(config_key, prompt_label, prompt, max_tokens)
+        all_results[config_key] = result
+    _print_summary(all_results)
+    return all_results
 
-    for prompt_label, prompt, max_tokens_list in [
-        ("long", LONG_PROMPT, [64, 128, 256]),
-        ("short_eos", SHORT_PROMPT, [256]),
-    ]:
-        for max_tokens in max_tokens_list:
-            params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
-            key = f"{prompt_label}_{max_tokens}"
 
-            print(f"\n{'='*78}")
-            print(f"  {key}: prompt={prompt_label}, max_tokens={max_tokens}, rounds={N_ROUNDS}")
-            print(f"{'='*78}")
+def _run_test():
+    results = _run_bench()
+    return {"passed": True, "results": results}
 
-            # Collect times per scenario across interleaved rounds.
-            times = {s: [] for s in ["baseline", "capture", "hooks_sync", "full_unpacked", "full_packed"]}
-            gen_tokens = {}
 
-            for round_i in range(N_ROUNDS):
-                # ── 1. Baseline ──
-                buf.enabled = False
-                fr_capture.enabled = False
-                buf.drain()
-                fr_capture.drain()
-
-                t0 = time.monotonic()
-                out = llm.generate([prompt], params)
-                t1 = time.monotonic()
-                times["baseline"].append(t1 - t0)
-                gen_tokens["baseline"] = len(out[0].outputs[0].token_ids)
-
-                # ── 2. + capture wrapper ──
-                buf.enabled = True
-                cap._capture_mode = "minimal"
-                fr_capture.enabled = False
-                buf.drain()
-
-                t0 = time.monotonic()
-                out = llm.generate([prompt], params)
-                t1 = time.monotonic()
-                times["capture"].append(t1 - t0)
-                gen_tokens["capture"] = len(out[0].outputs[0].token_ids)
-                buf.drain()
-
-                # ── 3. + hooks + sync, no commit ──
-                buf.enabled = True
-                cap._capture_mode = "minimal"
-                fr_capture.enabled = True
-                buf.drain()
-                fr_capture.drain()
-
-                t0 = time.monotonic()
-                out = llm.generate([prompt], params)
-                torch.cuda.synchronize()
-                buf.drain()
-                fr_capture.drain()
-                t1 = time.monotonic()
-                times["hooks_sync"].append(t1 - t0)
-                gen_tokens["hooks_sync"] = len(out[0].outputs[0].token_ids)
-
-                # ── 4. Full path (unpacked) ──
-                buf.enabled = True
-                cap._capture_mode = "minimal"
-                fr_capture.enabled = True
-                os.environ["VERILM_PACKED_COMMIT"] = "0"
-
-                t0 = time.monotonic()
-                result = server.chat(prompt=prompt, max_tokens=max_tokens)
-                t1 = time.monotonic()
-                times["full_unpacked"].append(t1 - t0)
-                gen_tokens["full_unpacked"] = result["n_tokens"]
-
-                # ── 5. Full path (packed) ──
-                os.environ["VERILM_PACKED_COMMIT"] = "1"
-
-                t0 = time.monotonic()
-                result = server.chat(prompt=prompt, max_tokens=max_tokens)
-                t1 = time.monotonic()
-                times["full_packed"].append(t1 - t0)
-                gen_tokens["full_packed"] = result["n_tokens"]
-
-            # Reset state.
-            buf.enabled = False
-            fr_capture.enabled = False
-            os.environ["VERILM_PACKED_COMMIT"] = "1"
-
-            # ── Report ──
-            stats = {s: _stats(t) for s, t in times.items()}
-            baseline_med = stats["baseline"]["med"]
-
-            print(f"\n{'Scenario':<30} {'Tokens':>6} {'Med ms':>9} {'Delta ms':>10} {'ms/tok':>8}")
-            print(f"{'-'*68}")
-            for scenario in ["baseline", "capture", "hooks_sync", "full_unpacked", "full_packed"]:
-                s = stats[scenario]
-                tok = gen_tokens.get(scenario, 0)
-                delta = (s["med"] - baseline_med) * 1000
-                ms_tok = delta / max(tok, 1)
-                label = {
-                    "baseline": "1. Baseline (no capture)",
-                    "capture": "2. + capture wrapper",
-                    "hooks_sync": "3. + hooks + sync (no commit)",
-                    "full_unpacked": "4. Full (unpacked commit)",
-                    "full_packed": "5. Full (packed commit)",
-                }[scenario]
-                print(f"{label:<30} {tok:>6} {s['med']*1000:>8.1f}ms {delta:>+9.1f}ms {ms_tok:>+7.2f}")
-
-            # Marginal cost breakdown (median-based).
-            b = stats["baseline"]["med"]
-            c = stats["capture"]["med"]
-            h = stats["hooks_sync"]["med"]
-            fu = stats["full_unpacked"]["med"]
-            fp = stats["full_packed"]["med"]
-            tok = gen_tokens.get("full_packed", gen_tokens.get("baseline", 1))
-
-            print(f"\n  Marginal breakdown (median, ms):")
-            print(f"    Capture wrapper:         {(c - b)*1000:>+8.1f}ms  ({(c - b)*1000/max(tok,1):>+6.2f}ms/tok)")
-            print(f"    Hooks + sync:            {(h - c)*1000:>+8.1f}ms  ({(h - c)*1000/max(tok,1):>+6.2f}ms/tok)")
-            print(f"    Commit (unpacked):       {(fu - h)*1000:>+8.1f}ms  ({(fu - h)*1000/max(tok,1):>+6.2f}ms/tok)")
-            print(f"    Commit (packed):         {(fp - h)*1000:>+8.1f}ms  ({(fp - h)*1000/max(tok,1):>+6.2f}ms/tok)")
-            print(f"    Packed vs unpacked:      {(fp - fu)*1000:>+8.1f}ms")
-            print(f"    Total overhead (packed):  {(fp - b)*1000:>+8.1f}ms  ({(fp - b)*1000/max(tok,1):>+6.2f}ms/tok)")
-
-            all_results[key] = {
-                "prompt": prompt_label,
-                "max_tokens": max_tokens,
-                "gen_tokens": gen_tokens,
-                "stats_ms": {s: {k: v * 1000 for k, v in st.items()} for s, st in stats.items()},
-                "marginal_capture_ms": (c - b) * 1000,
-                "marginal_hooks_sync_ms": (h - c) * 1000,
-                "marginal_commit_unpacked_ms": (fu - h) * 1000,
-                "marginal_commit_packed_ms": (fp - h) * 1000,
-                "packed_vs_unpacked_ms": (fp - fu) * 1000,
-                "total_overhead_packed_ms": (fp - b) * 1000,
-            }
-
-    # ── Final summary ──
+def _print_summary(all_results):
     print(f"\n{'='*78}")
     print("SUMMARY — Marginal overhead (median ms)")
     print(f"{'='*78}")
     print(f"{'Config':<20} {'Tok':>5} {'Capture':>9} {'Hook+Sync':>10} {'Commit_U':>9} {'Commit_P':>9} {'P-U':>7} {'Total_P':>9}")
     print(f"{'-'*78}")
-    for key, r in sorted(all_results.items()):
+    for key in sorted(all_results):
+        r = all_results[key]
         tok = r["gen_tokens"].get("full_packed", r["gen_tokens"].get("baseline", 0))
         print(
             f"{key:<20} {tok:>5} "
@@ -283,22 +307,33 @@ def _run_bench():
             f"{r['total_overhead_packed_ms']:>+8.1f}"
         )
 
-    return all_results
 
+# ── Modal path: parallel (one A100 per config) ──
 
-def _run_test():
-    results = _run_bench()
-    return {"passed": True, "results": results}
-
-
-@app.function(image=image, gpu="A100-80GB", timeout=1200)
-def run_bench():
-    return _run_bench()
+@app.function(image=image, gpu="A100-80GB", timeout=600)
+def run_config(config_key: str, prompt_label: str, prompt: str, max_tokens: int):
+    return _run_single_config(config_key, prompt_label, prompt, max_tokens)
 
 
 @app.local_entrypoint()
 def main():
-    print("VeriLM A/B Overhead Benchmark")
+    print("VeriLM A/B Overhead Benchmark (parallel)")
     print("=" * 60)
-    results = run_bench.remote()
-    print("\n--- Done ---")
+    print(f"Launching {len(CONFIGS)} configs on separate A100s...\n")
+
+    # Parallel dispatch: each config gets its own GPU container.
+    handles = []
+    for config_key, prompt_label, prompt, max_tokens in CONFIGS:
+        print(f"  Spawning {config_key} (max_tokens={max_tokens})...")
+        h = run_config.spawn(config_key, prompt_label, prompt, max_tokens)
+        handles.append((config_key, h))
+
+    # Collect results as they finish.
+    all_results = {}
+    for config_key, h in handles:
+        result = h.get()
+        all_results[config_key] = result
+        print(f"\n  {config_key} done.")
+
+    _print_summary(all_results)
+    print("\n--- All configs complete ---")
