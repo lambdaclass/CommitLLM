@@ -12,9 +12,12 @@
 //!    uniformly distributed.
 //! 5. **Modular bias** — `hash % n` should not introduce exploitable bias.
 //!
-//! Note: `derive_block_coefficients` now derives from the verifier's secret
-//! key seed (not the public Merkle root). The binding/separation tests below
-//! verify the derivation is sound with respect to the key seed input.
+//! Note:
+//! - `derive_challenges` is interactive challenge expansion from a verifier-
+//!   generated challenge seed.
+//! - `derive_block_coefficients` derives from the verifier's secret key seed,
+//!   not public commitment data.
+//! - `derive_token_seed` is deterministic decode-replay randomness.
 
 use verilm_core::freivalds::derive_block_coefficients;
 use verilm_core::merkle::derive_challenges;

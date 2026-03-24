@@ -20,9 +20,9 @@ struct Args {
     #[arg(long, short)]
     batch: Option<String>,
 
-    /// Verifier seed for challenge derivation (hex, 32 bytes). Required for --batch.
-    #[arg(long)]
-    seed: Option<String>,
+    /// Verifier-generated challenge seed for batch challenge expansion (hex, 32 bytes).
+    #[arg(long = "challenge-seed", alias = "seed")]
+    challenge_seed: Option<String>,
 
     /// Number of tokens to challenge. Required for --batch.
     #[arg(long, default_value = "5")]
@@ -50,16 +50,17 @@ fn main() -> Result<()> {
             std::process::exit(1);
         }
     } else if let Some(batch_path) = &args.batch {
-        let seed_hex = args
-            .seed
+        let challenge_seed_hex = args
+            .challenge_seed
             .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("--seed required for batch mode"))?;
-        let seed_bytes = hex::decode(seed_hex).context("invalid hex seed")?;
-        if seed_bytes.len() != 32 {
-            anyhow::bail!("seed must be 32 bytes (64 hex chars)");
+            .ok_or_else(|| anyhow::anyhow!("--challenge-seed required for batch mode"))?;
+        let challenge_seed_bytes =
+            hex::decode(challenge_seed_hex).context("invalid hex challenge seed")?;
+        if challenge_seed_bytes.len() != 32 {
+            anyhow::bail!("challenge seed must be 32 bytes (64 hex chars)");
         }
-        let mut seed = [0u8; 32];
-        seed.copy_from_slice(&seed_bytes);
+        let mut challenge_seed = [0u8; 32];
+        challenge_seed.copy_from_slice(&challenge_seed_bytes);
 
         let batch_data = fs::read(batch_path).context("reading batch file")?;
         let proof =
@@ -73,7 +74,7 @@ fn main() -> Result<()> {
             proof.traces.len()
         );
 
-        let report = verify_batch(&key, &proof, seed, args.challenge_k);
+        let report = verify_batch(&key, &proof, challenge_seed, args.challenge_k);
         eprintln!("challenges (k={}): {:?}", report.challenges.len(), report.challenges);
         println!("{}", report);
         if report.verdict == Verdict::Fail {

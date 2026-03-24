@@ -999,10 +999,10 @@ impl std::fmt::Display for BatchVerifyReport {
 pub fn verify_batch(
     key: &VerifierKey,
     proof: &BatchProof,
-    seed: [u8; 32],
+    challenge_seed: [u8; 32],
     challenge_k: u32,
 ) -> BatchVerifyReport {
-    verify_batch_with_policy(key, proof, seed, challenge_k, &Default::default())
+    verify_batch_with_policy(key, proof, challenge_seed, challenge_k, &Default::default())
 }
 
 /// Verify a batch proof with explicit verification policy.
@@ -1013,7 +1013,7 @@ pub fn verify_batch(
 pub fn verify_batch_with_policy(
     key: &VerifierKey,
     proof: &BatchProof,
-    seed: [u8; 32],
+    challenge_seed: [u8; 32],
     challenge_k: u32,
     policy: &verilm_core::types::VerificationPolicy,
 ) -> BatchVerifyReport {
@@ -1023,7 +1023,7 @@ pub fn verify_batch_with_policy(
 
     let challenges = merkle::derive_challenges(
         &proof.commitment.merkle_root,
-        &seed,
+        &challenge_seed,
         proof.commitment.n_tokens,
         challenge_k,
     );
@@ -1265,10 +1265,11 @@ pub fn verify_batch_with_policy(
 
 /// Derive deterministic layer indices for a routine audit.
 ///
-/// Uses `SHA256(seed || token_index || counter)` to pick `k` unique layer
-/// indices from `0..n_layers`. For a full audit, just returns `0..n_layers`.
+/// Uses `SHA256(challenge_seed || token_index || counter)` to pick `k` unique
+/// layer indices from `0..n_layers`. For a full audit, just returns
+/// `0..n_layers`.
 pub fn derive_audit_layers(
-    seed: &[u8; 32],
+    challenge_seed: &[u8; 32],
     token_index: u32,
     n_layers: usize,
     tier: AuditTier,
@@ -1284,7 +1285,7 @@ pub fn derive_audit_layers(
             let mut counter: u32 = 0;
             while indices.len() < k {
                 let mut hasher = Sha256::new();
-                hasher.update(seed);
+                hasher.update(challenge_seed);
                 hasher.update(token_index.to_le_bytes());
                 hasher.update(counter.to_le_bytes());
                 let hash: [u8; 32] = hasher.finalize().into();
@@ -1297,26 +1298,26 @@ pub fn derive_audit_layers(
     }
 }
 
-/// Build an `AuditChallenge` from a seed and tier.
+/// Build an `AuditChallenge` from a verifier-generated challenge seed and tier.
 ///
 /// Picks a random token index from `0..n_tokens` and layer indices from
 /// `0..n_layers` based on the tier.
 pub fn build_audit_challenge(
-    seed: &[u8; 32],
+    challenge_seed: &[u8; 32],
     n_tokens: u32,
     n_layers: usize,
     tier: AuditTier,
 ) -> AuditChallenge {
     use sha2::{Digest, Sha256};
 
-    // Pick token index from seed
+    // Pick token index from the verifier's challenge seed.
     let mut hasher = Sha256::new();
     hasher.update(b"vi-audit-token-v1");
-    hasher.update(seed);
+    hasher.update(challenge_seed);
     let hash: [u8; 32] = hasher.finalize().into();
     let token_index = u32::from_le_bytes(hash[..4].try_into().unwrap()) % n_tokens;
 
-    let layer_indices = derive_audit_layers(seed, token_index, n_layers, tier);
+    let layer_indices = derive_audit_layers(challenge_seed, token_index, n_layers, tier);
 
     AuditChallenge {
         token_index,

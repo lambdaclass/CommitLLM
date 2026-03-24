@@ -501,12 +501,18 @@ pub fn hash_prompt(prompt_bytes: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Derive k unique challenge indices deterministically from a Merkle root and seed.
+/// Derive `k` unique challenge indices from a commitment root and verifier challenge seed.
 ///
-/// Uses SHA256(root || seed || counter) to generate each index mod n_tokens.
-/// The prover commits the root before knowing the seed, so challenges are
-/// unpredictable at commitment time.
-pub fn derive_challenges(root: &[u8; 32], seed: &[u8; 32], n_tokens: u32, k: u32) -> Vec<u32> {
+/// Uses `SHA256(root || challenge_seed || counter)` to generate each index mod
+/// `n_tokens`. This is interactive challenge expansion, not Fiat-Shamir: the
+/// verifier samples `challenge_seed` after seeing the commitment root, so the
+/// prover cannot know the challenge set at commitment time.
+pub fn derive_challenges(
+    root: &[u8; 32],
+    challenge_seed: &[u8; 32],
+    n_tokens: u32,
+    k: u32,
+) -> Vec<u32> {
     use std::collections::BTreeSet;
     let k = k.min(n_tokens); // can't challenge more tokens than exist
     let mut indices = BTreeSet::new();
@@ -514,7 +520,7 @@ pub fn derive_challenges(root: &[u8; 32], seed: &[u8; 32], n_tokens: u32, k: u32
     while (indices.len() as u32) < k {
         let mut hasher = Sha256::new();
         hasher.update(root);
-        hasher.update(seed);
+        hasher.update(challenge_seed);
         hasher.update(counter.to_le_bytes());
         let hash: [u8; 32] = hasher.finalize().into();
         let idx = u32::from_le_bytes(hash[..4].try_into().unwrap()) % n_tokens;

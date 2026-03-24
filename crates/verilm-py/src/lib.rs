@@ -477,10 +477,10 @@ fn commit_from_captures(
     Ok(BatchState { inner, commitment })
 }
 
-/// Build an audit challenge from a seed.
+/// Build an audit challenge from a verifier-generated challenge seed.
 ///
 /// Args:
-///     seed: bytes (32) — challenge derivation seed
+///     challenge_seed: bytes (32) — verifier-generated challenge seed
 ///     n_tokens: int — number of tokens in the batch
 ///     n_layers: int — number of layers in the model
 ///     tier: str — "routine" or "full"
@@ -490,16 +490,16 @@ fn commit_from_captures(
 #[pyfunction]
 fn build_audit_challenge(
     py: Python<'_>,
-    seed: Vec<u8>,
+    challenge_seed: Vec<u8>,
     n_tokens: u32,
     n_layers: usize,
     tier: String,
 ) -> PyResult<Bound<'_, PyDict>> {
-    if seed.len() != 32 {
-        return Err(PyValueError::new_err("seed must be exactly 32 bytes"));
+    if challenge_seed.len() != 32 {
+        return Err(PyValueError::new_err("challenge_seed must be exactly 32 bytes"));
     }
-    let mut seed_arr = [0u8; 32];
-    seed_arr.copy_from_slice(&seed);
+    let mut challenge_seed_arr = [0u8; 32];
+    challenge_seed_arr.copy_from_slice(&challenge_seed);
 
     let tier_enum = match tier.as_str() {
         "routine" => AuditTier::Routine,
@@ -507,7 +507,12 @@ fn build_audit_challenge(
         _ => return Err(PyValueError::new_err(format!("invalid tier: {}", tier))),
     };
 
-    let challenge = verilm_verify::build_audit_challenge(&seed_arr, n_tokens, n_layers, tier_enum);
+    let challenge = verilm_verify::build_audit_challenge(
+        &challenge_seed_arr,
+        n_tokens,
+        n_layers,
+        tier_enum,
+    );
 
     let d = PyDict::new(py);
     d.set_item("token_index", challenge.token_index)?;
@@ -617,7 +622,7 @@ fn failures_to_py_list<'py>(
 /// Args:
 ///     proof_json: JSON-serialized `BatchProof`.
 ///     key_json: JSON-serialized `VerifierKey`.
-///     seed: hex string (64 chars) — challenge derivation seed.
+///     challenge_seed: hex string (64 chars) — verifier-generated challenge seed.
 ///     challenge_k: number of tokens to challenge.
 ///     policy: optional dict with `min_version`, `expected_prompt_hash`,
 ///         `expected_manifest_hash`.
@@ -625,12 +630,12 @@ fn failures_to_py_list<'py>(
 /// Returns:
 ///     dict with `passed` (bool), `failures` (list of dicts).
 #[pyfunction]
-#[pyo3(signature = (proof_json, key_json, seed, challenge_k, policy=None))]
+#[pyo3(signature = (proof_json, key_json, challenge_seed, challenge_k, policy=None))]
 fn verify_batch<'py>(
     py: Python<'py>,
     proof_json: &str,
     key_json: &str,
-    seed: &str,
+    challenge_seed: &str,
     challenge_k: u32,
     policy: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Bound<'py, PyDict>> {
@@ -638,12 +643,17 @@ fn verify_batch<'py>(
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize BatchProof: {}", e)))?;
     let key: VerifierKey = serde_json::from_str(key_json)
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize VerifierKey: {}", e)))?;
-    let seed_bytes = decode_hex32(seed, "seed")?;
+    let challenge_seed_bytes = decode_hex32(challenge_seed, "challenge_seed")?;
 
     let policy_obj = policy.map(extract_policy).transpose()?.unwrap_or_default();
 
-    let report =
-        verilm_verify::verify_batch_with_policy(&key, &proof, seed_bytes, challenge_k, &policy_obj);
+    let report = verilm_verify::verify_batch_with_policy(
+        &key,
+        &proof,
+        challenge_seed_bytes,
+        challenge_k,
+        &policy_obj,
+    );
 
     let result = PyDict::new(py);
     result.set_item("passed", report.verdict == verilm_verify::Verdict::Pass)?;
