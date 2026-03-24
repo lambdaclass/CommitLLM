@@ -734,6 +734,11 @@ impl WeightProvider {
         )))?;
         Ok(WeightProvider { inner: Arc::new(provider) })
     }
+
+    /// Return the R_W weight-chain hash as a hex string.
+    fn weight_hash_hex(&self) -> String {
+        hex::encode(self.inner.weight_hash())
+    }
 }
 
 /// Opaque handle to V4 minimal retained-state commitment.

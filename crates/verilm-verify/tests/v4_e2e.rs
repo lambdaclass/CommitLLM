@@ -126,7 +126,7 @@ fn v4_protocol_token_zero_pass() {
 
     let report = verify_v4(&key, &response);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
-    assert_eq!(response.prefix_retained.len(), 0);
+    assert_eq!(response.prefix_leaf_hashes.len(), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -299,8 +299,9 @@ fn v4_weights_multi_token_pass() {
     let response = open_v4(&state, 2, &ToyWeights(&model), &cfg, &[], None, None);
     let report = verify_v4_with_weights(&key, &response, &ToyWeights(&model));
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
-    // 3 independent token replays (debug path replays all prefix + challenged)
-    assert!(report.checks_run > 20);
+    // Structural checks + challenged token replay only (prefix tokens are
+    // verified via compact leaf hashes, not full weight-backed replay).
+    assert!(report.checks_run > 10);
 }
 
 #[test]

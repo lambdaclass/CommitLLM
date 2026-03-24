@@ -743,11 +743,11 @@ pub fn open_v4_structural(state: &MinimalBatchState, token_index: u32) -> V4Audi
         kv_chain_root: None,
     };
 
-    let mut prefix_retained = Vec::with_capacity(i);
+    let mut prefix_leaf_hashes = Vec::with_capacity(i);
     let mut prefix_merkle_proofs = Vec::with_capacity(i);
     let mut prefix_token_ids = Vec::with_capacity(i);
     for j in 0..i {
-        prefix_retained.push(state.all_retained[j].clone());
+        prefix_leaf_hashes.push(merkle::hash_retained_state_direct(&state.all_retained[j]));
         prefix_merkle_proofs.push(merkle::prove(&state.retained_tree, j));
         prefix_token_ids.push(state.token_ids[j]);
     }
@@ -765,7 +765,7 @@ pub fn open_v4_structural(state: &MinimalBatchState, token_index: u32) -> V4Audi
         io_proof: merkle::prove(&state.io_tree, i),
         token_id: state.token_ids[i],
         prev_io_hash,
-        prefix_retained,
+        prefix_leaf_hashes,
         prefix_merkle_proofs,
         prefix_token_ids,
         commitment,
@@ -1502,7 +1502,7 @@ mod tests {
         let response = open_v4_structural(&state, 2);
         assert_eq!(response.token_index, 2);
         assert_eq!(response.token_id, 30);
-        assert_eq!(response.prefix_retained.len(), 2);
+        assert_eq!(response.prefix_leaf_hashes.len(), 2);
         assert_eq!(response.prefix_merkle_proofs.len(), 2);
         assert_eq!(response.prefix_token_ids, vec![10, 20]);
         assert_eq!(response.commitment.merkle_root, commitment.merkle_root);
@@ -1516,18 +1516,17 @@ mod tests {
         ));
 
         // Verify each prefix token's Merkle proof.
-        for (j, prefix_rs) in response.prefix_retained.iter().enumerate() {
-            let prefix_leaf = merkle::hash_retained_state_direct(prefix_rs);
+        for (j, prefix_leaf_hash) in response.prefix_leaf_hashes.iter().enumerate() {
             assert!(merkle::verify(
                 &commitment.merkle_root,
-                &prefix_leaf,
+                prefix_leaf_hash,
                 &response.prefix_merkle_proofs[j],
             ));
         }
 
         // Verify IO chain.
-        let leaf_hash_0 = merkle::hash_retained_state_direct(&response.prefix_retained[0]);
-        let leaf_hash_1 = merkle::hash_retained_state_direct(&response.prefix_retained[1]);
+        let leaf_hash_0 = response.prefix_leaf_hashes[0];
+        let leaf_hash_1 = response.prefix_leaf_hashes[1];
         let io_0 = merkle::io_hash_v4(leaf_hash_0, 10, [0u8; 32]);
         let io_1 = merkle::io_hash_v4(leaf_hash_1, 20, io_0);
         assert_eq!(response.prev_io_hash, io_1);
@@ -1550,7 +1549,7 @@ mod tests {
         let (_, state) = commit_minimal(retained, &params);
         let response = open_v4_structural(&state, 0);
 
-        assert_eq!(response.prefix_retained.len(), 0);
+        assert_eq!(response.prefix_leaf_hashes.len(), 0);
         assert_eq!(response.prefix_merkle_proofs.len(), 0);
         assert_eq!(response.prev_io_hash, [0u8; 32]);
     }

@@ -137,6 +137,7 @@ def _run_bench():
             token_index=challenge["token_index"],
             layer_indices=challenge["layer_indices"],
             tier="routine",
+            binary=False,
         )
         routine_open_times.append(time.monotonic() - t0)
         routine_json = result
@@ -157,6 +158,7 @@ def _run_bench():
             token_index=0,
             layer_indices=full_layers,
             tier="full",
+            binary=False,
         )
         full_open_times.append(time.monotonic() - t0)
         full_json = result

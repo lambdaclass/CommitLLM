@@ -114,6 +114,7 @@ def _run_e2e():
         token_index=0,
         layer_indices=full_layers,
         tier="full",
+        binary=False,
     )
     audit_full = json.loads(audit_full_json) if isinstance(audit_full_json, str) else audit_full_json
     shell_full = audit_full.get("shell_opening")
@@ -162,6 +163,7 @@ def _run_e2e():
         token_index=routine_token,
         layer_indices=routine_layers,
         tier="routine",
+        binary=False,
     )
     audit_routine = json.loads(audit_routine_json) if isinstance(audit_routine_json, str) else audit_routine_json
     shell_routine = audit_routine.get("shell_opening")

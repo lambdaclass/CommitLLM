@@ -369,8 +369,10 @@ pub struct V4AuditResponse {
     pub token_id: u32,
     /// Previous IO hash (for chain verification).
     pub prev_io_hash: [u8; 32],
-    /// Retained states for all prior tokens (prefix), ordered by position.
-    pub prefix_retained: Vec<RetainedTokenState>,
+    /// Leaf hashes for all prior tokens (prefix), ordered by position.
+    /// Each entry is `hash_retained_state_direct(state)` — 32 bytes instead
+    /// of the full `RetainedTokenState`, which is the major payload win.
+    pub prefix_leaf_hashes: Vec<[u8; 32]>,
     /// Merkle proofs for each prefix token's retained leaf.
     pub prefix_merkle_proofs: Vec<MerkleProof>,
     /// Token IDs for prefix tokens.

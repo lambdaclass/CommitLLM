@@ -83,6 +83,16 @@ class VerifiedInferenceServer:
             except Exception as e:
                 logger.warning("Could not pre-load WeightProvider: %s", e)
 
+        # Verify the cached WeightProvider matches the committed R_W.
+        if self._weight_provider is not None:
+            provider_rw = self._weight_provider.weight_hash_hex()
+            if provider_rw != self._weight_hash:
+                raise RuntimeError(
+                    f"WeightProvider R_W mismatch: provider={provider_rw}, "
+                    f"manifest={self._weight_hash}. Model identity not bound."
+                )
+            logger.info("WeightProvider R_W bound: %s", provider_rw)
+
     def _compute_tokenizer_hash(self, llm) -> str:
         """SHA-256 of tokenizer vocab, used in manifest."""
         try:
@@ -371,19 +381,20 @@ class VerifiedInferenceServer:
         token_index: int,
         layer_indices: List[int],
         tier: str = "routine",
-        binary: bool = False,
+        binary: bool = True,
     ):
         """Open an audit proof.
 
         For full-trace (V1-V3) state: returns zstd-compressed binary.
-        For V4 retained-state: returns JSON string or binary bytes.
+        For V4 retained-state: returns binary (bincode+zstd) by default,
+        or JSON string when binary=False (debug only).
 
         Args:
             request_id: from the /chat response.
             token_index: which token to audit.
             layer_indices: which layers to open. The verifier chooses.
             tier: "routine" (shell checks) or "full" (shell + attention replay).
-            binary: if True, return bincode+zstd bytes instead of JSON (V4 only).
+            binary: if True (default), return bincode+zstd bytes. False for JSON debug.
         """
         entry = self._audit_store.get(request_id)
         if entry is None:
@@ -455,7 +466,7 @@ def create_app(llm, **kwargs):
                     {"error": "token_index and layer_indices are required"},
                     status_code=400,
                 )
-            use_binary = request.get("binary", False)
+            use_binary = request.get("binary", True)
             result = server.audit(
                 request_id=request["request_id"],
                 token_index=request["token_index"],

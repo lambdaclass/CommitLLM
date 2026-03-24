@@ -450,7 +450,7 @@ mod tests {
             },
             token_id: 42,
             prev_io_hash: [0xcc; 32],
-            prefix_retained: vec![],
+            prefix_leaf_hashes: vec![],
             prefix_merkle_proofs: vec![],
             prefix_token_ids: vec![],
             commitment: BatchCommitment {

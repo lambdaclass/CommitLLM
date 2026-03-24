@@ -172,6 +172,7 @@ def _run_bench():
             token_index=0,
             layer_indices=list(range(n_layers)),
             tier="routine",
+            binary=False,
         )
         audit_open_times.append(time.monotonic() - t0)
         audit_json = audit_result  # JSON string from V4 path

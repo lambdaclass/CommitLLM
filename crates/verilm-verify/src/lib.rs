@@ -1938,13 +1938,10 @@ pub fn verify_v4_with_weights(
         None
     };
 
-    // Replay each prefix token independently (debug path).
-    // Prefix tokens don't have initial_residual — use simplified bridge.
-    for (t, prefix_rs) in response.prefix_retained.iter().enumerate() {
-        let (c, f) = replay_token_shell(key, cfg, prefix_rs, weights, t, None);
-        checks_run += c;
-        failures.extend(f);
-    }
+    // NOTE: prefix replay is no longer possible — prefix_leaf_hashes are
+    // compact 32-byte hashes, not full RetainedTokenState.  The structural
+    // checks in verify_v4_structural still verify the prefix Merkle proofs
+    // and IO chain using these hashes.
 
     // Replay the challenged token (with initial_residual if available).
     let (c, f) = replay_token_shell(
@@ -1952,7 +1949,7 @@ pub fn verify_v4_with_weights(
         cfg,
         &response.retained,
         weights,
-        response.prefix_retained.len(),
+        response.prefix_leaf_hashes.len(),
         initial_residual,
     );
     checks_run += c;
@@ -2025,15 +2022,14 @@ fn verify_v4_structural(
     }
 
     // 5. Prefix retained leaf Merkle proofs
-    for (j, (prefix_state, proof)) in response
-        .prefix_retained
+    for (j, (prefix_leaf_hash, proof)) in response
+        .prefix_leaf_hashes
         .iter()
         .zip(response.prefix_merkle_proofs.iter())
         .enumerate()
     {
         checks_run += 1;
-        let prefix_leaf = merkle::hash_retained_state_direct(prefix_state);
-        if !merkle::verify(&response.commitment.merkle_root, &prefix_leaf, proof) {
+        if !merkle::verify(&response.commitment.merkle_root, prefix_leaf_hash, proof) {
             failures.push(format!(
                 "prefix token {}: retained leaf Merkle proof failed",
                 j
@@ -2044,9 +2040,8 @@ fn verify_v4_structural(
     // 6. IO chain verification
     checks_run += 1;
     let mut prev_io = [0u8; 32];
-    for (j, prefix_state) in response.prefix_retained.iter().enumerate() {
-        let prefix_leaf = merkle::hash_retained_state_direct(prefix_state);
-        prev_io = merkle::io_hash_v4(prefix_leaf, response.prefix_token_ids[j], prev_io);
+    for (j, prefix_leaf_hash) in response.prefix_leaf_hashes.iter().enumerate() {
+        prev_io = merkle::io_hash_v4(*prefix_leaf_hash, response.prefix_token_ids[j], prev_io);
     }
 
     if prev_io != response.prev_io_hash {
@@ -2071,12 +2066,12 @@ fn verify_v4_structural(
 
     // 7. Prefix count == token_index
     checks_run += 1;
-    if response.prefix_retained.len() != response.token_index as usize {
+    if response.prefix_leaf_hashes.len() != response.token_index as usize {
         failures.push(format!(
             "token {}: expected {} prefix tokens but got {}",
             response.token_index,
             response.token_index,
-            response.prefix_retained.len()
+            response.prefix_leaf_hashes.len()
         ));
     }
 

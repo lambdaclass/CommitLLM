@@ -587,6 +587,8 @@ pub struct SafetensorsWeightProvider {
     embedding_tree: Option<verilm_core::merkle::MerkleTree>,
     /// Path to model directory (for loading embedding rows on demand).
     model_dir: std::path::PathBuf,
+    /// R_W: SHA-256 weight-chain hash over all INT8 weights and scales.
+    weight_hash: [u8; 32],
 }
 
 impl SafetensorsWeightProvider {
@@ -632,6 +634,24 @@ impl SafetensorsWeightProvider {
             .map(|hashes| verilm_core::merkle::build_tree(&hashes))
             .ok();
 
+        // Detect source dtype from the first weight tensor and compute R_W.
+        let first_name = MatrixType::Wq.weight_name().replace("{}", "0");
+        let (_, _, first_dtype) = find_tensor_raw(&parsed, &first_name)?;
+        let source_dtype = match first_dtype {
+            Dtype::I8 => "I8",
+            Dtype::BF16 => "BF16",
+            Dtype::F16 => "F16",
+            other => bail!("unsupported source dtype {:?}", other),
+        };
+
+        let weight_hash = verilm_core::merkle::hash_weights(
+            source_dtype,
+            config.n_layers,
+            &scales,
+            |layer, mt_idx| weights[layer][mt_idx].clone(),
+            MatrixType::ALL.len(),
+        );
+
         Ok(SafetensorsWeightProvider {
             config,
             weights,
@@ -640,11 +660,17 @@ impl SafetensorsWeightProvider {
             rmsnorm_ffn_weights,
             embedding_tree,
             model_dir: dir.to_path_buf(),
+            weight_hash,
         })
     }
 
     pub fn config(&self) -> &ModelConfig {
         &self.config
+    }
+
+    /// Return the R_W weight-chain hash computed at load time.
+    pub fn weight_hash(&self) -> [u8; 32] {
+        self.weight_hash
     }
 
     /// Per-layer, per-matrix-type weight quantization scales.
