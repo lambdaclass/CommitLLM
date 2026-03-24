@@ -22,6 +22,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import time
 from typing import Dict, List, Optional
 
@@ -69,6 +70,16 @@ class VerifiedInferenceServer:
         else:
             self.el_capture = None
             logger.info("Minimal mode: skipping embedding/logit hooks")
+
+        # Install canonical sampler hook on LogitsProcessor module.
+        # Must be AFTER capture hooks so capture sees original (unmasked) logits.
+        from .sampler import CanonicalSamplerHook
+        self.sampler_hook = CanonicalSamplerHook()
+        if not self.sampler_hook.install(model):
+            raise RuntimeError(
+                "Could not install canonical sampler hook — "
+                "LogitsProcessor module not found in model"
+            )
 
         # Manifest hashes.
         self._tokenizer_hash = self._compute_tokenizer_hash(llm)
@@ -185,24 +196,16 @@ class VerifiedInferenceServer:
     ) -> dict:
         """Run verified inference: generate → capture → commit.
 
-        Only greedy decoding (temperature=0) is supported. Stochastic
-        sampling cannot be faithfully replayed by the verifier because
-        vLLM's sampler uses an internal RNG that does not match the
-        protocol's canonical sampler. This restriction will be lifted
-        once a canonical ChaCha20-based sampler is integrated.
+        Supports both greedy (temperature=0) and sampled decoding.
+        Sampled decoding uses a canonical ChaCha20-based sampler injected
+        as a vLLM logits processor, ensuring exact reproducibility by the
+        verifier. vLLM's own sampling knobs are neutralized — the
+        canonical processor is the sole policy owner.
         """
         import verilm_rs
         from vllm import SamplingParams
 
         from . import capture as cap
-
-        # Enforce greedy-only until canonical stochastic replay exists.
-        if temperature != 0.0:
-            raise ValueError(
-                "verilm: only greedy decoding (temperature=0) is supported. "
-                "Stochastic sampling cannot be faithfully verified — the "
-                "verifier's canonical sampler does not match vLLM's RNG."
-            )
 
         # Clear buffers and reset call counter to realign layer/proj counting.
         # Without the counter reset, any extra cutlass_scaled_mm calls between
@@ -212,15 +215,21 @@ class VerifiedInferenceServer:
         if self.el_capture is not None:
             self.el_capture.drain()
 
-        # Greedy: deterministic seed derived from prompt.
-        seed = hashlib.sha256(prompt.encode()).digest()
+        # Fresh random batch seed per request. The commitment includes
+        # seed_commitment = SHA256(batch_seed); the batch_seed itself is
+        # revealed only at audit time, preventing pre-computation attacks.
+        seed = secrets.token_bytes(32)
 
-        # Generate.
-        params = SamplingParams(
-            max_tokens=max_tokens,
-            temperature=0.0,
-        )
-        outputs = self.llm.generate([prompt], params)
+        # Activate the canonical sampler hook for this request.
+        # The hook intercepts LogitsProcessor output, runs the Rust canonical
+        # sampler, and masks all but the chosen token to -inf. vLLM then does
+        # greedy argmax on the masked logits — the token is already decided.
+        self.sampler_hook.activate(seed, temperature, top_k, top_p)
+        params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
+        try:
+            outputs = self.llm.generate([prompt], params)
+        finally:
+            self.sampler_hook.deactivate()
         output = outputs[0]
 
         generated_text = output.outputs[0].text
@@ -503,6 +512,9 @@ def create_app(llm, **kwargs):
             result = server.chat(
                 prompt=request.get("prompt", ""),
                 max_tokens=request.get("n_tokens", 4),
+                temperature=float(request.get("temperature", 0.0)),
+                top_k=int(request.get("top_k", 0)),
+                top_p=float(request.get("top_p", 1.0)),
             )
             return result
         except Exception as e:

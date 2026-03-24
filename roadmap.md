@@ -1,134 +1,320 @@
 # Roadmap
 
-## 1. Research & Validation
+This roadmap reflects the current execution order for VeriLM:
 
-First, we need empirical data to validate the protocol's security bounds.
+1. Finish live sampled serving so production behavior is exactly replayable.
+2. Canonicalize the V5 retained-state path.
+3. Add exact-strengthening features needed for the strongest claim.
+4. Adversarially harden the verifier before trusting final benchmarks.
+5. Add conformance, interoperability, and operational fail-closed checks.
+6. Only then optimize further, benchmark the final protocol, and publish.
 
-- [ ] **Measure the requantization corridor** — Run FP16 vs FP64 attention on real Llama activations, quantize both to INT8, measure per-element agreement rates. This determines the actual bound on adversarial freedom in attention manipulation.
-- [ ] **Calibrate detection probabilities** — Concrete numbers for P(catch) at various sampling rates (k) and tampering fractions (f/n).
-- [ ] **Storage cost benchmarks** — Real measurements across audit windows (30s, 60s, 2min, 1hr) and model sizes.
-- [ ] **Inference overhead measurement** — Quantify the runtime cost of tracing and commitment generation (memcpy overhead, Merkle tree construction, etc.)
+## 0. Closed Blockers
 
-## 2. Core Implementation
+These are no longer on the critical path:
 
-The foundation everything else builds on.
+- [x] Sync-equivalence: `global` and `event` modes were checked and matched.
+- [x] Capture reliability: EOS trailing-forward trim, prefix-caching disablement, counter reset, and mixed-shape stability are in place.
+- [x] Deterministic capture mismatch investigation: no remaining evidence that modulo-based projection identification must be replaced.
 
-### 2.1 Sidecar Audit Path
-- [ ] **Freeze the current sidecar as the reference path** — Keep the existing full-trace `BatchState` path working as the baseline prover implementation.
-- [ ] **Add end-to-end sidecar tests** — `chat -> commit -> audit -> deserialize -> verify` on the current path before refactoring storage.
-- [ ] **Introduce minimal retained-state types** — Replace full-trace retention with prover-side state that stores only the irreducible audit-window artifacts plus commitment metadata.
-- [ ] **Implement replay-from-retained-state** — Reconstruct the opened shell/KV data on demand from transcript + retained post-attention artifacts + model metadata.
-- [ ] **Switch `/audit` to the replay path** — Make selective audit openings come from replayed state rather than cloning stored full traces.
-- [ ] **Differential-test old vs new audit paths** — For the same request/challenge, the replay path must produce verifier-equivalent openings to the current full-trace path.
+## 1. V6 First: Live Canonical Sampled Serving and Decode/Output Binding
 
-### 2.2 Verifier
-- [ ] **Rust verifier library** — 25 MB key + receipt + traces → pass/fail
-  - Freivalds checks (all 7 matrices)
-  - Exact requantization verification
-  - SiLU LUT, RoPE, RMSNorm canonical recomputation
-  - Attention replay (FP64)
-  - KV provenance sampling
-  - Cross-layer consistency checks
-- [ ] **Client SDKs** — Python and TypeScript libraries for verifying receipts (wrapping the Rust core)
+Sampled serving is required for V6. Greedy remains the `temperature=0` special case.
 
-### 2.3 Tracing Plugins
-- [ ] **vLLM tracing plugin** — Sidecar that captures intermediates and emits 100-byte receipts
-- [ ] **llama.cpp tracing plugin** — Same for llama.cpp deployments
-- [ ] **Fine-tuned models / LoRA support** — How to handle adapters (separate commitment vs merged weights)
+- [ ] **Implement live canonical sampled decoding through a vLLM `logits_processor`**
+  - keep vLLM responsible for forward passes, batching, KV/cache, and logits production
+  - keep VeriLM responsible for the final token-selection semantics
+  - do not fork vLLM if the `logits_processor` path is sufficient
 
-### 2.4 Formal Verification
-- [ ] **Formalization in Lean** — Prove correctness of Freivalds implementation and protocol composition
+- [ ] **Finish the decode/output parts of the manifest before declaring sampled serving done**
+  - decode spec: sampler ID / version, temperature, top-k, top-p, repetition / frequency / presence penalties, logit bias, bad-word masks, grammar / guided-decoding constraints, mode choice, tie-breaking rules
+  - output spec: EOS policy, stop strings, min/max stopping rules, ignore-EOS behavior, special-token stripping, detokenization / cleanup / whitespace normalization
 
-### 2.5 Testing & Quality
-- [ ] **Property-based test suite** — Cheat detection should always catch manipulation; fuzzing the verifier
-- [ ] **Batch verification** — Optimizations for verifying many receipts (e.g., a day's traffic)
+- [ ] **Bind transcript randomness end to end**
+  - generate a fresh random per-request `batch_seed`
+  - commit `seed_commitment = H(batch_seed)` in the receipt
+  - reveal `batch_seed` on audit
+  - derive per-token seeds deterministically from `batch_seed` and token index
 
-### 2.6 Standardization
-- [ ] **Receipt format spec** — Documented schema for the 100-byte receipt and all commitment structures
-- [ ] **API extensions** — OpenAI-compatible `receipt` field in response headers/metadata
+- [ ] **Apply the canonical decode policy in the live path**
+  - temperature
+  - top-k
+  - top-p
+  - repetition / frequency / presence penalties
+  - grammar / guided decoding
+  - logit bias
+  - tie-breaking rules
 
-## 3. Launch & Documentation
+- [ ] **Force the chosen token**
+  - mask all other logits so vLLM's internal sampler becomes irrelevant
+  - neutralize or bypass vLLM's built-in sampling knobs so decode policy is not applied twice
 
-Ship the protocol and explain it clearly.
+- [ ] **Keep greedy mode as a supported special case**
+  - `temperature=0` triggers argmax behavior
+  - same receipt structure
+  - useful for deterministic benchmarks and debugging
 
-### 3.1 Paper
-- [ ] Add graphs and tables with concrete numbers (storage costs, audit windows, detection probabilities)
-- [ ] Add security game + proof sketches for the core soundness claims
-- [ ] Add batched-serving discussion (per-request trace isolation under vLLM / paged attention)
-- [ ] Add adversarial model section — Formal threat model describing provider capabilities, cheating strategies, and protocol guarantees against each
-- [ ] Cut a versioned paper release in GitHub
-- [ ] Upload to arXiv
-- [ ] Claim / create Hugging Face Paper Page and link repo + artifacts
+- [ ] **Add sampled end-to-end tests through the live HTTP/server path**
+  - honest sampled pass
+  - wrong seed fails
+  - wrong manifest fails
+  - wrong sampled token fails
+  - cross-request splice fails
 
-### 3.2 Demo & Visualization
-- [ ] **Interactive TUI demo** — Terminal interface showing the protocol in action
-  - User chats with "provider" (simulated or real)
-  - Each response shows 100-byte receipt
-  - User can manually audit any response
-  - Random automatic audits happen in background
-  - Provider randomly cheats (model swap, attention manipulation, KV tampering)
-  - Visual feedback: green check for honest, red alert with evidence for caught cheating
-  - Shows detection probability in real-time
-- [ ] **Hugging Face Space demo** — Public artifact linked from the paper page
-  - Receipt visualization
-  - One-click audit walkthrough
-  - Example cheating scenarios and caught audits
+- [ ] **Add verifier logic for decode/output policy completeness needed by sampled serving**
+  - recompute penalties
+  - verify grammar / constraint behavior
+  - verify stop-string and stop-policy behavior
+  - replay detokenization / cleanup when final text is claimed
 
-### 3.3 Communication
-- [ ] Write article for blog.lambdaclass.com
-- [ ] Write X thread
-- [ ] Prepare publication rollout: GitHub release → arXiv → Hugging Face Paper Page → demo links
-- [ ] Make repo public (squash git history to single commit first)
+- [ ] **Add sampler drift protection**
+  - version-lock / conformance tests so sampler behavior cannot drift silently across vLLM upgrades
 
-## 4. First Product
+- [ ] **Make sampled decoding the default production mode**
+  - only after the live canonical sampler is stable, replayable, and fully tested
 
-Something people can actually use.
+## 2. Canonical V5 Path
 
-- [ ] **OpenAI-compatible proxy with receipts** — Sits in front of vLLM, standard API, receipts in response headers/metadata
-  - 60-second default audit window (fits in RAM, no NVMe complexity)
-  - Programmatic challenge endpoint
-  - Simple verifier CLI
+- [ ] **Make the key-only retained-state path the canonical protocol path**
+- [ ] **Keep weight-backed replay debug-only / oracle-only**
+- [ ] **Remove or demote transitional V4 framing**
+- [ ] **Keep only irreducible retained state long-term**
+- [ ] **Keep the binary audit / receipt format as the canonical protocol format**
+- [ ] **Ensure audit-time weight loading stays bound to the committed `R_W`**
 
-## 5. Ecosystem
+## 3. Remaining Exactness and Strengthening
 
-Where this gets interesting.
+- [ ] **Complete the manifest in its final protocol form**
+  - input spec: tokenizer / normalization, chat template, BOS / EOS policy, truncation / padding, special-token handling, system prompt
+  - model spec: `R_W`, quantization config, adapter / LoRA / merged-checkpoint identity, RoPE / scaling config, RMSNorm epsilon, other architecture-affecting knobs
+  - decode spec and output spec are already required in Section 1 for sampled-serving completion
 
-### 5.1 Decentralized Inference
-- [ ] **Ritual plugin** — Replace redundant execution with receipts
-- [ ] **Bittensor plugin** — Verified subnet incentives
-- [ ] **Gensyn plugin** — Proof-of-training integration
+- [ ] **Add verifier logic for policy completeness**
+  - any remaining input/model-spec verification beyond the decode/output checks already required in Section 1
 
-### 5.2 Marketplace
-- [ ] **Inference marketplace** — Multiple providers, same model, client-verified receipts, price/quality competition
+- [ ] **Keep the final token tail exact end to end in the published protocol**
+  - final hidden
+  - LM head / logits
+  - logit modifiers
+  - token selection
+  - stopping behavior
+  - output-text claim boundaries
+
+- [ ] **Add exact full-prefix deep-audit mode**
+  - without this, prefix anchoring remains statistical
+
+- [ ] **Ensure deep-audit batching uses verifier-secret randomness**
+
+## 4. Adversarial Hardening
+
+This comes before trusting final benchmarks or making strong publication claims.
+
+- [ ] **Add an explicit adversarial verifier-hardening phase**
+
+- [ ] **Build a tamper corpus for every verifier boundary**
+  - shell openings
+  - retained-state leaves
+  - IO chain
+  - embedding proofs
+  - manifest fields
+  - prompt hashes
+  - seed commitments
+  - LM-head / final-token step
+  - decode replay
+  - stop policy
+  - prefix openings
+  - routine / full audit semantics
+  - malformed binary payloads
+
+- [ ] **Add cross-proof and splice attacks**
+  - mix request A receipts with request B audits
+  - mix prefixes across requests
+  - mix manifests / weights / prompts / seeds across requests
+
+- [ ] **Add boundary-condition fuzzing**
+  - EOS-shortened requests
+  - long prompt / short output
+  - short prompt / long output
+  - weird tier / layer requests
+  - malformed serialization
+  - unknown versions
+
+- [ ] **Assert failures for the right reason**
+  - not just "some error"
+  - where possible, specific verifier failure messages
+
+## 5. Conformance, Interoperability, and Challenge Specification
+
+- [ ] **Add golden / conformance vectors**
+  - fixed receipts
+  - fixed audit responses
+  - fixed verifier outputs
+  - usable by future Rust / Python / TypeScript verifiers
+
+- [ ] **Write the challenge protocol specification**
+  - when `challenge_seed` is sampled
+  - how token challenges are derived
+  - how layer challenges are derived
+  - how prefix challenges are derived
+  - routine vs deep-audit parameters
+  - exact interactive verifier / prover flow
+
+- [ ] **Add cross-version / interoperability tests for the binary format**
+  - golden binary payloads
+  - backward rejection behavior
+  - forward rejection behavior
+  - independent decoder compatibility
+
+## 6. Live Server Operational Checks
+
+- [ ] **Add startup / self-check tasks for the live verified server**
+  - assert model identity matches committed `R_W`
+  - assert prefix caching is disabled in verified mode
+  - assert sync mode / capture mode match intended verified settings
+  - fail closed on operational mismatch instead of silently drifting
+
+## 7. Performance and Audit Cost
+
+Performance is no longer ahead of protocol completion, but still matters before release.
+
+### 7.1 Inference Cost
+
+- [ ] **Lower online inference overhead further if it remains worthwhile**
+  - pinned host buffers for `a_i8`
+  - flatter minimal-capture layout
+  - less Python postprocessing
+  - less PyO3 / Rust ingress copying
+  - possibly a more native capture implementation if needed
+
+- [ ] **Rebenchmark after each meaningful online-path change**
+
+### 7.2 Audit Payload and Audit Open Cost
+
+- [ ] **Inspect the binary payload by field**
+- [ ] **Reduce audit payload structurally where possible**
+  - remove unnecessary full vectors
+  - preserve strongest full/deep-audit semantics
+  - use sampling only for routine / probabilistic tiers
+
+- [ ] **Add streaming / incremental audit open if it materially reduces peak memory or open time**
+
+## 8. Benchmarks and Research Validation
+
+- [ ] **Benchmark the final V5 path**
+  - baseline
+  - online overhead
+  - commit time
+  - audit open time
+  - verify time
+  - retained state per token
+  - binary payload size
+
+- [ ] **Benchmark the protocol-complete V6 path**
+  - greedy path cost
+  - sampled path cost
+  - routine vs deep audit
+  - exact-prefix premium
+  - retained state / payload / verifier time
+
+- [ ] **Measure retained-state memory and audit bandwidth**
+- [ ] **Measure the attention corridor empirically**
+- [ ] **Measure real audit-window storage costs**
+- [ ] **Calibrate detection probabilities**
+- [ ] **Benchmark batch verification**
+
+## 9. Documentation and Release
+
+These tasks must explicitly update the full protocol, not just the README narrative.
+
+- [ ] **Update the full protocol specification in the paper**
+  - exact / statistical / approximate boundaries
+  - routine vs deep audit
+  - greedy vs sampled mode status
+  - retained-state canonical path
+  - verifier randomness model
+
+- [ ] **Update the full protocol documentation in the README**
+  - architecture
+  - verifier model
+  - exact / statistical / approximate guarantees
+  - binary protocol path
+  - routine vs deep audit
+
+- [ ] **Update the article / writeup to match the full protocol**
+
+- [ ] **Add a pipeline figure**
+  - exact
+  - statistical
+  - approximate
+  - trust-assumption boundaries
+
+- [ ] **Document canonical semantics vs trust assumptions clearly**
+
+- [ ] **Add fail-on-unknown versioning rules to the full protocol docs and code-facing docs**
+
+- [ ] **Run the final kept-path benchmark suite**
+
+- [ ] **Publish around V6 when the story is coherent**
+
+## 10. Longer-Term Engineering
+
+- [ ] **Client SDKs** — Python and TypeScript wrappers around the verifier
+- [ ] **llama.cpp tracing plugin**
+- [ ] **Fine-tuned models / LoRA support**
+- [ ] **Formalization in Lean**
+- [ ] **Receipt format specification**
+- [ ] **API extensions** — OpenAI-compatible receipt field in response metadata
+
+## 11. First Product
+
+- [ ] **OpenAI-compatible proxy with receipts**
+  - standard API
+  - receipts in response headers / metadata
+  - default audit window
+  - challenge endpoint
+  - simple verifier CLI
+
+## 12. Ecosystem
+
+- [ ] **Ritual plugin**
+- [ ] **Bittensor plugin**
+- [ ] **Gensyn plugin**
+- [ ] **Inference marketplace**
 
 ---
 
 ## Critical Path
 
-```
-Stabilize current sidecar path
+```text
+Live canonical sampled serving
+    + decode/output manifest binding + verifier replay
     ↓
-End-to-end sidecar tests
+Canonical V5 retained-state path
     ↓
-Minimal retained state
+Exact full-prefix mode
     ↓
-Replay-from-retained-state audit path
+Adversarial verifier hardening
     ↓
-Verifier + vLLM plugin hardening
+Conformance / challenge specification / interoperability
     ↓
-Research (requantization corridor)
+Performance and audit-cost cleanup
     ↓
-Launch (paper + blog + public repo)
+Final V5/V6 benchmarks
     ↓
-First Product (OpenAI-compatible proxy)
+Update the full protocol docs
     ↓
-Ecosystem (integrations + marketplace)
+Publish
 ```
 
-## Open Questions
+## End State
 
-| Question | Why it matters | Blocker for |
-|----------|--------------|-------------|
-| How wide is the requantization corridor? | Determines actual security bound for attention manipulation | Protocol security claims |
-| Is 60s audit window acceptable to providers? | Affects storage architecture (RAM-only vs NVMe spill) | Product defaults |
-| Can attention replay be batched efficiently? | Affects verifier CPU cost at long context | Scalability |
+The target for V6 is:
+
+- exact shell / bridge / final-token path
+- exact preprocessing, model, decode, and output policy binding
+- exact sampled replay as the default production mode
+- greedy mode available as the `temperature=0` special case
+- exact prefix mode available via deep audit
+- only the attention interior remains approximate
+
+After V6, the main remaining protocol gap is attention exactness. A V7 only makes sense if the attention story improves materially.

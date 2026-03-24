@@ -9,3 +9,4 @@ models/
 __pycache__/
 *.pyc
 *.egg-info/
+.runpod_pod_state.json

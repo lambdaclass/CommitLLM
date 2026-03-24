@@ -1060,6 +1060,66 @@ fn verify_v4_binary<'py>(
     Ok(result)
 }
 
+/// Derive a per-token PRNG seed from the batch seed and token index.
+///
+/// Implements `SHA256("vi-sample-v1" || batch_seed || token_index_le32)`.
+///
+/// Args:
+///     batch_seed: bytes — 32-byte batch seed (revealed at audit time).
+///     token_index: int — zero-based index of the token within the batch.
+///
+/// Returns:
+///     bytes — 32-byte per-token seed.
+#[pyfunction]
+fn derive_token_seed<'py>(
+    py: Python<'py>,
+    batch_seed: &[u8],
+    token_index: u32,
+) -> PyResult<Bound<'py, PyBytes>> {
+    if batch_seed.len() != 32 {
+        return Err(PyValueError::new_err("batch_seed must be exactly 32 bytes"));
+    }
+    let mut seed_arr = [0u8; 32];
+    seed_arr.copy_from_slice(batch_seed);
+    let token_seed = verilm_core::sampling::derive_token_seed(&seed_arr, token_index);
+    Ok(PyBytes::new(py, &token_seed))
+}
+
+/// Run the canonical sampler on logits.
+///
+/// This is the exact same algorithm the verifier uses. Given logits (as f32
+/// list), decode parameters, and a per-token seed, returns the selected token
+/// index.
+///
+/// Args:
+///     logits: list[float] — raw logits for the full vocabulary.
+///     temperature: float — sampling temperature (0.0 = greedy argmax).
+///     top_k: int — top-k filtering (0 = disabled).
+///     top_p: float — nucleus sampling threshold (1.0 = disabled).
+///     token_seed: bytes — 32-byte per-token seed from derive_token_seed.
+///
+/// Returns:
+///     int — the selected token ID.
+#[pyfunction]
+fn canonical_sample(
+    logits: Vec<f32>,
+    temperature: f32,
+    top_k: u32,
+    top_p: f32,
+    token_seed: &[u8],
+) -> PyResult<u32> {
+    if logits.is_empty() {
+        return Err(PyValueError::new_err("logits must not be empty"));
+    }
+    if token_seed.len() != 32 {
+        return Err(PyValueError::new_err("token_seed must be exactly 32 bytes"));
+    }
+    let mut seed_arr = [0u8; 32];
+    seed_arr.copy_from_slice(token_seed);
+    let params = verilm_core::sampling::DecodeParams { temperature, top_k, top_p };
+    Ok(verilm_core::sampling::sample(&logits, &params, &seed_arr))
+}
+
 #[pymodule]
 fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(commit, m)?)?;
@@ -1072,6 +1132,8 @@ fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(generate_key, m)?)?;
     m.add_function(wrap_pyfunction!(verify_v4, m)?)?;
     m.add_function(wrap_pyfunction!(verify_v4_binary, m)?)?;
+    m.add_function(wrap_pyfunction!(derive_token_seed, m)?)?;
+    m.add_function(wrap_pyfunction!(canonical_sample, m)?)?;
     m.add_class::<WeightProvider>()?;
     m.add_class::<BatchState>()?;
     m.add_class::<MinimalBatchStateHandle>()?;
