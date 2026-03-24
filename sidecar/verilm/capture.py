@@ -21,6 +21,22 @@ projections with a fixed 4-call pattern per layer:
   qkv_proj → o_proj → gate_up_proj → down_proj
 
 The CUTLASS kernel runs unchanged — model output is bit-identical.
+
+Synchronization (VERILM_SYNC_MODE env var):
+
+  "global" (default):
+    torch.cuda.synchronize() after inference — stalls entire GPU.
+
+  "event":
+    D2H copies on a dedicated CUDA stream. Event-based wait before
+    drain — only blocks until copy completion, not all GPU work.
+
+Both modes produce identical captured tensors and commitments.
+
+CUDA graphs: vLLM must use enforce_eager=True for verified inference.
+CUDA graphs replay GPU kernels without executing Python, so the capture
+wrapper (counter, D2H copy, buffer append) never runs during replay.
+This is a fundamental constraint of per-kernel capture.
 """
 
 import os
@@ -141,6 +157,20 @@ class CaptureBuffer:
 
     No lock needed: vLLM runs inference single-threaded per worker process.
     The buffer is a plain list for minimal append overhead.
+
+    Sync modes (VERILM_SYNC_MODE env var):
+
+      "global" (default):
+        After inference completes, waits with torch.cuda.synchronize().
+        Safe baseline — stalls the entire GPU but cannot race.
+
+      "event":
+        D2H copies run on a dedicated CUDA stream. A single event is
+        recorded after each copy batch; wait_for_transfers() synchronizes
+        on that event only. Does not stall unrelated GPU work.
+
+    The sync mode is set once via set_sync_mode() during register().
+    Both modes produce identical captured tensors.
     """
 
     def __init__(self, max_entries: int = 100_000):
@@ -149,11 +179,68 @@ class CaptureBuffer:
         self.total_captured = 0
         self.enabled = True
 
+        # Sync infrastructure — initialized lazily by set_sync_mode("event").
+        self._sync_mode = "global"
+        self._copy_stream: Optional[torch.cuda.Stream] = None
+        self._sync_event: Optional[torch.cuda.Event] = None
+        self._transfers_pending = False
+
         # Request tracking
         self._current_request_id: Optional[str] = None
         self._current_prompt_ids: List[int] = []
         self._request_start: float = 0.0
         self._request_entries_start: int = 0
+
+    def set_sync_mode(self, mode: str):
+        """Set synchronization mode. Call once after CUDA is initialized.
+
+        "global": torch.cuda.synchronize() (safe default).
+        "event":  dedicated copy stream + event sync.
+        """
+        if mode == "event":
+            self._copy_stream = torch.cuda.Stream()
+            self._sync_event = torch.cuda.Event()
+            self._sync_mode = "event"
+            logger.info(
+                "verilm: sync mode = event (dedicated copy stream, pid=%d)",
+                os.getpid(),
+            )
+        elif mode == "global":
+            self._copy_stream = None
+            self._sync_event = None
+            self._sync_mode = "global"
+            logger.info(
+                "verilm: sync mode = global (torch.cuda.synchronize, pid=%d)",
+                os.getpid(),
+            )
+        else:
+            logger.warning(
+                "verilm: unknown VERILM_SYNC_MODE=%s, using global", mode,
+            )
+        self._transfers_pending = False
+
+    def copy_to_cpu(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Copy a GPU tensor to CPU using the configured sync strategy.
+
+        Event mode: issues copy on the dedicated copy stream after
+        synchronizing with the compute stream. Next compute kernels
+        can overlap with the D2H transfer.
+
+        Global mode: non-blocking copy on the current (compute) stream.
+        Caller must use wait_for_transfers() before reading the result.
+        """
+        if self._sync_mode == "event" and self._copy_stream is not None:
+            # Make copy stream wait for the tensor to be produced on compute stream.
+            self._copy_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(self._copy_stream):
+                cpu = tensor.to("cpu", non_blocking=True)
+                self._sync_event.record()
+            self._transfers_pending = True
+            return cpu
+
+        # Global mode: copy on compute stream, wait globally later.
+        self._transfers_pending = True
+        return tensor.to("cpu", non_blocking=True)
 
     def append(self, entry: CaptureTuple):
         self._entries.append(entry)
@@ -163,7 +250,17 @@ class CaptureBuffer:
             self._entries = self._entries[-self._max_entries:]
 
     def drain(self) -> List[CaptureTuple]:
-        """Remove and return all entries."""
+        """Remove and return all entries.
+
+        In event mode, warns if transfers haven't been waited on yet
+        and auto-waits to prevent reading incomplete data.
+        """
+        if self._transfers_pending:
+            logger.warning(
+                "CaptureBuffer.drain() called with pending transfers — "
+                "auto-waiting (call wait_for_transfers() explicitly)"
+            )
+            self.wait_for_transfers()
         entries = self._entries
         self._entries = []
         return entries
@@ -199,11 +296,31 @@ class CaptureBuffer:
         self._current_prompt_ids = []
         return result
 
+    def wait_for_transfers(self):
+        """Wait for all pending non-blocking D2H transfers to complete.
+
+        Event mode: synchronizes on the last recorded event (dedicated
+        copy stream only — does not stall unrelated GPU work).
+
+        Global mode: torch.cuda.synchronize() (stalls entire device).
+        """
+        if not self._transfers_pending:
+            return
+
+        if self._sync_mode == "event" and self._sync_event is not None:
+            self._sync_event.synchronize()
+        else:
+            torch.cuda.synchronize()
+
+        self._transfers_pending = False
+
     def stats(self) -> dict:
         return {
             "buffered": len(self._entries),
             "total_captured": self.total_captured,
             "enabled": self.enabled,
+            "sync_mode": self._sync_mode,
+            "transfers_pending": self._transfers_pending,
             "in_request": self._current_request_id is not None,
         }
 
@@ -272,8 +389,7 @@ def _wrapped_cutlass_scaled_mm(
 
     if _capture_mode == "minimal":
         # V4 path: no _int_mm. Only transfer o_proj input to CPU.
-        # scale_a is stored as-is; server.py extracts after cuda.synchronize().
-        a_cpu = a.to("cpu", non_blocking=True) if proj == "o_proj" else None
+        a_cpu = buf.copy_to_cpu(a) if proj == "o_proj" else None
         buf.append((layer, proj, a_cpu, None, scale_a))
     else:
         # Full path: compute INT32 accumulator via _int_mm.
@@ -290,8 +406,8 @@ def _wrapped_cutlass_scaled_mm(
         else:
             acc_i32 = torch._int_mm(a, b)
 
-        buf.append((layer, proj, a.to("cpu", non_blocking=True),
-                    acc_i32.to("cpu", non_blocking=True), scale_a))
+        buf.append((layer, proj, buf.copy_to_cpu(a),
+                    buf.copy_to_cpu(acc_i32), scale_a))
 
     if buf.total_captured % _log_interval == 0:
         logger.info(
@@ -346,6 +462,7 @@ def register():
     Env vars:
         VERILM_CAPTURE: "0" to disable capture entirely.
         VERILM_CAPTURE_MODE: "full" (default) or "minimal" (V4, no _int_mm).
+        VERILM_SYNC_MODE: "global" (default) or "event" (dedicated copy stream).
     """
     global _patched, _capture_mode
 
@@ -364,6 +481,10 @@ def register():
         _capture_mode = mode_env
     else:
         logger.warning("verilm: unknown VERILM_CAPTURE_MODE=%s, using full", mode_env)
+
+    # Sync mode: "global" (torch.cuda.synchronize) or "event" (dedicated copy stream).
+    sync_env = os.environ.get("VERILM_SYNC_MODE", "global")
+    _capture_buffer.set_sync_mode(sync_env)
 
     try:
         import vllm._custom_ops as ops

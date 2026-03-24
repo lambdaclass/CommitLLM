@@ -37,67 +37,112 @@ use verilm_core::types::{
 };
 use verilm_prover::{commit_with_full_binding, FullBindingParams};
 
-/// Extract a Vec<i8> from bytes (fast path) or a Python list of ints (fallback).
+/// Read raw bytes from a Python buffer protocol object (numpy arrays, CPU tensors).
+/// Returns None if the object doesn't support the buffer protocol.
+/// Avoids the Python-side `.tobytes()` allocation + copy.
+fn try_buffer_as_bytes(obj: &Bound<'_, PyAny>) -> Option<Vec<u8>> {
+    let mut view: pyo3::ffi::Py_buffer = unsafe { std::mem::zeroed() };
+    if unsafe {
+        pyo3::ffi::PyObject_GetBuffer(obj.as_ptr(), &mut view, pyo3::ffi::PyBUF_SIMPLE)
+    } != 0
+    {
+        unsafe { pyo3::ffi::PyErr_Clear() };
+        return None;
+    }
+    let len = view.len as usize;
+    let mut dst = Vec::with_capacity(len);
+    unsafe {
+        std::ptr::copy_nonoverlapping(view.buf as *const u8, dst.as_mut_ptr(), len);
+        dst.set_len(len);
+        pyo3::ffi::PyBuffer_Release(&mut view);
+    }
+    Some(dst)
+}
+
+/// Reinterpret raw bytes as i8 (identical layout, zero-cost transmute).
+fn raw_to_i8(raw: Vec<u8>) -> Vec<i8> {
+    let len = raw.len();
+    let cap = raw.capacity();
+    let ptr = std::mem::ManuallyDrop::new(raw).as_mut_ptr();
+    // SAFETY: u8 and i8 have identical size, alignment, and valid-value ranges.
+    unsafe { Vec::from_raw_parts(ptr as *mut i8, len, cap) }
+}
+
+/// Reinterpret raw bytes as i32 (native-endian bulk copy).
+fn raw_to_i32(src: &[u8]) -> PyResult<Vec<i32>> {
+    if src.len() % 4 != 0 {
+        return Err(PyValueError::new_err(format!(
+            "i32 bytes length {} not a multiple of 4",
+            src.len()
+        )));
+    }
+    let n = src.len() / 4;
+    let mut dst = Vec::with_capacity(n);
+    unsafe {
+        std::ptr::copy_nonoverlapping(src.as_ptr() as *const i32, dst.as_mut_ptr(), n);
+        dst.set_len(n);
+    }
+    Ok(dst)
+}
+
+/// Reinterpret raw bytes as f32 (native-endian bulk copy).
+fn raw_to_f32(src: &[u8]) -> PyResult<Vec<f32>> {
+    if src.len() % 4 != 0 {
+        return Err(PyValueError::new_err(format!(
+            "f32 bytes length {} not a multiple of 4",
+            src.len()
+        )));
+    }
+    let n = src.len() / 4;
+    let mut dst = Vec::with_capacity(n);
+    unsafe {
+        std::ptr::copy_nonoverlapping(src.as_ptr() as *const f32, dst.as_mut_ptr(), n);
+        dst.set_len(n);
+    }
+    Ok(dst)
+}
+
+/// Extract a Vec<i8> from bytes, buffer protocol, or Python list.
 fn extract_i8_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<i8>> {
     // Fast path: bytes object — zero-alloc reinterpret u8 → i8.
     if let Ok(b) = obj.cast::<PyBytes>() {
         let src = b.as_bytes();
         let mut dst = Vec::with_capacity(src.len());
-        // SAFETY: i8 and u8 have identical layout; this is a bitwise copy.
         unsafe {
             std::ptr::copy_nonoverlapping(src.as_ptr() as *const i8, dst.as_mut_ptr(), src.len());
             dst.set_len(src.len());
         }
         return Ok(dst);
     }
+    // Buffer protocol: numpy arrays, CPU tensors (avoids Python-side .tobytes()).
+    if let Some(raw) = try_buffer_as_bytes(obj) {
+        return Ok(raw_to_i8(raw));
+    }
     // Fallback: Python list of ints.
     if let Ok(v) = obj.extract::<Vec<i8>>() {
         return Ok(v);
     }
-    Err(PyValueError::new_err("expected bytes or list of i8"))
+    Err(PyValueError::new_err("expected bytes, buffer, or list of i8"))
 }
 
-/// Extract a Vec<i32> from bytes (fast path) or a Python list of ints (fallback).
+/// Extract a Vec<i32> from bytes, buffer protocol, or Python list.
 fn extract_i32_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<i32>> {
-    // Fast path: bytes object — bulk reinterpret as native-endian i32.
     if let Ok(b) = obj.cast::<PyBytes>() {
-        let src = b.as_bytes();
-        if src.len() % 4 != 0 {
-            return Err(PyValueError::new_err(
-                format!("i32 bytes length {} not a multiple of 4", src.len()),
-            ));
-        }
-        let n = src.len() / 4;
-        let mut dst = Vec::with_capacity(n);
-        // SAFETY: src.len() is a multiple of 4; native-endian bytes from .tobytes()
-        // can be bulk-reinterpreted as i32. Single memcpy instead of per-element loop.
-        unsafe {
-            std::ptr::copy_nonoverlapping(src.as_ptr() as *const i32, dst.as_mut_ptr(), n);
-            dst.set_len(n);
-        }
-        return Ok(dst);
+        return raw_to_i32(b.as_bytes());
     }
-    // Fallback: Python list of ints.
+    if let Some(raw) = try_buffer_as_bytes(obj) {
+        return raw_to_i32(&raw);
+    }
     obj.extract::<Vec<i32>>()
 }
 
-/// Extract a Vec<f32> from bytes (fast path) or a Python list of floats (fallback).
+/// Extract a Vec<f32> from bytes, buffer protocol, or Python list.
 fn extract_f32_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
     if let Ok(b) = obj.cast::<PyBytes>() {
-        let src = b.as_bytes();
-        if src.len() % 4 != 0 {
-            return Err(PyValueError::new_err(
-                format!("f32 bytes length {} not a multiple of 4", src.len()),
-            ));
-        }
-        let n = src.len() / 4;
-        let mut dst = Vec::with_capacity(n);
-        // SAFETY: same as extract_i32_vec — bulk reinterpret native-endian bytes.
-        unsafe {
-            std::ptr::copy_nonoverlapping(src.as_ptr() as *const f32, dst.as_mut_ptr(), n);
-            dst.set_len(n);
-        }
-        return Ok(dst);
+        return raw_to_f32(b.as_bytes());
+    }
+    if let Some(raw) = try_buffer_as_bytes(obj) {
+        return raw_to_f32(&raw);
     }
     obj.extract::<Vec<f32>>()
 }

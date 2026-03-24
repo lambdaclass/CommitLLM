@@ -25,8 +25,6 @@ import os
 import time
 from typing import Dict, List, Optional
 
-import torch
-
 logger = logging.getLogger("verilm.server")
 
 
@@ -214,7 +212,8 @@ class VerifiedInferenceServer:
         prompt_token_ids = list(output.prompt_token_ids)
 
         # Ensure all non-blocking GPU→CPU transfers from capture hook completed.
-        torch.cuda.synchronize()
+        # Targeted event sync — only waits on the last D2H transfer, not all GPU work.
+        self.buf.wait_for_transfers()
 
         # Drain captures (tensors are already on CPU).
         captures = self.buf.drain()
@@ -295,8 +294,9 @@ class VerifiedInferenceServer:
         import verilm_rs
         from . import capture as cap
 
-        capture_inputs = [c[2].numpy().tobytes() for c in captures]
-        capture_accs = [c[3].numpy().tobytes() for c in captures]
+        # Pass numpy views directly — Rust reads via buffer protocol (no .tobytes() copy).
+        capture_inputs = [c[2].numpy() for c in captures]
+        capture_accs = [c[3].numpy() for c in captures]
         capture_scales = []
         for c in captures:
             s = c[4]
@@ -310,7 +310,7 @@ class VerifiedInferenceServer:
         residuals = el_data.get("residuals")
         residual_bytes = None
         if residuals:
-            residual_bytes = [r.float().numpy().tobytes() for r in residuals]
+            residual_bytes = [r.float().numpy() for r in residuals]
 
         return verilm_rs.commit_from_captures(
             capture_inputs=capture_inputs,
@@ -350,7 +350,7 @@ class VerifiedInferenceServer:
                 gu_cap = captures[base + 2]
                 down_cap = captures[base + 3]
 
-                o_proj_inputs.append(o_cap[2].numpy().tobytes())  # a_i8
+                o_proj_inputs.append(o_cap[2].numpy())  # numpy view, Rust reads via buffer protocol
 
                 # 4 scales per layer: [scale_x_attn, scale_a, scale_x_ffn, scale_h]
                 for cap_entry in (qkv_cap, o_cap, gu_cap, down_cap):

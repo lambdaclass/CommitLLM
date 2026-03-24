@@ -31,11 +31,7 @@ vllm_image = (
     .add_local_dir("sidecar", remote_path="/opt/verilm", copy=True)
     .run_commands(
         "pip install -e /opt/verilm",
-        "python -c \""
-        "import site, os; "
-        "d = site.getsitepackages()[0]; "
-        "open(os.path.join(d, 'verilm_capture.pth'), 'w')"
-        ".write('import verilm._startup\\n')\"",
+        "python3 -c 'import site, os; open(os.path.join(site.getsitepackages()[0], \"verilm_capture.pth\"), \"w\").write(\"import verilm._startup\\n\")'",
     )
     .env(
         {
