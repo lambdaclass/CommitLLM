@@ -15,6 +15,7 @@ Do not claim "everything except attention" until all of these are complete:
 
 - [ ] live sampled serving is replayable end to end
 - [ ] decode/output policy completeness is finished
+- [ ] input/model preprocessing and manifest verification are explicit and complete
 - [ ] the exact final-token boundary starts at the captured pre-final-norm residual and is committed / fail-closed
 - [ ] the canonical LM-head verification path is resolved and matches the security claim
 - [ ] exact full-prefix deep-audit mode exists
@@ -56,6 +57,11 @@ Sampled serving is required for V6. Greedy remains the `temperature=0` special c
 - [ ] **Finish the decode/output parts of the manifest before declaring sampled serving done**
   - decode spec: sampler ID / version, temperature, top-k, top-p, repetition / frequency / presence penalties, logit bias, bad-word masks, grammar / guided-decoding constraints, mode choice, tie-breaking rules
   - output spec: EOS policy, stop strings, min/max stopping rules, ignore-EOS behavior, special-token stripping, detokenization / cleanup / whitespace normalization
+  - explicitly bind the currently missing preprocessing / output fields:
+    - chat-template policy / hash
+    - BOS / EOS policy
+    - truncation policy
+    - detokenization / cleanup policy
 
 - [ ] **Bind transcript randomness end to end**
   - generate a fresh random per-request `batch_seed`
@@ -89,10 +95,23 @@ Sampled serving is required for V6. Greedy remains the `temperature=0` special c
   - cross-request splice fails
 
 - [ ] **Add verifier logic for decode/output policy completeness needed by sampled serving**
+  - verify sampler ID / version and mode choice match the committed decode path
+  - verify temperature / top-k / top-p filtering semantics
   - recompute penalties
+  - verify logit-bias behavior or reject it explicitly
+  - verify bad-word mask behavior or reject it explicitly
   - verify grammar / constraint behavior
+  - verify tie-breaking behavior
+  - verify EOS policy
+  - verify ignore-EOS behavior
+  - verify min/max stopping rules
   - verify stop-string and stop-policy behavior
   - replay detokenization / cleanup when final text is claimed
+
+- [ ] **Resolve every decode/output feature as either exact replay or explicit fail-closed rejection**
+  - do not leave partially wired fields in an ambiguous state
+  - unsupported non-default penalties / logit bias / bad-word masks / guided decoding / stop sequences must remain bound and rejected explicitly until replay support exists
+  - document which decode/output features are currently replayed versus fail-closed rejected
 
 - [ ] **Add sampler drift protection**
   - version-lock / conformance tests so sampler behavior cannot drift silently across vLLM upgrades
@@ -117,6 +136,7 @@ Sampled serving is required for V6. Greedy remains the `temperature=0` special c
     - keep exact LM-head recomputation as the canonical implementation path
   - make the code, verifier key story, benchmark story, and security claim all match that choice
   - do not leave the paper/claim language implying LM-head Freivalds if the implementation is still exact recomputation
+  - explicitly track whether LM head is cryptographically weight-bound or only exact-recomputed, and make the claim language match
 
 - [ ] **Only claim "everything except attention" after all of the following are done**
   - sampled serving is live and replayable end to end
@@ -139,9 +159,24 @@ Sampled serving is required for V6. Greedy remains the `temperature=0` special c
   - input spec: tokenizer / normalization, chat template, BOS / EOS policy, truncation / padding, special-token handling, system prompt
   - model spec: `R_W`, quantization config, adapter / LoRA / merged-checkpoint identity, RoPE / scaling config, RMSNorm epsilon, other architecture-affecting knobs
   - decode spec and output spec are already required in Section 1 for sampled-serving completion
+  - add explicit bound fields for:
+    - chat-template hash / policy
+    - BOS / EOS policy
+    - truncation policy
+    - detokenization / cleanup policy
 
 - [ ] **Add verifier logic for policy completeness**
-  - any remaining input/model-spec verification beyond the decode/output checks already required in Section 1
+  - verify tokenizer / normalization binding
+  - verify chat-template hash / policy binding
+  - verify BOS / EOS preprocessing policy binding
+  - verify truncation / padding policy binding
+  - verify special-token handling binding
+  - verify system-prompt binding
+  - verify quantization-config binding against the committed quantization identity
+  - verify no uncommitted adapters / LoRA are active, or verify committed merged/adapted identity
+  - verify RoPE / scaling configuration binding
+  - verify RMSNorm epsilon binding
+  - verify any other architecture-affecting knobs that change outputs
 
 - [ ] **Keep the final token tail exact end to end in the published protocol**
   - final hidden
@@ -373,6 +408,14 @@ These tasks must explicitly update the full protocol, not just the README narrat
 - [ ] **Client SDKs** — Python and TypeScript wrappers around the verifier
 - [ ] **llama.cpp tracing plugin**
 - [ ] **Fine-tuned models / LoRA support**
+- [ ] **Generalize the packed retained-state path beyond constant-width decoder models**
+  - replace fixed-layout assumptions with a versioned retained-state schema
+  - carry per-layer shape metadata instead of assuming one global `hidden_dim`
+  - carry explicit capture-layout metadata instead of assuming one fixed projection/call order
+  - use per-layer / per-forward offset tables for packed storage and hashing
+  - add architecture-specific packing adapters where needed
+  - bind schema / layout versions into the model or manifest spec
+  - support audit-time reconstruction and hashing from schema-driven packed storage
 - [ ] **Formalization in Lean**
 - [ ] **Receipt format specification**
 - [ ] **API extensions** — OpenAI-compatible receipt field in response metadata
