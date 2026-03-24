@@ -265,6 +265,19 @@ class CaptureBuffer:
         self._entries = []
         return entries
 
+    def reset_counter(self):
+        """Reset the global call counter to zero.
+
+        Must be called before each inference request to realign the
+        call-counting layer/proj identification. Without this, any
+        extra cutlass_scaled_mm calls between requests (warmup, vLLM
+        internal prefill scheduling, chunked prefill) cause permanent
+        counter misalignment — the wrapper reads shape[0] from the
+        wrong projection and derives incorrect batch sizes.
+        """
+        global _call_counter
+        _call_counter = 0
+
     def begin_request(
         self, request_id: str, prompt_token_ids: Optional[List[int]] = None
     ):

@@ -46,6 +46,17 @@ class VerifiedInferenceServer:
         self.llm = llm
         self.ttl_secs = ttl_secs
 
+        # Prefix caching must be disabled for verified inference.
+        # When enabled, vLLM reuses KV cache blocks from prior requests with
+        # matching prefixes, processing fewer tokens through cutlass_scaled_mm.
+        # This causes batch_size mismatches in our capture counting.
+        cache_cfg = getattr(llm.llm_engine, "cache_config", None)
+        if cache_cfg and getattr(cache_cfg, "enable_prefix_caching", False):
+            logger.warning(
+                "verilm: prefix caching is enabled — this will cause capture "
+                "mismatches on repeated prompts. Use enable_prefix_caching=False."
+            )
+
         # Configure capture from model.
         model = get_model_from_llm(llm)
         configure_from_model(model)
@@ -191,8 +202,11 @@ class VerifiedInferenceServer:
                 "verifier's canonical sampler does not match vLLM's RNG."
             )
 
-        # Clear buffers.
+        # Clear buffers and reset call counter to realign layer/proj counting.
+        # Without the counter reset, any extra cutlass_scaled_mm calls between
+        # requests (warmup, chunked prefill residue) cause permanent misalignment.
         self.buf.drain()
+        self.buf.reset_counter()
         if self.el_capture is not None:
             self.el_capture.drain()
 
@@ -221,10 +235,22 @@ class VerifiedInferenceServer:
 
         n_layers = cap._n_layers
         calls_per_fwd = n_layers * cap.PROJS_PER_LAYER
+
+        # Diagnostic: always log capture counts for debugging mismatch issues.
+        all_token_ids_dbg = prompt_token_ids + gen_token_ids
+        logger.info(
+            "verilm: captures=%d, calls_per_fwd=%d, prompt_tokens=%d, "
+            "gen_tokens=%d, all_tokens=%d, call_counter=%d",
+            len(captures), calls_per_fwd, len(prompt_token_ids),
+            len(gen_token_ids), len(all_token_ids_dbg), cap._call_counter,
+        )
+
         if len(captures) == 0 or len(captures) % calls_per_fwd != 0:
             raise RuntimeError(
                 f"Capture count {len(captures)} not a multiple of "
-                f"calls_per_fwd {calls_per_fwd}"
+                f"calls_per_fwd {calls_per_fwd} "
+                f"(prompt_tokens={len(prompt_token_ids)}, gen_tokens={len(gen_token_ids)}, "
+                f"call_counter={cap._call_counter})"
             )
 
         # Derive forward pass batch sizes from capture tensor shapes.
@@ -242,11 +268,34 @@ class VerifiedInferenceServer:
         all_token_ids = prompt_token_ids + gen_token_ids
         n_tokens = sum(fwd_batch_sizes)
         expected_traces = len(all_token_ids) - 1
+
+        # EOS trailing forward pass trim: when generation stops early (EOS
+        # before max_tokens), vLLM's async scheduler has already dispatched
+        # one more decode step before the EOS sampling result is checked.
+        # That extra forward pass processes the last gen token to produce
+        # EOS logits but does not correspond to an emitted transcript token.
+        # Trim it so the proof aligns to the actual transcript.
+        if (n_tokens == expected_traces + 1
+                and len(gen_token_ids) < max_tokens
+                and fwd_batch_sizes[-1] == 1):
+            logger.info(
+                "verilm: trimming trailing EOS forward pass "
+                "(gen=%d < max=%d, n_fwd %d→%d)",
+                len(gen_token_ids), max_tokens, n_fwd, n_fwd - 1,
+            )
+            captures = captures[:-calls_per_fwd]
+            n_fwd -= 1
+            fwd_batch_sizes = fwd_batch_sizes[:-1]
+            n_tokens = sum(fwd_batch_sizes)
+
         if n_tokens != expected_traces:
             raise RuntimeError(
                 f"Token count ({n_tokens}) does not match expected "
-                f"({expected_traces} = {len(all_token_ids)} tokens - 1). "
-                f"Cannot commit with mismatched transcript."
+                f"({expected_traces}). "
+                f"Cannot commit with mismatched transcript. "
+                f"captures={len(captures)}, calls_per_fwd={calls_per_fwd}, "
+                f"n_fwd={n_fwd}, fwd_batch_sizes={fwd_batch_sizes}, "
+                f"prompt_tokens={len(prompt_token_ids)}, gen_tokens={len(gen_token_ids)}"
             )
 
         # Build manifest (shared by both paths).

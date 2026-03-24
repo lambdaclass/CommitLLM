@@ -75,7 +75,7 @@ def run_case(case_idx: int, prompt: str, max_tokens: int, n_repeats: int):
     buf = get_capture_buffer()
 
     print(f"[case={case_idx}] Loading {MODEL_ID}...")
-    llm = LLM(model=MODEL_ID, dtype="auto", max_model_len=2048, enforce_eager=True)
+    llm = LLM(model=MODEL_ID, dtype="auto", max_model_len=2048, enforce_eager=True, enable_prefix_caching=False)
     server = VerifiedInferenceServer(llm)
     n_layers = cap._n_layers
     model_dir = server._model_dir
@@ -111,16 +111,19 @@ def run_case(case_idx: int, prompt: str, max_tokens: int, n_repeats: int):
 
     def chat_with_retry(mode_label, prompt, max_tokens):
         """Retry server.chat on capture mismatch (known intermittent issue)."""
+        last_error = None
         for attempt in range(MAX_RETRIES):
             try:
                 return server.chat(prompt=prompt, max_tokens=max_tokens)
             except RuntimeError as e:
-                if "Token count" in str(e) and "does not match expected" in str(e):
-                    print(f"  WARN: capture mismatch ({mode_label}, attempt {attempt+1}) — retrying")
-                    buf.drain()  # clear stale captures
+                err = str(e)
+                if "Token count" in err or "Capture count" in err:
+                    print(f"  WARN: capture mismatch ({mode_label}, attempt {attempt+1}): {err}")
+                    buf.drain()
+                    last_error = err
                     continue
                 raise
-        raise RuntimeError(f"Capture mismatch persisted after {MAX_RETRIES} retries ({mode_label})")
+        raise RuntimeError(f"Capture mismatch persisted after {MAX_RETRIES} retries ({mode_label}): {last_error}")
 
     for repeat in range(n_repeats):
         tag = f"case={case_idx} repeat={repeat} prompt={prompt_label!r} max_tokens={max_tokens}"

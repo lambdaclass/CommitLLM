@@ -65,7 +65,7 @@ def _run_e2e():
     from verilm.server import VerifiedInferenceServer
 
     print(f"Loading {MODEL_ID}...")
-    llm = LLM(model=MODEL_ID, dtype="auto", max_model_len=2048, enforce_eager=True)
+    llm = LLM(model=MODEL_ID, dtype="auto", max_model_len=2048, enforce_eager=True, enable_prefix_caching=False)
     server = VerifiedInferenceServer(llm)
     n_layers = cap._n_layers
     model_dir = server._model_dir

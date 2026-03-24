@@ -78,7 +78,7 @@ def _run_bench():
     buf = get_capture_buffer()
 
     print(f"Loading {MODEL_ID}...")
-    llm = LLM(model=MODEL_ID, dtype="auto", max_model_len=2048, enforce_eager=True)
+    llm = LLM(model=MODEL_ID, dtype="auto", max_model_len=2048, enforce_eager=True, enable_prefix_caching=False)
     params = SamplingParams(max_tokens=MAX_TOKENS, temperature=0.0)
 
     # Warmup (full mode to cover the widest path).

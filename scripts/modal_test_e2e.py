@@ -63,7 +63,7 @@ def _run_e2e():
 
     # -- Setup --
     print(f"Loading {MODEL_ID}...")
-    llm = LLM(model=MODEL_ID, dtype="auto", max_model_len=2048, enforce_eager=True)
+    llm = LLM(model=MODEL_ID, dtype="auto", max_model_len=2048, enforce_eager=True, enable_prefix_caching=False)
     server = VerifiedInferenceServer(llm)
     print("VerifiedInferenceServer ready")
 
