@@ -262,6 +262,39 @@ fn extract_manifest(d: &Bound<'_, PyDict>) -> PyResult<DeploymentManifest> {
                 decode_hex32(&hex_str, "system_prompt_hash")
             })
             .transpose()?,
+        repetition_penalty: d.get_item("repetition_penalty")?
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or(1.0),
+        frequency_penalty: d.get_item("frequency_penalty")?
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or(0.0),
+        presence_penalty: d.get_item("presence_penalty")?
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or(0.0),
+        logit_bias: {
+            let lb: Vec<(u32, f32)> = d.get_item("logit_bias")?
+                .map(|v| v.extract())
+                .transpose()?
+                .unwrap_or_default();
+            let mut sorted = lb;
+            sorted.sort_by_key(|&(tid, _)| tid);
+            sorted
+        },
+        guided_decoding: d.get_item("guided_decoding")?
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or_default(),
+        stop_sequences: d.get_item("stop_sequences")?
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or_default(),
+        max_tokens: d.get_item("max_tokens")?
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or(0),
     })
 }
 

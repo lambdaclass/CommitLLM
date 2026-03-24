@@ -333,7 +333,7 @@ pub fn hash_embedding_row(row: &[f32]) -> [u8; 32] {
 ///   5. `eos_policy` as UTF-8 bytes
 pub fn hash_manifest(manifest: &crate::types::DeploymentManifest) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"vi-manifest-v2");
+    hasher.update(b"vi-manifest-v3");
     hasher.update(manifest.tokenizer_hash);
     hasher.update(manifest.temperature.to_le_bytes());
     hasher.update(manifest.top_k.to_le_bytes());
@@ -360,6 +360,26 @@ pub fn hash_manifest(manifest: &crate::types::DeploymentManifest) -> [u8; 32] {
     } else {
         hasher.update(b"\x00");
     }
+    // Logit-modifying parameters.
+    hasher.update(manifest.repetition_penalty.to_le_bytes());
+    hasher.update(manifest.frequency_penalty.to_le_bytes());
+    hasher.update(manifest.presence_penalty.to_le_bytes());
+    // Logit bias: length-prefixed sorted pairs.
+    hasher.update((manifest.logit_bias.len() as u32).to_le_bytes());
+    for &(token_id, bias) in &manifest.logit_bias {
+        hasher.update(token_id.to_le_bytes());
+        hasher.update(bias.to_le_bytes());
+    }
+    // Guided decoding constraint.
+    hasher.update((manifest.guided_decoding.len() as u32).to_le_bytes());
+    hasher.update(manifest.guided_decoding.as_bytes());
+    // Output-level parameters.
+    hasher.update((manifest.stop_sequences.len() as u32).to_le_bytes());
+    for s in &manifest.stop_sequences {
+        hasher.update((s.len() as u32).to_le_bytes());
+        hasher.update(s.as_bytes());
+    }
+    hasher.update(manifest.max_tokens.to_le_bytes());
     hasher.finalize().into()
 }
 

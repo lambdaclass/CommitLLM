@@ -329,6 +329,9 @@ class VerifiedInferenceServer:
             )
 
         # Build manifest from actual request parameters.
+        # Logit-modifying parameters are pinned to their canonical defaults;
+        # the verifier rejects anything else (no repetition/frequency/presence
+        # penalty, no logit bias, no guided decoding in canonical sampler).
         manifest = {
             "tokenizer_hash": self._tokenizer_hash,
             "temperature": temperature,
@@ -338,6 +341,13 @@ class VerifiedInferenceServer:
             "weight_hash": self._weight_hash,
             "quant_hash": self._quant_hash,
             "system_prompt_hash": self._system_prompt_hash,
+            "repetition_penalty": 1.0,
+            "frequency_penalty": 0.0,
+            "presence_penalty": 0.0,
+            "logit_bias": [],
+            "guided_decoding": "",
+            "stop_sequences": [],
+            "max_tokens": max_tokens,
         }
 
         if cap._capture_mode == "minimal":

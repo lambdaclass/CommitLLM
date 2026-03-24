@@ -1148,6 +1148,13 @@ fn make_manifest(temperature: f32, top_k: u32, top_p: f32) -> DeploymentManifest
         weight_hash: None,
         quant_hash: None,
         system_prompt_hash: None,
+        repetition_penalty: 1.0,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
+        logit_bias: vec![],
+        guided_decoding: String::new(),
+        stop_sequences: vec![],
+        max_tokens: 0,
     }
 }
 
@@ -1478,4 +1485,162 @@ fn v4_final_residual_commitment_binding() {
         report.failures);
     assert!(report.failures.iter().any(|f| f.contains("Merkle proof failed")),
         "should fail on Merkle proof, failures: {:?}", report.failures);
+}
+
+// ---------------------------------------------------------------------------
+// Manifest: verifier rejects unsupported logit-modifying parameters
+// ---------------------------------------------------------------------------
+
+/// Helper: commit + open with a manifest, return the verification report.
+fn verify_with_manifest(manifest: DeploymentManifest) -> verilm_verify::V4VerifyReport {
+    let cfg = ModelConfig::toy();
+    let toy = verilm_test_vectors::generate_model_with_head(&cfg, 54321);
+    let mut key = verilm_test_vectors::generate_key(&cfg, &toy.layers, [2u8; 32]);
+    key.lm_head = Some(toy.lm_head.clone());
+
+    let input: Vec<i8> = (0..cfg.hidden_dim).map(|i| (i * 3 % 256) as i8).collect();
+    let traces = forward_pass(&cfg, &toy.layers, &input);
+    let final_hidden = verilm_core::requantize(&traces.last().unwrap().ffn_out);
+
+    // Compute the correct greedy token so the only failure is the manifest field.
+    let logits = verilm_core::sampling::recompute_logits(
+        &toy.lm_head, &final_hidden, cfg.vocab_size, cfg.hidden_dim,
+    );
+    let token_id = logits.iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .unwrap().0 as u32;
+
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"manifest rejection test",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained_from_traces(&traces)], &params, None);
+    let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None);
+
+    verify_v4(&key, &response)
+}
+
+#[test]
+fn v4_manifest_rejects_repetition_penalty() {
+    let mut m = make_manifest(0.0, 0, 1.0);
+    m.repetition_penalty = 1.2;
+    let report = verify_with_manifest(m);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("repetition_penalty")),
+        "expected repetition_penalty rejection, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_rejects_frequency_penalty() {
+    let mut m = make_manifest(0.0, 0, 1.0);
+    m.frequency_penalty = 0.5;
+    let report = verify_with_manifest(m);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("frequency_penalty")),
+        "expected frequency_penalty rejection, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_rejects_presence_penalty() {
+    let mut m = make_manifest(0.0, 0, 1.0);
+    m.presence_penalty = 0.3;
+    let report = verify_with_manifest(m);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("presence_penalty")),
+        "expected presence_penalty rejection, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_rejects_logit_bias() {
+    let mut m = make_manifest(0.0, 0, 1.0);
+    m.logit_bias = vec![(42, 5.0), (100, -10.0)];
+    let report = verify_with_manifest(m);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("logit_bias")),
+        "expected logit_bias rejection, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_rejects_guided_decoding() {
+    let mut m = make_manifest(0.0, 0, 1.0);
+    m.guided_decoding = "json_schema".into();
+    let report = verify_with_manifest(m);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("guided_decoding")),
+        "expected guided_decoding rejection, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_rejects_stop_sequences() {
+    let mut m = make_manifest(0.0, 0, 1.0);
+    m.stop_sequences = vec!["<|end|>".into(), "STOP".into()];
+    let report = verify_with_manifest(m);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("stop_sequences")),
+        "expected stop_sequences rejection, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_rejects_exceeded_max_tokens() {
+    // Commit 2 tokens, open token_index 1 with max_tokens=1.
+    // token_index 1 >= max_tokens 1 → should fail.
+    let cfg = ModelConfig::toy();
+    let toy = verilm_test_vectors::generate_model_with_head(&cfg, 54321);
+    let mut key = verilm_test_vectors::generate_key(&cfg, &toy.layers, [2u8; 32]);
+    key.lm_head = Some(toy.lm_head.clone());
+
+    let input: Vec<i8> = (0..cfg.hidden_dim).map(|i| (i * 3 % 256) as i8).collect();
+    let traces = forward_pass(&cfg, &toy.layers, &input);
+    let retained = retained_from_traces(&traces);
+
+    let final_hidden = verilm_core::requantize(&traces.last().unwrap().ffn_out);
+    let logits = verilm_core::sampling::recompute_logits(
+        &toy.lm_head, &final_hidden, cfg.vocab_size, cfg.hidden_dim,
+    );
+    let token_id = logits.iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .unwrap().0 as u32;
+
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.max_tokens = 1; // only token_index 0 is valid
+
+    let params = FullBindingParams {
+        token_ids: &[token_id, token_id], // 2 tokens
+        prompt: b"max_tokens test",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+    };
+    let (_commitment, state) = commit_minimal(
+        vec![retained.clone(), retained], &params, None,
+    );
+    // Open token_index 1 — exceeds max_tokens=1
+    let response = open_v4(&state, 1, &ToyWeights(&toy.layers), &cfg, &[], None, None);
+
+    let report = verify_v4(&key, &response);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("max_tokens")),
+        "expected max_tokens rejection, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_max_tokens_zero_means_unlimited() {
+    // max_tokens=0 means no limit — should pass regardless of token_index.
+    let m = make_manifest(0.0, 0, 1.0);
+    assert_eq!(m.max_tokens, 0);
+    let report = verify_with_manifest(m);
+    assert_eq!(report.verdict, Verdict::Pass,
+        "max_tokens=0 (unlimited) should pass, failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_accepts_all_defaults() {
+    // All logit-modifying fields at their canonical defaults → should pass.
+    let m = make_manifest(0.0, 0, 1.0);
+    let report = verify_with_manifest(m);
+    assert_eq!(report.verdict, Verdict::Pass,
+        "canonical defaults should pass, failures: {:?}", report.failures);
 }

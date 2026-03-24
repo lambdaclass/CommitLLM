@@ -1681,6 +1681,54 @@ pub fn verify_v4(
                         failures.push("manifest hash does not match commitment".into());
                     }
                 }
+
+                // Reject logit-modifying parameters the canonical sampler doesn't support.
+                // These are bound in the manifest hash, so a prover can't hide them.
+                // But the verifier can't replay sampling correctly if they're enabled.
+                checks_run += 1;
+                if manifest.repetition_penalty != 1.0 {
+                    failures.push(format!(
+                        "unsupported repetition_penalty={} (canonical sampler requires 1.0)",
+                        manifest.repetition_penalty
+                    ));
+                }
+                if manifest.frequency_penalty != 0.0 {
+                    failures.push(format!(
+                        "unsupported frequency_penalty={} (canonical sampler requires 0.0)",
+                        manifest.frequency_penalty
+                    ));
+                }
+                if manifest.presence_penalty != 0.0 {
+                    failures.push(format!(
+                        "unsupported presence_penalty={} (canonical sampler requires 0.0)",
+                        manifest.presence_penalty
+                    ));
+                }
+                if !manifest.logit_bias.is_empty() {
+                    failures.push(format!(
+                        "unsupported logit_bias ({} entries, canonical sampler requires empty)",
+                        manifest.logit_bias.len()
+                    ));
+                }
+                if !manifest.guided_decoding.is_empty() {
+                    failures.push(format!(
+                        "unsupported guided_decoding='{}' (canonical sampler requires empty)",
+                        manifest.guided_decoding
+                    ));
+                }
+                if !manifest.stop_sequences.is_empty() {
+                    failures.push(format!(
+                        "unsupported stop_sequences ({} entries, canonical sampler requires empty)",
+                        manifest.stop_sequences.len()
+                    ));
+                }
+                if manifest.max_tokens > 0 && response.token_index >= manifest.max_tokens {
+                    failures.push(format!(
+                        "token_index {} exceeds manifest max_tokens {}",
+                        response.token_index, manifest.max_tokens
+                    ));
+                }
+
                 Some(verilm_core::sampling::DecodeParams {
                     temperature: manifest.temperature,
                     top_k: manifest.top_k,

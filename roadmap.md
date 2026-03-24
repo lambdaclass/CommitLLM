@@ -283,6 +283,16 @@ These tasks must explicitly update the full protocol, not just the README narrat
   - retained-state canonical path
   - verifier randomness model
 
+- [ ] **Explicitly document verified-mode deviations from stock vLLM in the paper and docs**
+  - vLLM still owns forward passes, batching, KV/cache machinery, and logits production
+  - VeriLM adds capture hooks for retained/boundary state
+  - VeriLM owns the final sampled token-selection semantics through the canonical logits processor
+  - verified mode may require operational settings that differ from stock serving
+    - prefix caching disabled
+    - specific sync/capture settings
+    - fail-closed startup checks
+  - make clear that verified mode is minimally invasive to model execution, but not bit-for-bit identical to stock sampled serving
+
 - [ ] **Update the full protocol documentation in the README**
   - architecture
   - verifier model

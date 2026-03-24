@@ -58,6 +58,49 @@ pub struct DeploymentManifest {
     /// Prevents system-prompt injection or substitution.
     #[serde(default)]
     pub system_prompt_hash: Option<[u8; 32]>,
+
+    // --- Logit-modifying parameters (affect token selection) ---
+
+    /// Repetition penalty: multiplicative factor on logits of previously generated tokens.
+    /// 1.0 = disabled (no penalty).
+    #[serde(default = "default_repetition_penalty")]
+    pub repetition_penalty: f32,
+    /// Frequency penalty: additive penalty proportional to token frequency in output.
+    /// 0.0 = disabled.
+    #[serde(default)]
+    pub frequency_penalty: f32,
+    /// Presence penalty: additive penalty for any token that appeared in output.
+    /// 0.0 = disabled.
+    #[serde(default)]
+    pub presence_penalty: f32,
+    /// Logit bias: (token_id, additive_bias) pairs, sorted by token_id.
+    /// Empty = disabled.
+    #[serde(default)]
+    pub logit_bias: Vec<(u32, f32)>,
+    /// Guided decoding grammar/schema identifier. Empty = disabled.
+    /// When non-empty, constrains sampling to tokens valid under this grammar.
+    #[serde(default)]
+    pub guided_decoding: String,
+
+    // --- Output-level parameters ---
+
+    /// Stop sequences that terminate generation. Empty = rely on eos_policy only.
+    #[serde(default)]
+    pub stop_sequences: Vec<String>,
+    /// Maximum tokens to generate. 0 = no explicit limit.
+    #[serde(default)]
+    pub max_tokens: u32,
+}
+
+fn default_repetition_penalty() -> f32 { 1.0 }
+
+impl DeploymentManifest {
+    /// Return default (disabled) values for all logit-modifying and output parameters.
+    /// Use struct update syntax: `DeploymentManifest { temperature: 0.5, ..DeploymentManifest::disabled_extras() }`
+    /// is NOT possible since the struct is not Default. Instead, use these constants directly.
+    pub const DISABLED_REPETITION_PENALTY: f32 = 1.0;
+    pub const DISABLED_FREQUENCY_PENALTY: f32 = 0.0;
+    pub const DISABLED_PRESENCE_PENALTY: f32 = 0.0;
 }
 
 /// VERIFIER-SECRET material. Must never be sent to the prover.

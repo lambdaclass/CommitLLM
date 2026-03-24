@@ -645,6 +645,13 @@ fn test_v3_with_manifest_binding() {
         weight_hash: None,
         quant_hash: None,
         system_prompt_hash: None,
+        repetition_penalty: 1.0,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
+        logit_bias: vec![],
+        guided_decoding: String::new(),
+        stop_sequences: vec![],
+        max_tokens: 0,
     };
 
     let params = FullBindingParams {
@@ -687,6 +694,13 @@ fn test_v3_wrong_manifest_rejected() {
         weight_hash: None,
         quant_hash: None,
         system_prompt_hash: None,
+        repetition_penalty: 1.0,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
+        logit_bias: vec![],
+        guided_decoding: String::new(),
+        stop_sequences: vec![],
+        max_tokens: 0,
     };
 
     let params = FullBindingParams {
@@ -710,6 +724,13 @@ fn test_v3_wrong_manifest_rejected() {
         weight_hash: None,
         quant_hash: None,
         system_prompt_hash: None,
+        repetition_penalty: 1.0,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
+        logit_bias: vec![],
+        guided_decoding: String::new(),
+        stop_sequences: vec![],
+        max_tokens: 0,
     };
     let policy = VerificationPolicy {
         expected_manifest_hash: Some(merkle::hash_manifest(&wrong_manifest)),
