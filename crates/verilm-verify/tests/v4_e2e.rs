@@ -6,7 +6,7 @@
 //! Debug/oracle path: verifier independently replays from public weights.
 
 use verilm_core::constants::{MatrixType, ModelConfig};
-use verilm_core::types::{BridgeParams, RetainedLayerState, RetainedTokenState, ShellWeights};
+use verilm_core::types::{BridgeParams, DeploymentManifest, RetainedLayerState, RetainedTokenState, ShellWeights};
 use verilm_prover::{commit_minimal, open_v4, open_v4_structural, FullBindingParams};
 use verilm_test_vectors::{forward_pass, generate_key, generate_model, LayerWeights};
 use verilm_verify::{verify_v4, verify_v4_with_weights, Verdict};
@@ -1132,4 +1132,154 @@ fn v4_lm_head_multi_token_pass() {
         assert_eq!(report.verdict, Verdict::Pass,
             "token {}: failures: {:?}", i, report.failures);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Manifest binding + sampling replay
+// ---------------------------------------------------------------------------
+
+fn make_manifest(temperature: f32, top_k: u32, top_p: f32) -> DeploymentManifest {
+    DeploymentManifest {
+        tokenizer_hash: [0u8; 32],
+        temperature,
+        top_k,
+        top_p,
+        eos_policy: "stop".into(),
+        weight_hash: None,
+        quant_hash: None,
+        system_prompt_hash: None,
+    }
+}
+
+#[test]
+fn v4_manifest_greedy_sampling_replay_pass() {
+    // Greedy manifest (temp=0): sampling replay should agree with argmax.
+    let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let manifest = make_manifest(0.0, 0, 1.0);
+
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"manifest greedy",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None);
+
+    let report = verify_v4(&key, &response);
+    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_sampled_replay_pass() {
+    // Non-greedy: use temperature=1.0, produce correct sampled token.
+    let cfg = ModelConfig::toy();
+    let toy = verilm_test_vectors::generate_model_with_head(&cfg, 54321);
+    let mut key = verilm_test_vectors::generate_key(&cfg, &toy.layers, [2u8; 32]);
+    key.lm_head = Some(toy.lm_head.clone());
+
+    let input: Vec<i8> = (0..cfg.hidden_dim).map(|i| (i * 3 % 256) as i8).collect();
+    let traces = forward_pass(&cfg, &toy.layers, &input);
+    let final_hidden = verilm_core::requantize(&traces.last().unwrap().ffn_out);
+
+    let manifest = make_manifest(1.0, 0, 1.0);
+    let sampling_seed = [42u8; 32];
+
+    // Compute the correct sampled token using the canonical sampler.
+    let logits = verilm_core::sampling::recompute_logits(
+        &toy.lm_head, &final_hidden, cfg.vocab_size, cfg.hidden_dim,
+    );
+    let dp = verilm_core::sampling::DecodeParams {
+        temperature: manifest.temperature,
+        top_k: manifest.top_k,
+        top_p: manifest.top_p,
+    };
+    let token_seed = verilm_core::sampling::derive_token_seed(&sampling_seed, 0);
+    let token_id = verilm_core::sampling::sample(&logits, &dp, &token_seed);
+
+    let retained = retained_from_traces(&traces);
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"manifest sampled",
+        sampling_seed,
+        manifest: Some(&manifest),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params);
+    let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None);
+
+    let report = verify_v4(&key, &response);
+    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_wrong_sampled_token_detected() {
+    // Non-greedy with wrong token → sampling replay should catch it.
+    let cfg = ModelConfig::toy();
+    let toy = verilm_test_vectors::generate_model_with_head(&cfg, 54321);
+    let mut key = verilm_test_vectors::generate_key(&cfg, &toy.layers, [2u8; 32]);
+    key.lm_head = Some(toy.lm_head.clone());
+
+    let input: Vec<i8> = (0..cfg.hidden_dim).map(|i| (i * 3 % 256) as i8).collect();
+    let traces = forward_pass(&cfg, &toy.layers, &input);
+    let final_hidden = verilm_core::requantize(&traces.last().unwrap().ffn_out);
+
+    let manifest = make_manifest(1.0, 0, 1.0);
+    let sampling_seed = [42u8; 32];
+
+    // Compute the correct token, then use a different one.
+    let logits = verilm_core::sampling::recompute_logits(
+        &toy.lm_head, &final_hidden, cfg.vocab_size, cfg.hidden_dim,
+    );
+    let dp = verilm_core::sampling::DecodeParams {
+        temperature: manifest.temperature,
+        top_k: manifest.top_k,
+        top_p: manifest.top_p,
+    };
+    let token_seed = verilm_core::sampling::derive_token_seed(&sampling_seed, 0);
+    let correct_token = verilm_core::sampling::sample(&logits, &dp, &token_seed);
+    let wrong_token = (correct_token + 1) % cfg.vocab_size as u32;
+
+    let retained = retained_from_traces(&traces);
+    let params = FullBindingParams {
+        token_ids: &[wrong_token],
+        prompt: b"manifest wrong token",
+        sampling_seed,
+        manifest: Some(&manifest),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params);
+    let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None);
+
+    let report = verify_v4(&key, &response);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("lm_head")),
+        "should fail on lm_head sampling check, failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_hash_mismatch_detected() {
+    // Manifest hash in commitment doesn't match the manifest in response.
+    let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"manifest mismatch",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None);
+
+    // Tamper with the manifest in the response (different temperature).
+    response.manifest = Some(make_manifest(1.0, 0, 1.0));
+
+    let report = verify_v4(&key, &response);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("manifest hash")),
+        "should fail on manifest hash, failures: {:?}", report.failures);
 }

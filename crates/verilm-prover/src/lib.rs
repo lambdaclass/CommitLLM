@@ -449,6 +449,8 @@ pub struct MinimalBatchState {
     pub seed_commitment: [u8; 32],
     pub revealed_seed: [u8; 32],
     pub io_hashes: Vec<[u8; 32]>,
+    /// Deployment manifest, stored for inclusion in V4 audit responses.
+    pub manifest: Option<DeploymentManifest>,
 }
 
 /// Build retained state from minimal captures (no i32 accumulators).
@@ -561,6 +563,7 @@ pub fn commit_minimal(
         seed_commitment: merkle::hash_seed(&params.sampling_seed),
         revealed_seed: params.sampling_seed,
         io_hashes: io_leaves,
+        manifest: params.manifest.cloned(),
     };
 
     (commitment, state)
@@ -772,6 +775,7 @@ pub fn open_v4_structural(state: &MinimalBatchState, token_index: u32) -> V4Audi
         commitment,
         revealed_seed: state.revealed_seed,
         shell_opening: None,
+        manifest: state.manifest.clone(),
     }
 }
 

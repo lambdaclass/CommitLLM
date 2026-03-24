@@ -390,6 +390,11 @@ pub struct V4AuditResponse {
     /// Prover-computed shell intermediates for the challenged token.
     /// The protocol verifier requires this; structural-only checks may omit.
     pub shell_opening: Option<ShellTokenOpening>,
+    /// Deployment manifest included at audit time. The verifier checks
+    /// `hash_manifest(manifest) == commitment.manifest_hash` and extracts
+    /// decode parameters for sampling replay.
+    #[serde(default)]
+    pub manifest: Option<DeploymentManifest>,
 }
 
 // ===========================================================================

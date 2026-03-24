@@ -466,6 +466,7 @@ mod tests {
             },
             revealed_seed: [0xff; 32],
             shell_opening: Some(shell),
+            manifest: None,
         };
 
         let binary = serialize_v4_audit(&resp);

@@ -1672,8 +1672,27 @@ pub fn verify_v4(
             checks_run += c;
             failures.extend(f);
 
-            // LM head verification: if key has lm_head, derive logits and
-            // verify the claimed token_id matches argmax (greedy check).
+            // Manifest binding: if response carries manifest, verify hash matches commitment.
+            let decode_params = if let Some(ref manifest) = response.manifest {
+                if let Some(ref committed_hash) = response.commitment.manifest_hash {
+                    checks_run += 1;
+                    let computed = merkle::hash_manifest(manifest);
+                    if computed != *committed_hash {
+                        failures.push("manifest hash does not match commitment".into());
+                    }
+                }
+                Some(verilm_core::sampling::DecodeParams {
+                    temperature: manifest.temperature,
+                    top_k: manifest.top_k,
+                    top_p: manifest.top_p,
+                })
+            } else {
+                None
+            };
+
+            // LM head + sampling verification.
+            // With decode params: full sampling replay (greedy or seeded).
+            // Without decode params: greedy argmax fallback.
             if let Some(ref lm_head) = key.lm_head {
                 if let Some(ref fh) = final_hidden {
                     if key.config.vocab_size > 0 {
@@ -1681,15 +1700,26 @@ pub fn verify_v4(
                         let logits = verilm_core::sampling::recompute_logits(
                             lm_head, fh, key.config.vocab_size, key.config.hidden_dim,
                         );
-                        let argmax_token = logits.iter()
-                            .enumerate()
-                            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-                            .map(|(i, _)| i as u32)
-                            .unwrap_or(0);
-                        if argmax_token != response.token_id {
+
+                        let expected_token = if let Some(ref dp) = decode_params {
+                            // Full sampling replay with decode params + revealed seed.
+                            let token_seed = verilm_core::sampling::derive_token_seed(
+                                &response.revealed_seed, response.token_index,
+                            );
+                            verilm_core::sampling::sample(&logits, dp, &token_seed)
+                        } else {
+                            // No manifest → greedy argmax fallback.
+                            logits.iter()
+                                .enumerate()
+                                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                                .map(|(i, _)| i as u32)
+                                .unwrap_or(0)
+                        };
+
+                        if expected_token != response.token_id {
                             failures.push(format!(
-                                "lm_head: argmax={} but claimed token_id={}",
-                                argmax_token, response.token_id
+                                "lm_head: expected token_id={} but claimed token_id={}",
+                                expected_token, response.token_id
                             ));
                         }
                     }
