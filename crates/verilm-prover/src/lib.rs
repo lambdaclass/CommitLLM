@@ -1,5 +1,6 @@
 //! Prover engine: commitment generation and proof opening for the VeriLM protocol.
 
+use rayon::prelude::*;
 use verilm_core::bridge_requantize;
 use verilm_core::constants::MatrixType;
 use verilm_core::matmul::matmul_i32;
@@ -520,9 +521,9 @@ pub fn commit_minimal(
         "retained state count must match token_ids"
     );
 
-    // Trace tree: hash retained state per token.
+    // Trace tree: hash retained state per token (parallel).
     let trace_leaves: Vec<[u8; 32]> = all_retained
-        .iter()
+        .par_iter()
         .map(|rs| merkle::hash_retained_state_direct(rs))
         .collect();
 
