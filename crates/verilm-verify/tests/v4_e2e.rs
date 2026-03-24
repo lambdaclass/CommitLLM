@@ -1009,3 +1009,127 @@ fn v4_unbound_initial_residual_rejected() {
     assert!(report.failures.iter().any(|f| f.contains("embedding_merkle_root")),
         "should fail on missing embedding root, failures: {:?}", report.failures);
 }
+
+// ---------------------------------------------------------------------------
+// LM head verification (greedy argmax)
+// ---------------------------------------------------------------------------
+
+/// Setup with lm_head: generate model with head, derive correct token_id via argmax.
+fn setup_lm_head() -> (
+    ModelConfig,
+    Vec<LayerWeights>,
+    verilm_core::types::VerifierKey,
+    Vec<i8>,  // lm_head weights
+    Vec<i8>,  // input
+    u32,      // correct token_id (argmax of logits)
+) {
+    let cfg = ModelConfig::toy();
+    let toy = verilm_test_vectors::generate_model_with_head(&cfg, 12345);
+    let mut key = verilm_test_vectors::generate_key(&cfg, &toy.layers, [1u8; 32]);
+    key.lm_head = Some(toy.lm_head.clone());
+
+    let input: Vec<i8> = (0..cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&cfg, &toy.layers, &input);
+    let final_hidden = verilm_core::requantize(&traces.last().unwrap().ffn_out);
+    let logits = verilm_core::sampling::recompute_logits(
+        &toy.lm_head, &final_hidden, cfg.vocab_size, cfg.hidden_dim,
+    );
+    let token_id = logits.iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(i, _)| i as u32)
+        .unwrap();
+
+    (cfg, toy.layers, key, toy.lm_head, input, token_id)
+}
+
+#[test]
+fn v4_lm_head_greedy_pass() {
+    let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"lm_head test",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None);
+
+    let report = verify_v4(&key, &response);
+    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+    // Should have the standard checks PLUS one lm_head check
+    assert!(report.failures.is_empty());
+}
+
+#[test]
+fn v4_lm_head_wrong_token_detected() {
+    let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    // Use a wrong token_id (offset by 1)
+    let wrong_token = (token_id + 1) % cfg.vocab_size as u32;
+
+    let params = FullBindingParams {
+        token_ids: &[wrong_token],
+        prompt: b"lm_head tamper test",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None);
+
+    let report = verify_v4(&key, &response);
+    assert_eq!(report.verdict, Verdict::Fail, "wrong token should be detected");
+    assert!(report.failures.iter().any(|f| f.contains("lm_head")),
+        "should fail on lm_head check, failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_lm_head_multi_token_pass() {
+    let cfg = ModelConfig::toy();
+    let toy = verilm_test_vectors::generate_model_with_head(&cfg, 12345);
+    let mut key = verilm_test_vectors::generate_key(&cfg, &toy.layers, [1u8; 32]);
+    key.lm_head = Some(toy.lm_head.clone());
+
+    // Generate 3 tokens, each with correct argmax token_id
+    let inputs: Vec<Vec<i8>> = (0..3)
+        .map(|t| (0..cfg.hidden_dim).map(|i| ((i + t * 7) % 256) as i8).collect())
+        .collect();
+
+    let mut all_retained = Vec::new();
+    let mut token_ids = Vec::new();
+    for inp in &inputs {
+        let traces = forward_pass(&cfg, &toy.layers, inp);
+        let final_hidden = verilm_core::requantize(&traces.last().unwrap().ffn_out);
+        let logits = verilm_core::sampling::recompute_logits(
+            &toy.lm_head, &final_hidden, cfg.vocab_size, cfg.hidden_dim,
+        );
+        let tid = logits.iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(i, _)| i as u32)
+            .unwrap();
+        all_retained.push(retained_from_traces(&traces));
+        token_ids.push(tid);
+    }
+
+    let params = FullBindingParams {
+        token_ids: &token_ids,
+        prompt: b"lm_head multi",
+        sampling_seed: [99u8; 32],
+        manifest: None,
+    };
+    let (_commitment, state) = commit_minimal(all_retained, &params);
+
+    // Verify each token
+    for i in 0..3 {
+        let response = open_v4(&state, i, &ToyWeights(&toy.layers), &cfg, &[], None, None);
+        let report = verify_v4(&key, &response);
+        assert_eq!(report.verdict, Verdict::Pass,
+            "token {}: failures: {:?}", i, report.failures);
+    }
+}

@@ -1668,9 +1668,37 @@ pub fn verify_v4(
                 );
             }
 
-            let (c, f) = verify_shell_opening(key, &response.retained, shell);
+            let (c, f, final_hidden) = verify_shell_opening(key, &response.retained, shell);
             checks_run += c;
             failures.extend(f);
+
+            // LM head verification: if key has lm_head, derive logits and
+            // verify the claimed token_id matches argmax (greedy check).
+            if let Some(ref lm_head) = key.lm_head {
+                if let Some(ref fh) = final_hidden {
+                    if key.config.vocab_size > 0 {
+                        checks_run += 1;
+                        let logits = verilm_core::sampling::recompute_logits(
+                            lm_head, fh, key.config.vocab_size, key.config.hidden_dim,
+                        );
+                        let argmax_token = logits.iter()
+                            .enumerate()
+                            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                            .map(|(i, _)| i as u32)
+                            .unwrap_or(0);
+                        if argmax_token != response.token_id {
+                            failures.push(format!(
+                                "lm_head: argmax={} but claimed token_id={}",
+                                argmax_token, response.token_id
+                            ));
+                        }
+                    }
+                } else {
+                    failures.push(
+                        "key has lm_head but shell verification did not produce final_hidden".into()
+                    );
+                }
+            }
         }
         None => {
             failures.push("V4 audit response missing shell_opening".into());
@@ -1699,11 +1727,15 @@ pub fn verify_v4(
 /// When `shell.initial_residual` is present and the key has RMSNorm weights,
 /// uses the full bridge (dequant → residual → RMSNorm → quantize). This
 /// also enables QKV Freivalds at layer 0.
+///
+/// Returns `(checks_run, failures, final_hidden)`. `final_hidden` is the
+/// i8 hidden state after the last layer, derived from the bridge chain.
+/// Used by verify_v4 for lm_head logit verification.
 fn verify_shell_opening(
     key: &VerifierKey,
     retained: &verilm_core::types::RetainedTokenState,
     shell: &verilm_core::types::ShellTokenOpening,
-) -> (usize, Vec<String>) {
+) -> (usize, Vec<String>, Option<Vec<i8>>) {
     let mut failures = Vec::new();
     let mut checks_run = 0usize;
 
@@ -1716,7 +1748,7 @@ fn verify_shell_opening(
             "shell_opening has {} layers but layer_indices specifies {}",
             shell.layers.len(), opened_layers.len()
         ));
-        return (checks_run, failures);
+        return (checks_run, failures, None);
     }
 
     // Build a lookup: shell_idx for a given layer_idx (None if not opened).
@@ -1908,7 +1940,19 @@ fn verify_shell_opening(
         // with proper challenge derivation). Bridge tracking stops.
     }
 
-    (checks_run, failures)
+    // Derive final_hidden from the chain endpoint.
+    // For full bridge with final_norm_weights: apply final RMSNorm to residual.
+    // For simplified bridge (toy model): x_attn after last layer is requantize(ffn_out).
+    let final_hidden = if let (Some(ref res), Some(ref fnw)) = (&residual, &key.final_norm_weights) {
+        let normed = verilm_core::rmsnorm::rmsnorm_f64_input(res, fnw, key.rmsnorm_eps);
+        // Quantize to i8 with unit scale (simple clamp) for lm_head matmul.
+        Some(normed.iter().map(|&v| v.round().clamp(-128.0, 127.0) as i8).collect())
+    } else {
+        // Simplified bridge: x_attn after last layer IS the final hidden state.
+        x_attn.clone()
+    };
+
+    (checks_run, failures, final_hidden)
 }
 
 /// Verify V4 with verifier-side weight-backed replay (debug/oracle path).

@@ -462,9 +462,48 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         }
     };
 
+    // Load lm_head (unembedding matrix) for logit verification.
+    let lm_head = match load_weights_as_i8(&parsed, "lm_head.weight") {
+        Ok((weights, scale)) => {
+            let (_, lm_shape, _) = find_tensor_raw(&parsed, "lm_head.weight")?;
+            let vocab_size = lm_shape[0];
+            eprintln!("  lm_head: {}x{} (scale={:.6})", vocab_size, cfg.hidden_dim, scale);
+            Some(weights)
+        }
+        Err(e) => {
+            eprintln!("  warning: could not load lm_head.weight: {}", e);
+            None
+        }
+    };
+
+    // Detect vocab_size from lm_head shape (more reliable than config.json).
+    let vocab_size = if lm_head.is_some() {
+        let (_, lm_shape, _) = find_tensor_raw(&parsed, "lm_head.weight")?;
+        lm_shape[0]
+    } else {
+        0
+    };
+
+    // Load final RMSNorm weights (model.norm.weight).
+    let final_norm_weights = match load_1d_f32(&parsed, "model.norm.weight") {
+        Ok(w) => {
+            eprintln!("  final RMSNorm: {} dims", w.len());
+            Some(w)
+        }
+        Err(e) => {
+            eprintln!("  warning: could not load model.norm.weight: {}", e);
+            None
+        }
+    };
+
+    let mut config = cfg;
+    if vocab_size > 0 {
+        config.vocab_size = vocab_size;
+    }
+
     Ok(VerifierKey {
         version: 1,
-        config: cfg,
+        config,
         seed,
         source_dtype,
         weight_scales: quantization_scales.clone(),
@@ -473,12 +512,13 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         v_vectors,
         wo_norms: Vec::new(),
         max_v_norm: 0.0,
-        lm_head: None,
+        lm_head,
         weight_hash: Some(weight_hash),
         rmsnorm_attn_weights,
         rmsnorm_ffn_weights,
         rmsnorm_eps: 1e-5,
         embedding_merkle_root,
+        final_norm_weights,
     })
 }
 

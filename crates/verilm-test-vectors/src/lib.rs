@@ -648,6 +648,7 @@ pub fn generate_key(cfg: &ModelConfig, model: &[LayerWeights], seed: [u8; 32]) -
         weight_scales: Vec::new(),
         rmsnorm_eps: 1e-5,
         embedding_merkle_root: None,
+        final_norm_weights: None,
     }
 }
 

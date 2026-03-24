@@ -159,6 +159,12 @@ pub struct VerifierKey {
     /// `initial_residual` against this root via `ShellTokenOpening.embedding_proof`.
     #[serde(default)]
     pub embedding_merkle_root: Option<[u8; 32]>,
+
+    /// Final RMSNorm weight vector (`model.norm.weight`), applied after the
+    /// last transformer layer and before lm_head. Length = `hidden_dim`.
+    /// `None` for toy model (simplified bridge uses clamp-requantize).
+    #[serde(default)]
+    pub final_norm_weights: Option<Vec<f32>>,
 }
 
 fn default_rmsnorm_eps() -> f64 {
