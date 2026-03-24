@@ -314,6 +314,7 @@ These tasks must explicitly update the full protocol, not just the README narrat
   - enumerate what is approximate
   - enumerate what is statistical
   - enumerate what is still operationally trusted
+  - explicitly enumerate standard cryptographic assumptions, verifier-key secrecy assumptions, and side-channel assumptions
   - ensure docs and claims match that list
 
 - [ ] **Update the full protocol specification in the paper**
@@ -349,6 +350,12 @@ These tasks must explicitly update the full protocol, not just the README narrat
   - trust-assumption boundaries
 
 - [ ] **Document canonical semantics vs trust assumptions clearly**
+
+- [ ] **Add an explicit trusted-assumptions section to the paper, README, and article**
+  - standard cryptographic assumptions (hash collision resistance, prime-field / Freivalds assumptions)
+  - verifier key secrecy (`r_j` vectors are not leaked to the prover)
+  - no side-channel leakage of verifier-secret material
+  - make clear that these are trusted assumptions outside the protocol proof scope, not hidden guarantees
 
 - [ ] **Add fail-on-unknown versioning rules to the full protocol docs and code-facing docs**
 
