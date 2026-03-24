@@ -130,7 +130,7 @@ def create_pod(api_key):
         status = pod_info.get("desiredStatus", "")
         runtime = pod_info.get("runtime")
         if status == "RUNNING" and runtime:
-            ports = runtime.get("ports", [])
+            ports = runtime.get("ports") or []
             ssh_port = None
             ssh_ip = None
             for p in ports:

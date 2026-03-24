@@ -7,7 +7,7 @@ This roadmap reflects the current execution order for VeriLM:
 3. Add exact-strengthening features needed for the strongest claim.
 4. Adversarially harden the verifier before trusting final benchmarks.
 5. Add conformance, interoperability, and operational fail-closed checks.
-6. Only then optimize further, benchmark the final protocol, and publish.
+6. Benchmark every claim-critical or runtime-affecting change, then run the final protocol benchmarks and publish.
 
 ## Claim-Critical Checklist
 
@@ -15,17 +15,21 @@ Do not claim "everything except attention" until all of these are complete:
 
 - [ ] live sampled serving is replayable end to end
 - [ ] decode/output policy completeness is finished
-- [ ] the exact final-token boundary starts at the captured pre-final-norm residual
+- [ ] the exact final-token boundary starts at the captured pre-final-norm residual and is committed / fail-closed
+- [ ] the canonical LM-head verification path is resolved and matches the security claim
 - [ ] exact full-prefix deep-audit mode exists
 - [ ] the V5 retained-state path is canonical
 - [ ] adversarial hardening is complete
 - [ ] conformance vectors and challenge-spec documentation exist
+- [ ] verified-mode operational checks exist and fail closed
 
 ## Publication-Credibility Checklist
 
 Do not treat the protocol as publication-ready until all of these are complete:
 
 - [ ] final V5/V6 benchmarks are run
+- [ ] milestone benchmark baselines exist for all major runtime-affecting protocol changes
+- [ ] no unexplained regression remains in latency, throughput, memory, payload size, audit-open time, or verify time
 - [ ] exact/statistical/approximate boundaries are documented clearly
 - [ ] canonical semantics vs trust assumptions are documented clearly
 - [ ] binary interoperability/versioning behavior is tested
@@ -107,10 +111,18 @@ Sampled serving is required for V6. Greedy remains the `temperature=0` special c
 
 ## 3. Remaining Exactness and Strengthening
 
+- [ ] **Resolve the LM-head verification mismatch as a claim-critical blocker**
+  - decide the canonical LM-head design:
+    - extend the protocol with `MatrixType::LM_HEAD` plus verifier-side Freivalds vectors and checks, or
+    - keep exact LM-head recomputation as the canonical implementation path
+  - make the code, verifier key story, benchmark story, and security claim all match that choice
+  - do not leave the paper/claim language implying LM-head Freivalds if the implementation is still exact recomputation
+
 - [ ] **Only claim "everything except attention" after all of the following are done**
   - sampled serving is live and replayable end to end
   - decode/output policy completeness is finished
   - the exact final-token boundary starts at the captured pre-final-norm residual
+  - the LM-head verification path is canonical and matches the claimed mechanism
   - exact full-prefix deep-audit mode exists
 
 - [ ] **Move the exact final-token boundary to the strongest post-attention state**
@@ -220,6 +232,32 @@ This comes before trusting final benchmarks or making strong publication claims.
 
 Performance is no longer ahead of protocol completion, but still matters before release.
 
+### 7.0 Regression Guardrails
+
+- [ ] **Define a stable benchmark protocol**
+  - fixed prompt/output corpus
+  - fixed model and verified-mode settings
+  - fixed hardware class and warmup policy
+  - fixed remote-GPU benchmark environment for milestone checks
+  - fixed reporting format for latency, throughput, memory, payload, audit-open time, and verify time
+
+- [ ] **Record benchmark baselines before and after every runtime-affecting milestone**
+  - live canonical sampler integration
+  - final-token boundary capture / commitment move
+  - exact full-prefix deep-audit mode
+  - verified-mode sync/capture changes
+  - binary payload / retained-state layout changes
+
+- [ ] **Run periodic remote-GPU benchmark checkpoints, not just local measurements**
+  - use the same representative GPU class for comparisons whenever possible
+  - run milestone checks on the remote GPU after claim-critical or runtime-affecting changes
+  - treat local-only numbers as fast sanity checks, not as the final source of truth
+
+- [ ] **Treat unexplained regressions as blockers**
+  - compare against the previous milestone baseline
+  - investigate regressions before proceeding
+  - explicitly document accepted tradeoffs when a stronger protocol step costs performance
+
 ### 7.1 Inference Cost
 
 - [ ] **Lower online inference overhead further if it remains worthwhile**
@@ -244,6 +282,7 @@ Performance is no longer ahead of protocol completion, but still matters before 
 ## 8. Benchmarks and Research Validation
 
 - [ ] **Benchmark the final V5 path**
+  - run on the reference remote-GPU benchmark environment
   - baseline
   - online overhead
   - commit time
@@ -253,6 +292,7 @@ Performance is no longer ahead of protocol completion, but still matters before 
   - binary payload size
 
 - [ ] **Benchmark the protocol-complete V6 path**
+  - run on the reference remote-GPU benchmark environment
   - greedy path cost
   - sampled path cost
   - routine vs deep audit
@@ -314,6 +354,11 @@ These tasks must explicitly update the full protocol, not just the README narrat
 
 - [ ] **Run the final kept-path benchmark suite**
 
+- [ ] **Explain benchmark methodology and regression gates in the paper/docs**
+  - what hardware and workload class the numbers correspond to
+  - which changes were benchmark-gated during development
+  - how protocol-strengthening tradeoffs against performance were evaluated
+
 - [ ] **Publish around V6 when the story is coherent**
 
 ## 10. Longer-Term Engineering
@@ -348,10 +393,13 @@ These tasks must explicitly update the full protocol, not just the README narrat
 ```text
 Live canonical sampled serving
     + decode/output manifest binding + verifier replay
+    + sampled-serving benchmark gate
     ↓
 Canonical V5 retained-state path
+    + V5 benchmark gate
     ↓
 Exact full-prefix mode
+    + exact-prefix benchmark gate
     ↓
 Adversarial verifier hardening
     ↓

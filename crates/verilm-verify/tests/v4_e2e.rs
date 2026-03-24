@@ -1627,6 +1627,49 @@ fn v4_manifest_rejects_exceeded_max_tokens() {
 }
 
 #[test]
+fn v4_manifest_rejects_overlong_transcript() {
+    // Commit 3 tokens with max_tokens=2, but open token_index 0 (valid index).
+    // The per-token check passes (0 < 2), but committed n_tokens=3 > max_tokens=2.
+    let cfg = ModelConfig::toy();
+    let toy = verilm_test_vectors::generate_model_with_head(&cfg, 54321);
+    let mut key = verilm_test_vectors::generate_key(&cfg, &toy.layers, [2u8; 32]);
+    key.lm_head = Some(toy.lm_head.clone());
+
+    let input: Vec<i8> = (0..cfg.hidden_dim).map(|i| (i * 3 % 256) as i8).collect();
+    let traces = forward_pass(&cfg, &toy.layers, &input);
+    let retained = retained_from_traces(&traces);
+
+    let final_hidden = verilm_core::requantize(&traces.last().unwrap().ffn_out);
+    let logits = verilm_core::sampling::recompute_logits(
+        &toy.lm_head, &final_hidden, cfg.vocab_size, cfg.hidden_dim,
+    );
+    let token_id = logits.iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .unwrap().0 as u32;
+
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.max_tokens = 2; // allow indices 0,1
+
+    let params = FullBindingParams {
+        token_ids: &[token_id, token_id, token_id], // 3 tokens committed
+        prompt: b"overlong transcript",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+    };
+    let (_commitment, state) = commit_minimal(
+        vec![retained.clone(), retained.clone(), retained], &params, None,
+    );
+    // Open token_index 0 — valid per-token, but transcript is overlong
+    let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None);
+
+    let report = verify_v4(&key, &response);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("committed n_tokens") && f.contains("max_tokens")),
+        "expected transcript-level max_tokens rejection, got: {:?}", report.failures);
+}
+
+#[test]
 fn v4_manifest_max_tokens_zero_means_unlimited() {
     // max_tokens=0 means no limit — should pass regardless of token_index.
     let m = make_manifest(0.0, 0, 1.0);
@@ -1643,4 +1686,169 @@ fn v4_manifest_accepts_all_defaults() {
     let report = verify_with_manifest(m);
     assert_eq!(report.verdict, Verdict::Pass,
         "canonical defaults should pass, failures: {:?}", report.failures);
+}
+
+// ---------------------------------------------------------------------------
+// Cross-request splice attacks (V4 sampled serving)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn v4_cross_request_splice_shell_opening() {
+    // Attack: two honest requests (different prompts, different seeds).
+    // Attacker splices run B's shell opening into run A's response.
+    // The Merkle proof from B won't verify against A's tree.
+    let (cfg, model, key) = setup();
+
+    let input_a: Vec<i8> = (0..cfg.hidden_dim).map(|i| (i % 256) as i8).collect();
+    let input_b: Vec<i8> = (0..cfg.hidden_dim).map(|i| ((i * 7 + 100) % 256) as i8).collect();
+
+    let traces_a = forward_pass(&cfg, &model, &input_a);
+    let traces_b = forward_pass(&cfg, &model, &input_b);
+    let retained_a = retained_from_traces(&traces_a);
+    let retained_b = retained_from_traces(&traces_b);
+
+    // Sanity: the two retained states must actually differ for this test to work.
+    let hash_a = verilm_core::merkle::hash_retained_with_residual(&retained_a, None);
+    let hash_b = verilm_core::merkle::hash_retained_with_residual(&retained_b, None);
+    assert_ne!(hash_a, hash_b,
+        "test precondition: retained states from different inputs must hash differently");
+
+    let params_a = FullBindingParams {
+        token_ids: &[42],
+        prompt: b"request A",
+        sampling_seed: [1u8; 32],
+        manifest: None,
+    };
+    let params_b = FullBindingParams {
+        token_ids: &[99],
+        prompt: b"request B",
+        sampling_seed: [2u8; 32],
+        manifest: None,
+    };
+
+    let (_commit_a, state_a) = commit_minimal(vec![retained_a], &params_a, None);
+    let (_commit_b, state_b) = commit_minimal(vec![retained_b], &params_b, None);
+
+    let mut response_a = open_v4(&state_a, 0, &ToyWeights(&model), &cfg, &[], None, None);
+    let response_b = open_v4(&state_b, 0, &ToyWeights(&model), &cfg, &[], None, None);
+
+    // SPLICE: graft B's shell opening + retained state into A's response,
+    // keeping A's commitment (merkle root, io root, seed, prompt hash).
+    response_a.shell_opening = response_b.shell_opening.clone();
+    response_a.retained = response_b.retained.clone();
+
+    let report = verify_v4(&key, &response_a);
+    assert_eq!(report.verdict, Verdict::Fail,
+        "cross-request splice must be detected, got: {:?}", report.failures);
+    // The retained leaf hash from B won't match A's Merkle tree
+    assert!(report.failures.iter().any(|f| f.contains("Merkle proof")),
+        "expected Merkle proof failure from spliced retained state, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_cross_request_splice_with_manifest() {
+    // Same attack but with sampled decoding manifests.
+    // Run A uses greedy (temp=0), run B uses sampled (temp=1.0).
+    // Even if the attacker fixes up the retained state, the IO chain
+    // and manifest hash binding catch the splice.
+    let (cfg, model, key) = setup();
+
+    let input_a: Vec<i8> = (0..cfg.hidden_dim).map(|i| (i % 256) as i8).collect();
+    let input_b: Vec<i8> = (0..cfg.hidden_dim).map(|i| ((i * 7 + 100) % 256) as i8).collect();
+
+    let traces_a = forward_pass(&cfg, &model, &input_a);
+    let traces_b = forward_pass(&cfg, &model, &input_b);
+    let retained_a = retained_from_traces(&traces_a);
+    let retained_b = retained_from_traces(&traces_b);
+
+    let manifest_a = make_manifest(0.0, 0, 1.0); // greedy
+    let manifest_b = make_manifest(1.0, 0, 1.0); // sampled
+
+    let params_a = FullBindingParams {
+        token_ids: &[42],
+        prompt: b"greedy request",
+        sampling_seed: [1u8; 32],
+        manifest: Some(&manifest_a),
+    };
+    let params_b = FullBindingParams {
+        token_ids: &[99],
+        prompt: b"sampled request",
+        sampling_seed: [2u8; 32],
+        manifest: Some(&manifest_b),
+    };
+
+    let (_commit_a, state_a) = commit_minimal(vec![retained_a], &params_a, None);
+    let (_commit_b, state_b) = commit_minimal(vec![retained_b], &params_b, None);
+
+    let mut response_a = open_v4(&state_a, 0, &ToyWeights(&model), &cfg, &[], None, None);
+    let response_b = open_v4(&state_b, 0, &ToyWeights(&model), &cfg, &[], None, None);
+
+    // SPLICE: graft B's shell + retained + manifest into A's response,
+    // keeping A's commitment.
+    response_a.shell_opening = response_b.shell_opening.clone();
+    response_a.retained = response_b.retained.clone();
+    response_a.manifest = response_b.manifest.clone();
+
+    let report = verify_v4(&key, &response_a);
+    assert_eq!(report.verdict, Verdict::Fail,
+        "cross-request splice with manifest must be detected, got: {:?}", report.failures);
+    // Manifest from B doesn't match A's commitment hash.
+    assert!(report.failures.iter().any(|f| f.contains("manifest hash")),
+        "expected manifest hash mismatch, got: {:?}", report.failures);
+    // Retained state from B doesn't match A's Merkle tree.
+    assert!(report.failures.iter().any(|f| f.contains("Merkle proof")),
+        "expected Merkle proof failure, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_cross_request_splice_token_id_swap() {
+    // Attack: two multi-token requests. Attacker takes token 1 from run B
+    // and presents it as token 1 in run A. The IO chain catches this because
+    // prev_io_hash for position 1 depends on position 0's leaf hash + token_id.
+    let (cfg, model, key) = setup();
+
+    let inputs_a: Vec<Vec<i8>> = (0..3)
+        .map(|t| (0..cfg.hidden_dim).map(|i| ((i + t * 7) % 256) as i8).collect())
+        .collect();
+    let inputs_b: Vec<Vec<i8>> = (0..3)
+        .map(|t| (0..cfg.hidden_dim).map(|i| ((i * 11 + t * 31 + 80) % 256) as i8).collect())
+        .collect();
+
+    let all_retained_a: Vec<RetainedTokenState> = inputs_a.iter()
+        .map(|inp| retained_from_traces(&forward_pass(&cfg, &model, inp)))
+        .collect();
+    let all_retained_b: Vec<RetainedTokenState> = inputs_b.iter()
+        .map(|inp| retained_from_traces(&forward_pass(&cfg, &model, inp)))
+        .collect();
+
+    let params_a = FullBindingParams {
+        token_ids: &[10, 20, 30],
+        prompt: b"multi A",
+        sampling_seed: [1u8; 32],
+        manifest: None,
+    };
+    let params_b = FullBindingParams {
+        token_ids: &[40, 50, 60],
+        prompt: b"multi B",
+        sampling_seed: [2u8; 32],
+        manifest: None,
+    };
+
+    let (_commit_a, state_a) = commit_minimal(all_retained_a, &params_a, None);
+    let (_commit_b, state_b) = commit_minimal(all_retained_b, &params_b, None);
+
+    let mut response_a = open_v4(&state_a, 1, &ToyWeights(&model), &cfg, &[], None, None);
+    let response_b = open_v4(&state_b, 1, &ToyWeights(&model), &cfg, &[], None, None);
+
+    // SPLICE: replace token 1's retained state and shell from B into A
+    response_a.retained = response_b.retained.clone();
+    response_a.shell_opening = response_b.shell_opening.clone();
+    response_a.token_id = response_b.token_id;
+
+    let report = verify_v4(&key, &response_a);
+    assert_eq!(report.verdict, Verdict::Fail,
+        "cross-request token splice must be detected, got: {:?}", report.failures);
+    assert!(report.failures.iter().any(|f|
+        f.contains("Merkle proof") || f.contains("IO") || f.contains("chain")),
+        "expected Merkle or IO chain failure, got: {:?}", report.failures);
 }

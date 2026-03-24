@@ -1722,11 +1722,19 @@ pub fn verify_v4(
                         manifest.stop_sequences.len()
                     ));
                 }
-                if manifest.max_tokens > 0 && response.token_index >= manifest.max_tokens {
-                    failures.push(format!(
-                        "token_index {} exceeds manifest max_tokens {}",
-                        response.token_index, manifest.max_tokens
-                    ));
+                if manifest.max_tokens > 0 {
+                    if response.token_index >= manifest.max_tokens {
+                        failures.push(format!(
+                            "token_index {} exceeds manifest max_tokens {}",
+                            response.token_index, manifest.max_tokens
+                        ));
+                    }
+                    if response.commitment.n_tokens > manifest.max_tokens {
+                        failures.push(format!(
+                            "committed n_tokens {} exceeds manifest max_tokens {}",
+                            response.commitment.n_tokens, manifest.max_tokens
+                        ));
+                    }
                 }
 
                 Some(verilm_core::sampling::DecodeParams {
