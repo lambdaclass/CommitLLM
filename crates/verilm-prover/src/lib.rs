@@ -521,11 +521,15 @@ pub fn commit_minimal(
     params: &FullBindingParams,
     final_residuals: Option<Vec<Vec<f32>>>,
 ) -> (BatchCommitment, MinimalBatchState) {
+    let n_tokens = all_retained.len();
     assert_eq!(
-        all_retained.len(),
+        n_tokens,
         params.token_ids.len(),
         "retained state count must match token_ids"
     );
+
+    let timers = std::env::var("VERILM_COMMIT_TIMERS").map_or(false, |v| v == "1");
+    let t0 = if timers { Some(std::time::Instant::now()) } else { None };
 
     // Trace tree: hash retained state per token (parallel).
     // When final_residuals is present, bind each into the leaf hash.
@@ -538,8 +542,10 @@ pub fn commit_minimal(
         })
         .collect();
 
+    let t_leaf = if timers { Some(std::time::Instant::now()) } else { None };
+
     // IO tree: chain the leaf hash (not ad hoc features) for splice resistance.
-    let mut io_leaves = Vec::with_capacity(all_retained.len());
+    let mut io_leaves = Vec::with_capacity(n_tokens);
     let mut prev_io = [0u8; 32];
     for (i, leaf_hash) in trace_leaves.iter().enumerate() {
         let io = merkle::io_hash_v4(*leaf_hash, params.token_ids[i], prev_io);
@@ -547,14 +553,18 @@ pub fn commit_minimal(
         prev_io = io;
     }
 
+    let t_io_chain = if timers { Some(std::time::Instant::now()) } else { None };
+
     let trace_tree = merkle::build_tree(&trace_leaves);
     let io_tree = merkle::build_tree(&io_leaves);
     let manifest_hash = params.manifest.map(|m| merkle::hash_manifest(m));
 
+    let t_trees = if timers { Some(std::time::Instant::now()) } else { None };
+
     let commitment = BatchCommitment {
         merkle_root: trace_tree.root,
         io_root: io_tree.root,
-        n_tokens: all_retained.len() as u32,
+        n_tokens: n_tokens as u32,
         manifest_hash,
         version: CommitmentVersion::V4,
         prompt_hash: Some(merkle::hash_prompt(params.prompt)),
@@ -575,6 +585,21 @@ pub fn commit_minimal(
         manifest: params.manifest.cloned(),
         final_residuals,
     };
+
+    if let (Some(t0), Some(t_leaf), Some(t_io_chain), Some(t_trees)) =
+        (t0, t_leaf, t_io_chain, t_trees)
+    {
+        let now = std::time::Instant::now();
+        eprintln!(
+            "verilm rust commit_minimal timers: leaf_hash={:.1}ms io_chain={:.1}ms trees={:.1}ms assemble={:.1}ms total={:.1}ms ({} tokens)",
+            t_leaf.duration_since(t0).as_secs_f64() * 1000.0,
+            t_io_chain.duration_since(t_leaf).as_secs_f64() * 1000.0,
+            t_trees.duration_since(t_io_chain).as_secs_f64() * 1000.0,
+            now.duration_since(t_trees).as_secs_f64() * 1000.0,
+            now.duration_since(t0).as_secs_f64() * 1000.0,
+            n_tokens,
+        );
+    }
 
     (commitment, state)
 }
@@ -801,6 +826,8 @@ pub fn commit_minimal_packed(
         );
     }
 
+    let timers = std::env::var("VERILM_COMMIT_TIMERS").map_or(false, |v| v == "1");
+
     // Build temporary state for hashing (borrows only, no ownership transfer).
     let dummy_tree = merkle::MerkleTree { root: [0u8; 32], nodes: vec![], n_leaves: 0, padded_size: 0 };
     let state = PackedBatchState {
@@ -823,11 +850,15 @@ pub fn commit_minimal_packed(
         final_res_dim,
     };
 
+    let t0 = if timers { Some(std::time::Instant::now()) } else { None };
+
     // Trace tree: hash each token in parallel.
     let trace_leaves: Vec<[u8; 32]> = (0..n_tokens)
         .into_par_iter()
         .map(|t| state.hash_token(t))
         .collect();
+
+    let t_leaf = if timers { Some(std::time::Instant::now()) } else { None };
 
     // IO tree: sequential chain.
     let mut io_leaves = Vec::with_capacity(n_tokens);
@@ -838,9 +869,13 @@ pub fn commit_minimal_packed(
         prev_io = io;
     }
 
+    let t_io_chain = if timers { Some(std::time::Instant::now()) } else { None };
+
     let trace_tree = merkle::build_tree(&trace_leaves);
     let io_tree = merkle::build_tree(&io_leaves);
     let manifest_hash = params.manifest.map(|m| merkle::hash_manifest(m));
+
+    let t_trees = if timers { Some(std::time::Instant::now()) } else { None };
 
     let commitment = BatchCommitment {
         merkle_root: trace_tree.root,
@@ -873,6 +908,21 @@ pub fn commit_minimal_packed(
         packed_final_res: state.packed_final_res,
         final_res_dim,
     };
+
+    if let (Some(t0), Some(t_leaf), Some(t_io_chain), Some(t_trees)) =
+        (t0, t_leaf, t_io_chain, t_trees)
+    {
+        let now = std::time::Instant::now();
+        eprintln!(
+            "verilm rust commit_packed timers: leaf_hash={:.1}ms io_chain={:.1}ms trees={:.1}ms assemble={:.1}ms total={:.1}ms ({} tokens)",
+            t_leaf.duration_since(t0).as_secs_f64() * 1000.0,
+            t_io_chain.duration_since(t_leaf).as_secs_f64() * 1000.0,
+            t_trees.duration_since(t_io_chain).as_secs_f64() * 1000.0,
+            now.duration_since(t_trees).as_secs_f64() * 1000.0,
+            now.duration_since(t0).as_secs_f64() * 1000.0,
+            n_tokens,
+        );
+    }
 
     (commitment, final_state)
 }

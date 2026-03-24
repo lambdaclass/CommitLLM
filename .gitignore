@@ -3,6 +3,7 @@ target/
 *.vtrace
 .cache/
 .direnv/
+.envrc
 models/
 
 # Python

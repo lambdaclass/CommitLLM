@@ -1,6 +1,6 @@
 .PHONY: build test check clean paper paper-watch paper-clean paper-stamp lean-build lean-clean \
        gpu-test gpu-test-e2e gpu-test-sampled gpu-test-stability gpu-test-modal gpu-terminate \
-       gpu-bench-hooks gpu-bench-hooks-modal
+       gpu-bench-hooks gpu-bench-hooks-modal gpu-bench-ab gpu-bench-ab-modal
 
 # Rust
 build:
@@ -44,6 +44,18 @@ gpu-bench-hooks:
 
 gpu-bench-hooks-modal:
 	modal run --detach scripts/modal/bench_hooks_overhead.py
+
+gpu-bench-commit:
+	python scripts/runpod/test.py --script scripts/modal/bench_commit_phases.py
+
+gpu-bench-commit-modal:
+	modal run --detach scripts/modal/bench_commit_phases.py
+
+gpu-bench-ab:
+	python scripts/runpod/test.py --script scripts/modal/bench_ab_overhead.py
+
+gpu-bench-ab-modal:
+	modal run --detach scripts/modal/bench_ab_overhead.py
 
 # Paper
 paper:

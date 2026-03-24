@@ -233,6 +233,10 @@ class VerifiedInferenceServer:
         # revealed only at audit time, preventing pre-computation attacks.
         seed = secrets.token_bytes(32)
 
+        _chat_timers = os.environ.get("VERILM_COMMIT_TIMERS", "0") == "1"
+        if _chat_timers:
+            _ct0 = time.monotonic()
+
         # Activate the canonical sampler hook for this request.
         # The hook intercepts LogitsProcessor output, runs the Rust canonical
         # sampler, and masks all but the chosen token to -inf. vLLM then does
@@ -249,6 +253,9 @@ class VerifiedInferenceServer:
         gen_token_ids = list(output.outputs[0].token_ids)
         prompt_token_ids = list(output.prompt_token_ids)
 
+        if _chat_timers:
+            _ct_gen = time.monotonic()
+
         # Ensure all non-blocking GPU→CPU transfers completed.
         # 1. Capture buffer: event-based sync (only waits on the last D2H transfer).
         self.buf.wait_for_transfers()
@@ -258,10 +265,16 @@ class VerifiedInferenceServer:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
+        if _chat_timers:
+            _ct_sync = time.monotonic()
+
         # Drain captures (tensors are already on CPU).
         captures = self.buf.drain()
         el_data = self.el_capture.drain() if self.el_capture is not None else {}
         final_residuals_raw = self.final_res_capture.drain() if self.final_res_capture is not None else []
+
+        if _chat_timers:
+            _ct_drain = time.monotonic()
 
         n_layers = cap._n_layers
         calls_per_fwd = n_layers * cap.PROJS_PER_LAYER
@@ -363,6 +376,20 @@ class VerifiedInferenceServer:
             state = self._commit_full(
                 captures, fwd_batch_sizes, n_layers, el_data,
                 all_token_ids, prompt, seed, manifest,
+            )
+
+        if _chat_timers:
+            _ct_commit = time.monotonic()
+            n_tok = len(gen_token_ids)
+            logger.info(
+                "verilm chat timers: generate=%.1fms sync=%.1fms drain=%.1fms "
+                "commit=%.1fms total=%.1fms (%d tokens)",
+                (_ct_gen - _ct0) * 1000,
+                (_ct_sync - _ct_gen) * 1000,
+                (_ct_drain - _ct_sync) * 1000,
+                (_ct_commit - _ct_drain) * 1000,
+                (_ct_commit - _ct0) * 1000,
+                n_tok,
             )
 
         # Store for audit.
@@ -496,22 +523,27 @@ class VerifiedInferenceServer:
 
         Drop-in replacement for _commit_minimal with the same return type.
         """
+        import numpy as np
         import verilm_rs
         from . import capture as cap
 
         hidden_dim = cap._hidden_size
+        timers = os.environ.get("VERILM_COMMIT_TIMERS", "0") == "1"
+        if timers:
+            import time as _t
+            t0 = _t.monotonic()
 
-        # Pack all o_proj activations into one contiguous bytearray.
+        # Pack all o_proj activations into one contiguous numpy array.
         # Layout: fwd-major × layer-major, each segment is (batch_sz × hidden_dim) i8 bytes.
-        packed_a = bytearray()
+        # Collect views first, then single np.concatenate (avoids O(n²) bytearray realloc).
+        a_arrays = []
         packed_scales = []
 
         for fwd_i in range(n_fwd):
             for l_i in range(n_layers):
                 base = fwd_i * calls_per_fwd + l_i * 4
                 # Call order: qkv=0, o=1, gate_up=2, down=3
-                o_cap = captures[base + 1]
-                packed_a += bytes(o_cap[2].numpy().data)
+                a_arrays.append(captures[base + 1][2].numpy().ravel())
 
                 # 4 scales per (fwd, layer): [scale_x_attn, scale_a, scale_x_ffn, scale_h]
                 for cap_entry in (captures[base + 0], captures[base + 1],
@@ -524,6 +556,14 @@ class VerifiedInferenceServer:
                     else:
                         packed_scales.append(float(s))
 
+        if timers:
+            t_loop = _t.monotonic()
+
+        packed_a = np.concatenate(a_arrays)
+
+        if timers:
+            t_pack_a = _t.monotonic()
+
         # Pack final residuals as contiguous f32 bytes, token-major.
         packed_fr = None
         fr_dim = 0
@@ -534,16 +574,20 @@ class VerifiedInferenceServer:
                     f"forward pass count ({len(fwd_batch_sizes)}). "
                     f"Hook capture misaligned."
                 )
-            packed_fr = bytearray()
+            fr_arrays = []
             for fwd_tensor, batch_sz in zip(final_residuals_raw, fwd_batch_sizes):
-                for pos in range(batch_sz):
-                    if fwd_tensor.dim() >= 2:
-                        packed_fr += bytes(fwd_tensor[pos].numpy().data)
-                    else:
-                        packed_fr += bytes(fwd_tensor.numpy().data)
+                t = fwd_tensor.numpy() if not isinstance(fwd_tensor, np.ndarray) else fwd_tensor
+                if t.ndim >= 2:
+                    fr_arrays.append(t[:batch_sz].ravel())
+                else:
+                    fr_arrays.append(t.ravel())
+            packed_fr = np.concatenate(fr_arrays)
             fr_dim = final_residuals_raw[0].shape[-1]
 
-        return verilm_rs.commit_minimal_packed(
+        if timers:
+            t_pack_fr = _t.monotonic()
+
+        result = verilm_rs.commit_minimal_packed(
             packed_a=packed_a,
             packed_scales=packed_scales,
             n_layers=n_layers,
@@ -557,6 +601,23 @@ class VerifiedInferenceServer:
             packed_final_res=packed_fr,
             final_res_dim=fr_dim,
         )
+
+        if timers:
+            t_rust = _t.monotonic()
+            n_tok = sum(fwd_batch_sizes)
+            logger.info(
+                "verilm commit timers: loop=%.1fms concat=%.1fms pack_fr=%.1fms rust=%.1fms "
+                "total=%.1fms (%d tokens, %.2fms/tok)",
+                (t_loop - t0) * 1000,
+                (t_pack_a - t_loop) * 1000,
+                (t_pack_fr - t_pack_a) * 1000,
+                (t_rust - t_pack_fr) * 1000,
+                (t_rust - t0) * 1000,
+                n_tok,
+                (t_rust - t0) * 1000 / max(n_tok, 1),
+            )
+
+        return result
 
     def audit(
         self,
