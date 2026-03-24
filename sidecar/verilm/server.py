@@ -63,6 +63,7 @@ class VerifiedInferenceServer:
 
         # Manifest hashes.
         self._tokenizer_hash = self._compute_tokenizer_hash(llm)
+        self._model_dir = self._resolve_model_dir(llm)
         self._weight_hash = self._compute_weight_hash_rw(llm)
         self._quant_hash = self._compute_quant_hash(model)
         self._system_prompt_hash = hashlib.sha256(b"").hexdigest()  # Default: empty prompt
@@ -92,15 +93,12 @@ class VerifiedInferenceServer:
         try:
             import verilm_rs
 
-            # Get model path from vLLM. HuggingFace models are cached
-            # under ~/.cache/huggingface/hub/ after download.
-            model_dir = self._resolve_model_dir(llm)
-            if model_dir is None:
+            if self._model_dir is None:
                 logger.warning("Could not resolve model directory for R_W computation")
                 return "00" * 32
 
-            logger.info("Computing R_W (weight-chain hash) from %s...", model_dir)
-            weight_hash = verilm_rs.compute_weight_hash(model_dir)
+            logger.info("Computing R_W (weight-chain hash) from %s...", self._model_dir)
+            weight_hash = verilm_rs.compute_weight_hash(self._model_dir)
             logger.info("R_W: %s", weight_hash)
             return weight_hash
         except Exception as e:
@@ -352,6 +350,7 @@ class VerifiedInferenceServer:
             prompt=prompt.encode(),
             sampling_seed=seed,
             manifest=manifest,
+            model_dir=self._model_dir,
         )
 
     def audit(

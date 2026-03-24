@@ -710,6 +710,8 @@ fn compute_weight_hash(model_dir: String) -> PyResult<String> {
 struct MinimalBatchStateHandle {
     inner: verilm_prover::MinimalBatchState,
     commitment: BatchCommitment,
+    /// Model directory for loading weights at audit time (shell openings).
+    model_dir: Option<String>,
 }
 
 #[pymethods]
@@ -742,8 +744,9 @@ impl MinimalBatchStateHandle {
     /// Open a V4 audit response for a challenged token.
     ///
     /// Returns JSON-serialized V4AuditResponse containing the challenged
-    /// token's retained state, Merkle/IO proofs, and all prefix tokens'
-    /// retained states + proofs needed for replay verification.
+    /// token's retained state, Merkle/IO proofs, all prefix tokens' retained
+    /// states + proofs, and prover-computed shell openings for the challenged
+    /// token (so the verifier can check with key-only Freivalds).
     fn audit_v4(&self, token_index: u32) -> PyResult<String> {
         if token_index >= self.inner.all_retained.len() as u32 {
             return Err(PyValueError::new_err(format!(
@@ -752,7 +755,23 @@ impl MinimalBatchStateHandle {
                 self.inner.all_retained.len()
             )));
         }
-        let response = verilm_prover::open_v4(&self.inner, token_index);
+
+        let dir = self.model_dir.as_ref().ok_or_else(|| {
+            PyValueError::new_err(
+                "V4 audit requires model_dir for shell opening computation; \
+                 model directory was not available at commit time"
+            )
+        })?;
+        let provider = verilm_keygen::SafetensorsWeightProvider::load(
+            std::path::Path::new(dir),
+        ).map_err(|e| PyValueError::new_err(format!(
+            "failed to load weights from {}: {}", dir, e
+        )))?;
+        let response = verilm_prover::open_v4(
+            &self.inner, token_index, &provider, provider.config(),
+            provider.weight_scales(),
+        );
+
         serde_json::to_string(&response)
             .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
     }
@@ -779,6 +798,7 @@ impl MinimalBatchStateHandle {
     prompt,
     sampling_seed,
     manifest = None,
+    model_dir = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn commit_minimal_from_captures(
@@ -790,6 +810,7 @@ fn commit_minimal_from_captures(
     prompt: Vec<u8>,
     sampling_seed: Vec<u8>,
     manifest: Option<&Bound<'_, PyDict>>,
+    model_dir: Option<String>,
 ) -> PyResult<MinimalBatchStateHandle> {
     let n_entries = o_proj_inputs.len();
     let expected_scales = n_entries * 4;
@@ -838,7 +859,7 @@ fn commit_minimal_from_captures(
         },
     );
 
-    Ok(MinimalBatchStateHandle { inner, commitment })
+    Ok(MinimalBatchStateHandle { inner, commitment, model_dir })
 }
 
 #[pymodule]

@@ -31,7 +31,7 @@ use safetensors::{Dtype, SafeTensors};
 use verilm_core::constants::{MatrixType, ModelConfig};
 use verilm_core::field::Fp;
 use verilm_core::freivalds;
-use verilm_core::types::VerifierKey;
+use verilm_core::types::{ShellWeights, VerifierKey};
 
 /// A memory-mapped safetensors file.
 struct MappedShard {
@@ -484,4 +484,65 @@ pub fn write_safetensors(
     let bytes = safetensors::tensor::serialize(tensor_data, &None)?;
     std::fs::write(path, bytes)?;
     Ok(())
+}
+
+/// Weight provider that loads INT8 matrices from safetensors on disk.
+///
+/// Used by the prover at audit time to compute shell openings.
+/// Loads all weight matrices up front for the requested layers.
+pub struct SafetensorsWeightProvider {
+    config: ModelConfig,
+    /// weights[layer][matrix_type_idx] = flattened i8 data
+    weights: Vec<Vec<Vec<i8>>>,
+    /// scales[layer][matrix_type_idx] = per-tensor quantization scale.
+    /// 0.0 for native INT8 tensors.
+    scales: Vec<Vec<f32>>,
+}
+
+impl SafetensorsWeightProvider {
+    /// Load all weight matrices from a safetensors model directory.
+    pub fn load(dir: &Path) -> Result<Self> {
+        let config = detect_config(dir)?;
+        let mapped = open_shards(dir)?;
+        let parsed: Vec<_> = mapped
+            .iter()
+            .map(|s| SafeTensors::deserialize(&s.mmap).map(|st| (st, s)))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to parse safetensors")?;
+
+        let mut weights = Vec::with_capacity(config.n_layers);
+        let mut scales = Vec::with_capacity(config.n_layers);
+        for layer_idx in 0..config.n_layers {
+            let mut layer_weights = Vec::with_capacity(MatrixType::ALL.len());
+            let mut layer_scales = Vec::with_capacity(MatrixType::ALL.len());
+            for mt in MatrixType::ALL {
+                let name = mt.weight_name().replace("{}", &layer_idx.to_string());
+                let (w, scale) = load_weights_as_i8(&parsed, &name)?;
+                layer_weights.push(w);
+                layer_scales.push(scale);
+            }
+            weights.push(layer_weights);
+            scales.push(layer_scales);
+        }
+
+        Ok(SafetensorsWeightProvider { config, weights, scales })
+    }
+
+    pub fn config(&self) -> &ModelConfig {
+        &self.config
+    }
+
+    /// Per-layer, per-matrix-type weight quantization scales.
+    /// 0.0 for native INT8 tensors. Same layout as `VerifierKey.weight_scales`.
+    pub fn weight_scales(&self) -> &[Vec<f32>] {
+        &self.scales
+    }
+}
+
+impl ShellWeights for SafetensorsWeightProvider {
+    fn weight(&self, layer: usize, mt: MatrixType) -> &[i8] {
+        let mt_idx = MatrixType::ALL.iter().position(|&m| m == mt)
+            .expect("unknown MatrixType");
+        &self.weights[layer][mt_idx]
+    }
 }

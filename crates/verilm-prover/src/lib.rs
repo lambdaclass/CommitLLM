@@ -1,11 +1,14 @@
 //! Prover engine: commitment generation and proof opening for the VeriLM protocol.
 
+use verilm_core::bridge_requantize;
 use verilm_core::constants::MatrixType;
+use verilm_core::matmul::matmul_i32;
 use verilm_core::merkle;
 use verilm_core::requantize;
 use verilm_core::types::{
     AuditChallenge, AuditResponse, BatchCommitment, BatchProof, CommitmentVersion,
     DeploymentManifest, LayerTrace, RetainedLayerState, RetainedTokenState,
+    ShellLayerOpening, ShellTokenOpening, ShellWeights,
     TokenTrace, V4AuditResponse, VerificationPolicy, VerifierKey,
 };
 
@@ -561,14 +564,118 @@ pub fn commit_minimal(
     (commitment, state)
 }
 
-/// V4 open: open a challenged token's retained leaf plus all prefix tokens.
+/// Compute shell opening for a single token from retained state + public weights.
 ///
-/// The verifier needs:
-/// - The challenged token's retained state + Merkle/IO proofs
-/// - All prior tokens' retained states + Merkle proofs (prefix replay)
+/// The prover reconstructs all matmul intermediates that the verifier
+/// will check with key-only Freivalds. Bridge values (requantize, SiLU)
+/// are not sent — the verifier derives them from the i32 accumulators
+/// and the committed scales.
 ///
-/// This is O(t * log N) where t is the challenged token index.
-pub fn open_v4(state: &MinimalBatchState, token_index: u32) -> V4AuditResponse {
+/// `weight_scales` is per-layer, per-MatrixType quantization scales.
+/// Empty for native INT8 / toy model (bridges fall back to clamp).
+pub fn compute_shell_opening(
+    retained: &RetainedTokenState,
+    weights: &dyn ShellWeights,
+    cfg: &verilm_core::constants::ModelConfig,
+    weight_scales: &[Vec<f32>],
+) -> ShellTokenOpening {
+    let mut layers = Vec::with_capacity(retained.layers.len());
+    let mut x_attn: Option<Vec<i8>> = None;
+
+    let ws = |layer: usize, mt: MatrixType| -> f32 {
+        if weight_scales.is_empty() || layer >= weight_scales.len() {
+            return 0.0;
+        }
+        let idx = MatrixType::ALL.iter().position(|&m| m == mt).unwrap();
+        weight_scales[layer][idx]
+    };
+
+    for (layer_idx, rs) in retained.layers.iter().enumerate() {
+        let a = &rs.a;
+
+        // QKV: only when x_attn is known (layers > 0, from cross-layer chain)
+        let (q, k, v) = if let Some(ref xa) = x_attn {
+            (
+                Some(matmul_i32(weights.weight(layer_idx, MatrixType::Wq), xa, cfg.hidden_dim, cfg.hidden_dim)),
+                Some(matmul_i32(weights.weight(layer_idx, MatrixType::Wk), xa, cfg.kv_dim, cfg.hidden_dim)),
+                Some(matmul_i32(weights.weight(layer_idx, MatrixType::Wv), xa, cfg.kv_dim, cfg.hidden_dim)),
+            )
+        } else {
+            (None, None, None)
+        };
+
+        // W_o @ a
+        let attn_out = matmul_i32(
+            weights.weight(layer_idx, MatrixType::Wo), a, cfg.hidden_dim, cfg.hidden_dim,
+        );
+
+        // Bridge: x_ffn = bridge_requantize(attn_out, scale_wo, scale_a, scale_x_ffn)
+        let x_ffn = bridge_requantize(
+            &attn_out,
+            ws(layer_idx, MatrixType::Wo),
+            rs.scale_a,
+            rs.scale_x_ffn,
+        );
+
+        // W_g, W_u @ x_ffn
+        let g = matmul_i32(weights.weight(layer_idx, MatrixType::Wg), &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
+        let u = matmul_i32(weights.weight(layer_idx, MatrixType::Wu), &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
+
+        // Bridge: h = SiLU(dequant(g)) * dequant(u), requantized with scale_h
+        let h = verilm_core::silu::compute_h_scaled(
+            &g, &u,
+            ws(layer_idx, MatrixType::Wg),
+            ws(layer_idx, MatrixType::Wu),
+            rs.scale_x_ffn,
+            rs.scale_h,
+        );
+
+        // W_d @ h
+        let ffn_out = matmul_i32(weights.weight(layer_idx, MatrixType::Wd), &h, cfg.hidden_dim, cfg.ffn_dim);
+
+        // Cross-layer chain: x_attn for next layer
+        let next_scale_x_attn = retained.layers
+            .get(layer_idx + 1)
+            .map(|r| r.scale_x_attn)
+            .unwrap_or(1.0);
+        x_attn = Some(bridge_requantize(
+            &ffn_out,
+            ws(layer_idx, MatrixType::Wd),
+            rs.scale_h,
+            next_scale_x_attn,
+        ));
+
+        layers.push(ShellLayerOpening { attn_out, g, u, ffn_out, q, k, v });
+    }
+
+    ShellTokenOpening { layers }
+}
+
+/// V4 open: open a challenged token with prover-computed shell intermediates.
+///
+/// This is the protocol path: the prover reconstructs shell intermediates
+/// from retained `a` + weights. The verifier checks with key-only Freivalds.
+///
+/// `weight_scales` is per-layer, per-MatrixType quantization scales.
+/// Empty for native INT8 / toy model.
+pub fn open_v4(
+    state: &MinimalBatchState,
+    token_index: u32,
+    weights: &dyn ShellWeights,
+    cfg: &verilm_core::constants::ModelConfig,
+    weight_scales: &[Vec<f32>],
+) -> V4AuditResponse {
+    let mut response = open_v4_structural(state, token_index);
+    response.shell_opening = Some(compute_shell_opening(
+        &state.all_retained[token_index as usize], weights, cfg, weight_scales,
+    ));
+    response
+}
+
+/// V4 open: structural only (Merkle proofs + IO chain, no shell intermediates).
+///
+/// Use `open_v4` for the full protocol path with shell openings.
+pub fn open_v4_structural(state: &MinimalBatchState, token_index: u32) -> V4AuditResponse {
     let i = token_index as usize;
     assert!(i < state.all_retained.len(), "token_index out of range");
 
@@ -583,7 +690,6 @@ pub fn open_v4(state: &MinimalBatchState, token_index: u32) -> V4AuditResponse {
         kv_chain_root: None,
     };
 
-    // Prefix: all tokens [0, i) — needed for replay from initial state.
     let mut prefix_retained = Vec::with_capacity(i);
     let mut prefix_merkle_proofs = Vec::with_capacity(i);
     let mut prefix_token_ids = Vec::with_capacity(i);
@@ -611,7 +717,7 @@ pub fn open_v4(state: &MinimalBatchState, token_index: u32) -> V4AuditResponse {
         prefix_token_ids,
         commitment,
         revealed_seed: state.revealed_seed,
-        replayed_layers: None, // filled by prover replay at audit time
+        shell_opening: None,
     }
 }
 
@@ -1340,7 +1446,7 @@ mod tests {
         let (commitment, state) = commit_minimal(retained, &params);
 
         // Open token 2 — should include prefix tokens 0, 1.
-        let response = open_v4(&state, 2);
+        let response = open_v4_structural(&state, 2);
         assert_eq!(response.token_index, 2);
         assert_eq!(response.token_id, 30);
         assert_eq!(response.prefix_retained.len(), 2);
@@ -1389,7 +1495,7 @@ mod tests {
         };
 
         let (_, state) = commit_minimal(retained, &params);
-        let response = open_v4(&state, 0);
+        let response = open_v4_structural(&state, 0);
 
         assert_eq!(response.prefix_retained.len(), 0);
         assert_eq!(response.prefix_merkle_proofs.len(), 0);

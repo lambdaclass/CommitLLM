@@ -48,6 +48,46 @@ pub fn compute_h_unit_scale(g_acc: &[i32], u_acc: &[i32]) -> Vec<i8> {
         .collect()
 }
 
+/// Scale-aware SiLU bridge: dequantize g,u accumulators, apply SiLU, requantize.
+///
+/// For W8A8 models where the gate/up accumulators need proper dequantization:
+///   g_f = g_i32 * scale_w_g * scale_x_ffn
+///   u_f = u_i32 * scale_w_u * scale_x_ffn
+///   h_f = SiLU(g_f) * u_f
+///   h_i8 = round(h_f / scale_h).clamp(-128, 127)
+///
+/// For native INT8 (scale_w_g == 0.0): falls back to `compute_h_unit_scale`.
+pub fn compute_h_scaled(
+    g_acc: &[i32],
+    u_acc: &[i32],
+    scale_w_g: f32,
+    scale_w_u: f32,
+    scale_x_ffn: f32,
+    scale_h: f32,
+) -> Vec<i8> {
+    if scale_w_g == 0.0 {
+        return compute_h_unit_scale(g_acc, u_acc);
+    }
+    assert_eq!(g_acc.len(), u_acc.len());
+    let dequant_g = (scale_w_g as f64) * (scale_x_ffn as f64);
+    let dequant_u = (scale_w_u as f64) * (scale_x_ffn as f64);
+    let inv_scale_h = 1.0 / (scale_h as f64);
+    g_acc
+        .iter()
+        .zip(u_acc.iter())
+        .map(|(&g, &u)| {
+            let g_f = g as f64 * dequant_g;
+            let u_f = u as f64 * dequant_u;
+            let h_f = silu_f64(g_f) * u_f;
+            (h_f * inv_scale_h).round().clamp(-128.0, 127.0) as i8
+        })
+        .collect()
+}
+
+fn silu_f64(x: f64) -> f64 {
+    x / (1.0 + (-x).exp())
+}
+
 /// Verify the SiLU + elementwise multiply step.
 ///
 /// Given g (gate), u (up), h (output), and quantization parameters,
@@ -132,5 +172,36 @@ mod tests {
             .collect();
 
         assert!(check_silu(&g, &u, &h, &lut, u_scale, h_scale, h_zero));
+    }
+
+    #[test]
+    fn test_compute_h_scaled_fallback() {
+        // With scale_w_g == 0.0, should produce same result as compute_h_unit_scale.
+        let g_acc = vec![10, -5, 127, -128, 200];
+        let u_acc = vec![20, 30, -10, 50, -60];
+        let unit = compute_h_unit_scale(&g_acc, &u_acc);
+        let scaled = compute_h_scaled(&g_acc, &u_acc, 0.0, 0.0, 1.0, 1.0);
+        assert_eq!(unit, scaled, "zero weight scale should fall back to unit-scale");
+    }
+
+    #[test]
+    fn test_compute_h_scaled_known_values() {
+        // Manual calculation with known scales.
+        // g_acc = [100], u_acc = [50]
+        // scale_w_g = 0.01, scale_w_u = 0.02, scale_x_ffn = 0.5, scale_h = 0.1
+        // g_f = 100 * 0.01 * 0.5 = 0.5
+        // u_f = 50 * 0.02 * 0.5 = 0.5
+        // SiLU(0.5) = 0.5 / (1 + e^-0.5) ≈ 0.5 * 0.6225 = 0.31122
+        // h_f = 0.31122 * 0.5 = 0.15561
+        // h_i8 = round(0.15561 / 0.1) = round(1.5561) = 2
+        let result = compute_h_scaled(&[100], &[50], 0.01, 0.02, 0.5, 0.1);
+        assert_eq!(result, vec![2]);
+    }
+
+    #[test]
+    fn test_compute_h_scaled_clamps() {
+        // Large values should clamp to i8 range.
+        let result = compute_h_scaled(&[10000], &[10000], 1.0, 1.0, 1.0, 0.001);
+        assert_eq!(result, vec![127]);
     }
 }

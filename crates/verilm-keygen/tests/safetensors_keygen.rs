@@ -368,3 +368,65 @@ fn test_int8_key_has_zero_quantization_scales() {
         }
     }
 }
+
+// -----------------------------------------------------------------------
+// SafetensorsWeightProvider tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_weight_provider_loads_and_matches() {
+    use verilm_core::types::ShellWeights;
+
+    let (dir, cfg, all_weights) = make_toy_safetensors();
+    let provider = verilm_keygen::SafetensorsWeightProvider::load(dir.path()).unwrap();
+
+    assert_eq!(provider.config().hidden_dim, cfg.hidden_dim);
+    assert_eq!(provider.config().n_layers, cfg.n_layers);
+
+    // Every weight matrix from the provider must match the original
+    for (layer_idx, layer_weights) in all_weights.iter().enumerate() {
+        for (mt, expected) in layer_weights {
+            let got = provider.weight(layer_idx, *mt);
+            assert_eq!(got, expected.as_slice(),
+                "weight mismatch at layer {} {:?}", layer_idx, mt);
+        }
+    }
+}
+
+#[test]
+fn test_weight_provider_freivalds_compatible() {
+    use verilm_core::types::ShellWeights;
+
+    let (dir, cfg, _) = make_toy_safetensors();
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+    let provider = verilm_keygen::SafetensorsWeightProvider::load(dir.path()).unwrap();
+
+    // Shell opening from the provider must pass Freivalds with the keygen key
+    use rand::Rng;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
+    let mut rng = ChaCha20Rng::seed_from_u64(5555);
+
+    for layer_idx in 0..cfg.n_layers {
+        for mt in MatrixType::ALL.iter() {
+            let cols = mt.input_dim(&cfg);
+            let rows = mt.output_dim(&cfg);
+            let x: Vec<i8> = (0..cols).map(|_| rng.gen::<i8>()).collect();
+            let w = provider.weight(layer_idx, *mt);
+
+            let z: Vec<i32> = (0..rows)
+                .map(|r| (0..cols).map(|c| w[r * cols + c] as i32 * x[c] as i32).sum())
+                .collect();
+
+            assert!(
+                freivalds::check(
+                    key.v_for(layer_idx, *mt),
+                    &x,
+                    key.r_for(*mt),
+                    &z,
+                ),
+                "Freivalds failed: layer {} {:?}", layer_idx, mt
+            );
+        }
+    }
+}

@@ -695,12 +695,14 @@ pub fn verify_rope(
 /// Uses the block Freivalds check (Phase A) and f32 assembly check (Phase B)
 /// from the `Q8LayerTrace` block accumulators.
 ///
+/// Block batching coefficients are derived from the verifier's secret key seed,
+/// not from public data. This is strictly stronger than Fiat-Shamir.
+///
 /// Returns failure descriptions (empty = pass).
 pub fn verify_q8_one(
     key: &VerifierKey,
     _trace: &TokenTrace,
     q8_layers: &[verilm_core::types::Q8LayerTrace],
-    merkle_root: &[u8; 32],
 ) -> Vec<String> {
     use verilm_core::freivalds::{check_q8_blocks, derive_block_coefficients};
     use verilm_core::constants::MatrixType;
@@ -724,7 +726,7 @@ pub fn verify_q8_one(
             let r = key.r_for(*mt);
 
             let c = derive_block_coefficients(
-                merkle_root,
+                &key.seed,
                 layer_idx,
                 mt_idx,
                 blocks.n_blocks,
@@ -1611,32 +1613,238 @@ impl std::fmt::Display for V4VerifyReport {
     }
 }
 
-/// Verify a V4 retained-state audit response.
+// Re-export ShellWeights from core for debug/oracle replay users.
+pub use verilm_core::types::ShellWeights;
+
+/// Verify V4 audit response: structural checks + key-only Freivalds on shell openings.
 ///
-/// **Structural checks** (always run):
-/// 1. Commitment version is V4
-/// 2. Seed commitment: `hash(revealed_seed) == commitment.seed_commitment`
-/// 3. Prompt hash is present
-/// 4. Challenged token retained leaf Merkle proof
-/// 5. Every prefix token retained leaf Merkle proof
-/// 6. IO chain: rebuild from prefix, verify challenged token's IO proof
-/// 7. Prefix count == token_index
-///
-/// **Shell replay checks** (when `response.replayed_layers` is `Some`):
-/// 1. Retained-state binding: replayed `a` matches retained `a` per layer
-/// 2. Freivalds on all 7 matmuls per layer (Wq, Wk, Wv, Wo, Wg, Wu, Wd)
-/// 3. SiLU check
-/// 4. Intra-layer chain: `x_ffn == requantize(attn_out)`
-/// 5. Cross-layer chain: `x_attn[l+1] == requantize(ffn_out[l])`
+/// This is the protocol verifier — requires only the precomputed VerifierKey,
+/// no weights. Checks:
+/// 1. Structural: version, seed, prompt, Merkle proofs, IO chain, prefix count
+/// 2. Shell opening: Freivalds on each matmul (W_o, W_g, W_u, W_d, optionally QKV)
+/// 3. Bridge consistency: verifier derives intermediate i8 values from i32 accumulators
+/// 4. Retained-state binding: shell openings must be consistent with committed `a`
 pub fn verify_v4(
     key: &VerifierKey,
     response: &V4AuditResponse,
 ) -> V4VerifyReport {
     let start = Instant::now();
+    let (mut checks_run, mut failures) = verify_v4_structural(response);
+
+    // Protocol path: check shell openings with key-only Freivalds.
+    match &response.shell_opening {
+        Some(shell) => {
+            let (c, f) = verify_shell_opening(key, &response.retained, shell);
+            checks_run += c;
+            failures.extend(f);
+        }
+        None => {
+            failures.push("V4 audit response missing shell_opening".into());
+        }
+    }
+
+    let duration = start.elapsed();
+    let checks_passed = checks_run.saturating_sub(failures.len());
+
+    V4VerifyReport {
+        verdict: if failures.is_empty() { Verdict::Pass } else { Verdict::Fail },
+        token_index: response.token_index,
+        checks_run,
+        checks_passed,
+        failures,
+        duration,
+    }
+}
+
+/// Verify shell opening for one token using key-only Freivalds + bridge checks.
+///
+/// The verifier does NOT recompute matmuls — it checks the prover's i32
+/// accumulators with precomputed Freivalds keys and verifies bridge
+/// consistency by deriving intermediate i8 values from the accumulators.
+fn verify_shell_opening(
+    key: &VerifierKey,
+    retained: &verilm_core::types::RetainedTokenState,
+    shell: &verilm_core::types::ShellTokenOpening,
+) -> (usize, Vec<String>) {
     let mut failures = Vec::new();
     let mut checks_run = 0usize;
 
-    // === STRUCTURAL CHECKS ===
+    if shell.layers.len() != retained.layers.len() {
+        failures.push(format!(
+            "shell_opening has {} layers but retained has {}",
+            shell.layers.len(), retained.layers.len()
+        ));
+        return (checks_run, failures);
+    }
+
+    let mut x_attn: Option<Vec<i8>> = None;
+
+    for (layer_idx, (rs, sl)) in retained.layers.iter().zip(shell.layers.iter()).enumerate() {
+        let a = &rs.a;
+
+        // QKV Freivalds (layers > 0 where x_attn is derivable)
+        if let Some(ref xa) = x_attn {
+            let qkv = [
+                (MatrixType::Wq, &sl.q, key.config.hidden_dim),
+                (MatrixType::Wk, &sl.k, key.config.kv_dim),
+                (MatrixType::Wv, &sl.v, key.config.kv_dim),
+            ];
+            for (mt, opened_acc, _expected_rows) in &qkv {
+                match opened_acc {
+                    Some(z) => {
+                        checks_run += 1;
+                        if !freivalds::check(
+                            key.v_for(layer_idx, *mt),
+                            xa,
+                            key.r_for(*mt),
+                            z,
+                        ) {
+                            failures.push(format!(
+                                "layer {} {:?}: Freivalds failed on shell opening",
+                                layer_idx, mt
+                            ));
+                        }
+                    }
+                    None => {
+                        failures.push(format!(
+                            "layer {} {:?}: shell opening missing QKV (x_attn derivable)",
+                            layer_idx, mt
+                        ));
+                    }
+                }
+            }
+        }
+
+        // W_o @ a: check prover's attn_out
+        checks_run += 1;
+        if !freivalds::check(
+            key.v_for(layer_idx, MatrixType::Wo),
+            a,
+            key.r_for(MatrixType::Wo),
+            &sl.attn_out,
+        ) {
+            failures.push(format!(
+                "layer {} Wo: Freivalds failed on shell opening", layer_idx
+            ));
+        }
+
+        // Bridge: verifier derives x_ffn from prover's attn_out using scales
+        let x_ffn = verilm_core::bridge_requantize(
+            &sl.attn_out,
+            key.weight_scale_for(layer_idx, MatrixType::Wo),
+            rs.scale_a,
+            rs.scale_x_ffn,
+        );
+
+        // W_g, W_u @ x_ffn
+        for (mt, z) in [(MatrixType::Wg, &sl.g), (MatrixType::Wu, &sl.u)] {
+            checks_run += 1;
+            if !freivalds::check(
+                key.v_for(layer_idx, mt),
+                &x_ffn,
+                key.r_for(mt),
+                z,
+            ) {
+                failures.push(format!(
+                    "layer {} {:?}: Freivalds failed on shell opening",
+                    layer_idx, mt
+                ));
+            }
+        }
+
+        // Bridge: verifier derives h from prover's g, u using scales
+        let h = verilm_core::silu::compute_h_scaled(
+            &sl.g, &sl.u,
+            key.weight_scale_for(layer_idx, MatrixType::Wg),
+            key.weight_scale_for(layer_idx, MatrixType::Wu),
+            rs.scale_x_ffn,
+            rs.scale_h,
+        );
+
+        // W_d @ h
+        checks_run += 1;
+        if !freivalds::check(
+            key.v_for(layer_idx, MatrixType::Wd),
+            &h,
+            key.r_for(MatrixType::Wd),
+            &sl.ffn_out,
+        ) {
+            failures.push(format!(
+                "layer {} Wd: Freivalds failed on shell opening", layer_idx
+            ));
+        }
+
+        // Cross-layer chain: derive x_attn for next layer
+        let next_scale_x_attn = retained.layers
+            .get(layer_idx + 1)
+            .map(|r| r.scale_x_attn)
+            .unwrap_or(1.0);
+        x_attn = Some(verilm_core::bridge_requantize(
+            &sl.ffn_out,
+            key.weight_scale_for(layer_idx, MatrixType::Wd),
+            rs.scale_h,
+            next_scale_x_attn,
+        ));
+    }
+
+    (checks_run, failures)
+}
+
+/// Verify V4 with verifier-side weight-backed replay (debug/oracle path).
+///
+/// The verifier independently reconstructs the computation shell from
+/// committed retained `a` + public weights. This is NOT the protocol path —
+/// it requires the verifier to hold full weights. Use for:
+/// - Differential testing against the protocol verifier
+/// - Stronger local checking when weights are available
+/// - Dev-mode paranoid verification
+pub fn verify_v4_with_weights(
+    key: &VerifierKey,
+    response: &V4AuditResponse,
+    weights: &dyn ShellWeights,
+) -> V4VerifyReport {
+    let start = Instant::now();
+    let (mut checks_run, mut failures) = verify_v4_structural(response);
+
+    let cfg = &key.config;
+
+    // Replay each prefix token independently (debug path).
+    for (t, prefix_rs) in response.prefix_retained.iter().enumerate() {
+        let (c, f) = replay_token_shell(key, cfg, prefix_rs, weights, t);
+        checks_run += c;
+        failures.extend(f);
+    }
+
+    // Replay the challenged token.
+    let (c, f) = replay_token_shell(
+        key,
+        cfg,
+        &response.retained,
+        weights,
+        response.prefix_retained.len(),
+    );
+    checks_run += c;
+    failures.extend(f);
+
+    let duration = start.elapsed();
+    let checks_passed = checks_run.saturating_sub(failures.len());
+
+    V4VerifyReport {
+        verdict: if failures.is_empty() { Verdict::Pass } else { Verdict::Fail },
+        token_index: response.token_index,
+        checks_run,
+        checks_passed,
+        failures,
+        duration,
+    }
+}
+
+/// Structural checks shared by verify_v4 and verify_v4_with_replay.
+fn verify_v4_structural(
+    response: &V4AuditResponse,
+) -> (usize, Vec<String>) {
+    let mut failures = Vec::new();
+    let mut checks_run = 0usize;
 
     // 1. Commitment version must be V4
     checks_run += 1;
@@ -1702,7 +1910,6 @@ pub fn verify_v4(
     }
 
     // 6. IO chain verification
-    // Rebuild the chain from prefix[0] through challenged token.
     checks_run += 1;
     let mut prev_io = [0u8; 32];
     for (j, prefix_state) in response.prefix_retained.iter().enumerate() {
@@ -1710,7 +1917,6 @@ pub fn verify_v4(
         prev_io = merkle::io_hash_v4(prefix_leaf, response.prefix_token_ids[j], prev_io);
     }
 
-    // Verify prev_io_hash matches the recomputed chain
     if prev_io != response.prev_io_hash {
         failures.push(format!(
             "token {}: prev_io_hash doesn't match recomputed chain from prefix",
@@ -1718,7 +1924,6 @@ pub fn verify_v4(
         ));
     }
 
-    // Verify IO proof against io_root
     checks_run += 1;
     let challenged_io = merkle::io_hash_v4(leaf_hash, response.token_id, prev_io);
     if !merkle::verify(
@@ -1732,7 +1937,7 @@ pub fn verify_v4(
         ));
     }
 
-    // 7. Structural consistency: prefix count must equal token_index
+    // 7. Prefix count == token_index
     checks_run += 1;
     if response.prefix_retained.len() != response.token_index as usize {
         failures.push(format!(
@@ -1743,99 +1948,160 @@ pub fn verify_v4(
         ));
     }
 
-    // === SHELL REPLAY CHECKS ===
-    //
-    // When replayed_layers are provided, the prover has replayed
-    // computation from retained state + public weights at audit time.
-    // We verify the replay is consistent with the committed retained
-    // state and passes all matmul / chain checks.
+    (checks_run, failures)
+}
 
-    if let Some(replayed) = &response.replayed_layers {
-        if replayed.len() != response.retained.layers.len() {
-            failures.push(format!(
-                "replayed_layers count {} != retained layers count {}",
-                replayed.len(),
-                response.retained.layers.len()
-            ));
-        } else {
-            for (layer_idx, (lt, rs)) in replayed
-                .iter()
-                .zip(response.retained.layers.iter())
-                .enumerate()
-            {
-                // Retained-state binding: replayed a must match committed a
+/// Replay one token's computation shell from retained state + public weights.
+///
+/// Each token's replay is independent — layer 0 starts with x_attn unknown
+/// (the embedding is not available to the verifier). Layers 1+ derive
+/// x_attn from the previous layer's ffn_out (intra-token cross-layer chain).
+///
+/// Returns (checks_run, failures).
+fn replay_token_shell(
+    key: &VerifierKey,
+    cfg: &verilm_core::constants::ModelConfig,
+    retained: &verilm_core::types::RetainedTokenState,
+    weights: &dyn ShellWeights,
+    token_pos: usize,
+) -> (usize, Vec<String>) {
+    use verilm_core::matmul::matmul_i32;
+
+    let mut failures = Vec::new();
+    let mut checks_run = 0usize;
+
+    // Layer 0: x_attn is unknown (depends on embedding, which the verifier
+    // doesn't have). No QKV Freivalds for layer 0.
+    // Layers 1+: x_attn = requantize(ffn_out) from the previous layer.
+    let mut x_attn: Option<Vec<i8>> = None;
+
+    for (layer_idx, rs) in retained.layers.iter().enumerate() {
+        let a = &rs.a;
+
+        // QKV Freivalds (only when x_attn is known, i.e. layers > 0 or
+        // when we have the cross-token chain from the previous token)
+        if let Some(ref xa) = x_attn {
+            let qkv_mats = [
+                (MatrixType::Wq, cfg.hidden_dim, cfg.hidden_dim),
+                (MatrixType::Wk, cfg.kv_dim, cfg.hidden_dim),
+                (MatrixType::Wv, cfg.kv_dim, cfg.hidden_dim),
+            ];
+            for (mt, rows, cols) in &qkv_mats {
+                let z = matmul_i32(weights.weight(layer_idx, *mt), xa, *rows, *cols);
                 checks_run += 1;
-                if lt.a != rs.a {
+                if !freivalds::check(
+                    key.v_for(layer_idx, *mt),
+                    xa,
+                    key.r_for(*mt),
+                    &z,
+                ) {
                     failures.push(format!(
-                        "layer {}: replayed a doesn't match retained a",
-                        layer_idx
+                        "token {} layer {} {:?}: Freivalds weight-binding failed",
+                        token_pos, layer_idx, mt
                     ));
-                }
-
-                // Freivalds checks for each matrix type (7 per layer)
-                let matmul_checks: [(MatrixType, &[i8], &[i32]); 7] = [
-                    (MatrixType::Wq, &lt.x_attn, &lt.q),
-                    (MatrixType::Wk, &lt.x_attn, &lt.k),
-                    (MatrixType::Wv, &lt.x_attn, &lt.v),
-                    (MatrixType::Wo, &lt.a, &lt.attn_out),
-                    (MatrixType::Wg, &lt.x_ffn, &lt.g),
-                    (MatrixType::Wu, &lt.x_ffn, &lt.u),
-                    (MatrixType::Wd, &lt.h, &lt.ffn_out),
-                ];
-
-                for (mt, input, output) in &matmul_checks {
-                    checks_run += 1;
-                    let v = key.v_for(layer_idx, *mt);
-                    let r = key.r_for(*mt);
-                    if !freivalds::check(v, input, r, output) {
-                        failures.push(format!(
-                            "layer {} {:?}: Freivalds check failed",
-                            layer_idx, mt
-                        ));
-                    }
-                }
-
-                // SiLU check
-                checks_run += 1;
-                let expected_h = verilm_core::silu::compute_h_unit_scale(&lt.g, &lt.u);
-                if lt.h != expected_h {
-                    failures.push(format!("layer {}: SiLU check failed", layer_idx));
-                }
-
-                // Intra-layer chain: x_ffn == requantize(attn_out)
-                checks_run += 1;
-                if lt.x_ffn != requantize(&lt.attn_out) {
-                    failures.push(format!("layer {}: chain x_ffn mismatch", layer_idx));
-                }
-
-                // Cross-layer chain
-                if layer_idx + 1 < replayed.len() {
-                    checks_run += 1;
-                    if replayed[layer_idx + 1].x_attn != requantize(&lt.ffn_out) {
-                        failures.push(format!(
-                            "layer {}->{}: cross-layer chain mismatch",
-                            layer_idx,
-                            layer_idx + 1
-                        ));
-                    }
                 }
             }
         }
+
+        // W_o: attn_out = W_o @ a (verifier-computed)
+        let attn_out = matmul_i32(
+            weights.weight(layer_idx, MatrixType::Wo),
+            a,
+            cfg.hidden_dim,
+            cfg.hidden_dim,
+        );
+        checks_run += 1;
+        if !freivalds::check(
+            key.v_for(layer_idx, MatrixType::Wo),
+            a,
+            key.r_for(MatrixType::Wo),
+            &attn_out,
+        ) {
+            failures.push(format!(
+                "token {} layer {} Wo: Freivalds weight-binding failed",
+                token_pos, layer_idx
+            ));
+        }
+
+        // Intra-layer chain: x_ffn via scale-aware bridge
+        let x_ffn = verilm_core::bridge_requantize(
+            &attn_out,
+            key.weight_scale_for(layer_idx, MatrixType::Wo),
+            rs.scale_a,
+            rs.scale_x_ffn,
+        );
+
+        // W_g, W_u: gate and up projections
+        let g = matmul_i32(
+            weights.weight(layer_idx, MatrixType::Wg),
+            &x_ffn,
+            cfg.ffn_dim,
+            cfg.hidden_dim,
+        );
+        let u = matmul_i32(
+            weights.weight(layer_idx, MatrixType::Wu),
+            &x_ffn,
+            cfg.ffn_dim,
+            cfg.hidden_dim,
+        );
+
+        // Freivalds on W_g, W_u
+        for (mt, z) in [(MatrixType::Wg, &g), (MatrixType::Wu, &u)] {
+            checks_run += 1;
+            if !freivalds::check(
+                key.v_for(layer_idx, mt),
+                &x_ffn,
+                key.r_for(mt),
+                z,
+            ) {
+                failures.push(format!(
+                    "token {} layer {} {:?}: Freivalds weight-binding failed",
+                    token_pos, layer_idx, mt
+                ));
+            }
+        }
+
+        // SiLU: h via scale-aware bridge
+        let h = verilm_core::silu::compute_h_scaled(
+            &g, &u,
+            key.weight_scale_for(layer_idx, MatrixType::Wg),
+            key.weight_scale_for(layer_idx, MatrixType::Wu),
+            rs.scale_x_ffn,
+            rs.scale_h,
+        );
+
+        // W_d: ffn_out = W_d @ h
+        let ffn_out = matmul_i32(
+            weights.weight(layer_idx, MatrixType::Wd),
+            &h,
+            cfg.hidden_dim,
+            cfg.ffn_dim,
+        );
+        checks_run += 1;
+        if !freivalds::check(
+            key.v_for(layer_idx, MatrixType::Wd),
+            &h,
+            key.r_for(MatrixType::Wd),
+            &ffn_out,
+        ) {
+            failures.push(format!(
+                "token {} layer {} Wd: Freivalds weight-binding failed",
+                token_pos, layer_idx
+            ));
+        }
+
+        // Cross-layer chain: x_attn for next layer (intra-token)
+        let next_scale_x_attn = retained.layers
+            .get(layer_idx + 1)
+            .map(|r| r.scale_x_attn)
+            .unwrap_or(1.0);
+        x_attn = Some(verilm_core::bridge_requantize(
+            &ffn_out,
+            key.weight_scale_for(layer_idx, MatrixType::Wd),
+            rs.scale_h,
+            next_scale_x_attn,
+        ));
     }
 
-    let duration = start.elapsed();
-    let checks_passed = checks_run.saturating_sub(failures.len());
-
-    V4VerifyReport {
-        verdict: if failures.is_empty() {
-            Verdict::Pass
-        } else {
-            Verdict::Fail
-        },
-        token_index: response.token_index,
-        checks_run,
-        checks_passed,
-        failures,
-        duration,
-    }
+    (checks_run, failures)
 }
