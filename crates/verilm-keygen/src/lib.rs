@@ -190,6 +190,73 @@ fn load_1d_f32(
     }
 }
 
+/// Compute SHA-256 leaf hashes for every row of a 2D embedding tensor.
+fn compute_embedding_hashes(
+    shards: &[(SafeTensors<'_>, &MappedShard)],
+    name: &str,
+) -> Result<Vec<[u8; 32]>> {
+    let (data, shape, dtype) = find_tensor_raw(shards, name)?;
+    if shape.len() != 2 {
+        bail!("embedding tensor {} shape {:?}, expected 2D", name, shape);
+    }
+    let rows = shape[0];
+    let cols = shape[1];
+    let bytes_per_elem: usize = match dtype {
+        Dtype::F32 => 4,
+        Dtype::BF16 | Dtype::F16 => 2,
+        other => bail!("embedding tensor {} has unsupported dtype {:?}", name, other),
+    };
+    let mut hashes = Vec::with_capacity(rows);
+    for row in 0..rows {
+        let offset = row * cols * bytes_per_elem;
+        let row_data = &data[offset..offset + cols * bytes_per_elem];
+        let f32_row: Vec<f32> = match dtype {
+            Dtype::F32 => row_data
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                .collect(),
+            Dtype::BF16 => bf16_to_f32(row_data),
+            Dtype::F16 => fp16_to_f32(row_data),
+            _ => unreachable!(),
+        };
+        hashes.push(verilm_core::merkle::hash_embedding_row(&f32_row));
+    }
+    eprintln!("  hashed {} embedding rows ({}D)", rows, cols);
+    Ok(hashes)
+}
+
+/// Load a single row from a 2D tensor as f32.
+fn load_2d_row_f32(
+    shards: &[(SafeTensors<'_>, &MappedShard)],
+    name: &str,
+    row: usize,
+    cols: usize,
+) -> Result<Vec<f32>> {
+    let (data, shape, dtype) = find_tensor_raw(shards, name)?;
+    if shape.len() != 2 || shape[1] != cols {
+        bail!("tensor {} shape {:?}, expected [_, {}]", name, shape, cols);
+    }
+    if row >= shape[0] {
+        bail!("row {} out of range for {} (rows={})", row, name, shape[0]);
+    }
+    let bytes_per_elem: usize = match dtype {
+        Dtype::F32 => 4,
+        Dtype::BF16 | Dtype::F16 => 2,
+        other => bail!("tensor {} has unsupported dtype {:?}", name, other),
+    };
+    let offset = row * cols * bytes_per_elem;
+    let row_data = &data[offset..offset + cols * bytes_per_elem];
+    match dtype {
+        Dtype::F32 => Ok(row_data
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect()),
+        Dtype::BF16 => Ok(bf16_to_f32(row_data)),
+        Dtype::F16 => Ok(fp16_to_f32(row_data)),
+        _ => unreachable!(),
+    }
+}
+
 /// Detect model config by inspecting tensor shapes.
 pub fn detect_config(dir: &Path) -> Result<ModelConfig> {
     let mapped = open_shards(dir)?;
@@ -381,6 +448,20 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
 
     eprintln!("  weight hash: {}", hex::encode(weight_hash));
 
+    // Compute embedding Merkle root
+    let emb_name = "model.embed_tokens.weight";
+    let embedding_merkle_root = match compute_embedding_hashes(&parsed, emb_name) {
+        Ok(hashes) => {
+            let root = verilm_core::merkle::compute_root(&hashes);
+            eprintln!("  embedding Merkle root: {}", hex::encode(root));
+            Some(root)
+        }
+        Err(e) => {
+            eprintln!("  warning: could not compute embedding Merkle root: {}", e);
+            None
+        }
+    };
+
     Ok(VerifierKey {
         version: 1,
         config: cfg,
@@ -397,6 +478,7 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         rmsnorm_attn_weights,
         rmsnorm_ffn_weights,
         rmsnorm_eps: 1e-5,
+        embedding_merkle_root,
     })
 }
 
@@ -497,10 +579,21 @@ pub struct SafetensorsWeightProvider {
     /// scales[layer][matrix_type_idx] = per-tensor quantization scale.
     /// 0.0 for native INT8 tensors.
     scales: Vec<Vec<f32>>,
+    /// Per-layer RMSNorm attention weights.
+    rmsnorm_attn_weights: Vec<Vec<f32>>,
+    /// Per-layer RMSNorm FFN weights.
+    rmsnorm_ffn_weights: Vec<Vec<f32>>,
+    /// Embedding Merkle tree (for producing proofs at audit time).
+    embedding_tree: Option<verilm_core::merkle::MerkleTree>,
+    /// Path to model directory (for loading embedding rows on demand).
+    model_dir: std::path::PathBuf,
 }
 
 impl SafetensorsWeightProvider {
     /// Load all weight matrices from a safetensors model directory.
+    ///
+    /// Also loads RMSNorm weights and builds an embedding Merkle tree
+    /// for full bridge support at audit time.
     pub fn load(dir: &Path) -> Result<Self> {
         let config = detect_config(dir)?;
         let mapped = open_shards(dir)?;
@@ -512,6 +605,9 @@ impl SafetensorsWeightProvider {
 
         let mut weights = Vec::with_capacity(config.n_layers);
         let mut scales = Vec::with_capacity(config.n_layers);
+        let mut rmsnorm_attn_weights = Vec::with_capacity(config.n_layers);
+        let mut rmsnorm_ffn_weights = Vec::with_capacity(config.n_layers);
+
         for layer_idx in 0..config.n_layers {
             let mut layer_weights = Vec::with_capacity(MatrixType::ALL.len());
             let mut layer_scales = Vec::with_capacity(MatrixType::ALL.len());
@@ -523,9 +619,28 @@ impl SafetensorsWeightProvider {
             }
             weights.push(layer_weights);
             scales.push(layer_scales);
+
+            // RMSNorm weights
+            let attn_norm = format!("model.layers.{}.input_layernorm.weight", layer_idx);
+            rmsnorm_attn_weights.push(load_1d_f32(&parsed, &attn_norm).unwrap_or_default());
+            let ffn_norm = format!("model.layers.{}.post_attention_layernorm.weight", layer_idx);
+            rmsnorm_ffn_weights.push(load_1d_f32(&parsed, &ffn_norm).unwrap_or_default());
         }
 
-        Ok(SafetensorsWeightProvider { config, weights, scales })
+        // Build embedding Merkle tree for proof generation at audit time
+        let embedding_tree = compute_embedding_hashes(&parsed, "model.embed_tokens.weight")
+            .map(|hashes| verilm_core::merkle::build_tree(&hashes))
+            .ok();
+
+        Ok(SafetensorsWeightProvider {
+            config,
+            weights,
+            scales,
+            rmsnorm_attn_weights,
+            rmsnorm_ffn_weights,
+            embedding_tree,
+            model_dir: dir.to_path_buf(),
+        })
     }
 
     pub fn config(&self) -> &ModelConfig {
@@ -536,6 +651,43 @@ impl SafetensorsWeightProvider {
     /// 0.0 for native INT8 tensors. Same layout as `VerifierKey.weight_scales`.
     pub fn weight_scales(&self) -> &[Vec<f32>] {
         &self.scales
+    }
+
+    pub fn rmsnorm_attn_weights(&self) -> &[Vec<f32>] {
+        &self.rmsnorm_attn_weights
+    }
+
+    pub fn rmsnorm_ffn_weights(&self) -> &[Vec<f32>] {
+        &self.rmsnorm_ffn_weights
+    }
+
+    pub fn rmsnorm_eps(&self) -> f64 {
+        1e-5
+    }
+
+    /// Load a single embedding row (f32) for the given token ID.
+    ///
+    /// Re-opens the safetensors files to read one row on demand.
+    pub fn load_embedding_row(&self, token_id: usize) -> Result<Vec<f32>> {
+        let mapped = open_shards(&self.model_dir)?;
+        let parsed: Vec<_> = mapped
+            .iter()
+            .map(|s| SafeTensors::deserialize(&s.mmap).map(|st| (st, s)))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to parse safetensors")?;
+        load_2d_row_f32(&parsed, "model.embed_tokens.weight", token_id, self.config.hidden_dim)
+    }
+
+    /// Generate a Merkle proof for the given token ID's embedding row.
+    ///
+    /// Returns `None` if the embedding tree was not built (tensor missing).
+    pub fn embedding_proof(&self, token_id: usize) -> Option<verilm_core::merkle::MerkleProof> {
+        self.embedding_tree.as_ref().map(|tree| verilm_core::merkle::prove(tree, token_id))
+    }
+
+    /// Embedding Merkle root, if available.
+    pub fn embedding_merkle_root(&self) -> Option<[u8; 32]> {
+        self.embedding_tree.as_ref().map(|tree| tree.root)
     }
 }
 

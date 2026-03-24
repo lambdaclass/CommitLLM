@@ -15,13 +15,14 @@
 //! Compression is a separate layer applied on top of any serialized
 //! payload. It is not part of the canonical format.
 
-use crate::types::{AuditResponse, BatchProof, CompactAuditResponse, CompactBatchProof, TokenTrace, VerifierKey};
+use crate::types::{AuditResponse, BatchProof, CompactAuditResponse, CompactBatchProof, TokenTrace, V4AuditResponse, VerifierKey};
 
 const KEY_MAGIC: &[u8; 4] = b"VKEY";
 const TRACE_MAGIC: &[u8; 4] = b"VTRC";
 const BATCH_MAGIC: &[u8; 4] = b"VBAT";
 const COMPACT_BATCH_MAGIC: &[u8; 4] = b"VCBT";
 const COMPACT_AUDIT_MAGIC: &[u8; 4] = b"VCAR";
+const V4_AUDIT_MAGIC: &[u8; 4] = b"VV4A";
 
 // ── Verifier key ────────────────────────────────────────────
 
@@ -119,6 +120,30 @@ pub fn deserialize_compact_audit(data: &[u8]) -> Result<AuditResponse, String> {
     compact.to_full()
 }
 
+// ── V4 audit response (bincode + zstd) ──────────────────────
+//
+// Binary wire format for V4AuditResponse. Replaces JSON for
+// production use — JSON remains available for debugging.
+
+pub fn serialize_v4_audit(resp: &V4AuditResponse) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(V4_AUDIT_MAGIC);
+    let encoded = bincode::serialize(resp).expect("V4 audit serialization failed");
+    let compressed = zstd::encode_all(encoded.as_slice(), 3).expect("zstd compression failed");
+    buf.extend_from_slice(&compressed);
+    buf
+}
+
+pub fn deserialize_v4_audit(data: &[u8]) -> Result<V4AuditResponse, String> {
+    if data.len() < 4 || &data[..4] != V4_AUDIT_MAGIC {
+        return Err("invalid V4 audit magic".into());
+    }
+    let decompressed =
+        zstd::decode_all(&data[4..]).map_err(|e| format!("zstd decompression failed: {e}"))?;
+    bincode::deserialize(&decompressed)
+        .map_err(|e| format!("V4 audit deserialization failed: {e}"))
+}
+
 // ── Transport compression (independent of schema) ───────────
 //
 // These work on arbitrary byte slices. Apply on top of any
@@ -162,6 +187,7 @@ mod tests {
             rmsnorm_ffn_weights: Vec::new(),
             weight_scales: Vec::new(),
             rmsnorm_eps: 1e-5,
+            embedding_merkle_root: None,
         };
         let data = serialize_key(&key);
         let key2 = deserialize_key(&data).unwrap();
@@ -379,5 +405,91 @@ mod tests {
     #[test]
     fn test_compact_audit_bad_magic() {
         assert!(deserialize_compact_audit(b"BAAD1234").is_err());
+    }
+
+    #[test]
+    fn test_v4_audit_roundtrip() {
+        use crate::types::{
+            BatchCommitment, CommitmentVersion, RetainedLayerState, RetainedTokenState,
+            ShellLayerOpening, ShellTokenOpening, V4AuditResponse,
+        };
+
+        let retained = RetainedTokenState {
+            layers: vec![RetainedLayerState {
+                a: vec![1i8, 2, 3],
+                scale_a: 0.5,
+                scale_x_attn: 0.25,
+                scale_x_ffn: 0.125,
+                scale_h: 0.0625,
+            }],
+        };
+        let shell = ShellTokenOpening {
+            layers: vec![ShellLayerOpening {
+                attn_out: vec![10i32, 20],
+                g: vec![30i32],
+                u: vec![40i32],
+                ffn_out: vec![50i32, 60],
+                q: None,
+                k: None,
+                v: None,
+            }],
+            layer_indices: None,
+            initial_residual: None,
+            embedding_proof: None,
+        };
+        let resp = V4AuditResponse {
+            token_index: 7,
+            retained: retained.clone(),
+            merkle_proof: MerkleProof {
+                leaf_index: 7,
+                siblings: vec![[0xaa; 32]],
+            },
+            io_proof: MerkleProof {
+                leaf_index: 7,
+                siblings: vec![[0xbb; 32]],
+            },
+            token_id: 42,
+            prev_io_hash: [0xcc; 32],
+            prefix_retained: vec![],
+            prefix_merkle_proofs: vec![],
+            prefix_token_ids: vec![],
+            commitment: BatchCommitment {
+                merkle_root: [0xdd; 32],
+                io_root: [0xee; 32],
+                n_tokens: 8,
+                manifest_hash: None,
+                version: CommitmentVersion::V4,
+                prompt_hash: None,
+                seed_commitment: None,
+                kv_chain_root: None,
+            },
+            revealed_seed: [0xff; 32],
+            shell_opening: Some(shell),
+        };
+
+        let binary = serialize_v4_audit(&resp);
+        assert_eq!(&binary[..4], V4_AUDIT_MAGIC);
+
+        let restored = deserialize_v4_audit(&binary).unwrap();
+        assert_eq!(restored.token_index, 7);
+        assert_eq!(restored.token_id, 42);
+        assert_eq!(restored.retained, retained);
+        assert_eq!(restored.commitment.n_tokens, 8);
+        let shell_r = restored.shell_opening.unwrap();
+        assert_eq!(shell_r.layers[0].attn_out, vec![10i32, 20]);
+
+        // Verify binary is reasonably compact (magic + compressed bincode).
+        // Raw bincode of this small struct should be ~200 bytes; zstd adds overhead
+        // for tiny payloads but stays under 500.
+        assert!(
+            binary.len() < 500,
+            "binary too large: {} bytes",
+            binary.len()
+        );
+    }
+
+    #[test]
+    fn test_v4_audit_bad_magic() {
+        assert!(deserialize_v4_audit(b"BAAD1234").is_err());
     }
 }

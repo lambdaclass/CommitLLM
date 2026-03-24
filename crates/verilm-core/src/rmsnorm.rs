@@ -110,6 +110,38 @@ pub fn requantize_bridge(
     quantize_f64_to_i8(&normed, scale_next as f64)
 }
 
+/// Dequantize i32 accumulator and add to residual in place.
+///
+/// Computes: `residual[i] += acc_i32[i] * scale_w * scale_x`
+pub fn dequant_add_residual(acc_i32: &[i32], scale_w: f32, scale_x: f32, residual: &mut [f64]) {
+    let dequant_scale = (scale_w as f64) * (scale_x as f64);
+    for (res, &acc) in residual.iter_mut().zip(acc_i32.iter()) {
+        *res += (acc as f64) * dequant_scale;
+    }
+}
+
+/// Full bridge: dequant → residual += → RMSNorm → quantize to i8.
+///
+/// Updates residual **in place** and returns the requantized i8 output.
+/// This is the paper-correct bridge for W8A8 models:
+///   1. Dequantize: `f64 = acc_i32 * scale_w * scale_x`
+///   2. Update residual: `residual += dequantized`
+///   3. RMSNorm: `f64 = RMSNorm(residual, weights, eps)`
+///   4. Quantize: `i8 = round(f64 / scale_next)` clamped to [-128, 127]
+pub fn bridge_residual_rmsnorm(
+    acc_i32: &[i32],
+    scale_w: f32,
+    scale_x: f32,
+    residual: &mut [f64],
+    rmsnorm_weights: &[f32],
+    eps: f64,
+    scale_next: f32,
+) -> Vec<i8> {
+    dequant_add_residual(acc_i32, scale_w, scale_x, residual);
+    let normed = rmsnorm_f64_input(residual, rmsnorm_weights, eps);
+    quantize_f64_to_i8(&normed, scale_next as f64)
+}
+
 /// Verify the requantization bridge between two layers.
 ///
 /// Checks that `next_input_i8` matches the canonical recomputation:

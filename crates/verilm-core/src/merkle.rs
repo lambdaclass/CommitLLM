@@ -289,6 +289,16 @@ pub struct MerkleProof {
     pub siblings: Vec<[u8; 32]>,
 }
 
+/// Hash an embedding table row (f32 values) to produce a Merkle leaf hash.
+///
+/// Domain separator `"vi-embedding-v1"` prevents collisions with other hash domains.
+pub fn hash_embedding_row(row: &[f32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"vi-embedding-v1");
+    hash_f32_into(&mut hasher, row);
+    hasher.finalize().into()
+}
+
 /// Compute a deployment manifest hash: SHA-256 over all manifest fields in canonical order.
 ///
 /// The hash covers (with domain separator `b"vi-manifest-v1"`):

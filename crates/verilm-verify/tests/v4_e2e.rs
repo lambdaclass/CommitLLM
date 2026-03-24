@@ -6,7 +6,7 @@
 //! Debug/oracle path: verifier independently replays from public weights.
 
 use verilm_core::constants::{MatrixType, ModelConfig};
-use verilm_core::types::{RetainedLayerState, RetainedTokenState, ShellWeights};
+use verilm_core::types::{BridgeParams, RetainedLayerState, RetainedTokenState, ShellWeights};
 use verilm_prover::{commit_minimal, open_v4, open_v4_structural, FullBindingParams};
 use verilm_test_vectors::{forward_pass, generate_key, generate_model, LayerWeights};
 use verilm_verify::{verify_v4, verify_v4_with_weights, Verdict};
@@ -70,7 +70,7 @@ fn v4_protocol_single_token_pass() {
         manifest: None,
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[]);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None);
 
     let report = verify_v4(&key, &response);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
@@ -101,7 +101,7 @@ fn v4_protocol_multi_token_pass() {
     };
     let (_commitment, state) = commit_minimal(all_retained, &params);
 
-    let response = open_v4(&state, 2, &ToyWeights(&model), &cfg, &[]);
+    let response = open_v4(&state, 2, &ToyWeights(&model), &cfg, &[], None, None);
     let report = verify_v4(&key, &response);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
     // Structural + shell Freivalds for challenged token only
@@ -122,7 +122,7 @@ fn v4_protocol_token_zero_pass() {
         manifest: None,
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[]);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None);
 
     let report = verify_v4(&key, &response);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
@@ -154,7 +154,7 @@ fn v4_tampered_io_chain_detected() {
     };
     let (_commitment, state) = commit_minimal(all_retained, &params);
 
-    let mut response = open_v4(&state, 1, &ToyWeights(&model), &cfg, &[]);
+    let mut response = open_v4(&state, 1, &ToyWeights(&model), &cfg, &[], None, None);
     response.prev_io_hash[0] ^= 0xff;
 
     let report = verify_v4(&key, &response);
@@ -180,7 +180,7 @@ fn v4_wrong_seed_detected() {
         manifest: None,
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[]);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None);
     response.revealed_seed[0] ^= 0xff;
 
     let report = verify_v4(&key, &response);
@@ -210,7 +210,7 @@ fn v4_wrong_shell_opening_detected() {
     // Prover opens with WRONG weights — shell intermediates are inconsistent
     // with the keygen weights. Freivalds catches this.
     let wrong_model = generate_model(&cfg, 99999);
-    let response = open_v4(&state, 0, &ToyWeights(&wrong_model), &cfg, &[]);
+    let response = open_v4(&state, 0, &ToyWeights(&wrong_model), &cfg, &[], None, None);
 
     let report = verify_v4(&key, &response);
     assert_eq!(report.verdict, Verdict::Fail);
@@ -265,7 +265,7 @@ fn v4_weights_single_token_pass() {
         manifest: None,
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[]);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None);
 
     let report = verify_v4_with_weights(&key, &response, &ToyWeights(&model));
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
@@ -296,7 +296,7 @@ fn v4_weights_multi_token_pass() {
     };
     let (_commitment, state) = commit_minimal(all_retained, &params);
 
-    let response = open_v4(&state, 2, &ToyWeights(&model), &cfg, &[]);
+    let response = open_v4(&state, 2, &ToyWeights(&model), &cfg, &[], None, None);
     let report = verify_v4_with_weights(&key, &response, &ToyWeights(&model));
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
     // 3 independent token replays (debug path replays all prefix + challenged)
@@ -317,7 +317,7 @@ fn v4_weights_wrong_weights_detected() {
         manifest: None,
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[]);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None);
 
     // Debug verifier replays with WRONG weights — Freivalds catches mismatch.
     let wrong_model = generate_model(&cfg, 99999);
@@ -386,7 +386,7 @@ fn v4_scale_aware_single_token_pass() {
         manifest: None,
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, None, None);
 
     let report = verify_v4(&key, &response);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
@@ -411,7 +411,7 @@ fn v4_scale_aware_multi_token_pass() {
         manifest: None,
     };
     let (_commitment, state) = commit_minimal(all_retained, &params);
-    let response = open_v4(&state, 2, &ToyWeights(&model), &cfg, &ws);
+    let response = open_v4(&state, 2, &ToyWeights(&model), &cfg, &ws, None, None);
 
     let report = verify_v4(&key, &response);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
@@ -439,7 +439,7 @@ fn v4_scale_mismatch_detected() {
     let wrong_ws: Vec<Vec<f32>> = (0..cfg.n_layers)
         .map(|_| vec![1.0; verilm_core::constants::MatrixType::ALL.len()])
         .collect();
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &wrong_ws);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &wrong_ws, None, None);
 
     let report = verify_v4(&key, &response);
     assert_eq!(report.verdict, Verdict::Fail, "scale mismatch should cause failure");
@@ -448,4 +448,563 @@ fn v4_scale_mismatch_detected() {
         "expected Freivalds failure from scale mismatch, got: {:?}",
         report.failures
     );
+}
+
+// ---------------------------------------------------------------------------
+// Full bridge: dequant → residual → RMSNorm → quantize
+// ---------------------------------------------------------------------------
+
+/// Build synthetic RMSNorm weights and initial residual for full-bridge tests.
+fn setup_full_bridge() -> (
+    ModelConfig,
+    Vec<LayerWeights>,
+    verilm_core::types::VerifierKey,
+    Vec<Vec<f32>>, // weight_scales
+    Vec<Vec<f32>>, // rmsnorm_attn_weights
+    Vec<Vec<f32>>, // rmsnorm_ffn_weights
+    Vec<f32>,      // initial_residual
+) {
+    let cfg = ModelConfig::toy();
+    let model = generate_model(&cfg, 12345);
+    let mut key = generate_key(&cfg, &model, [1u8; 32]);
+
+    let n_mt = MatrixType::ALL.len();
+    let weight_scales: Vec<Vec<f32>> = (0..cfg.n_layers)
+        .map(|l| (0..n_mt).map(|m| 0.01 + 0.001 * (l * n_mt + m) as f32).collect())
+        .collect();
+
+    // Synthetic RMSNorm weights (all positive, like real models)
+    let rmsnorm_attn: Vec<Vec<f32>> = (0..cfg.n_layers)
+        .map(|l| (0..cfg.hidden_dim).map(|i| 0.5 + 0.01 * ((l * cfg.hidden_dim + i) % 100) as f32).collect())
+        .collect();
+    let rmsnorm_ffn: Vec<Vec<f32>> = (0..cfg.n_layers)
+        .map(|l| (0..cfg.hidden_dim).map(|i| 0.6 + 0.01 * ((l * cfg.hidden_dim + i + 37) % 100) as f32).collect())
+        .collect();
+
+    // Synthetic initial residual (embedding-like)
+    let initial_residual: Vec<f32> = (0..cfg.hidden_dim)
+        .map(|i| 0.1 * (i as f32 - cfg.hidden_dim as f32 / 2.0))
+        .collect();
+
+    key.weight_scales = weight_scales.clone();
+    key.rmsnorm_attn_weights = rmsnorm_attn.clone();
+    key.rmsnorm_ffn_weights = rmsnorm_ffn.clone();
+    key.rmsnorm_eps = 1e-5;
+
+    (cfg, model, key, weight_scales, rmsnorm_attn, rmsnorm_ffn, initial_residual)
+}
+
+/// Run a full-bridge forward pass to produce RetainedTokenState consistent
+/// with the bridge computation. This replicates the paper's residual stream.
+fn full_bridge_forward(
+    cfg: &ModelConfig,
+    model: &[LayerWeights],
+    initial_residual: &[f32],
+    rmsnorm_attn: &[Vec<f32>],
+    rmsnorm_ffn: &[Vec<f32>],
+    weight_scales: &[Vec<f32>],
+    scales: &[(f32, f32, f32, f32)], // per layer: (scale_x_attn, scale_a, scale_x_ffn, scale_h)
+    eps: f64,
+) -> RetainedTokenState {
+    use verilm_core::matmul::matmul_i32;
+    use verilm_core::rmsnorm::{bridge_residual_rmsnorm, dequant_add_residual, rmsnorm_f64_input, quantize_f64_to_i8};
+
+    let mut residual: Vec<f64> = initial_residual.iter().map(|&v| v as f64).collect();
+    let mut layers = Vec::new();
+    let heads_per_kv = cfg.n_q_heads / cfg.n_kv_heads;
+
+    for (l, lw) in model.iter().enumerate() {
+        let (scale_x_attn, scale_a, scale_x_ffn, scale_h) = scales[l];
+
+        let ws = |mt: MatrixType| -> f32 {
+            let idx = MatrixType::ALL.iter().position(|&m| m == mt).unwrap();
+            weight_scales[l][idx]
+        };
+
+        // x_attn = quantize(RMSNorm_attn(residual), scale_x_attn)
+        let normed = rmsnorm_f64_input(&residual, &rmsnorm_attn[l], eps);
+        let x_attn = quantize_f64_to_i8(&normed, scale_x_attn as f64);
+
+        // Single-token attention: a = expand(requantize(V))
+        let v_acc = matmul_i32(&lw.wv, &x_attn, cfg.kv_dim, cfg.hidden_dim);
+        let v_i8 = verilm_core::requantize(&v_acc);
+        let mut a = vec![0i8; cfg.hidden_dim];
+        for qh in 0..cfg.n_q_heads {
+            let kv_head = qh / heads_per_kv;
+            let src = kv_head * cfg.d_head;
+            let dst = qh * cfg.d_head;
+            a[dst..dst + cfg.d_head].copy_from_slice(&v_i8[src..src + cfg.d_head]);
+        }
+
+        // Replicate bridge to advance residual for next layer
+        let attn_out = matmul_i32(&lw.wo, &a, cfg.hidden_dim, cfg.hidden_dim);
+        let x_ffn = bridge_residual_rmsnorm(
+            &attn_out, ws(MatrixType::Wo), scale_a,
+            &mut residual, &rmsnorm_ffn[l], eps, scale_x_ffn,
+        );
+
+        let g = matmul_i32(&lw.wg, &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
+        let u = matmul_i32(&lw.wu, &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
+        let h = verilm_core::silu::compute_h_scaled(
+            &g, &u, ws(MatrixType::Wg), ws(MatrixType::Wu), scale_x_ffn, scale_h,
+        );
+        let ffn_out = matmul_i32(&lw.wd, &h, cfg.hidden_dim, cfg.ffn_dim);
+
+        if l + 1 < rmsnorm_attn.len() {
+            let next_scale = scales.get(l + 1).map(|s| s.0).unwrap_or(1.0);
+            bridge_residual_rmsnorm(
+                &ffn_out, ws(MatrixType::Wd), scale_h,
+                &mut residual, &rmsnorm_attn[l + 1], eps, next_scale,
+            );
+        } else {
+            dequant_add_residual(&ffn_out, ws(MatrixType::Wd), scale_h, &mut residual);
+        }
+
+        layers.push(RetainedLayerState { a, scale_a, scale_x_attn, scale_x_ffn, scale_h });
+    }
+
+    RetainedTokenState { layers }
+}
+
+/// Synthetic per-layer activation scales for full-bridge tests.
+fn bridge_scales(cfg: &ModelConfig) -> Vec<(f32, f32, f32, f32)> {
+    (0..cfg.n_layers)
+        .map(|l| (
+            0.3 + 0.05 * l as f32,  // scale_x_attn
+            0.5 + 0.1 * l as f32,   // scale_a
+            0.4 + 0.07 * l as f32,  // scale_x_ffn
+            0.6 + 0.03 * l as f32,  // scale_h
+        ))
+        .collect()
+}
+
+#[test]
+fn v4_full_bridge_single_token_pass() {
+    let (cfg, model, mut key, ws, rmsnorm_attn, rmsnorm_ffn, initial_residual) = setup_full_bridge();
+    let scales = bridge_scales(&cfg);
+    let token_id = 42u32;
+
+    let (tree, root) = setup_embedding_tree(&initial_residual, token_id, 128);
+    key.embedding_merkle_root = Some(root);
+
+    let retained = full_bridge_forward(
+        &cfg, &model, &initial_residual, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+    );
+
+    let proof = verilm_core::merkle::prove(&tree, token_id as usize);
+    let bridge = BridgeParams {
+        rmsnorm_attn_weights: &rmsnorm_attn,
+        rmsnorm_ffn_weights: &rmsnorm_ffn,
+        rmsnorm_eps: 1e-5,
+        initial_residual: &initial_residual,
+        embedding_proof: Some(proof),
+    };
+
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"full bridge",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None);
+
+    let report = verify_v4(&key, &response);
+    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+    // 1 embedding check + structural (7 for token 0) + 7 Freivalds per layer
+    assert!(report.checks_run >= 8 + cfg.n_layers * 7,
+        "expected at least {} checks, got {}",
+        8 + cfg.n_layers * 7, report.checks_run);
+}
+
+#[test]
+fn v4_full_bridge_cross_layer_chain() {
+    let (cfg, model, mut key, ws, rmsnorm_attn, rmsnorm_ffn, initial_residual) = setup_full_bridge();
+    let scales = bridge_scales(&cfg);
+
+    // Build embedding table with rows for token_ids 10, 20, 30
+    let token_ids = [10u32, 20, 30];
+    let residuals: Vec<Vec<f32>> = (0..3).map(|t| {
+        initial_residual.iter().map(|&v| v + 0.05 * t as f32).collect()
+    }).collect();
+
+    // Build a tree that contains all 3 residuals at their token_id indices
+    let n_vocab = 128;
+    let mut leaves = Vec::with_capacity(n_vocab);
+    for i in 0..n_vocab {
+        if let Some(pos) = token_ids.iter().position(|&tid| tid as usize == i) {
+            leaves.push(verilm_core::merkle::hash_embedding_row(&residuals[pos]));
+        } else {
+            let row: Vec<f32> = (0..initial_residual.len())
+                .map(|j| (i * 1000 + j) as f32 * 0.001).collect();
+            leaves.push(verilm_core::merkle::hash_embedding_row(&row));
+        }
+    }
+    let tree = verilm_core::merkle::build_tree(&leaves);
+    key.embedding_merkle_root = Some(tree.root);
+
+    let all_retained: Vec<RetainedTokenState> = residuals.iter().map(|ir| {
+        full_bridge_forward(&cfg, &model, ir, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5)
+    }).collect();
+
+    let params = FullBindingParams {
+        token_ids: &token_ids,
+        prompt: b"multi token full bridge",
+        sampling_seed: [99u8; 32],
+        manifest: None,
+    };
+    let (_commitment, state) = commit_minimal(all_retained, &params);
+
+    // Open token 2 (token_id=30) — its bridge must match
+    let proof = verilm_core::merkle::prove(&tree, 30);
+    let bridge = BridgeParams {
+        rmsnorm_attn_weights: &rmsnorm_attn,
+        rmsnorm_ffn_weights: &rmsnorm_ffn,
+        rmsnorm_eps: 1e-5,
+        initial_residual: &residuals[2],
+        embedding_proof: Some(proof),
+    };
+    let response = open_v4(&state, 2, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None);
+
+    let report = verify_v4(&key, &response);
+    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_full_bridge_wrong_residual_detected() {
+    let (cfg, model, mut key, ws, rmsnorm_attn, rmsnorm_ffn, initial_residual) = setup_full_bridge();
+    let scales = bridge_scales(&cfg);
+    let token_id = 42u32;
+
+    let (tree, root) = setup_embedding_tree(&initial_residual, token_id, 128);
+    key.embedding_merkle_root = Some(root);
+
+    let retained = full_bridge_forward(
+        &cfg, &model, &initial_residual, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+    );
+
+    // Prover computes shell with CORRECT initial_residual + valid proof
+    let proof = verilm_core::merkle::prove(&tree, token_id as usize);
+    let bridge = BridgeParams {
+        rmsnorm_attn_weights: &rmsnorm_attn,
+        rmsnorm_ffn_weights: &rmsnorm_ffn,
+        rmsnorm_eps: 1e-5,
+        initial_residual: &initial_residual,
+        embedding_proof: Some(proof),
+    };
+
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"wrong residual",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None);
+
+    // Tamper: change initial_residual in the shell opening after prover built it.
+    // The embedding proof was computed for the original residual, so hash won't match.
+    if let Some(ref mut shell) = response.shell_opening {
+        if let Some(ref mut ir) = shell.initial_residual {
+            for v in ir.iter_mut() {
+                *v += 100.0; // grossly wrong
+            }
+        }
+    }
+
+    let report = verify_v4(&key, &response);
+    assert_eq!(report.verdict, Verdict::Fail, "wrong residual should be detected");
+    assert!(
+        report.failures.iter().any(|f| f.contains("embedding Merkle proof")),
+        "expected embedding proof failure from tampered residual, got: {:?}",
+        report.failures
+    );
+}
+
+#[test]
+fn v4_full_bridge_qkv_layer0() {
+    // Verify that full bridge enables QKV checking at layer 0
+    // (toy model skips layer 0 QKV because x_attn is unknown)
+    let (cfg, model, mut key, ws, rmsnorm_attn, rmsnorm_ffn, initial_residual) = setup_full_bridge();
+    let scales = bridge_scales(&cfg);
+    let token_id = 42u32;
+
+    let (tree, root) = setup_embedding_tree(&initial_residual, token_id, 128);
+    key.embedding_merkle_root = Some(root);
+
+    let retained = full_bridge_forward(
+        &cfg, &model, &initial_residual, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+    );
+
+    let proof = verilm_core::merkle::prove(&tree, token_id as usize);
+    let bridge = BridgeParams {
+        rmsnorm_attn_weights: &rmsnorm_attn,
+        rmsnorm_ffn_weights: &rmsnorm_ffn,
+        rmsnorm_eps: 1e-5,
+        initial_residual: &initial_residual,
+        embedding_proof: Some(proof),
+    };
+
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"qkv layer0",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None);
+
+    // Verify shell has QKV at layer 0
+    let shell = response.shell_opening.as_ref().unwrap();
+    assert!(shell.layers[0].q.is_some(), "full bridge should produce QKV at layer 0");
+    assert!(shell.layers[0].k.is_some());
+    assert!(shell.layers[0].v.is_some());
+
+    // Verification passes with all 7 checks per layer (QKV at layer 0 included)
+    let report = verify_v4(&key, &response);
+    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+
+    // Full bridge: 1 embedding + 7 structural + 7 Freivalds per layer
+    assert!(report.checks_run >= 8 + cfg.n_layers * 7,
+        "full bridge should have 7 checks/layer + embedding (got {} total, expected >= {})",
+        report.checks_run, 8 + cfg.n_layers * 7);
+}
+
+/// Build a toy "embedding table" and Merkle tree for embedding-proof tests.
+fn setup_embedding_tree(initial_residual: &[f32], token_id: u32, n_vocab: usize) -> (verilm_core::merkle::MerkleTree, [u8; 32]) {
+    // Build embedding table: random rows except row[token_id] = initial_residual
+    let mut leaves = Vec::with_capacity(n_vocab);
+    for i in 0..n_vocab {
+        if i == token_id as usize {
+            leaves.push(verilm_core::merkle::hash_embedding_row(initial_residual));
+        } else {
+            // Dummy rows with deterministic content
+            let row: Vec<f32> = (0..initial_residual.len())
+                .map(|j| (i * 1000 + j) as f32 * 0.001)
+                .collect();
+            leaves.push(verilm_core::merkle::hash_embedding_row(&row));
+        }
+    }
+    let tree = verilm_core::merkle::build_tree(&leaves);
+    let root = tree.root;
+    (tree, root)
+}
+
+#[test]
+fn v4_embedding_proof_pass() {
+    let (cfg, model, mut key, ws, rmsnorm_attn, rmsnorm_ffn, initial_residual) = setup_full_bridge();
+    let scales = bridge_scales(&cfg);
+    let token_id = 42u32;
+
+    // Build embedding tree and set root in key
+    let (tree, root) = setup_embedding_tree(&initial_residual, token_id, 128);
+    key.embedding_merkle_root = Some(root);
+
+    let retained = full_bridge_forward(
+        &cfg, &model, &initial_residual, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+    );
+
+    let proof = verilm_core::merkle::prove(&tree, token_id as usize);
+    let bridge = BridgeParams {
+        rmsnorm_attn_weights: &rmsnorm_attn,
+        rmsnorm_ffn_weights: &rmsnorm_ffn,
+        rmsnorm_eps: 1e-5,
+        initial_residual: &initial_residual,
+        embedding_proof: Some(proof),
+    };
+
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"embedding proof",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None);
+
+    let report = verify_v4(&key, &response);
+    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+    // Should have embedding proof check + structural + bridge checks
+    assert!(report.checks_run >= 8 + cfg.n_layers * 7,
+        "expected at least {} checks (incl embedding), got {}",
+        8 + cfg.n_layers * 7, report.checks_run);
+}
+
+#[test]
+fn v4_embedding_proof_tampered_residual_detected() {
+    let (cfg, model, mut key, ws, rmsnorm_attn, rmsnorm_ffn, initial_residual) = setup_full_bridge();
+    let scales = bridge_scales(&cfg);
+    let token_id = 42u32;
+
+    let (tree, root) = setup_embedding_tree(&initial_residual, token_id, 128);
+    key.embedding_merkle_root = Some(root);
+
+    let retained = full_bridge_forward(
+        &cfg, &model, &initial_residual, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+    );
+
+    // Tamper: use wrong initial_residual but correct proof (for the real one)
+    let tampered: Vec<f32> = initial_residual.iter().map(|&v| v + 1.0).collect();
+    let proof = verilm_core::merkle::prove(&tree, token_id as usize);
+    let bridge = BridgeParams {
+        rmsnorm_attn_weights: &rmsnorm_attn,
+        rmsnorm_ffn_weights: &rmsnorm_ffn,
+        rmsnorm_eps: 1e-5,
+        initial_residual: &tampered, // wrong residual
+        embedding_proof: Some(proof), // proof is for the real residual
+    };
+
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"tampered embedding",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None);
+
+    let report = verify_v4(&key, &response);
+    assert_eq!(report.verdict, Verdict::Fail, "tampered residual should be caught");
+    assert!(report.failures.iter().any(|f| f.contains("embedding Merkle proof")),
+        "should fail on embedding proof, failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_embedding_proof_missing_when_root_present() {
+    let (cfg, model, mut key, ws, rmsnorm_attn, rmsnorm_ffn, initial_residual) = setup_full_bridge();
+    let scales = bridge_scales(&cfg);
+
+    let (_tree, root) = setup_embedding_tree(&initial_residual, 42, 128);
+    key.embedding_merkle_root = Some(root);
+
+    let retained = full_bridge_forward(
+        &cfg, &model, &initial_residual, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+    );
+
+    // Bridge with initial_residual but NO embedding_proof
+    let bridge = BridgeParams {
+        rmsnorm_attn_weights: &rmsnorm_attn,
+        rmsnorm_ffn_weights: &rmsnorm_ffn,
+        rmsnorm_eps: 1e-5,
+        initial_residual: &initial_residual,
+        embedding_proof: None, // missing!
+    };
+
+    let params = FullBindingParams {
+        token_ids: &[42],
+        prompt: b"missing proof",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None);
+
+    let report = verify_v4(&key, &response);
+    assert_eq!(report.verdict, Verdict::Fail, "missing proof should be caught");
+    assert!(report.failures.iter().any(|f| f.contains("missing embedding_proof")),
+        "should fail on missing proof, failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_embedding_proof_wrong_token_id_detected() {
+    let (cfg, model, mut key, ws, rmsnorm_attn, rmsnorm_ffn, initial_residual) = setup_full_bridge();
+    let scales = bridge_scales(&cfg);
+    let token_id = 42u32;
+
+    let (tree, root) = setup_embedding_tree(&initial_residual, token_id, 128);
+    key.embedding_merkle_root = Some(root);
+
+    let retained = full_bridge_forward(
+        &cfg, &model, &initial_residual, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+    );
+
+    // Proof for wrong token index (43 instead of 42)
+    let wrong_proof = verilm_core::merkle::prove(&tree, 43);
+    let bridge = BridgeParams {
+        rmsnorm_attn_weights: &rmsnorm_attn,
+        rmsnorm_ffn_weights: &rmsnorm_ffn,
+        rmsnorm_eps: 1e-5,
+        initial_residual: &initial_residual,
+        embedding_proof: Some(wrong_proof),
+    };
+
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"wrong token proof",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None);
+
+    let report = verify_v4(&key, &response);
+    assert_eq!(report.verdict, Verdict::Fail, "wrong token_id should be caught");
+    assert!(report.failures.iter().any(|f| f.contains("leaf_index") && f.contains("token_id")),
+        "should fail on token_id mismatch, failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_downgrade_omit_initial_residual_detected() {
+    // Key has embedding_merkle_root → prover MUST provide initial_residual.
+    // Omitting it is a downgrade attack to the simplified bridge path.
+    let (cfg, model, mut key, ws, rmsnorm_attn, rmsnorm_ffn, initial_residual) = setup_full_bridge();
+    let scales = bridge_scales(&cfg);
+    let token_id = 42u32;
+
+    let (_, root) = setup_embedding_tree(&initial_residual, token_id, 128);
+    key.embedding_merkle_root = Some(root);
+
+    let retained = full_bridge_forward(
+        &cfg, &model, &initial_residual, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+    );
+
+    // Deliberately pass None for bridge → no initial_residual in the shell opening
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"downgrade",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, None, None);
+
+    let report = verify_v4(&key, &response);
+    assert_eq!(report.verdict, Verdict::Fail, "omitted initial_residual should be caught");
+    assert!(report.failures.iter().any(|f| f.contains("initial_residual")),
+        "should fail on missing initial_residual, failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_unbound_initial_residual_rejected() {
+    // Key has RMSNorm weights but NO embedding_merkle_root.
+    // Prover supplies initial_residual anyway → must be rejected (unbound vector).
+    let (cfg, model, key, ws, rmsnorm_attn, rmsnorm_ffn, initial_residual) = setup_full_bridge();
+    let scales = bridge_scales(&cfg);
+    assert!(key.embedding_merkle_root.is_none(), "key should have no embedding root");
+
+    let retained = full_bridge_forward(
+        &cfg, &model, &initial_residual, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+    );
+
+    let bridge = BridgeParams {
+        rmsnorm_attn_weights: &rmsnorm_attn,
+        rmsnorm_ffn_weights: &rmsnorm_ffn,
+        rmsnorm_eps: 1e-5,
+        initial_residual: &initial_residual,
+        embedding_proof: None,
+    };
+
+    let params = FullBindingParams {
+        token_ids: &[42],
+        prompt: b"unbound residual",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None);
+
+    let report = verify_v4(&key, &response);
+    assert_eq!(report.verdict, Verdict::Fail, "unbound initial_residual should be rejected");
+    assert!(report.failures.iter().any(|f| f.contains("embedding_merkle_root")),
+        "should fail on missing embedding root, failures: {:?}", report.failures);
 }

@@ -1278,22 +1278,19 @@ pub fn derive_audit_layers(
         AuditTier::Full => (0..n_layers).collect(),
         AuditTier::Routine => {
             use sha2::{Digest, Sha256};
-            use std::collections::BTreeSet;
 
-            let k = 10usize.min(n_layers); // 10 layers or all if fewer
-            let mut indices = BTreeSet::new();
-            let mut counter: u32 = 0;
-            while indices.len() < k {
-                let mut hasher = Sha256::new();
-                hasher.update(challenge_seed);
-                hasher.update(token_index.to_le_bytes());
-                hasher.update(counter.to_le_bytes());
-                let hash: [u8; 32] = hasher.finalize().into();
-                let idx = u32::from_le_bytes(hash[..4].try_into().unwrap()) as usize % n_layers;
-                indices.insert(idx);
-                counter += 1;
-            }
-            indices.into_iter().collect()
+            // Contiguous prefix 0..=L_max. L_max is derived from the
+            // challenge seed so the prover cannot predict the depth.
+            // Minimum prefix length: min(10, n_layers).
+            let min_prefix = 10usize.min(n_layers);
+            let mut hasher = Sha256::new();
+            hasher.update(b"vi-audit-prefix-v1");
+            hasher.update(challenge_seed);
+            hasher.update(token_index.to_le_bytes());
+            let hash: [u8; 32] = hasher.finalize().into();
+            let raw = u32::from_le_bytes(hash[..4].try_into().unwrap()) as usize;
+            let l_max = (raw % n_layers).max(min_prefix.saturating_sub(1));
+            (0..=l_max).collect()
         }
     }
 }
@@ -1635,6 +1632,42 @@ pub fn verify_v4(
     // Protocol path: check shell openings with key-only Freivalds.
     match &response.shell_opening {
         Some(shell) => {
+            // Fail-closed embedding binding.
+            //
+            // If key has embedding_merkle_root: REQUIRE initial_residual + valid proof.
+            // If key has no embedding_merkle_root: REJECT any initial_residual (unbound).
+            if let Some(ref emb_root) = key.embedding_merkle_root {
+                checks_run += 1;
+                match (&shell.initial_residual, &shell.embedding_proof) {
+                    (Some(ir), Some(proof)) => {
+                        let leaf = verilm_core::merkle::hash_embedding_row(ir);
+                        if proof.leaf_index != response.token_id {
+                            failures.push(format!(
+                                "embedding proof leaf_index {} != token_id {}",
+                                proof.leaf_index, response.token_id
+                            ));
+                        } else if !verilm_core::merkle::verify(emb_root, &leaf, proof) {
+                            failures.push("embedding Merkle proof verification failed".into());
+                        }
+                    }
+                    (None, _) => {
+                        failures.push(
+                            "key has embedding_merkle_root but shell missing initial_residual".into()
+                        );
+                    }
+                    (Some(_), None) => {
+                        failures.push(
+                            "key has embedding_merkle_root but shell missing embedding_proof".into()
+                        );
+                    }
+                }
+            } else if shell.initial_residual.is_some() {
+                checks_run += 1;
+                failures.push(
+                    "shell has initial_residual but key has no embedding_merkle_root to verify it".into()
+                );
+            }
+
             let (c, f) = verify_shell_opening(key, &response.retained, shell);
             checks_run += c;
             failures.extend(f);
@@ -1662,6 +1695,10 @@ pub fn verify_v4(
 /// The verifier does NOT recompute matmuls — it checks the prover's i32
 /// accumulators with precomputed Freivalds keys and verifies bridge
 /// consistency by deriving intermediate i8 values from the accumulators.
+///
+/// When `shell.initial_residual` is present and the key has RMSNorm weights,
+/// uses the full bridge (dequant → residual → RMSNorm → quantize). This
+/// also enables QKV Freivalds at layer 0.
 fn verify_shell_opening(
     key: &VerifierKey,
     retained: &verilm_core::types::RetainedTokenState,
@@ -1670,122 +1707,205 @@ fn verify_shell_opening(
     let mut failures = Vec::new();
     let mut checks_run = 0usize;
 
-    if shell.layers.len() != retained.layers.len() {
+    // Resolve which layers are present.
+    let opened_layers: Vec<usize> = shell.layer_indices.clone()
+        .unwrap_or_else(|| (0..retained.layers.len()).collect());
+
+    if shell.layers.len() != opened_layers.len() {
         failures.push(format!(
-            "shell_opening has {} layers but retained has {}",
-            shell.layers.len(), retained.layers.len()
+            "shell_opening has {} layers but layer_indices specifies {}",
+            shell.layers.len(), opened_layers.len()
         ));
         return (checks_run, failures);
     }
 
-    let mut x_attn: Option<Vec<i8>> = None;
+    // Build a lookup: shell_idx for a given layer_idx (None if not opened).
+    let max_layer = opened_layers.iter().copied().max().unwrap_or(0);
+    let mut shell_idx_for = vec![None; max_layer + 1];
+    for (si, &li) in opened_layers.iter().enumerate() {
+        if li <= max_layer {
+            shell_idx_for[li] = Some(si);
+        }
+    }
 
-    for (layer_idx, (rs, sl)) in retained.layers.iter().zip(shell.layers.iter()).enumerate() {
+    // Full bridge: only when initial_residual is authenticated.
+    let use_full_bridge = shell.initial_residual.is_some()
+        && !key.rmsnorm_attn_weights.is_empty()
+        && key.embedding_merkle_root.is_some();
+
+    let (mut residual, mut x_attn) = if use_full_bridge {
+        let ir = shell.initial_residual.as_ref().unwrap();
+        let res: Vec<f64> = ir.iter().map(|&v| v as f64).collect();
+        let normed = verilm_core::rmsnorm::rmsnorm_f64_input(
+            &res, &key.rmsnorm_attn_weights[0], key.rmsnorm_eps,
+        );
+        let xa = verilm_core::rmsnorm::quantize_f64_to_i8(
+            &normed, retained.layers[0].scale_x_attn as f64,
+        );
+        (Some(res), Some(xa))
+    } else {
+        (None, None)
+    };
+
+    // Iterate 0..=max_layer: bridge is sequential, Freivalds only on opened layers.
+    for layer_idx in 0..=max_layer {
+        if layer_idx >= retained.layers.len() { break; }
+        let rs = &retained.layers[layer_idx];
         let a = &rs.a;
 
-        // QKV Freivalds (layers > 0 where x_attn is derivable)
-        if let Some(ref xa) = x_attn {
-            let qkv = [
-                (MatrixType::Wq, &sl.q, key.config.hidden_dim),
-                (MatrixType::Wk, &sl.k, key.config.kv_dim),
-                (MatrixType::Wv, &sl.v, key.config.kv_dim),
-            ];
-            for (mt, opened_acc, _expected_rows) in &qkv {
-                match opened_acc {
-                    Some(z) => {
-                        checks_run += 1;
-                        if !freivalds::check(
-                            key.v_for(layer_idx, *mt),
-                            xa,
-                            key.r_for(*mt),
-                            z,
-                        ) {
+        // If this layer has a shell opening, run Freivalds checks.
+        if let Some(si) = shell_idx_for[layer_idx] {
+            let sl = &shell.layers[si];
+
+            // QKV Freivalds (full bridge: all layers; toy: layers > 0)
+            if let Some(ref xa) = x_attn {
+                let qkv = [
+                    (MatrixType::Wq, &sl.q, key.config.hidden_dim),
+                    (MatrixType::Wk, &sl.k, key.config.kv_dim),
+                    (MatrixType::Wv, &sl.v, key.config.kv_dim),
+                ];
+                for (mt, opened_acc, _expected_rows) in &qkv {
+                    match opened_acc {
+                        Some(z) => {
+                            checks_run += 1;
+                            if !freivalds::check(
+                                key.v_for(layer_idx, *mt),
+                                xa,
+                                key.r_for(*mt),
+                                z,
+                            ) {
+                                failures.push(format!(
+                                    "layer {} {:?}: Freivalds failed on shell opening",
+                                    layer_idx, mt
+                                ));
+                            }
+                        }
+                        None => {
                             failures.push(format!(
-                                "layer {} {:?}: Freivalds failed on shell opening",
+                                "layer {} {:?}: shell opening missing QKV (x_attn derivable)",
                                 layer_idx, mt
                             ));
                         }
                     }
-                    None => {
-                        failures.push(format!(
-                            "layer {} {:?}: shell opening missing QKV (x_attn derivable)",
-                            layer_idx, mt
-                        ));
-                    }
                 }
             }
-        }
 
-        // W_o @ a: check prover's attn_out
-        checks_run += 1;
-        if !freivalds::check(
-            key.v_for(layer_idx, MatrixType::Wo),
-            a,
-            key.r_for(MatrixType::Wo),
-            &sl.attn_out,
-        ) {
-            failures.push(format!(
-                "layer {} Wo: Freivalds failed on shell opening", layer_idx
-            ));
-        }
-
-        // Bridge: verifier derives x_ffn from prover's attn_out using scales
-        let x_ffn = verilm_core::bridge_requantize(
-            &sl.attn_out,
-            key.weight_scale_for(layer_idx, MatrixType::Wo),
-            rs.scale_a,
-            rs.scale_x_ffn,
-        );
-
-        // W_g, W_u @ x_ffn
-        for (mt, z) in [(MatrixType::Wg, &sl.g), (MatrixType::Wu, &sl.u)] {
+            // W_o @ a
             checks_run += 1;
             if !freivalds::check(
-                key.v_for(layer_idx, mt),
-                &x_ffn,
-                key.r_for(mt),
-                z,
+                key.v_for(layer_idx, MatrixType::Wo),
+                a,
+                key.r_for(MatrixType::Wo),
+                &sl.attn_out,
             ) {
                 failures.push(format!(
-                    "layer {} {:?}: Freivalds failed on shell opening",
-                    layer_idx, mt
+                    "layer {} Wo: Freivalds failed on shell opening", layer_idx
                 ));
             }
+
+            // Post-attention bridge: derive x_ffn
+            let x_ffn = if let Some(ref mut res) = residual {
+                verilm_core::rmsnorm::bridge_residual_rmsnorm(
+                    &sl.attn_out,
+                    key.weight_scale_for(layer_idx, MatrixType::Wo),
+                    rs.scale_a,
+                    res,
+                    &key.rmsnorm_ffn_weights[layer_idx],
+                    key.rmsnorm_eps,
+                    rs.scale_x_ffn,
+                )
+            } else {
+                verilm_core::bridge_requantize(
+                    &sl.attn_out,
+                    key.weight_scale_for(layer_idx, MatrixType::Wo),
+                    rs.scale_a,
+                    rs.scale_x_ffn,
+                )
+            };
+
+            // W_g, W_u @ x_ffn
+            for (mt, z) in [(MatrixType::Wg, &sl.g), (MatrixType::Wu, &sl.u)] {
+                checks_run += 1;
+                if !freivalds::check(
+                    key.v_for(layer_idx, mt),
+                    &x_ffn,
+                    key.r_for(mt),
+                    z,
+                ) {
+                    failures.push(format!(
+                        "layer {} {:?}: Freivalds failed on shell opening",
+                        layer_idx, mt
+                    ));
+                }
+            }
+
+            // Bridge: verifier derives h from prover's g, u using scales
+            let h = verilm_core::silu::compute_h_scaled(
+                &sl.g, &sl.u,
+                key.weight_scale_for(layer_idx, MatrixType::Wg),
+                key.weight_scale_for(layer_idx, MatrixType::Wu),
+                rs.scale_x_ffn,
+                rs.scale_h,
+            );
+
+            // W_d @ h
+            checks_run += 1;
+            if !freivalds::check(
+                key.v_for(layer_idx, MatrixType::Wd),
+                &h,
+                key.r_for(MatrixType::Wd),
+                &sl.ffn_out,
+            ) {
+                failures.push(format!(
+                    "layer {} Wd: Freivalds failed on shell opening", layer_idx
+                ));
+            }
+
+            // Post-FFN bridge: derive x_attn for next layer
+            let next_scale_x_attn = retained.layers
+                .get(layer_idx + 1)
+                .map(|r| r.scale_x_attn)
+                .unwrap_or(1.0);
+
+            x_attn = if let Some(ref mut res) = residual {
+                if layer_idx + 1 < key.rmsnorm_attn_weights.len() {
+                    Some(verilm_core::rmsnorm::bridge_residual_rmsnorm(
+                        &sl.ffn_out,
+                        key.weight_scale_for(layer_idx, MatrixType::Wd),
+                        rs.scale_h,
+                        res,
+                        &key.rmsnorm_attn_weights[layer_idx + 1],
+                        key.rmsnorm_eps,
+                        next_scale_x_attn,
+                    ))
+                } else {
+                    verilm_core::rmsnorm::dequant_add_residual(
+                        &sl.ffn_out,
+                        key.weight_scale_for(layer_idx, MatrixType::Wd),
+                        rs.scale_h,
+                        res,
+                    );
+                    Some(verilm_core::bridge_requantize(
+                        &sl.ffn_out,
+                        key.weight_scale_for(layer_idx, MatrixType::Wd),
+                        rs.scale_h,
+                        next_scale_x_attn,
+                    ))
+                }
+            } else {
+                Some(verilm_core::bridge_requantize(
+                    &sl.ffn_out,
+                    key.weight_scale_for(layer_idx, MatrixType::Wd),
+                    rs.scale_h,
+                    next_scale_x_attn,
+                ))
+            };
         }
-
-        // Bridge: verifier derives h from prover's g, u using scales
-        let h = verilm_core::silu::compute_h_scaled(
-            &sl.g, &sl.u,
-            key.weight_scale_for(layer_idx, MatrixType::Wg),
-            key.weight_scale_for(layer_idx, MatrixType::Wu),
-            rs.scale_x_ffn,
-            rs.scale_h,
-        );
-
-        // W_d @ h
-        checks_run += 1;
-        if !freivalds::check(
-            key.v_for(layer_idx, MatrixType::Wd),
-            &h,
-            key.r_for(MatrixType::Wd),
-            &sl.ffn_out,
-        ) {
-            failures.push(format!(
-                "layer {} Wd: Freivalds failed on shell opening", layer_idx
-            ));
-        }
-
-        // Cross-layer chain: derive x_attn for next layer
-        let next_scale_x_attn = retained.layers
-            .get(layer_idx + 1)
-            .map(|r| r.scale_x_attn)
-            .unwrap_or(1.0);
-        x_attn = Some(verilm_core::bridge_requantize(
-            &sl.ffn_out,
-            key.weight_scale_for(layer_idx, MatrixType::Wd),
-            rs.scale_h,
-            next_scale_x_attn,
-        ));
+        // Layer not opened: no Freivalds, but bridge state must NOT advance
+        // (the prover didn't provide intermediates for this layer).
+        // For contiguous prefix semantics, all layers up to max are opened,
+        // so this branch is only hit for non-prefix gaps (shouldn't happen
+        // with proper challenge derivation). Bridge tracking stops.
     }
 
     (checks_run, failures)
@@ -1809,20 +1929,31 @@ pub fn verify_v4_with_weights(
 
     let cfg = &key.config;
 
+    // Extract initial_residual only when authenticated (embedding root present).
+    let initial_residual = if key.embedding_merkle_root.is_some() {
+        response.shell_opening
+            .as_ref()
+            .and_then(|s| s.initial_residual.as_deref())
+    } else {
+        None
+    };
+
     // Replay each prefix token independently (debug path).
+    // Prefix tokens don't have initial_residual — use simplified bridge.
     for (t, prefix_rs) in response.prefix_retained.iter().enumerate() {
-        let (c, f) = replay_token_shell(key, cfg, prefix_rs, weights, t);
+        let (c, f) = replay_token_shell(key, cfg, prefix_rs, weights, t, None);
         checks_run += c;
         failures.extend(f);
     }
 
-    // Replay the challenged token.
+    // Replay the challenged token (with initial_residual if available).
     let (c, f) = replay_token_shell(
         key,
         cfg,
         &response.retained,
         weights,
         response.prefix_retained.len(),
+        initial_residual,
     );
     checks_run += c;
     failures.extend(f);
@@ -1954,9 +2085,9 @@ fn verify_v4_structural(
 
 /// Replay one token's computation shell from retained state + public weights.
 ///
-/// Each token's replay is independent — layer 0 starts with x_attn unknown
-/// (the embedding is not available to the verifier). Layers 1+ derive
-/// x_attn from the previous layer's ffn_out (intra-token cross-layer chain).
+/// When the key has RMSNorm weights and `initial_residual` is provided,
+/// uses full bridge and enables QKV at layer 0. Otherwise falls back to
+/// simplified bridge (layer 0 QKV skipped).
 ///
 /// Returns (checks_run, failures).
 fn replay_token_shell(
@@ -1965,22 +2096,36 @@ fn replay_token_shell(
     retained: &verilm_core::types::RetainedTokenState,
     weights: &dyn ShellWeights,
     token_pos: usize,
+    initial_residual: Option<&[f32]>,
 ) -> (usize, Vec<String>) {
     use verilm_core::matmul::matmul_i32;
 
     let mut failures = Vec::new();
     let mut checks_run = 0usize;
 
-    // Layer 0: x_attn is unknown (depends on embedding, which the verifier
-    // doesn't have). No QKV Freivalds for layer 0.
-    // Layers 1+: x_attn = requantize(ffn_out) from the previous layer.
-    let mut x_attn: Option<Vec<i8>> = None;
+    // Full bridge: only when initial_residual is provided AND authenticated.
+    let use_full_bridge = initial_residual.is_some()
+        && !key.rmsnorm_attn_weights.is_empty()
+        && key.embedding_merkle_root.is_some();
+
+    let (mut residual, mut x_attn) = if use_full_bridge {
+        let ir = initial_residual.unwrap();
+        let res: Vec<f64> = ir.iter().map(|&v| v as f64).collect();
+        let normed = verilm_core::rmsnorm::rmsnorm_f64_input(
+            &res, &key.rmsnorm_attn_weights[0], key.rmsnorm_eps,
+        );
+        let xa = verilm_core::rmsnorm::quantize_f64_to_i8(
+            &normed, retained.layers[0].scale_x_attn as f64,
+        );
+        (Some(res), Some(xa))
+    } else {
+        (None, None)
+    };
 
     for (layer_idx, rs) in retained.layers.iter().enumerate() {
         let a = &rs.a;
 
-        // QKV Freivalds (only when x_attn is known, i.e. layers > 0 or
-        // when we have the cross-token chain from the previous token)
+        // QKV Freivalds (full bridge: all layers; toy: layers > 0)
         if let Some(ref xa) = x_attn {
             let qkv_mats = [
                 (MatrixType::Wq, cfg.hidden_dim, cfg.hidden_dim),
@@ -2024,13 +2169,25 @@ fn replay_token_shell(
             ));
         }
 
-        // Intra-layer chain: x_ffn via scale-aware bridge
-        let x_ffn = verilm_core::bridge_requantize(
-            &attn_out,
-            key.weight_scale_for(layer_idx, MatrixType::Wo),
-            rs.scale_a,
-            rs.scale_x_ffn,
-        );
+        // Post-attention bridge: derive x_ffn
+        let x_ffn = if let Some(ref mut res) = residual {
+            verilm_core::rmsnorm::bridge_residual_rmsnorm(
+                &attn_out,
+                key.weight_scale_for(layer_idx, MatrixType::Wo),
+                rs.scale_a,
+                res,
+                &key.rmsnorm_ffn_weights[layer_idx],
+                key.rmsnorm_eps,
+                rs.scale_x_ffn,
+            )
+        } else {
+            verilm_core::bridge_requantize(
+                &attn_out,
+                key.weight_scale_for(layer_idx, MatrixType::Wo),
+                rs.scale_a,
+                rs.scale_x_ffn,
+            )
+        };
 
         // W_g, W_u: gate and up projections
         let g = matmul_i32(
@@ -2091,17 +2248,45 @@ fn replay_token_shell(
             ));
         }
 
-        // Cross-layer chain: x_attn for next layer (intra-token)
+        // Post-FFN bridge: derive x_attn for next layer
         let next_scale_x_attn = retained.layers
             .get(layer_idx + 1)
             .map(|r| r.scale_x_attn)
             .unwrap_or(1.0);
-        x_attn = Some(verilm_core::bridge_requantize(
-            &ffn_out,
-            key.weight_scale_for(layer_idx, MatrixType::Wd),
-            rs.scale_h,
-            next_scale_x_attn,
-        ));
+
+        x_attn = if let Some(ref mut res) = residual {
+            if layer_idx + 1 < key.rmsnorm_attn_weights.len() {
+                Some(verilm_core::rmsnorm::bridge_residual_rmsnorm(
+                    &ffn_out,
+                    key.weight_scale_for(layer_idx, MatrixType::Wd),
+                    rs.scale_h,
+                    res,
+                    &key.rmsnorm_attn_weights[layer_idx + 1],
+                    key.rmsnorm_eps,
+                    next_scale_x_attn,
+                ))
+            } else {
+                verilm_core::rmsnorm::dequant_add_residual(
+                    &ffn_out,
+                    key.weight_scale_for(layer_idx, MatrixType::Wd),
+                    rs.scale_h,
+                    res,
+                );
+                Some(verilm_core::bridge_requantize(
+                    &ffn_out,
+                    key.weight_scale_for(layer_idx, MatrixType::Wd),
+                    rs.scale_h,
+                    next_scale_x_attn,
+                ))
+            }
+        } else {
+            Some(verilm_core::bridge_requantize(
+                &ffn_out,
+                key.weight_scale_for(layer_idx, MatrixType::Wd),
+                rs.scale_h,
+                next_scale_x_attn,
+            ))
+        };
     }
 
     (checks_run, failures)

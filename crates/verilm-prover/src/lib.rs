@@ -5,8 +5,9 @@ use verilm_core::constants::MatrixType;
 use verilm_core::matmul::matmul_i32;
 use verilm_core::merkle;
 use verilm_core::requantize;
+use verilm_core::rmsnorm::{bridge_residual_rmsnorm, dequant_add_residual, rmsnorm_f64_input, quantize_f64_to_i8};
 use verilm_core::types::{
-    AuditChallenge, AuditResponse, BatchCommitment, BatchProof, CommitmentVersion,
+    AuditChallenge, AuditResponse, BatchCommitment, BatchProof, BridgeParams, CommitmentVersion,
     DeploymentManifest, LayerTrace, RetainedLayerState, RetainedTokenState,
     ShellLayerOpening, ShellTokenOpening, ShellWeights,
     TokenTrace, V4AuditResponse, VerificationPolicy, VerifierKey,
@@ -573,14 +574,26 @@ pub fn commit_minimal(
 ///
 /// `weight_scales` is per-layer, per-MatrixType quantization scales.
 /// Empty for native INT8 / toy model (bridges fall back to clamp).
+///
+/// When `bridge` is `Some`, uses the paper-correct full bridge:
+///   dequant → residual += → RMSNorm → quantize
+/// When `None`, falls back to simplified bridge.
 pub fn compute_shell_opening(
     retained: &RetainedTokenState,
     weights: &dyn ShellWeights,
     cfg: &verilm_core::constants::ModelConfig,
     weight_scales: &[Vec<f32>],
+    bridge: Option<&BridgeParams>,
+    layer_filter: Option<&[usize]>,
 ) -> ShellTokenOpening {
-    let mut layers = Vec::with_capacity(retained.layers.len());
-    let mut x_attn: Option<Vec<i8>> = None;
+    // Determine how many layers to compute. For a contiguous prefix filter
+    // 0..=L_max we iterate through L_max+1 layers (bridge is sequential).
+    let max_layer = layer_filter
+        .map(|f| f.iter().copied().max().map_or(0, |m| m + 1))
+        .unwrap_or(retained.layers.len());
+    let max_layer = max_layer.min(retained.layers.len());
+
+    let mut layers = Vec::new();
 
     let ws = |layer: usize, mt: MatrixType| -> f32 {
         if weight_scales.is_empty() || layer >= weight_scales.len() {
@@ -590,10 +603,20 @@ pub fn compute_shell_opening(
         weight_scales[layer][idx]
     };
 
-    for (layer_idx, rs) in retained.layers.iter().enumerate() {
+    // Full bridge: init residual from embedding and derive x_attn_0
+    let (mut residual, mut x_attn) = if let Some(b) = bridge {
+        let res: Vec<f64> = b.initial_residual.iter().map(|&v| v as f64).collect();
+        let normed = rmsnorm_f64_input(&res, &b.rmsnorm_attn_weights[0], b.rmsnorm_eps);
+        let xa = quantize_f64_to_i8(&normed, retained.layers[0].scale_x_attn as f64);
+        (Some(res), Some(xa))
+    } else {
+        (None, None)
+    };
+
+    for (layer_idx, rs) in retained.layers.iter().enumerate().take(max_layer) {
         let a = &rs.a;
 
-        // QKV: only when x_attn is known (layers > 0, from cross-layer chain)
+        // QKV: when x_attn is known (full bridge: all layers; toy: layers > 0)
         let (q, k, v) = if let Some(ref xa) = x_attn {
             (
                 Some(matmul_i32(weights.weight(layer_idx, MatrixType::Wq), xa, cfg.hidden_dim, cfg.hidden_dim)),
@@ -609,19 +632,21 @@ pub fn compute_shell_opening(
             weights.weight(layer_idx, MatrixType::Wo), a, cfg.hidden_dim, cfg.hidden_dim,
         );
 
-        // Bridge: x_ffn = bridge_requantize(attn_out, scale_wo, scale_a, scale_x_ffn)
-        let x_ffn = bridge_requantize(
-            &attn_out,
-            ws(layer_idx, MatrixType::Wo),
-            rs.scale_a,
-            rs.scale_x_ffn,
-        );
+        // Post-attention bridge: derive x_ffn
+        let x_ffn = if let (Some(ref mut res), Some(b)) = (&mut residual, bridge) {
+            bridge_residual_rmsnorm(
+                &attn_out, ws(layer_idx, MatrixType::Wo), rs.scale_a,
+                res, &b.rmsnorm_ffn_weights[layer_idx], b.rmsnorm_eps, rs.scale_x_ffn,
+            )
+        } else {
+            bridge_requantize(&attn_out, ws(layer_idx, MatrixType::Wo), rs.scale_a, rs.scale_x_ffn)
+        };
 
         // W_g, W_u @ x_ffn
         let g = matmul_i32(weights.weight(layer_idx, MatrixType::Wg), &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
         let u = matmul_i32(weights.weight(layer_idx, MatrixType::Wu), &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
 
-        // Bridge: h = SiLU(dequant(g)) * dequant(u), requantized with scale_h
+        // SiLU bridge (unchanged — no residual involved)
         let h = verilm_core::silu::compute_h_scaled(
             &g, &u,
             ws(layer_idx, MatrixType::Wg),
@@ -633,22 +658,44 @@ pub fn compute_shell_opening(
         // W_d @ h
         let ffn_out = matmul_i32(weights.weight(layer_idx, MatrixType::Wd), &h, cfg.hidden_dim, cfg.ffn_dim);
 
-        // Cross-layer chain: x_attn for next layer
+        // Post-FFN bridge: derive x_attn for next layer
         let next_scale_x_attn = retained.layers
             .get(layer_idx + 1)
             .map(|r| r.scale_x_attn)
             .unwrap_or(1.0);
-        x_attn = Some(bridge_requantize(
-            &ffn_out,
-            ws(layer_idx, MatrixType::Wd),
-            rs.scale_h,
-            next_scale_x_attn,
-        ));
 
-        layers.push(ShellLayerOpening { attn_out, g, u, ffn_out, q, k, v });
+        x_attn = if let (Some(ref mut res), Some(b)) = (&mut residual, bridge) {
+            if layer_idx + 1 < b.rmsnorm_attn_weights.len() {
+                Some(bridge_residual_rmsnorm(
+                    &ffn_out, ws(layer_idx, MatrixType::Wd), rs.scale_h,
+                    res, &b.rmsnorm_attn_weights[layer_idx + 1], b.rmsnorm_eps,
+                    next_scale_x_attn,
+                ))
+            } else {
+                // Last layer: update residual, simplified bridge for unused x_attn
+                dequant_add_residual(&ffn_out, ws(layer_idx, MatrixType::Wd), rs.scale_h, res);
+                Some(bridge_requantize(
+                    &ffn_out, ws(layer_idx, MatrixType::Wd), rs.scale_h, next_scale_x_attn,
+                ))
+            }
+        } else {
+            Some(bridge_requantize(
+                &ffn_out, ws(layer_idx, MatrixType::Wd), rs.scale_h, next_scale_x_attn,
+            ))
+        };
+
+        // Only include layers in the filter
+        if layer_filter.map_or(true, |f| f.contains(&layer_idx)) {
+            layers.push(ShellLayerOpening { attn_out, g, u, ffn_out, q, k, v });
+        }
     }
 
-    ShellTokenOpening { layers }
+    ShellTokenOpening {
+        layers,
+        layer_indices: layer_filter.map(|f| f.to_vec()),
+        initial_residual: bridge.map(|b| b.initial_residual.to_vec()),
+        embedding_proof: bridge.and_then(|b| b.embedding_proof.clone()),
+    }
 }
 
 /// V4 open: open a challenged token with prover-computed shell intermediates.
@@ -658,16 +705,22 @@ pub fn compute_shell_opening(
 ///
 /// `weight_scales` is per-layer, per-MatrixType quantization scales.
 /// Empty for native INT8 / toy model.
+///
+/// When `bridge` is `Some`, uses full dequant→residual→RMSNorm→quantize chain.
+/// When `None`, falls back to simplified bridge.
 pub fn open_v4(
     state: &MinimalBatchState,
     token_index: u32,
     weights: &dyn ShellWeights,
     cfg: &verilm_core::constants::ModelConfig,
     weight_scales: &[Vec<f32>],
+    bridge: Option<&BridgeParams>,
+    layer_filter: Option<&[usize]>,
 ) -> V4AuditResponse {
     let mut response = open_v4_structural(state, token_index);
     response.shell_opening = Some(compute_shell_opening(
-        &state.all_retained[token_index as usize], weights, cfg, weight_scales,
+        &state.all_retained[token_index as usize], weights, cfg, weight_scales, bridge,
+        layer_filter,
     ));
     response
 }

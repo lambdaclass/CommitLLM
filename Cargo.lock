@@ -865,6 +865,7 @@ dependencies = [
  "bincode",
  "clap",
  "hex",
+ "serde_json",
  "sha2",
  "verilm-core",
  "verilm-prover",

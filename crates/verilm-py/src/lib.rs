@@ -712,6 +712,30 @@ fn compute_weight_hash(model_dir: String) -> PyResult<String> {
 // V4: Minimal retained-state commitment (no _int_mm, no full LayerTrace)
 // ===========================================================================
 
+use std::sync::Arc;
+
+/// Cached weight provider loaded once at server startup.
+///
+/// Wraps `SafetensorsWeightProvider` in an `Arc` so it can be shared
+/// across multiple `MinimalBatchStateHandle` instances without reloading.
+#[pyclass]
+struct WeightProvider {
+    inner: Arc<verilm_keygen::SafetensorsWeightProvider>,
+}
+
+#[pymethods]
+impl WeightProvider {
+    #[new]
+    fn new(model_dir: String) -> PyResult<Self> {
+        let provider = verilm_keygen::SafetensorsWeightProvider::load(
+            std::path::Path::new(&model_dir),
+        ).map_err(|e| PyValueError::new_err(format!(
+            "failed to load weights from {}: {}", model_dir, e
+        )))?;
+        Ok(WeightProvider { inner: Arc::new(provider) })
+    }
+}
+
 /// Opaque handle to V4 minimal retained-state commitment.
 ///
 /// Same interface as BatchState for commitment inspection, but audit
@@ -720,8 +744,8 @@ fn compute_weight_hash(model_dir: String) -> PyResult<String> {
 struct MinimalBatchStateHandle {
     inner: verilm_prover::MinimalBatchState,
     commitment: BatchCommitment,
-    /// Model directory for loading weights at audit time (shell openings).
-    model_dir: Option<String>,
+    /// Shared weight provider for shell opening computation at audit time.
+    provider: Option<Arc<verilm_keygen::SafetensorsWeightProvider>>,
 }
 
 #[pymethods]
@@ -757,7 +781,22 @@ impl MinimalBatchStateHandle {
     /// token's retained state, Merkle/IO proofs, all prefix tokens' retained
     /// states + proofs, and prover-computed shell openings for the challenged
     /// token (so the verifier can check with key-only Freivalds).
-    fn audit_v4(&self, token_index: u32) -> PyResult<String> {
+    fn audit_v4(&self, token_index: u32, layer_indices: Option<Vec<usize>>) -> PyResult<String> {
+        let response = self.build_v4_response(token_index, layer_indices.as_deref())?;
+        serde_json::to_string(&response)
+            .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+    }
+
+    /// Binary V4 audit: bincode + zstd. Returns bytes.
+    fn audit_v4_binary<'py>(&self, py: Python<'py>, token_index: u32, layer_indices: Option<Vec<usize>>) -> PyResult<Bound<'py, PyBytes>> {
+        let response = self.build_v4_response(token_index, layer_indices.as_deref())?;
+        let data = verilm_core::serialize::serialize_v4_audit(&response);
+        Ok(PyBytes::new(py, &data))
+    }
+}
+
+impl MinimalBatchStateHandle {
+    fn build_v4_response(&self, token_index: u32, layer_filter: Option<&[usize]>) -> PyResult<verilm_core::types::V4AuditResponse> {
         if token_index >= self.inner.all_retained.len() as u32 {
             return Err(PyValueError::new_err(format!(
                 "token_index {} out of range (n_tokens={})",
@@ -766,24 +805,36 @@ impl MinimalBatchStateHandle {
             )));
         }
 
-        let dir = self.model_dir.as_ref().ok_or_else(|| {
+        let provider = self.provider.as_ref().ok_or_else(|| {
             PyValueError::new_err(
-                "V4 audit requires model_dir for shell opening computation; \
-                 model directory was not available at commit time"
+                "V4 audit requires WeightProvider; none was provided at commit time"
             )
         })?;
-        let provider = verilm_keygen::SafetensorsWeightProvider::load(
-            std::path::Path::new(dir),
-        ).map_err(|e| PyValueError::new_err(format!(
-            "failed to load weights from {}: {}", dir, e
-        )))?;
-        let response = verilm_prover::open_v4(
-            &self.inner, token_index, &provider, provider.config(),
-            provider.weight_scales(),
-        );
-
-        serde_json::to_string(&response)
-            .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+        let token_id = self.inner.token_ids[token_index as usize] as usize;
+        let bridge_data: Option<(Vec<f32>, Option<verilm_core::merkle::MerkleProof>)> =
+            if !provider.rmsnorm_attn_weights().is_empty() {
+                let embedding_row = provider.load_embedding_row(token_id)
+                    .map_err(|e| PyValueError::new_err(format!(
+                        "failed to load embedding row for token {}: {}", token_id, e
+                    )))?;
+                let embedding_proof = provider.embedding_proof(token_id);
+                Some((embedding_row, embedding_proof))
+            } else {
+                None
+            };
+        let bridge = bridge_data.as_ref().map(|(emb_row, emb_proof)| {
+            verilm_core::types::BridgeParams {
+                rmsnorm_attn_weights: provider.rmsnorm_attn_weights(),
+                rmsnorm_ffn_weights: provider.rmsnorm_ffn_weights(),
+                rmsnorm_eps: provider.rmsnorm_eps(),
+                initial_residual: emb_row,
+                embedding_proof: emb_proof.clone(),
+            }
+        });
+        Ok(verilm_prover::open_v4(
+            &self.inner, token_index, provider.as_ref(), provider.config(),
+            provider.weight_scales(), bridge.as_ref(), layer_filter,
+        ))
     }
 }
 
@@ -808,7 +859,7 @@ impl MinimalBatchStateHandle {
     prompt,
     sampling_seed,
     manifest = None,
-    model_dir = None,
+    weight_provider = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn commit_minimal_from_captures(
@@ -820,7 +871,7 @@ fn commit_minimal_from_captures(
     prompt: Vec<u8>,
     sampling_seed: Vec<u8>,
     manifest: Option<&Bound<'_, PyDict>>,
-    model_dir: Option<String>,
+    weight_provider: Option<&WeightProvider>,
 ) -> PyResult<MinimalBatchStateHandle> {
     let n_entries = o_proj_inputs.len();
     let expected_scales = n_entries * 4;
@@ -869,7 +920,94 @@ fn commit_minimal_from_captures(
         },
     );
 
-    Ok(MinimalBatchStateHandle { inner, commitment, model_dir })
+    Ok(MinimalBatchStateHandle {
+        inner,
+        commitment,
+        provider: weight_provider.map(|wp| Arc::clone(&wp.inner)),
+    })
+}
+
+/// Generate a verifier key from safetensors model weights.
+///
+/// Args:
+///     model_dir: str — path to directory containing .safetensors files.
+///     seed: bytes (32) — verifier-secret seed for random vector generation.
+///
+/// Returns:
+///     str — JSON-serialized VerifierKey.
+#[pyfunction]
+fn generate_key(model_dir: String, seed: Vec<u8>) -> PyResult<String> {
+    if seed.len() != 32 {
+        return Err(PyValueError::new_err("seed must be exactly 32 bytes"));
+    }
+    let mut seed_arr = [0u8; 32];
+    seed_arr.copy_from_slice(&seed);
+
+    let key = verilm_keygen::generate_key(
+        std::path::Path::new(&model_dir),
+        seed_arr,
+    ).map_err(|e| PyValueError::new_err(format!("keygen failed: {}", e)))?;
+
+    serde_json::to_string(&key)
+        .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+}
+
+/// Verify a V4 audit response against a verifier key (key-only Freivalds).
+///
+/// Args:
+///     audit_json: str — JSON-serialized V4AuditResponse.
+///     key_json: str — JSON-serialized VerifierKey.
+///
+/// Returns:
+///     dict with `passed` (bool), `checks_run` (int), `checks_passed` (int),
+///     `failures` (list of str), `duration_us` (int).
+#[pyfunction]
+fn verify_v4<'py>(
+    py: Python<'py>,
+    audit_json: &str,
+    key_json: &str,
+) -> PyResult<Bound<'py, PyDict>> {
+    let response: verilm_core::types::V4AuditResponse = serde_json::from_str(audit_json)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize V4AuditResponse: {}", e)))?;
+    let key: VerifierKey = serde_json::from_str(key_json)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize VerifierKey: {}", e)))?;
+
+    let report = verilm_verify::verify_v4(&key, &response);
+
+    let result = PyDict::new(py);
+    result.set_item("passed", report.verdict == verilm_verify::Verdict::Pass)?;
+    result.set_item("checks_run", report.checks_run)?;
+    result.set_item("checks_passed", report.checks_passed)?;
+    result.set_item("failures", &report.failures)?;
+    result.set_item("duration_us", report.duration.as_micros() as u64)?;
+    Ok(result)
+}
+
+/// Verify a V4 audit response from binary (bincode+zstd) format.
+///
+/// Args:
+///     audit_binary: bytes — binary V4AuditResponse (from audit_v4_binary).
+///     key_json: str — JSON-serialized VerifierKey.
+#[pyfunction]
+fn verify_v4_binary<'py>(
+    py: Python<'py>,
+    audit_binary: &[u8],
+    key_json: &str,
+) -> PyResult<Bound<'py, PyDict>> {
+    let response = verilm_core::serialize::deserialize_v4_audit(audit_binary)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize V4 binary: {}", e)))?;
+    let key: VerifierKey = serde_json::from_str(key_json)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize VerifierKey: {}", e)))?;
+
+    let report = verilm_verify::verify_v4(&key, &response);
+
+    let result = PyDict::new(py);
+    result.set_item("passed", report.verdict == verilm_verify::Verdict::Pass)?;
+    result.set_item("checks_run", report.checks_run)?;
+    result.set_item("checks_passed", report.checks_passed)?;
+    result.set_item("failures", &report.failures)?;
+    result.set_item("duration_us", report.duration.as_micros() as u64)?;
+    Ok(result)
 }
 
 #[pymodule]
@@ -881,6 +1019,10 @@ fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(verify_batch, m)?)?;
     m.add_function(wrap_pyfunction!(verify_single, m)?)?;
     m.add_function(wrap_pyfunction!(compute_weight_hash, m)?)?;
+    m.add_function(wrap_pyfunction!(generate_key, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_v4, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_v4_binary, m)?)?;
+    m.add_class::<WeightProvider>()?;
     m.add_class::<BatchState>()?;
     m.add_class::<MinimalBatchStateHandle>()?;
     Ok(())

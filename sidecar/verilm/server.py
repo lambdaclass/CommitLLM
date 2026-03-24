@@ -72,6 +72,17 @@ class VerifiedInferenceServer:
         self._audit_store: Dict[str, dict] = {}
         self._max_audit_entries = max_audit_entries
 
+        # Pre-load weight provider once for all future V4 audits.
+        self._weight_provider = None
+        if self._model_dir is not None:
+            try:
+                import verilm_rs
+                logger.info("Pre-loading WeightProvider from %s...", self._model_dir)
+                self._weight_provider = verilm_rs.WeightProvider(self._model_dir)
+                logger.info("WeightProvider ready")
+            except Exception as e:
+                logger.warning("Could not pre-load WeightProvider: %s", e)
+
     def _compute_tokenizer_hash(self, llm) -> str:
         """SHA-256 of tokenizer vocab, used in manifest."""
         try:
@@ -350,7 +361,7 @@ class VerifiedInferenceServer:
             prompt=prompt.encode(),
             sampling_seed=seed,
             manifest=manifest,
-            model_dir=self._model_dir,
+            weight_provider=self._weight_provider,
         )
 
     def audit(
@@ -360,17 +371,19 @@ class VerifiedInferenceServer:
         token_index: int,
         layer_indices: List[int],
         tier: str = "routine",
+        binary: bool = False,
     ):
         """Open an audit proof.
 
         For full-trace (V1-V3) state: returns zstd-compressed binary.
-        For V4 retained-state: returns JSON string (V4AuditResponse).
+        For V4 retained-state: returns JSON string or binary bytes.
 
         Args:
             request_id: from the /chat response.
             token_index: which token to audit.
             layer_indices: which layers to open. The verifier chooses.
             tier: "routine" (shell checks) or "full" (shell + attention replay).
+            binary: if True, return bincode+zstd bytes instead of JSON (V4 only).
         """
         entry = self._audit_store.get(request_id)
         if entry is None:
@@ -384,7 +397,9 @@ class VerifiedInferenceServer:
 
         # V4 retained-state path.
         if hasattr(state, 'audit_v4'):
-            return state.audit_v4(token_index)
+            if binary:
+                return state.audit_v4_binary(token_index, layer_indices)
+            return state.audit_v4(token_index, layer_indices)
 
         # V1-V3 full-trace path.
         return state.audit_stratified(token_index, layer_indices, tier)
@@ -440,13 +455,21 @@ def create_app(llm, **kwargs):
                     {"error": "token_index and layer_indices are required"},
                     status_code=400,
                 )
+            use_binary = request.get("binary", False)
             result = server.audit(
                 request_id=request["request_id"],
                 token_index=request["token_index"],
                 layer_indices=request.get("layer_indices", []),
                 tier=request.get("tier", "routine"),
+                binary=use_binary,
             )
-            # V4 returns JSON string; V1-V3 returns bytes.
+            # Binary V4 or V1-V3 returns bytes.
+            if isinstance(result, (bytes, memoryview)):
+                return Response(
+                    content=bytes(result),
+                    media_type="application/octet-stream",
+                )
+            # JSON V4 returns string.
             if isinstance(result, str):
                 return JSONResponse(
                     json.loads(result),

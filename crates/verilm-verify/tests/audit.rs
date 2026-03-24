@@ -40,15 +40,12 @@ fn derive_layers_full_returns_all() {
 }
 
 #[test]
-fn derive_layers_routine_returns_10() {
+fn derive_layers_routine_returns_contiguous_prefix() {
     let layers = derive_audit_layers(&[42u8; 32], 5, 80, AuditTier::Routine);
-    assert_eq!(layers.len(), 10);
-    for &l in &layers {
-        assert!(l < 80);
-    }
-    let mut sorted = layers.clone();
-    sorted.sort();
-    assert_eq!(layers, sorted);
+    // Must be a contiguous prefix 0..=L_max with at least min(10, n_layers) layers
+    assert!(layers.len() >= 10, "prefix too short: {}", layers.len());
+    assert!(layers.len() <= 80);
+    assert_eq!(layers, (0..layers.len()).collect::<Vec<_>>());
 }
 
 #[test]
@@ -80,7 +77,13 @@ fn derive_layers_different_seed_different_result() {
 fn build_challenge_routine() {
     let challenge = build_audit_challenge(&[42u8; 32], 100, 80, AuditTier::Routine);
     assert!(challenge.token_index < 100);
-    assert_eq!(challenge.layer_indices.len(), 10);
+    assert!(challenge.layer_indices.len() >= 10);
+    assert!(challenge.layer_indices.len() <= 80);
+    // Contiguous prefix
+    assert_eq!(
+        challenge.layer_indices,
+        (0..challenge.layer_indices.len()).collect::<Vec<_>>()
+    );
     assert_eq!(challenge.tier, AuditTier::Routine);
 }
 

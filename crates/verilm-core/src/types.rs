@@ -153,6 +153,12 @@ pub struct VerifierKey {
     /// RMSNorm epsilon. Default 1e-5 for Llama-family models.
     #[serde(default = "default_rmsnorm_eps")]
     pub rmsnorm_eps: f64,
+
+    /// Merkle root over embedding table rows.
+    /// Each leaf = `hash_embedding_row(row_f32)`. Verifier checks prover's
+    /// `initial_residual` against this root via `ShellTokenOpening.embedding_proof`.
+    #[serde(default)]
+    pub embedding_merkle_root: Option<[u8; 32]>,
 }
 
 fn default_rmsnorm_eps() -> f64 {
@@ -304,6 +310,41 @@ pub struct ShellLayerOpening {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShellTokenOpening {
     pub layers: Vec<ShellLayerOpening>,
+    /// Which layer indices are present in `layers`.
+    /// `None` means all layers (full audit). When `Some`, `layers[i]` corresponds
+    /// to `layer_indices[i]`. Must be a contiguous prefix 0..=L_max for bridge
+    /// verification (sequential residual chain).
+    #[serde(default)]
+    pub layer_indices: Option<Vec<usize>>,
+    /// Initial residual stream (embedding[token_id]) for full bridge verification.
+    /// When present, enables residual-tracking RMSNorm bridge (paper-correct).
+    /// `None` for toy model (simplified clamp bridge).
+    #[serde(default)]
+    pub initial_residual: Option<Vec<f32>>,
+    /// Merkle proof binding `initial_residual` to the embedding table committed
+    /// in the verifier key. `leaf_index` = token_id, leaf = `hash_embedding_row(initial_residual)`.
+    #[serde(default)]
+    pub embedding_proof: Option<MerkleProof>,
+}
+
+/// Parameters for the full bridge computation (dequant → residual → RMSNorm → quantize).
+///
+/// Contains the RMSNorm weights and initial residual needed for
+/// paper-correct bridge verification. Weight scales are passed separately
+/// (they're also used by the simplified bridge path).
+///
+/// When `None`, the simplified bridge is used (toy model / native INT8).
+pub struct BridgeParams<'a> {
+    /// Per-layer RMSNorm weight vectors for attention input normalization.
+    pub rmsnorm_attn_weights: &'a [Vec<f32>],
+    /// Per-layer RMSNorm weight vectors for FFN input normalization.
+    pub rmsnorm_ffn_weights: &'a [Vec<f32>],
+    /// RMSNorm epsilon.
+    pub rmsnorm_eps: f64,
+    /// Initial residual stream value (embedding[token_id], f32).
+    pub initial_residual: &'a [f32],
+    /// Embedding Merkle proof for this token. Forwarded into `ShellTokenOpening`.
+    pub embedding_proof: Option<MerkleProof>,
 }
 
 /// V4 audit response: opens retained leaves for challenged and prefix tokens,
