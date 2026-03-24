@@ -1,28 +1,34 @@
 # VeriLM: Provenance for Open-Weight LLM Inference
 
-When you get a response from an LLM, there's no way to know what produced it. Not which model ran. Not whether the output was modified between generation and delivery. Not whether the provider used the weights they claimed.
+When you get a response from an LLM, there is usually no technical way to know what produced it. Not which checkpoint ran. Not whether the decode policy was the one the provider claimed. Not whether the output was modified between generation and delivery. Not whether the provider used the weights they charged for.
 
-Today, LLM outputs are unsigned assertions. There is no cryptographic link between a response and the computation that produced it. VeriLM changes that: it gives any response a verifiable tie to a specific set of public model weights. The verification is interactive and client-held — the client who holds a verifier key audits the provider directly. It is not a transferable proof that third parties can verify offline.
+VeriLM is a commit-and-audit protocol for open-weight LLM inference. A provider serves a response normally and returns a compact receipt. Later, a verifier can challenge specific token positions and layers, request an opening, and check the opened computation against:
 
-Model swap detection — catching a provider who serves 8B while charging for 70B — is one application of this, and the most obvious one. But provenance is the deeper primitive, and once you have it, the use cases multiply.
+- the committed model identity
+- the committed preprocessing policy
+- the committed decode and output policy
+- the committed transcript state
+- the public weights and verifier key
 
-The forcing function is data sovereignty. Banks frequently cannot send customer financial data to third-party AI providers under policy or regulatory constraints. Hospitals face similar restrictions with patient records under HIPAA. Law firms won't send privileged documents to a third-party API. Government agencies can't send classified material to commercial providers. These industries aren't choosing open-weight models primarily for cost — they're choosing them because they need to keep data on their own infrastructure. And once you're running open-weight models through a third-party hosting provider or on untrusted compute, the question becomes immediate: who verifies the inference?
+The goal is simple to state and difficult to fake:
 
-- **Decentralized compute.** Networks like Gensyn, Ritual, or Bittensor run inference on untrusted nodes. The current approach is 2-3x redundant execution — run the same inference multiple times and compare. This is expensive, and it's also weaker than it sounds: honest runs can diverge because of sampling randomness, floating-point non-determinism, or serving-stack differences, so output agreement is an awkward proxy for correctness. VeriLM replaces redundant execution with receipts and random audits — checking the computation path itself, not whether several sampled strings happen to match.
+> Everything except the attention interior is exact, replayable, and cryptographically bound.
 
-- **Benchmarking and model evaluation.** When a platform like LMSYS or Artificial Analysis evaluates a provider, they need to know the provider actually ran the claimed model and didn't swap in something cheaper to game the benchmark. Model identity is the benchmarker's entire product. The benchmarker is naturally the verifier.
+That is a stronger statement than “the outputs looked plausible” or “several replicas agreed.” It is a statement about computation provenance.
 
-- **Regulated industries.** Finance, insurance, healthcare, and legal are all moving to open-weight models for data sovereignty. They also have the strongest audit trail requirements. A bank's model risk management team already documents which model version is approved for credit decisions. VeriLM turns that documentation from a policy claim into a cryptographic guarantee. The EU AI Act (Article 15, enforcement August 2026) creates regulatory pressure for stronger auditability of high-risk AI systems — requiring appropriate accuracy, robustness, and cybersecurity guarantees that push in this direction.
+## Why provenance matters
 
-- **Enterprise AI procurement.** If you're paying for Llama 70B inference from a hosting provider, you want proof you're getting it. Not a promise. Not a dashboard. A cryptographic receipt you can independently verify.
+Open-weight models are attractive precisely because their weights are public and their behavior can, in principle, be audited. That matters in several settings:
 
-- **Agent platforms.** As AI agents take autonomous actions — executing trades, approving purchases, triaging support tickets — the question of which model produced each decision becomes a liability question. VeriLM receipts at each step create an auditable chain: not just what the agent did, but which exact model decided to do it.
+- **Enterprise procurement.** If you are paying for Llama 70B or Qwen 72B, you want proof that the provider really served that checkpoint.
+- **Benchmarking and evaluation.** A benchmarker needs to know that the claimed model actually ran.
+- **Regulated deployments.** Banks, hospitals, and legal teams often need an auditable chain from decision to model version.
+- **Decentralized or untrusted compute.** Networks such as Gensyn, Ritual, or Bittensor cannot rely on “just trust the node.”
+- **Agent systems.** If an autonomous system takes action, the question of which model produced the decision becomes a liability and governance question.
 
-- **Supply chain integrity.** Between the model running on a GPU and the text appearing in your application, there are proxies, gateways, caching layers, and middleware. Any of these can modify the output. A VeriLM receipt, committed at generation time, lets any party holding a verifier key audit whether what they received matches what was generated — regardless of how many intermediaries touched it.
+VeriLM turns “we ran this model” from a dashboard claim into a cryptographically auditable statement.
 
-The common thread: open-weight models have public weights, and public weights can be audited. VeriLM turns that observation into a protocol.
-
-## The core trick: verify a huge matrix multiply with two dot products
+## The core trick: verify huge matrix multiplies cheaply
 
 Suppose a provider claims they computed
 
@@ -30,172 +36,266 @@ Suppose a provider claims they computed
 z = W @ x
 ```
 
-for some public weight matrix `W`. The naive way to verify that claim is to recompute `W @ x`. For transformer layers, that's expensive enough that you might as well just rerun inference.
+for some public weight matrix `W`. Recomputing `W @ x` directly is expensive.
 
-Freivalds' algorithm gives a much cheaper check. During setup, the verifier picks a secret random vector `r` and precomputes
+Freivalds’ algorithm gives a much cheaper check. During setup, the verifier samples a secret random vector `r` and precomputes
 
 ```
 v = r^T @ W
 ```
 
-Then, at audit time, instead of recomputing the matrix multiply, the verifier checks
+Then, at audit time, the verifier checks
 
 ```
 v · x  =?  r^T · z
 ```
 
-All arithmetic is done modulo a prime `p ≥ 2³²`, and `r` is sampled uniformly from this finite field (F_p = Z/pZ). If `z` really equals `W @ x`, the equality always holds. If the provider used the wrong weight matrix, it fails except with probability at most `1/p` — by the Schwartz–Zippel lemma, a nonzero linear form over a finite field vanishes on at most a `1/p` fraction of the domain. With `p ≥ 2³²`, this gives at most `2^-32`.
+with arithmetic in a finite field `F_p` for a prime `p ≥ 2^32`. If `z = W @ x`, the equality always holds. If the provider used the wrong weights or the wrong output, it fails except with probability at most `1/p`.
 
-That matters because transformer inference is mostly weight matrix multiplication. Once you can audit those multiplies cheaply, you can verify the model's identity without rerunning the model.
+This matters because transformers are mostly matrix multiplication. Once those multiplications become cheap to audit, the verifier can check model identity without rerunning the full model.
 
-During a one-time setup, the verifier precomputes these vectors for every weight matrix at every layer, then deletes the weights. For Llama 70B, the entire verifier key is about 25 MB. The client stores this once and can audit any response, forever, without ever touching the weights again.
+In the final VeriLM protocol, Freivalds is used for:
 
-## The key insight: public weights are an auditor's gift
+- `W_q`
+- `W_k`
+- `W_v`
+- `W_o`
+- `W_gate`
+- `W_up`
+- `W_down`
+- `LM_head`
 
-Open-weight models have a property that most verifiable computation work ignores: the weights are public. Anyone can download Llama 70B from HuggingFace. Anyone can compute a fingerprint over those weights.
+The verifier still computes the final logits exactly for token replay. Freivalds binds the linear map; exact replay uses the resulting logits.
 
-This means we don't need a general-purpose proof system. We don't need zkSNARKs (100-1000x prover overhead). We don't need TEEs (hardware trust assumptions). We need something much simpler: a way to check, after the fact, that the provider's computation is consistent with the public weights.
+## What the protocol binds
 
-VeriLM is a commit-and-audit protocol. The provider serves responses normally. Each response carries a 100-byte receipt. Most responses are never checked. But when a client decides to audit, the provider must open their computation, and the verifier can cryptographically check it against the known weights.
+VeriLM does not only bind “some model ran.” It binds the whole deployment surface that affects outputs.
 
-Think of it like a tax audit. Everyone files returns. Most are never examined. But the possibility of an audit keeps people honest — especially when getting caught is catastrophic.
+The final protocol commits four specs:
 
-In practice, the client's verifier software automatically and randomly audits a small fraction of responses — say, 1-5%. The provider commits to every response before knowing whether it will be challenged, which tokens will be opened, or which layers will be checked. This unpredictability is what creates the deterrent: cheating on any response carries a non-negligible probability of getting caught. The auditing is programmatic, not human-initiated — the client software makes the challenge decision, sends it, and verifies the opening, all within a short audit window.
+- `input_spec_hash`
+- `model_spec_hash`
+- `decode_spec_hash`
+- `output_spec_hash`
 
-## What a transformer actually computes (and why most of it is easy to verify)
+Together, these bind:
 
-To understand VeriLM, you need to see what happens inside a transformer layer. Here's the computation for a single token at a single layer:
+- tokenizer and normalization semantics
+- chat template
+- BOS/EOS preprocessing policy
+- truncation and padding policy
+- special-token handling
+- system prompt semantics
+- model identity `R_W`
+- quantization scheme and configuration
+- adapter / LoRA / merged-checkpoint identity
+- RoPE and scaling configuration
+- RMSNorm epsilon
+- sampler ID and version
+- mode choice, temperature, top-k, top-p
+- penalties, logit bias, bad-word masks, grammar constraints, tie-breaking rules
+- EOS / ignore-EOS behavior
+- stop strings and min/max stopping rules
+- detokenization / cleanup / whitespace normalization
+
+If any of those semantics change, the committed receipt changes.
+
+## The guarantee boundary
+
+VeriLM has four guarantee classes:
+
+- **Exact.** Cryptographically checked or canonically recomputed with unambiguous semantics.
+- **Approximate.** Replayed and constrained, but not bit-reproducible because native FP16/BF16 attention is hardware-sensitive.
+- **Statistical.** Commitment binding is exact, but correctness of unopened positions depends on challenge sampling unless deep audit is used.
+- **Fail-closed.** A feature is either replayed exactly or rejected explicitly. The verifier never silently accepts unsupported semantics.
+
+This yields a clean protocol boundary:
+
+- **Exact:** preprocessing binding, embedding binding, shell matmuls, bridge operations, the final-token tail, LM-head binding, canonical sampled replay, and output-policy replay.
+- **Approximate:** the attention interior only.
+- **Statistical:** prefix/KV provenance in routine audit mode.
+- **Exact again in deep audit:** full-prefix checking when the stronger audit mode is used.
+
+## What a transformer computes, and where the hard part is
+
+Inside one layer, the high-level structure is:
 
 ```
 RMSNorm
-W_q, W_k, W_v  (INT8 matrix multiplies)
+W_q, W_k, W_v
 Requantize i32 → i8
 RoPE on Q, K
-Attention (Q@K^T, softmax, α@V)     ← the hard part
-W_o  (INT8 matrix multiply)
-Requantize i32 → i8
+Attention (Q@K^T, softmax, α@V)     ← the only approximate stage
+W_o
 Residual add
 RMSNorm
-W_gate, W_up  (INT8 matrix multiplies)
-Requantize i32 → i8
+W_gate, W_up
 SiLU(gate) ⊙ up
-W_down  (INT8 matrix multiply)
-Requantize i32 → i8
+W_down
 Residual add
 ```
 
-Count the operations. There are seven weight matrix multiplications per layer. There's requantization (converting INT32 accumulator outputs back to INT8). There's RoPE (positional encoding), RMSNorm (normalization), and SiLU (activation function).
+All shell operations are deterministic or canonically recomputable. The one stage that is not exactly reproducible across hardware is FP16/BF16 attention.
 
-All of these are deterministic or canonically recomputable. Given the same inputs, they produce the same verifiable outputs on any hardware. This is the **shell** — and it's exactly checkable. (It's sometimes called the "linear shell," though it includes nonlinear operations like RMSNorm and SiLU that are verified by canonical recomputation rather than Freivalds. The shell's exactness is a composition: cryptographic checks on the matmuls, plus deterministic recomputation on the bridge operations.)
+The protocol therefore does two things at once:
 
-Then there's attention. The GPU computes `Q @ K^T`, softmax, and `α @ V` in FP16 or BF16. Floating-point arithmetic is not bit-reproducible across hardware, or even across runs on the same hardware. This is the one part we can't verify exactly.
+- it makes the shell exact
+- it constrains attention from both sides without pretending it is exact
 
-The crucial observation: the shell is where the weights live. If you want to check which model ran, you check the weight multiplications. Attention is a function of Q, K, V — which are themselves outputs of weight multiplications. So you can verify the model's identity exactly, even though you can't verify attention exactly.
+The final-token tail is also exact, but only because the protocol starts that exact tail from a captured live boundary state: the pre-final-norm residual after the last transformer layer.
 
 ## The full protocol in three phases
 
-### Phase 0: Setup (once per model)
+### Phase 0: Setup
 
-Someone publishes the weights (e.g., Meta puts Llama 3 on HuggingFace). Anyone can compute a Merkle root `R_W` over all weight matrices — this is the model's public identity. The verifier generates secret random vectors, precomputes the Freivalds vectors, stores the 25 MB key, and deletes the weights.
+The verifier starts from a public checkpoint and computes a public model identity `R_W`, a Merkle root over the checkpoint in canonical order.
 
-### Phase 1: Commitment (every response)
+Then the verifier generates a secret verifier key:
 
-The provider runs inference normally. No changes to weights or GPU kernels. The only addition is a tracing layer that captures intermediates alongside normal execution: the INT8 inputs and INT32 outputs of each matrix multiplication, post-attention outputs, and quantization scales.
+- Freivalds vectors for the seven shell matrix families and `LM_head`
+- embedding commitment data
+- final RMSNorm weights
+- model configuration needed for canonical replay
 
-After generation completes, the provider builds two Merkle trees:
+The verifier key is secret. If the prover learns the verifier’s Freivalds vectors, the linear checks can be forged.
 
-- **R_T** (trace tree): commits all intermediates at all tokens. The provider can't change any activation after committing.
-- **R_KV** (KV tree): commits the per-token K,V history. The provider can't retroactively rewrite earlier tokens' context.
+### Phase 1: Commitment
 
-Plus a deployment manifest that binds the tokenizer, quantization scheme, sampling parameters, and system prompt.
+The provider runs inference normally. VeriLM adds a tracing layer that captures the retained state needed for later audit.
 
-The provider returns: the response + a **100-byte receipt** (R_T, R_KV, manifest hash, token count). That's it. Most responses are never audited. The receipt is the only overhead on the serving path.
+For every token, the provider commits:
 
-### Phase 2: Verification (on demand)
+- shell inputs and outputs
+- quantization bridge state
+- post-attention retained state
+- prefix/KV state
+- the exact final-token boundary state
+- deployment metadata through the four committed specs
+- transcript randomness through a per-request `batch_seed` and `seed_commitment`
 
-The client decides to audit. The provider doesn't know which responses will be challenged, or which tokens within them.
+The provider returns the response plus a compact receipt containing the trace commitments, the manifest commitment, the randomness commitment, and transcript metadata.
 
-**Step 1: Challenge.** The verifier picks random token positions and layers to open.
+### Phase 2: Verification
 
-**Step 2: Shell verification.** For each challenged position, the provider opens the INT8 inputs and INT32 outputs with Merkle proofs. The verifier runs Freivalds on all seven weight matrices (two dot products each), recomputes every requantization bridge exactly, checks SiLU against a 256-entry lookup table, recomputes RoPE from the position index, and verifies RMSNorm in the quantized output space. If any check fails, the provider cheated.
+When challenged, the provider opens the requested token positions and layers.
 
-After this step, the verifier has cryptographically verified Q, K, and V for the challenged token. These are trusted values.
+The verifier then performs:
 
-**Step 3: KV provenance.** Attention at token t needs the K,V from all earlier tokens. The provider opens the full prefix from R_KV. The verifier randomly samples some earlier positions and runs full shell verification on those too, checking that the committed K,V values match real computation. If the provider lied about K,V at any position, they risk the verifier hitting that exact position. The detection probability follows a clean formula: if they tampered with f out of n positions and the verifier samples k, P(catch) = 1 − (1 − f/n)^k.
+1. **Embedding binding.** Check that the token really maps to the committed embedding row.
+2. **Shell verification.** Run Freivalds on the shell matmuls and canonically recompute bridge operations.
+3. **KV provenance.** Open the committed prefix/KV state and sample earlier positions, or use deep audit for exact full-prefix checking.
+4. **Attention replay.** Recompute attention independently against the committed prefix and compare to the committed post-attention output.
+5. **Final-token replay.** Start from the captured pre-final-norm residual, apply the final RMSNorm exactly, bind `LM_head` with Freivalds, compute logits exactly, replay the canonical decode policy, and verify the chosen token and output-policy behavior.
 
-**Step 4: Cross-layer consistency.** When multiple layers are opened on the same token, fake attention at layer L must produce output that, after passing through W_o and requantization, feeds into layer L+1 consistently with the committed trace. This creates coupled algebraic constraints across layers. The more layers opened, the tighter the constraint.
+That last step is what closes the “final-token gap.” The verifier must not derive the token from a hidden state reconstructed through many approximate attention layers and then call the result exact.
 
-**Step 5: Attention replay.** The verifier recomputes attention independently using the shell-verified Q and the committed prefix K,V, working in FP64. The result is quantized to INT8 and compared against the committed post-attention output. This catches gross manipulation — local-window approximations that ignore distant context, suppressed attention to specific positions, substituted attention patterns.
+## Unsupported features are not “best effort”
 
-## What the receipt actually binds
+The final protocol has a strict rule:
 
-VeriLM is not just an anti-downgrade check. Each response carries a small cryptographic receipt that binds the audited computation to a specific deployment context. The receipt commits to the traced intermediates and to a manifest covering the claimed checkpoint, quantization, tokenizer, and decoding policy. An audited response is therefore tied not merely to "some model ran," but to a particular claimed model configuration.
+> Every decode or output feature is either replayed exactly or rejected explicitly.
 
-The strongest guarantee is model identity. VeriLM computes a public Merkle root over the model weights, so the expected identity of a published checkpoint can be recomputed independently. If a provider claims to serve a known public model but actually runs a modified, downgraded, or re-quantized fork, the audit fails: either the committed weight identity does not match the approved checkpoint, or the opened computation does not verify against the claimed weights. In practical terms, a provider cannot claim one set of weights and compute with another without risking detection. This is the protocol's hard claim: cryptographic certainty for model identity.
+That means:
 
-Beyond that, the receipt provides meaningful computation binding and long-run anti-tampering pressure. Because the provider commits before knowing whether the response will be audited, which token will be challenged, or which parts of the trace will be opened, it cannot safely rely on post-hoc rewriting or systematic substitution. That does not amount to a universal proof of full end-to-end response integrity on every response. It does, however, create persistent audit risk: if the delivered output is inconsistent with the committed computation, an audit can expose the mismatch, and repeated unpredictable audits make sustained cheating increasingly likely to be caught.
+- no hidden fallback from exact replay to approximate replay
+- no silently ignored decode modifiers
+- no “the manifest bound it, but the verifier didn’t really use it”
 
-The right way to describe VeriLM, then, is in two layers:
+Unsupported features must fail closed.
 
-- **Cryptographic certainty for model identity.** The claimed checkpoint either was used or it was not.
-- **Statistical deterrence for broader response integrity.** Not every response is universally proved, but when client software randomly audits 1-5% of responses — and the provider cannot predict which — sustained tampering becomes increasingly likely to be caught. The provider commits before knowing whether a response will be challenged, so they cannot selectively cheat on "safe" responses.
+## What VeriLM proves exactly
 
-## What's solved, what's not, and why we're telling you
+The final protocol gives exact guarantees for:
 
-**Solved — model provenance.** A single audit cryptographically ties a response to a specific set of weights with certainty ≤ 1/2³². This is the foundation everything else builds on. Whether you're checking for a model swap, establishing an audit trail, or proving which model produced a scientific result, provenance is the primitive. The guarantee is unconditional. No statistical sampling, no threshold calibration. A single audit of a single token is enough to catch a provider serving different model weights, because the Freivalds check at any opened layer will fail against the public checkpoint.
+- model identity `R_W`
+- embedding lookup
+- shell matmuls
+- bridge operations
+- final-token boundary from the captured pre-final-norm residual onward
+- LM-head binding
+- exact logits computation
+- canonical decode replay
+- output-policy replay
 
-**Nearly solved — attention correctness.** The verifier independently recomputes attention from shell-verified inputs and compares the output. Gross manipulation (skipped attention, local-window approximation, suppressed context) is caught. The remaining adversarial freedom is bounded by FP16/FP64 rounding disagreement within the INT8 quantization corridor — a margin that is expected to be very small but hasn't been measured empirically yet.
+This is the heart of the claim “everything except attention.”
 
-**Statistical — prefix history.** The KV cache for earlier tokens is Merkle-committed and spot-checked. Commitment binding is exact; correctness of unsampled positions depends on sampling rate.
+## What remains approximate
 
-We're being explicit about these boundaries because most verifiable inference work isn't. The honest decomposition is: exact verification on the shell, approximate replay on the attention interior, statistical coverage everywhere else. We think this matters more than claiming more than we can deliver.
+The attention interior remains approximate because native GPU FP16/BF16 attention is not bit-reproducible across devices or even across runs.
 
-## The attention gap
+VeriLM still constrains it strongly:
 
-This is the protocol's most interesting limitation, and it's irreducible within the sidecar design.
+- shell-verified `Q`, `K`, and `V`
+- commitment-verified prefix state
+- independent verifier replay
+- cross-layer consistency through the residual stream
 
-The shell is exactly verifiable because its operations are deterministic or canonically recomputable. Attention is not. The GPU computes Q@K^T, softmax, and α@V in FP16, which is not bit-reproducible across hardware. There's no way to verify the FP16 result matches a verifier-side replay without forcing the provider to change their attention kernel — which defeats the whole point.
+But it does not pretend that FP16/BF16 attention is exact.
 
-The protocol constrains attention from both sides. The inputs (Q, K, V) and outputs (post-W_o) are exactly verified by the shell. Attention replay checks that the committed output is consistent with the committed inputs. Cross-layer consistency forces fake attention to survive the entire residual stream.
+## What remains statistical
 
-What remains is the **requantization corridor**: the fraction of INT8 elements that disagree between FP16 and FP64 computation of the same attention operation. This is an open empirical question. If the agreement is >99% (which we expect), the adversary's freedom is tightly bounded. Measuring this corridor is the single most important next step.
+In routine audit mode, prefix/KV provenance is statistical:
 
-## What providers pay
+- Merkle binding is exact
+- sampled earlier positions are shell-verified exactly
+- unopened prefix positions are covered probabilistically
 
-Most intermediates in the forward pass are deterministic — given the same inputs, they reproduce exactly. The provider doesn't need to store them.
+Deep audit is the stronger path that upgrades prefix checking to exact full-prefix verification.
 
-The only things that must be stored are the post-attention output at each layer (the INT8 result after requantizing the FP16 attention output) and the associated per-tensor quantization scales. These can't be re-derived because re-running attention might produce slightly different FP16 values that land in different quantization buckets.
+## What providers still pay
 
-| Model | Per token storage |
-|---|---|
-| Llama 8B | ~128 KB |
-| Llama 70B | ~640 KB |
-| Llama 405B | ~2 MB |
+VeriLM is a sidecar protocol, not a zk proof system. The serving path still runs ordinary inference. The provider pays for:
 
-Everything else is re-derivable from: input tokens + output tokens + stored attention outputs and scales.
+- tracing retained state
+- storing audit-window state
+- returning a compact receipt on every response
+- responding to the relatively small fraction of responses that get audited
 
-With a short audit window (1-2 minutes), traces fit in a RAM ring buffer. For Llama 70B on 4x H100, that's about 315 GB — 16% of system RAM. No disk I/O required. The tracing overhead is a memcpy per layer per token.
-
-Short audit windows require automated auditing: the client's decision to challenge must be programmatic, not human-initiated. For software making a round-trip decision, 1-2 minutes is generous.
+The final protocol is designed so that the expensive work is rare and challenge-driven, not paid on every response.
 
 ## Why not ZK?
 
-The obvious question: why not just prove inference in zero knowledge?
+The obvious alternative is a zero-knowledge proof of inference.
 
-Because it's too expensive. Current zkSNARK/zkSTARK systems impose 100-1000x prover overhead. For a model that costs dollars per response to run, that means hundreds to thousands of dollars per proved response. That's not a viable product.
+That gives a different tradeoff:
 
-VeriLM's overhead is a 100-byte receipt per response and a memcpy per layer per token for tracing. The expensive part — verification — only happens on the small fraction of responses that get audited. And even then, verification is CPU-feasible for the client: dot products and hash checks for the shell, O(n²) matrix arithmetic for attention replay on longer sequences.
+- full third-party verifiability
+- much larger prover overhead
+- less natural fit for public open weights
 
-The tradeoff is honest: ZK gives you a proof that anyone can verify without interaction. VeriLM gives you an interactive audit that requires the provider to open their traces. But the audit establishes provenance with the same cryptographic certainty, at a fraction of the cost.
+VeriLM chooses a different point in the design space:
 
-## What's next
+- interactive audit
+- client-held verifier key
+- very small normal-path overhead
+- strong model-provenance guarantees
 
-The protocol is specified. The [paper](https://github.com/lambdaclass/verishell/releases/tag/v0.1.0) has the full details. What comes next:
+It is deliberately not a transferable proof system.
 
-1. **Measuring the requantization corridor.** Run attention in both FP16 and FP64 on real model activations, quantize both to INT8, measure per-element agreement. This sets the security parameter for attention replay.
+## Supported architectures
 
-2. **Integration with serving stacks.** VeriLM is designed to deploy as a sidecar over vLLM and llama.cpp. Building the tracing layer and receipt generation.
+The final protocol targets autoregressive decoder-only transformers with the committed capture layout and replay semantics. Unsupported architectures must fail closed rather than be silently interpreted as if they were Llama-style decoder stacks.
 
-3. **Formalization.** We want a Lean formalization of the protocol's security properties, particularly the Freivalds soundness bound and the composition argument.
+## Assumptions outside protocol scope
 
-The code is at [github.com/lambdaclass/verishell](https://github.com/lambdaclass/verishell).
+VeriLM does not assume honest prover hardware or honest provider runtime behavior. Those are what the protocol is meant to eliminate.
+
+The explicit assumptions outside protocol scope are:
+
+- standard cryptographic assumptions for the hash functions and finite-field checks
+- secrecy of verifier-only material such as the Freivalds vectors
+- no side-channel leakage of verifier-secret material
+- correct execution of the verifier itself
+
+Those assumptions should be stated explicitly, not hidden inside vague language about “trust.”
+
+## The real remaining research question
+
+The main open question is still the attention corridor:
+
+- how tightly FP64 verifier replay tracks production FP16/BF16 attention after requantization
+- how to calibrate tolerances so the verifier is honest about what is exact and what is only approximately constrained
+
+That is the genuine “except attention” boundary. Everything else in the final protocol is meant to be bound, checked, replayed exactly, or rejected.
+
+The code is at [github.com/lambdaclass/verishell](https://github.com/lambdaclass/verishell). The implementation roadmap for reaching this final protocol is in the repository’s `roadmap.md`.

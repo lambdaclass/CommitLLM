@@ -49,7 +49,7 @@
     #pad(x: 1.5em)[
       #text(size: 8.5pt)[
         #text(weight: "bold")[Abstract — ]
-        Users of open-weight LLMs have no technical mechanism to verify which model actually ran or whether the output was altered. We present VeriLM, a commit-and-audit protocol for open-weight LLM inference. The core insight is that public weights permit lightweight audit rather than expensive proof systems. VeriLM deploys as a sidecar over unmodified serving stacks: each response carries a 100-byte receipt, and only audited responses open traces. The protocol provides three tiers of assurance: exact model-identity checks on opened layers ($lt.eq 1\/2^(32)$ false-accept per matrix via Freivalds on INT8 weight matmuls), statistical prefix-state provenance (Merkle-committed KV history with sampled shell verification), and approximate attention replay (FP64 recomputation compared against the committed quantized post-attention output, bounded by the requantization corridor). Because receipts are small, VeriLM supports continuous random auditing at low amortized cost.
+        Users of open-weight LLMs have no technical mechanism to verify which model actually ran, which decode policy was used, or whether the output was altered after generation. We present VeriLM, a commit-and-audit protocol for open-weight LLM inference. The core insight is that public weights permit lightweight audit rather than expensive proof systems. VeriLM deploys as a sidecar over unmodified serving stacks: each response carries a compact receipt, and only audited responses open traces. The final protocol provides four guarantee classes: exact checks for preprocessing, model identity, shell matmuls, bridge operations, the final-token tail, and decode/output replay; statistical prefix-state provenance in routine audit mode; approximate attention replay bounded by the requantization corridor; and explicit fail-closed rejection of unsupported semantics. Because receipts are small and audits are rare, VeriLM supports continuous random auditing at low amortized cost.
       ]
     ]
     #v(0.5em)
@@ -68,7 +68,7 @@ Existing approaches to verifiable inference fall into two categories. Cryptograp
 
 VeriLM takes a different approach: a lightweight sidecar protocol that runs alongside unmodified GPU inference. The key insight is that INT8 quantized inference consists of operations that are either deterministic or canonically recomputable, and can be verified exactly. The only non-deterministic component is FP16/BF16 attention, which the protocol constrains from both sides without requiring exact reproduction.
 
-The protocol provides five layers of verification with different guarantee types, ranging from exact cryptographic checks on weight matrices to statistical sampling of prefix history.
+The protocol provides exact, approximate, statistical, and fail-closed guarantees in different parts of the pipeline. The honest decomposition is: exact verification everywhere outside the attention interior, approximate attention replay, and statistical prefix anchoring unless deep audit is used.
 
 = System Model
 
@@ -76,14 +76,14 @@ The protocol provides five layers of verification with different guarantee types
 
 The adversary controls the inference server. They may swap model weights, modify attention computation, fabricate intermediate activations, or lie about earlier context. The adversary may cheat adaptively --- choosing different strategies for different responses. The following timing and knowledge constraints apply:
 
-+ *Commitment precedes challenge.* The provider sends the receipt ($R_T$, $R_"KV"$, $M$, $N$) before learning whether the response will be audited.
++ *Commitment precedes challenge.* The provider sends the receipt ($R_T$, $R_"KV"$, $M$, $H(s)$, $N$, $dots$) before learning whether the response will be audited.
 + *Unpredictable selection.* The provider cannot predict which response, token position, or layer the verifier will challenge.
 + *Secret key.* The verifier holds $r_j$ and $v_j^((i))$ secret; the provider never observes them or the audit decision rule.
 + *Local verification.* The verifier checks locally --- no third party sees the challenge, the opening, or the conversation.
 
 In the intended deployment, the client's verifier software automatically and randomly audits a small fraction of responses (e.g., 1--5%).
 
-The client holds a verifier key ($tilde 25$ MB for Llama 70B) derived from the public model weights and a secret random vector. The client audits responses directly --- no trusted third party sees the conversation. The attester / verifier / relying-party terminology here follows standard remote-attestation usage @birkholz2023rats.
+The client holds a verifier key ($tilde 26$ MB for Llama 70B) derived from the public model weights and secret verifier-side randomness. The client audits responses directly --- no trusted third party sees the conversation. The attester / verifier / relying-party terminology here follows standard remote-attestation usage @birkholz2023rats.
 
 VeriLM provides interactive, client-held verification. The client who holds the verifier key checks the computation directly. The protocol does not produce a transferable proof that third parties can verify offline --- this is a deliberate tradeoff for low overhead. Audit openings contain intermediate activations from which the conversation content can be reconstructed; this is why the client audits themselves rather than delegating to a third party.
 
@@ -92,7 +92,7 @@ VeriLM provides interactive, client-held verification. The client who holds the 
 VeriLM is designed around three constraints:
 
 + *No serving-path changes.* The provider runs unmodified GPU inference. The only addition is a tracing layer that captures intermediates alongside normal execution.
-+ *Minimal per-response overhead.* Each response carries a 100-byte receipt (two Merkle roots, a deployment manifest hash, and a token count). Most responses are never audited.
++ *Minimal per-response overhead.* Each response carries a compact receipt binding trace commitments, deployment specs, transcript randomness, and token count. Most responses are never audited.
 + *Client-side verification.* The client performs all verification using CPU-feasible operations (dot products, hash checks, and --- for attention replay --- matrix arithmetic scaling as $O(n^2)$ in sequence length).
 
 #block(
@@ -102,10 +102,24 @@ VeriLM is designed around three constraints:
   radius: 2pt,
 )[
   *Protocol guarantees at a glance.*
-  + *Exact.* Opened-layer model identity ($lt.eq 1\/2^(32)$ false-accept) and commitment binding (hash-immutable after receipt).
-  + *Statistical.* Prefix KV correctness under sampling ($k$ prefix positions checked).
+  + *Exact.* Preprocessing, model identity, shell matmuls, bridge operations, the final-token tail, and decode/output replay.
+  + *Statistical.* Prefix KV correctness under routine audit sampling ($k$ prefix positions checked).
   + *Approximate.* Attention replay under the FP16$arrow.l.r$FP64 requantization corridor (@sec-attention-gap).
+  + *Outside protocol scope.* Standard cryptographic assumptions, verifier-secret secrecy, no side-channel leakage of verifier secrets, and correct verifier execution.
 ]
+
+== Protocol Boundary
+
+The final protocol uses four guarantee classes:
+
++ *Exact.* A property is cryptographically checked or canonically recomputed with fully specified semantics.
++ *Approximate.* The verifier independently replays the computation and constrains it tightly, but native FP16/BF16 execution is not bit-reproducible across hardware.
++ *Statistical.* Commitment binding is exact, but correctness of unopened positions depends on challenge sampling unless deep audit is used.
++ *Fail-closed.* A feature is either replayed exactly or rejected explicitly; the verifier never silently accepts unsupported semantics.
+
+VeriLM does _not_ assume honest prover hardware or honest provider runtime behavior. Those are what the protocol is designed to remove. The explicit assumptions outside protocol scope are standard cryptographic assumptions, secrecy of verifier-only material, resistance to side-channel leakage of verifier secrets, and correct execution of the verifier itself.
+
+The final protocol targets autoregressive decoder-only transformers with a committed capture layout and replay specification. Unsupported architectures must fail closed rather than be silently interpreted as if they shared decoder-only semantics.
 
 #figure(
   table(
@@ -115,7 +129,8 @@ VeriLM is designed around three constraints:
     [$R_W$], [Merkle root over model weights (public identity)],
     [$R_T$], [Merkle root over trace intermediates],
     [$R_"KV"$], [Merkle root over per-token $K, V$ history],
-    [$M$], [Deployment manifest hash],
+    [$M$], [Deployment commitment over input/model/decode/output specs],
+    [$H(s)$], [Transcript-seed commitment],
     [$N$], [Token count in response],
     [$c, ell$], [Number of challenged tokens; number of opened layers per token],
     [$m$], [Output dimension of the checked weight matrix (length of $r_j$)],
@@ -128,19 +143,22 @@ VeriLM is designed around three constraints:
 
 = Verification Layers
 
-VeriLM's verification is structured in five layers. This section defines the taxonomy and key terms; the full procedure is specified in @sec-protocol.
+VeriLM's verification is structured in six layers. This section defines the taxonomy and key terms; the full procedure is specified in @sec-protocol.
 
 The *shell* is the non-attention path through each transformer layer: seven INT8 weight matrix multiplications ($W_q$, $W_k$, $W_v$, $W_o$, $W_"gate"$, $W_"up"$, $W_"down"$), *requantization bridges* (the $"i32" arrow.r "i8"$ conversions between consecutive matmul stages), RoPE, RMSNorm, and SiLU. The shell includes nonlinear operations (RMSNorm, SiLU), but all shell operations are deterministic or canonically recomputable. Its exactness is a composition: cryptographic checks (Freivalds @freivalds1979) on the weight matmuls, plus deterministic or canonical recomputation on the bridge operations.
 
-Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not bit-reproducible across hardware --- this is the only non-exact component. The five layers are:
+Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not bit-reproducible across hardware --- this is the only non-exact component. The final exact tail starts from a captured pre-final-norm residual after the last layer, applies final RMSNorm exactly, binds the LM head with Freivalds, computes logits exactly, and replays the decode/output policy.
 
-+ *Shell verification (exact).* Cryptographic Freivalds checks ($lt.eq 1\/2^(32)$ false-accept) on all weight matmuls, plus deterministic recomputation of requantization bridges, RoPE, RMSNorm, and SiLU.
-+ *KV provenance (statistical).* Merkle-committed per-token K,V history; sampled positions are shell-verified. Binding is exact; correctness of unsampled positions depends on sampling rate.
+The six layers are:
+
++ *Input/model binding (exact).* Preprocessing policy, model identity, quantization scheme, architecture parameters, and deployment specs are committed and checked against known-good values.
++ *Shell verification (exact).* Cryptographic Freivalds checks ($lt.eq 1\/2^(32)$ false-accept) on all shell weight matmuls, plus deterministic recomputation of requantization bridges, RoPE, RMSNorm, and SiLU.
++ *KV provenance (statistical by default).* Merkle-committed per-token K,V history; sampled positions are shell-verified. Binding is exact; correctness of unsampled positions depends on sampling rate unless deep audit is used.
 + *Cross-layer consistency (structural).* Opening multiple layers on the same token creates algebraic coupling through the residual stream --- fake attention must stay consistent across all opened layers.
 + *Attention replay (approximate).* The verifier recomputes attention from shell-verified Q and committed prefix K,V in FP64, quantizes to INT8, and compares. Limited by FP16$arrow.l.r$FP64 mismatch.
-+ *Unopened positions (none).* No direct verification. Deterrence from the provider not knowing which responses will be audited or which tokens challenged.
++ *Final-token replay (exact / fail-closed).* The verifier starts from the captured pre-final-norm residual, checks the LM head with Freivalds, computes logits exactly, and replays the decode/output policy; unsupported semantics are rejected explicitly rather than silently accepted.
 
-@fig-forward-pass traces the full forward pass for one output token. Each operation is labeled with its verification type: Freivalds-checked weight matmuls, canonically recomputable bridge operations, and the single non-exact point --- FP16 attention. The only non-replayable provider-side state is the per-layer `attn_out_i8` and its quantization scale; everything below that point replays exactly or canonically from the stored values, the transcript, and the public weights.
+@fig-forward-pass traces the full forward pass for one output token. Each operation is labeled with its verification type: Freivalds-checked weight matmuls, canonically recomputable bridge operations, and the single non-exact point --- FP16 attention. The only non-replayable provider-side state is the per-layer `attn_out_i8` and its quantization scale, plus the captured pre-final-norm residual that anchors the exact final-token tail.
 
 #figure(
   block(width: 100%, inset: (x: 4pt, y: 6pt))[
@@ -181,14 +199,37 @@ Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not b
       raw("  down_i32 = W_down @ x_i8"), t[Freivalds],
       raw("  residual += dequant(down_i32, ...)"), t[canonical],
       sp,
-      raw("x_norm = RMSNorm(residual)"), t[canonical],
+      raw("final_residual = residual"), t[*STORED*],
+      raw("x_norm = RMSNorm(final_residual)"), t[canonical],
       raw("x_i8, s = quantize(x_norm)"), t[exact],
-      raw("logits_i32 = LM_head @ x_i8"), t[Freivalds],
-      raw("token = sample(dequant(logits_i32))"), t[transcript],
+      raw("logits_i32 = LM_head @ x_i8"), t[Freivalds + exact logits],
+      raw("token = canonical_decode(logits_i32, seed, policy)"), t[exact / fail-closed],
     )
   ],
-  caption: [Annotated forward pass for one output token. Each operation is labeled with its verification type. The only non-exact stage is FP16 attention; storing `attn_out_i8` and its scale bridges the gap.],
+  caption: [Annotated forward pass for one output token. Each operation is labeled with its verification type. The only non-exact stage is FP16 attention; the final-token tail is exact because it starts from the captured pre-final-norm residual.],
 ) <fig-forward-pass>
+
+#figure(
+  block(width: 100%, inset: (x: 3pt, y: 4pt))[
+    #set text(size: 7.3pt)
+    #table(
+      columns: (1.35fr, 1.7fr, auto, 1.35fr),
+      align: (left, left, center, left),
+      [*Component*], [*Verification method*], [*Guarantee*], [*What is bound*],
+      [Input preprocessing], [Committed input spec], [Exact], [Tokenizer, chat template, BOS/EOS, truncation, special-token handling, system prompt],
+      [Embedding], [Merkle proof to committed embedding root], [Exact], [Token-to-row binding],
+      [Shell matmuls], [Freivalds], [Exact], [Seven shell matrix families],
+      [Bridge operations], [Canonical recomputation], [Exact], [Requantization, residual, RMSNorm, RoPE, SiLU],
+      [Prefix / KV provenance], [Merkle binding + sampled shell checks or deep audit], [Statistical / Exact], [Committed prefix state],
+      [Attention], [Independent replay against committed prefix/output], [Approximate], [Consistency with committed shell values],
+      [Final boundary], [Captured pre-final-norm residual], [Exact], [Start of the exact final-token tail],
+      [LM head], [Freivalds + exact logits replay], [Exact], [Final linear map and logits],
+      [Decode policy], [Canonical replay or explicit rejection], [Exact / Fail-closed], [Sampler semantics and randomness],
+      [Output policy], [Exact replay or explicit rejection], [Exact / Fail-closed], [Stopping and text-cleanup semantics],
+    )
+  ],
+  caption: [Verification coverage matrix for the final protocol. "Fail-closed" means a feature is either replayed exactly or rejected explicitly; the verifier never silently accepts unsupported semantics.],
+) <tab-coverage-matrix>
 
 = The Protocol <sec-protocol>
 
@@ -196,7 +237,9 @@ Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not b
 
 *Public identity.* A Merkle root @merkle1987 $R_W$ is computed over all weight matrices of the published checkpoint. This root is the model's public identity --- anyone can recompute it from the published weights.
 
-*Verifier key generation.* The verifier fixes a prime $p gt.eq 2^(32)$. All Freivalds checks operate in $bb(F)_p = ZZ \/ p ZZ$: INT8 inputs and INT32 accumulators are lifted into this field. For each of the 7 matrix types ($W_q$, $W_k$, $W_v$, $W_o$, $W_"gate"$, $W_"up"$, $W_"down"$), the verifier samples a secret random vector $r_j$ uniformly from $bb(F)_p^m$. For each layer $i$, the verifier precomputes $v_j^((i)) = r_j^T W_j^((i)) mod p$ --- one matrix-vector multiply per matrix per layer, performed once. The resulting verifier key is $tilde 25$ MB for Llama 70B. After precomputation, the verifier deletes the weights. The $r_j$ vectors are the verifier's secret; if the prover learns them, it can forge passing checks.
+*Verifier key generation.* The verifier fixes a prime $p gt.eq 2^(32)$. All Freivalds checks operate in $bb(F)_p = ZZ \/ p ZZ$: INT8 inputs and INT32 accumulators are lifted into this field. For the 7 shell matrix types ($W_q$, $W_k$, $W_v$, $W_o$, $W_"gate"$, $W_"up"$, $W_"down"$) and the final LM head, the verifier samples secret random vectors $r_j$ uniformly from $bb(F)_p^m$. For each per-layer matrix, the verifier precomputes $v_j^((i)) = r_j^T W_j^((i)) mod p$; for the LM head, the verifier precomputes the corresponding verifier-side check vector once for the global unembedding matrix. The verifier key also binds the embedding commitment, final RMSNorm weights, model configuration, quantization metadata, RoPE/scaling configuration, and RMSNorm epsilon needed for canonical replay. The resulting verifier key remains small enough for client-held verification (roughly $tilde 26$ MB for Llama 70B). After precomputation, the verifier deletes the weights. The $r_j$ vectors are verifier-secret; if the prover learns them, it can forge passing checks.
+
+*Specification binding.* The deployment is described by four committed specs: $H_"input"$, $H_"model"$, $H_"decode"$, and $H_"output"$. These bind preprocessing semantics, model configuration, decode policy, and output policy respectively. Unsupported semantics are not left ambiguous: they must either be replayed exactly or rejected explicitly.
 
 == Phase 1: Commitment
 
@@ -209,19 +252,20 @@ For every token at every layer (both prefill and decode), the provider records:
 - The requantized INT8 values at each bridge
 - The post-attention INT8 output
 - The per-tensor quantization scales at each requantization bridge
+- The captured pre-final-norm residual needed to anchor the exact final-token tail
 
 After generation completes, the provider builds two Merkle trees @merkle1987. The trees are separate because they serve different access patterns: shell verification (Step 2) opens a few positions from $R_T$, while KV provenance (Step 3) opens the full prefix from $R_"KV"$. A single tree would force opening all intermediates at every prefix position just to extract the KV values.
 
 - $R_T$ (trace tree): over all intermediates at all tokens. The provider cannot change any activation after committing.
 - $R_"KV"$ (KV tree): over per-token $K, V$ state across all layers. The provider cannot retroactively rewrite earlier tokens' context. This tree allows efficient opening of the full prefix KV without opening the complete trace at every position.
 
-A deployment manifest binds everything outside the forward pass:
+A deployment commitment binds everything outside the forward pass:
 
-$ M = H(&"tokenizer_hash" || R_W || "quant_hash" \
-  || &"sampling_params" || "eos_policy" \
-  || &"system_prompt_hash") $
+$ M = H(H_"input" || H_"model" || H_"decode" || H_"output") $
 
-The provider returns the response plus a 100-byte receipt ($R_T$, $R_"KV"$, $M$, $N$). Most responses are never audited. The receipt is the only overhead on the normal serving path.
+The provider also samples a fresh per-request transcript seed $s$, commits $H(s)$ in the receipt, and derives per-token randomness deterministically from $s$ and the token index.
+
+The provider returns the response plus a compact receipt $(R_T, R_"KV", M, H(s), N, dots)$. Most responses are never audited. The receipt is the only overhead on the normal serving path.
 
 == Phase 2: Verification
 
@@ -235,7 +279,7 @@ The verifier selects $c$ random token positions from the $N$-token response and,
 
 For each challenged token $t$ at each opened layer $i$, the provider opens the INT8 inputs $x_"i8"$, INT32 accumulators $z_"i32"$, per-tensor quantization scales, the residual stream values at the layer boundaries, and the post-attention output $"attn_out_i8"$ --- all with Merkle proofs against $R_T$. The verifier performs four checks:
 
-+ *Freivalds on each weight matrix.* For each of the 7 matrices, the verifier checks $v_j^((i)) dot x equiv r_j^T dot z space (mod p)$. Each check is two dot products in $bb(F)_p$ --- $O(n)$. If the prover used wrong weights, false-accept probability is $lt.eq 1\/p$ per matrix. The bound follows from the Schwartz--Zippel lemma: a nonzero linear form over $bb(F)_p$ vanishes on at most a $1\/p$ fraction of inputs.
++ *Freivalds on each shell weight matrix.* For each of the 7 shell matrices, the verifier checks $v_j^((i)) dot x equiv r_j^T dot z space (mod p)$. Each check is two dot products in $bb(F)_p$ --- $O(n)$. If the prover used wrong weights, false-accept probability is $lt.eq 1\/p$ per matrix. The bound follows from the Schwartz--Zippel lemma: a nonzero linear form over $bb(F)_p$ vanishes on at most a $1\/p$ fraction of inputs.
 
 + *Requantization bridges (exact).* The verifier recomputes the $"i32" arrow.r "i8"$ conversion elementwise from the opened accumulators and quantization scales. This is deterministic integer arithmetic. Without this check, the prover could pass Freivalds (correct $r dot z$) but feed fabricated $"i8"$ values into the next stage.
 
@@ -280,6 +324,18 @@ This pins the attention output to a specific computation over the committed valu
 
 *Limitations.* The replay proves consistency with the _committed_ prefix, not necessarily with true execution at every earlier token. Prefix KV values are commitment-verified (they match $R_"KV"$) but only statistically anchored to real computation via the sampled shell checks in Step 3. The replay also cannot match the GPU's FP16 attention exactly --- the verifier's FP64 reference will differ slightly near quantization bucket boundaries.
 
+=== Step 6: Final-Token Replay
+
+The verifier now enters the exact final-token tail. The provider opens the captured pre-final-norm residual for the challenged token, together with the committed decode/output policy and the revealed transcript seed. The verifier then:
+
++ Applies the final RMSNorm exactly using the committed model spec.
++ Quantizes into the LM-head input space canonically.
++ Checks the LM head with Freivalds and computes logits exactly.
++ Replays the canonical decode policy using the committed decode spec and the per-token seed derived from the revealed transcript seed.
++ Verifies the chosen token and the output-policy behavior (EOS handling, stop strings, max/min stopping rules, and claimed text cleanup) exactly, or rejects the feature explicitly if the deployment claims an unsupported policy.
+
+This step is what makes the final-token boundary exact. The verifier must not derive the token from a hidden state reconstructed through many layers of approximate attention replay and then call the result exact.
+
 == Summary
 
 @tab-verification-methods summarizes the verification method applied to each operation in the forward pass.
@@ -289,6 +345,7 @@ This pins the attention output to a specific computation over the committed valu
     columns: (auto, auto),
     align: (left, left),
     [*Operation*], [*Verification*],
+    [Input / deployment specs], [Committed four-spec manifest],
     [Input embedding], [Table lookup (exact)],
     [$W_q, W_k, W_v$ (INT8)], [Freivalds],
     [Requantize i32 $arrow.r$ i8], [Exact recomputation],
@@ -299,7 +356,10 @@ This pins the attention output to a specific computation over the committed valu
     [$W_"gate"$, $W_"up"$ (INT8)], [Freivalds],
     [SiLU $dot.o$ up], [256-entry LUT + exact],
     [$W_"down"$ (INT8)], [Freivalds],
-    [LM head], [Freivalds],
+    [Final boundary], [Captured pre-final-norm residual],
+    [LM head], [Freivalds + exact logits replay],
+    [Decode policy], [Canonical replay or fail-closed rejection],
+    [Output policy], [Exact replay or fail-closed rejection],
   ),
   caption: [Per-layer verification methods],
 ) <tab-verification-methods>
@@ -313,6 +373,7 @@ Audit token $t = 47$ at layers 12 and 13 of a 70B model, sampling $k = 8$ prefix
 + *KV provenance.* Provider opens $K_(1..46)$, $V_(1..46)$ at both layers from $R_"KV"$. Verifier picks 8 random earlier positions, runs full shell verification at each, confirms committed $K$, $V$ match.
 + *Cross-layer.* Post-attention output at layer 12 feeds into layer 13's RMSNorm --- both sides shell-verified, so boundary must match exactly.
 + *Replay.* At each opened layer, the verifier recomputes attention in FP64 from shell-verified $Q_(47)$ and the commitment-verified prefix. Quantizes to INT8, compares against committed `attn_out_i8`. Passes if at least fraction $tau$ of INT8 elements agree at both layers.
++ *Final token.* Provider opens the captured pre-final-norm residual and revealed transcript seed. Verifier applies final RMSNorm exactly, checks the LM head with Freivalds, recomputes logits exactly, replays the canonical decode policy, and confirms the chosen token and output policy.
 
 == Data Lifecycle
 
@@ -322,11 +383,12 @@ Audit token $t = 47$ at layers 12 and 13 of a 70B model, sampling $k = 8$ prefix
   table(
     columns: (auto, auto, auto),
     align: (left, left, left),
-    [*Receipt fields (100 B total)*], [*Provider retains (ring buffer)*], [*Revealed on audit*],
+    [*Receipt fields (compact)*], [*Provider retains (ring buffer)*], [*Revealed on audit*],
     [$R_T$ (trace Merkle root)], [INT8 inputs to all 7 matrices], [Merkle openings from $R_T$],
     [$R_"KV"$ (KV Merkle root)], [INT32 accumulator outputs], [Merkle openings from $R_"KV"$],
-    [Manifest hash $M$], [Requantized INT8 at each bridge], [Opened intermediates at challenged positions],
-    [Token count $N$], [`attn_out_i8` + quantization scales], [Full prefix $K$, $V$ at opened layers],
+    [Spec commitment $M$], [Requantized INT8 at each bridge], [Opened intermediates at challenged positions],
+    [Seed commitment $H(s)$], [`attn_out_i8` + quantization scales], [Full prefix $K$, $V$ at opened layers],
+    [Token count $N$], [Captured pre-final-norm residual], [Opened final boundary state + revealed seed],
     [], [Per-tensor quantization scales], [],
   ),
   caption: [Data lifecycle: receipt (every response), retained state (RAM ring buffer, discarded after audit window), and audit openings (revealed only when challenged).],
@@ -340,8 +402,8 @@ We formalize model-identity soundness via an interactive game between a challeng
 
 $bold("Game")^("id")_(cal(A))(lambda)$:
 
-+ *Setup.* $cal(C)$ publishes weights $W$ and Merkle root $R_W$. $cal(C)$ samples $r_j in.rev bb(F)_p^m$ for each matrix type $j$, precomputes $v_j^((i)) = r_j^T W_j^((i)) mod p$ for every layer $i$, and stores the secret verifier key $"sk" = {r_j, v_j^((i))}$. $cal(A)$ receives $W$, $R_W$ but never observes $"sk"$.
-+ *Commit.* $cal(A)$ receives a prompt, runs inference (using any strategy), and returns a response plus receipt $(R_T, R_"KV", M, N)$.
++ *Setup.* $cal(C)$ publishes weights $W$ and Merkle root $R_W$. $cal(C)$ samples verifier-secret Freivalds vectors for every shell matrix family and for the LM head, precomputes the corresponding verifier-side checks, and stores the secret verifier key $"sk"$. $cal(A)$ receives $W$, $R_W$ but never observes $"sk"$.
++ *Commit.* $cal(A)$ receives a prompt, runs inference (using any strategy), and returns a response plus receipt $(R_T, R_"KV", M, H(s), N, dots)$.
 + *Challenge.* $cal(C)$ selects $c$ token positions and $ell$ layers per token uniformly at random. $cal(A)$ learns the challenge only now.
 + *Open.* $cal(A)$ opens the trace at challenged positions with Merkle proofs against $R_T$.
 + *Verify.* $cal(C)$ runs Freivalds and bridge checks at every opened position. Outputs accept or reject.
@@ -370,7 +432,16 @@ Committed KV values cannot change after $R_"KV"$ is sent (hash collision resista
 
 == Deployment Configuration Tampering
 
-The deployment manifest $M$ binds the tokenizer, weight Merkle root, quantization scheme, sampling parameters, EOS policy, and system prompt hash into the receipt. The verifier checks $M$ against known-good values (e.g., the published tokenizer for a given model family, the weight Merkle root from the public checkpoint). Any change to the deployment configuration produces a different manifest.
+The deployment commitment $M$ binds four specs into the receipt: preprocessing, model configuration, decode policy, and output policy. This includes the tokenizer, chat template, BOS/EOS preprocessing policy, truncation semantics, weight identity, quantization scheme, RoPE/scaling configuration, RMSNorm epsilon, adapter identity, sampler version, temperature/top-k/top-p, penalties, grammar constraints, stop policy, and detokenization semantics. The verifier checks these against known-good values for the intended deployment. Any change to the deployment configuration produces a different committed spec surface.
+
+== Assumptions Outside Protocol Scope
+
+The protocol does not assume honest prover hardware or honest provider runtime behavior. Those are the target of verification. The explicit assumptions outside protocol scope are:
+
++ standard cryptographic assumptions for the hash functions and finite-field checks
++ secrecy of verifier-only material such as the Freivalds vectors
++ no side-channel leakage of verifier-secret material
++ correct execution of the verifier itself
 
 = The Attention Gap <sec-attention-gap>
 
@@ -388,18 +459,18 @@ The remaining adversarial freedom comes from two sources:
 
 == Storage
 
-Only post-attention INT8 outputs and the associated per-tensor quantization scales require storage (everything else is re-derivable):
+Only the non-derivable retained state requires storage: post-attention INT8 outputs, the associated per-tensor quantization scales, and the captured pre-final-norm residual that anchors the exact final-token tail (everything else is re-derivable):
 
-This storage accounting is only for retained per-token trace state. The deployment manifest $M$ is computed and bound into the receipt at commit time; it is configuration metadata, not non-derivable trace state.
+This storage accounting is only for retained per-token trace state. The deployment commitment $M$ is computed and bound into the receipt at commit time; it is configuration metadata, not non-derivable trace state.
 
 #figure(
   table(
     columns: (auto, auto, auto, auto),
     align: (left, center, center, center),
     [*Model*], [*Layers*], [*hidden_dim*], [*Per token*],
-    [Llama 8B], [32], [4096], [$tilde 128$ KB],
-    [Llama 70B], [80], [8192], [$tilde 640$ KB],
-    [Llama 405B], [126], [16384], [$tilde 2$ MB],
+    [Llama 8B], [32], [4096], [$tilde 144$ KB],
+    [Llama 70B], [80], [8192], [$tilde 672$ KB],
+    [Llama 405B], [126], [16384], [$tilde 2.1$ MB],
   ),
   caption: [Per-token storage for non-derivable intermediates],
 )
@@ -416,7 +487,7 @@ The most direct alternative to VeriLM is proving inference in zero knowledge. Ea
 
 Related cryptographic ML systems such as Delphi @mishra2020delphi address a different problem: privacy-preserving neural inference, where neither party should reveal its inputs or model. VeriLM instead targets model-provenance auditing for open weights, where the model is public and the goal is to verify that the claimed weights were actually used.
 
-VeriLM makes the opposite tradeoff: verification is interactive (the provider must respond to challenges) and non-transferable (only the verifier who holds the key can check). In exchange, the normal serving path is unchanged and the per-response overhead is a 100-byte receipt. The expensive part --- verification --- only occurs on the small fraction of responses that are audited.
+VeriLM makes the opposite tradeoff: verification is interactive (the provider must respond to challenges) and non-transferable (only the verifier who holds the key can check). In exchange, the normal serving path is unchanged and the per-response overhead is a compact receipt. The expensive part --- verification --- only occurs on the small fraction of responses that are audited.
 
 Trusted execution environments (TEEs) and remote attestation provide another alternative @birkholz2023rats @menetrey2022attestation. TEEs can attest that specific code ran on specific hardware, avoiding the overhead of proof systems, but they introduce hardware trust assumptions, limit deployment flexibility, and tie verification to a specific vendor's attestation chain. VeriLM requires no hardware trust beyond standard computation.
 
@@ -428,14 +499,14 @@ Trusted execution environments (TEEs) and remote attestation provide another alt
     [ZK proofs], [100--1000$times$ prover], [Full computation correct], [None (math)], [Yes],
     [TEEs], [Attestation HW], [Claimed code ran on attested HW], [Hardware vendor], [Yes],
     [Redundant exec.], [2--3$times$ compute], [Outputs agree across replicas], [Honest majority], [No],
-    [VeriLM], [100 B receipt + rare audits], [Claimed weights used (exact);\ attention consistent (approx.)], [Verifier key secrecy], [No],
+    [VeriLM], [Compact receipt + rare audits], [Claimed weights used (exact);\ attention consistent (approx.)], [Verifier key secrecy + verifier integrity], [No],
   ),
   caption: [Comparison of verifiable inference approaches.],
 )
 
 = Limitations and Extensions
 
-The protocol's practical viability rests on two open empirical questions: the width of the requantization corridor (which bounds the attention gap) and whether storage and bandwidth costs are acceptable to providers at scale. Closing the attention gap entirely would require deterministic attention kernels or stronger proof systems, both of which violate the sidecar design constraint.
+The protocol's practical viability rests on two open empirical questions: the width of the requantization corridor (which bounds the attention gap) and whether storage and bandwidth costs are acceptable to providers at scale. Closing the attention gap entirely would require deterministic attention kernels or stronger proof systems, both of which violate the sidecar design constraint. The final protocol also assumes an autoregressive decoder-only architecture with the committed capture layout; broader architecture support requires additional schema and replay work but does not change the guarantee taxonomy.
 
 Two extensions could tighten the guarantees:
 
@@ -445,7 +516,7 @@ Two extensions could tighten the guarantees:
 
 = Conclusion
 
-VeriLM demonstrates that meaningful verification of LLM inference is possible without modifying the serving path or requiring expensive proof systems. The protocol's honest decomposition into exact, statistical, and approximate layers allows clients to understand precisely what is and is not guaranteed. The 100-byte receipt imposes negligible overhead on normal serving; the full audit is CPU-feasible for the client.
+VeriLM demonstrates that meaningful verification of LLM inference is possible without modifying the serving path or requiring expensive proof systems. The protocol's honest decomposition into exact, statistical, approximate, and fail-closed layers allows clients to understand precisely what is and is not guaranteed. A compact receipt imposes negligible overhead on normal serving; the full audit is CPU-feasible for the client.
 
 The most important next step is empirical measurement of the requantization corridor, which will determine how tightly the protocol constrains attention manipulation in practice.
 
