@@ -316,6 +316,8 @@ class VerifiedInferenceServer:
             captures = captures[:-calls_per_fwd]
             n_fwd -= 1
             fwd_batch_sizes = fwd_batch_sizes[:-1]
+            if len(final_residuals_raw) == n_fwd + 1:
+                final_residuals_raw = final_residuals_raw[:-1]
             n_tokens = sum(fwd_batch_sizes)
 
         if n_tokens != expected_traces:

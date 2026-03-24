@@ -227,6 +227,31 @@ def _run_e2e():
     if report_tampered["failures"]:
         print(f"  detected: {report_tampered['failures'][0][:80]}...")
 
+    # ── Step 7: EOS trailing forward pass trim regression ──
+    # When EOS fires before max_tokens, vLLM dispatches one extra decode step.
+    # The trim block must trim final_residuals_raw too, or commit crashes with
+    # "final_residual count (N+1) != forward pass count (N)".
+    # Use a short-answer prompt with high max_tokens to trigger early EOS.
+    print("\n7. EOS trailing forward pass trim (final_residual regression)...")
+    eos_prompt = "What is 2+2? Answer with just the number."
+    eos_result = server.chat(prompt=eos_prompt, max_tokens=256)
+    eos_n = eos_result["n_tokens"]
+    assert_true(eos_n < 256, f"EOS before max_tokens ({eos_n} < 256)")
+    assert_true(eos_result.get("commitment") is not None, "EOS trim: commit succeeded")
+    # Also verify the commitment is valid.
+    eos_rid = eos_result["request_id"]
+    eos_audit_json = server.audit(
+        request_id=eos_rid,
+        token_index=0,
+        layer_indices=full_layers,
+        tier="full",
+        binary=False,
+    )
+    eos_report = verilm_rs.verify_v4(eos_audit_json, key_json)
+    assert_true(eos_report["passed"], f"EOS trim: verify passed ({eos_report['checks_passed']}/{eos_report['checks_run']} checks)")
+    if not eos_report["passed"]:
+        print(f"  failures: {eos_report['failures']}")
+
     # ── Summary ──
     print(f"\n{'='*60}")
     if failures:
