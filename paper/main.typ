@@ -1,6 +1,6 @@
 #set document(
   title: "VeriLM: A Commit-and-Audit Protocol for Open-Weight LLM Inference",
-  author: ("Federico Carrone", "Diego Kingston", "Mariano Nicolini", "Pedro Fontana", "Manuel Puebla"),
+  author: ("Federico Carrone", "Diego Kingston", "Mariano Nicolini", "Pedro Fontana", "Manuel Puebla", "Mauro Toscano"),
   date: auto,
 )
 

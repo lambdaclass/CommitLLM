@@ -910,6 +910,7 @@ impl MinimalBatchStateHandle {
     sampling_seed,
     manifest = None,
     weight_provider = None,
+    final_residuals = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn commit_minimal_from_captures(
@@ -922,6 +923,7 @@ fn commit_minimal_from_captures(
     sampling_seed: Vec<u8>,
     manifest: Option<&Bound<'_, PyDict>>,
     weight_provider: Option<&WeightProvider>,
+    final_residuals: Option<&Bound<'_, PyList>>,
 ) -> PyResult<MinimalBatchStateHandle> {
     let n_entries = o_proj_inputs.len();
     let expected_scales = n_entries * 4;
@@ -960,6 +962,17 @@ fn commit_minimal_from_captures(
 
     let manifest_obj = manifest.map(extract_manifest).transpose()?;
 
+    // Extract per-token final residuals (pre-final-norm, f32) if provided.
+    let final_res = if let Some(fr_list) = final_residuals {
+        let mut vecs = Vec::with_capacity(fr_list.len());
+        for i in 0..fr_list.len() {
+            vecs.push(extract_f32_vec(&fr_list.get_item(i)?)?);
+        }
+        Some(vecs)
+    } else {
+        None
+    };
+
     let (commitment, inner) = verilm_prover::commit_minimal(
         all_retained,
         &FullBindingParams {
@@ -968,6 +981,7 @@ fn commit_minimal_from_captures(
             sampling_seed: seed,
             manifest: manifest_obj.as_ref(),
         },
+        final_res,
     );
 
     Ok(MinimalBatchStateHandle {

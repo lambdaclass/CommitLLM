@@ -223,6 +223,30 @@ pub fn hash_retained_state_direct(state: &crate::types::RetainedTokenState) -> [
     hasher.finalize().into()
 }
 
+/// Compute the committed leaf hash for a token with optional final residual binding.
+///
+/// When `final_residual` is `Some`, the leaf hash binds the captured pre-final-norm
+/// residual into the Merkle tree. This prevents a malicious prover from swapping
+/// the boundary state after seeing the audit challenge.
+///
+/// When `None`, returns `hash_retained_state_direct(state)` (backward compatible).
+pub fn hash_retained_with_residual(
+    state: &crate::types::RetainedTokenState,
+    final_residual: Option<&[f32]>,
+) -> [u8; 32] {
+    let base = hash_retained_state_direct(state);
+    match final_residual {
+        Some(fr) => {
+            let mut hasher = Sha256::new();
+            hasher.update(b"vi-retained-fr-v1");
+            hasher.update(base);
+            hash_f32_into(&mut hasher, fr);
+            hasher.finalize().into()
+        }
+        None => base,
+    }
+}
+
 /// Compute the V4 IO chain hash for a token.
 ///
 /// `io_t = H("vi-io-v4" || leaf_hash_t || token_id_t || prev_io_hash)`

@@ -437,6 +437,7 @@ mod tests {
             layer_indices: None,
             initial_residual: None,
             embedding_proof: None,
+            final_residual: None,
         };
         let resp = V4AuditResponse {
             token_index: 7,

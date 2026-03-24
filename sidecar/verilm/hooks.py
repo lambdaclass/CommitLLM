@@ -104,3 +104,48 @@ class EmbeddingLogitCapture:
         for h in self._handles:
             h.remove()
         self._handles.clear()
+
+
+class FinalResidualCapture:
+    """Captures the input to model.norm (final RMSNorm) per forward pass.
+
+    This is the pre-normalization residual stream at the exact boundary
+    between the approximate attention stack and the exact tail
+    (RMSNorm -> lm_head -> sampling). The verifier uses this for exact
+    token verification instead of the shell-replayed final hidden state.
+    """
+
+    def __init__(self):
+        self.residuals: List[torch.Tensor] = []
+        self._handle = None
+        self.enabled = True
+
+    def install(self, model) -> bool:
+        """Install forward hook on the final RMSNorm (model.norm).
+
+        Returns True if the hook was installed.
+        """
+        for name, mod in model.named_modules():
+            if name == "model.norm":
+                self._handle = mod.register_forward_hook(self._hook)
+                logger.info("verilm: installed final residual hook on %s", name)
+                return True
+        logger.warning("verilm: could not find model.norm for final residual capture")
+        return False
+
+    def _hook(self, module, args, output):
+        if self.enabled and len(args) > 0:
+            # Capture input in float32 for exact RMSNorm replay by verifier.
+            self.residuals.append(args[0].detach().float().to("cpu", non_blocking=True))
+
+    def drain(self) -> List[torch.Tensor]:
+        """Return and clear all captured final residuals."""
+        result = self.residuals
+        self.residuals = []
+        return result
+
+    def remove(self):
+        """Remove the installed hook."""
+        if self._handle is not None:
+            self._handle.remove()
+            self._handle = None

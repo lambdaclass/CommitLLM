@@ -451,6 +451,9 @@ pub struct MinimalBatchState {
     pub io_hashes: Vec<[u8; 32]>,
     /// Deployment manifest, stored for inclusion in V4 audit responses.
     pub manifest: Option<DeploymentManifest>,
+    /// Per-token captured final residual (pre-final-norm) from GPU inference.
+    /// Used at audit time for exact LM-head verification.
+    pub final_residuals: Option<Vec<Vec<f32>>>,
 }
 
 /// Build retained state from minimal captures (no i32 accumulators).
@@ -516,6 +519,7 @@ pub fn build_retained_from_captures(
 pub fn commit_minimal(
     all_retained: Vec<RetainedTokenState>,
     params: &FullBindingParams,
+    final_residuals: Option<Vec<Vec<f32>>>,
 ) -> (BatchCommitment, MinimalBatchState) {
     assert_eq!(
         all_retained.len(),
@@ -524,9 +528,14 @@ pub fn commit_minimal(
     );
 
     // Trace tree: hash retained state per token (parallel).
+    // When final_residuals is present, bind each into the leaf hash.
     let trace_leaves: Vec<[u8; 32]> = all_retained
         .par_iter()
-        .map(|rs| merkle::hash_retained_state_direct(rs))
+        .enumerate()
+        .map(|(i, rs)| {
+            let fr = final_residuals.as_ref().and_then(|frs| frs.get(i)).map(|v| v.as_slice());
+            merkle::hash_retained_with_residual(rs, fr)
+        })
         .collect();
 
     // IO tree: chain the leaf hash (not ad hoc features) for splice resistance.
@@ -564,6 +573,7 @@ pub fn commit_minimal(
         revealed_seed: params.sampling_seed,
         io_hashes: io_leaves,
         manifest: params.manifest.cloned(),
+        final_residuals,
     };
 
     (commitment, state)
@@ -699,6 +709,7 @@ pub fn compute_shell_opening(
         layer_indices: layer_filter.map(|f| f.to_vec()),
         initial_residual: bridge.map(|b| b.initial_residual.to_vec()),
         embedding_proof: bridge.and_then(|b| b.embedding_proof.clone()),
+        final_residual: None, // Set by open_v4 from captured GPU state
     }
 }
 
@@ -722,10 +733,16 @@ pub fn open_v4(
     layer_filter: Option<&[usize]>,
 ) -> V4AuditResponse {
     let mut response = open_v4_structural(state, token_index);
-    response.shell_opening = Some(compute_shell_opening(
+    let mut shell = compute_shell_opening(
         &state.all_retained[token_index as usize], weights, cfg, weight_scales, bridge,
         layer_filter,
-    ));
+    );
+    // Attach captured final residual from GPU inference (if available).
+    shell.final_residual = state.final_residuals
+        .as_ref()
+        .and_then(|frs| frs.get(token_index as usize))
+        .cloned();
+    response.shell_opening = Some(shell);
     response
 }
 
@@ -751,7 +768,8 @@ pub fn open_v4_structural(state: &MinimalBatchState, token_index: u32) -> V4Audi
     let mut prefix_merkle_proofs = Vec::with_capacity(i);
     let mut prefix_token_ids = Vec::with_capacity(i);
     for j in 0..i {
-        prefix_leaf_hashes.push(merkle::hash_retained_state_direct(&state.all_retained[j]));
+        let fr = state.final_residuals.as_ref().and_then(|frs| frs.get(j)).map(|v| v.as_slice());
+        prefix_leaf_hashes.push(merkle::hash_retained_with_residual(&state.all_retained[j], fr));
         prefix_merkle_proofs.push(merkle::prove(&state.retained_tree, j));
         prefix_token_ids.push(state.token_ids[j]);
     }
@@ -1422,7 +1440,7 @@ mod tests {
             manifest: None,
         };
 
-        let (commitment, state) = commit_minimal(retained, &params);
+        let (commitment, state) = commit_minimal(retained, &params, None);
 
         assert_eq!(commitment.version, CommitmentVersion::V4);
         assert_eq!(commitment.n_tokens, 3);
@@ -1451,7 +1469,7 @@ mod tests {
             manifest: None,
         };
 
-        let (_, state) = commit_minimal(retained.clone(), &params);
+        let (_, state) = commit_minimal(retained.clone(), &params, None);
 
         // Verify IO chain uses leaf hashes, not ad hoc features.
         let leaf0 = merkle::hash_retained_state_direct(&retained[0]);
@@ -1480,8 +1498,8 @@ mod tests {
         let retained1 = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
         let retained2 = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
 
-        let (c1, _) = commit_minimal(retained1, &params);
-        let (c2, _) = commit_minimal(retained2, &params);
+        let (c1, _) = commit_minimal(retained1, &params, None);
+        let (c2, _) = commit_minimal(retained2, &params, None);
 
         assert_eq!(c1.merkle_root, c2.merkle_root);
         assert_eq!(c1.io_root, c2.io_root);
@@ -1501,7 +1519,7 @@ mod tests {
             manifest: None,
         };
 
-        let (commitment, state) = commit_minimal(retained, &params);
+        let (commitment, state) = commit_minimal(retained, &params, None);
 
         // Open token 2 — should include prefix tokens 0, 1.
         let response = open_v4_structural(&state, 2);
@@ -1551,7 +1569,7 @@ mod tests {
             manifest: None,
         };
 
-        let (_, state) = commit_minimal(retained, &params);
+        let (_, state) = commit_minimal(retained, &params, None);
         let response = open_v4_structural(&state, 0);
 
         assert_eq!(response.prefix_leaf_hashes.len(), 0);

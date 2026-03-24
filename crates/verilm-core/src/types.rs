@@ -331,6 +331,12 @@ pub struct ShellTokenOpening {
     /// in the verifier key. `leaf_index` = token_id, leaf = `hash_embedding_row(initial_residual)`.
     #[serde(default)]
     pub embedding_proof: Option<MerkleProof>,
+    /// Captured pre-final-norm residual stream from the actual GPU inference.
+    /// When present, the verifier uses this for exact LM-head/token verification
+    /// instead of the shell-replayed final hidden state (which diverges after
+    /// many layers of approximate attention).
+    #[serde(default)]
+    pub final_residual: Option<Vec<f32>>,
 }
 
 /// Parameters for the full bridge computation (dequant → residual → RMSNorm → quantize).

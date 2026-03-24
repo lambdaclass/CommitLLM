@@ -1668,7 +1668,7 @@ pub fn verify_v4(
                 );
             }
 
-            let (c, f, final_hidden) = verify_shell_opening(key, &response.retained, shell);
+            let (c, f, shell_final_hidden) = verify_shell_opening(key, &response.retained, shell);
             checks_run += c;
             failures.extend(f);
 
@@ -1691,8 +1691,38 @@ pub fn verify_v4(
             };
 
             // LM head + sampling verification.
-            // With decode params: full sampling replay (greedy or seeded).
-            // Without decode params: greedy argmax fallback.
+            //
+            // Two sources for final_hidden:
+            // 1. Captured final_residual (from live GPU inference) — exact.
+            //    Apply final RMSNorm + quantize to get the true final_hidden.
+            // 2. Shell-replayed final_hidden — approximate (diverges after many
+            //    layers of approximate attention). Fallback for toy model only.
+            //
+            // Fail-closed: when the key has both lm_head and final_norm_weights,
+            // the prover MUST supply final_residual. Missing it means the exact
+            // tail path was not captured, and we reject rather than silently
+            // downgrade to the approximate shell replay.
+            let final_hidden = if let Some(ref fr) = shell.final_residual {
+                if let Some(ref fnw) = key.final_norm_weights {
+                    let res_f64: Vec<f64> = fr.iter().map(|&v| v as f64).collect();
+                    let normed = verilm_core::rmsnorm::rmsnorm_f64_input(&res_f64, fnw, key.rmsnorm_eps);
+                    Some(normed.iter().map(|&v| v.round().clamp(-128.0, 127.0) as i8).collect())
+                } else {
+                    // No final_norm_weights in key — fall back to shell replay (toy model).
+                    shell_final_hidden
+                }
+            } else if key.final_norm_weights.is_some() && key.lm_head.is_some() {
+                // Fail-closed: key requires exact verification but no captured state.
+                failures.push(
+                    "key has lm_head + final_norm_weights but shell missing final_residual \
+                     (exact tail verification required, cannot fall back to shell replay)".into()
+                );
+                None
+            } else {
+                // Toy model / no final_norm_weights — shell replay fallback is acceptable.
+                shell_final_hidden
+            };
+
             if let Some(ref lm_head) = key.lm_head {
                 if let Some(ref fh) = final_hidden {
                     if key.config.vocab_size > 0 {
@@ -2081,9 +2111,13 @@ fn verify_v4_structural(
         failures.push("V4 commitment missing prompt_hash".into());
     }
 
-    // 4. Challenged token retained leaf Merkle proof
+    // 4. Challenged token retained leaf Merkle proof.
+    // When shell_opening has final_residual, include it in the leaf hash
+    // (it was bound into the commitment at commit time).
     checks_run += 1;
-    let leaf_hash = merkle::hash_retained_state_direct(&response.retained);
+    let final_residual_ref = response.shell_opening.as_ref()
+        .and_then(|s| s.final_residual.as_deref());
+    let leaf_hash = merkle::hash_retained_with_residual(&response.retained, final_residual_ref);
     if !merkle::verify(
         &response.commitment.merkle_root,
         &leaf_hash,

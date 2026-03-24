@@ -71,6 +71,17 @@ class VerifiedInferenceServer:
             self.el_capture = None
             logger.info("Minimal mode: skipping embedding/logit hooks")
 
+        # Install final residual capture (always, even in minimal mode).
+        # Captures the pre-final-norm residual for exact LM-head verification.
+        from .hooks import FinalResidualCapture
+        self.final_res_capture = FinalResidualCapture()
+        if not self.final_res_capture.install(model):
+            logger.warning(
+                "Could not install final residual capture — "
+                "lm_head verification will use shell-replayed state"
+            )
+            self.final_res_capture = None
+
         # Install canonical sampler hook on LogitsProcessor module.
         # Must be AFTER capture hooks so capture sees original (unmasked) logits.
         from .sampler import CanonicalSamplerHook
@@ -214,6 +225,8 @@ class VerifiedInferenceServer:
         self.buf.reset_counter()
         if self.el_capture is not None:
             self.el_capture.drain()
+        if self.final_res_capture is not None:
+            self.final_res_capture.drain()
 
         # Fresh random batch seed per request. The commitment includes
         # seed_commitment = SHA256(batch_seed); the batch_seed itself is
@@ -236,13 +249,19 @@ class VerifiedInferenceServer:
         gen_token_ids = list(output.outputs[0].token_ids)
         prompt_token_ids = list(output.prompt_token_ids)
 
-        # Ensure all non-blocking GPU→CPU transfers from capture hook completed.
-        # Targeted event sync — only waits on the last D2H transfer, not all GPU work.
+        # Ensure all non-blocking GPU→CPU transfers completed.
+        # 1. Capture buffer: event-based sync (only waits on the last D2H transfer).
         self.buf.wait_for_transfers()
+        # 2. Hook D2H copies (final_res_capture, el_capture) use non_blocking=True
+        #    without dedicated events. A device-wide sync ensures they're complete.
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
 
         # Drain captures (tensors are already on CPU).
         captures = self.buf.drain()
         el_data = self.el_capture.drain() if self.el_capture is not None else {}
+        final_residuals_raw = self.final_res_capture.drain() if self.final_res_capture is not None else []
 
         n_layers = cap._n_layers
         calls_per_fwd = n_layers * cap.PROJS_PER_LAYER
@@ -324,7 +343,7 @@ class VerifiedInferenceServer:
         if cap._capture_mode == "minimal":
             state = self._commit_minimal(
                 captures, n_fwd, n_layers, calls_per_fwd, fwd_batch_sizes,
-                all_token_ids, prompt, seed, manifest,
+                all_token_ids, prompt, seed, manifest, final_residuals_raw,
             )
         else:
             state = self._commit_full(
@@ -390,7 +409,8 @@ class VerifiedInferenceServer:
         )
 
     def _commit_minimal(self, captures, n_fwd, n_layers, calls_per_fwd,
-                         fwd_batch_sizes, all_token_ids, prompt, seed, manifest):
+                         fwd_batch_sizes, all_token_ids, prompt, seed, manifest,
+                         final_residuals_raw=None):
         """V4 retained-state commitment path (no _int_mm, no full traces).
 
         Extracts o_proj inputs (a_i8) and per-layer scales from the minimal
@@ -422,6 +442,25 @@ class VerifiedInferenceServer:
                     else:
                         minimal_scales.append(float(s))
 
+        # Organize per-token final residuals from per-forward-pass captures.
+        # model.norm hook fires once per forward pass with shape (batch_sz, hidden_dim).
+        # Split by fwd_batch_sizes to get one f32 vector per token position.
+        final_residuals = None
+        if final_residuals_raw:
+            if len(final_residuals_raw) != len(fwd_batch_sizes):
+                raise RuntimeError(
+                    f"final_residual count ({len(final_residuals_raw)}) != "
+                    f"forward pass count ({len(fwd_batch_sizes)}). "
+                    f"Hook capture misaligned."
+                )
+            final_residuals = []
+            for fwd_tensor, batch_sz in zip(final_residuals_raw, fwd_batch_sizes):
+                for pos in range(batch_sz):
+                    if fwd_tensor.dim() >= 2:
+                        final_residuals.append(fwd_tensor[pos].numpy())
+                    else:
+                        final_residuals.append(fwd_tensor.numpy())
+
         return verilm_rs.commit_minimal_from_captures(
             o_proj_inputs=o_proj_inputs,
             scales=minimal_scales,
@@ -432,6 +471,7 @@ class VerifiedInferenceServer:
             sampling_seed=seed,
             manifest=manifest,
             weight_provider=self._weight_provider,
+            final_residuals=final_residuals,
         )
 
     def audit(

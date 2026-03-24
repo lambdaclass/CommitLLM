@@ -198,7 +198,7 @@ fn bench_gate_a() {
             sampling_seed: [1u8; 32],
             manifest: None,
         };
-        let (_c, s) = commit_minimal(retained_all.clone(), &params);
+        let (_c, s) = commit_minimal(retained_all.clone(), &params, None);
         commit_times.push(start.elapsed());
         state = Some(s);
     }
@@ -245,7 +245,7 @@ fn bench_gate_a() {
         sampling_seed: [7u8; 32],
         manifest: None,
     };
-    let (_fb_commitment, fb_state) = commit_minimal(vec![fb_retained], &fb_params);
+    let (_fb_commitment, fb_state) = commit_minimal(vec![fb_retained], &fb_params, None);
 
     let fb_bridge = BridgeParams {
         rmsnorm_attn_weights: &fb_rn_attn,

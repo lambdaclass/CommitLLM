@@ -9,6 +9,29 @@ This roadmap reflects the current execution order for VeriLM:
 5. Add conformance, interoperability, and operational fail-closed checks.
 6. Only then optimize further, benchmark the final protocol, and publish.
 
+## Claim-Critical Checklist
+
+Do not claim "everything except attention" until all of these are complete:
+
+- [ ] live sampled serving is replayable end to end
+- [ ] decode/output policy completeness is finished
+- [ ] the exact final-token boundary starts at the captured pre-final-norm residual
+- [ ] exact full-prefix deep-audit mode exists
+- [ ] the V5 retained-state path is canonical
+- [ ] adversarial hardening is complete
+- [ ] conformance vectors and challenge-spec documentation exist
+
+## Publication-Credibility Checklist
+
+Do not treat the protocol as publication-ready until all of these are complete:
+
+- [ ] final V5/V6 benchmarks are run
+- [ ] exact/statistical/approximate boundaries are documented clearly
+- [ ] canonical semantics vs trust assumptions are documented clearly
+- [ ] binary interoperability/versioning behavior is tested
+- [ ] operational fail-closed startup checks exist
+- [ ] at least one independent non-Rust verifier consumer can consume the golden vectors
+
 ## 0. Closed Blockers
 
 These are no longer on the critical path:
@@ -84,6 +107,22 @@ Sampled serving is required for V6. Greedy remains the `temperature=0` special c
 
 ## 3. Remaining Exactness and Strengthening
 
+- [ ] **Only claim "everything except attention" after all of the following are done**
+  - sampled serving is live and replayable end to end
+  - decode/output policy completeness is finished
+  - the exact final-token boundary starts at the captured pre-final-norm residual
+  - exact full-prefix deep-audit mode exists
+
+- [ ] **Move the exact final-token boundary to the strongest post-attention state**
+  - capture the **pre-final-norm residual** in the live path
+  - do not derive the final token from a shell-replayed hidden state after approximate attention replay
+  - make the verifier recompute the exact tail from that captured boundary:
+    - final RMSNorm
+    - LM head
+    - logits
+    - decode policy
+    - sampled token
+
 - [ ] **Complete the manifest in its final protocol form**
   - input spec: tokenizer / normalization, chat template, BOS / EOS policy, truncation / padding, special-token handling, system prompt
   - model spec: `R_W`, quantization config, adapter / LoRA / merged-checkpoint identity, RoPE / scaling config, RMSNorm epsilon, other architecture-affecting knobs
@@ -104,6 +143,10 @@ Sampled serving is required for V6. Greedy remains the `temperature=0` special c
   - without this, prefix anchoring remains statistical
 
 - [ ] **Ensure deep-audit batching uses verifier-secret randomness**
+
+- [ ] **Run a boundary-fix benchmark checkpoint**
+  - after the final-token boundary moves to the captured pre-final-norm residual
+  - measure any change in audit open cost, verifier cost, and payload size
 
 ## 4. Adversarial Hardening
 
@@ -225,6 +268,13 @@ Performance is no longer ahead of protocol completion, but still matters before 
 ## 9. Documentation and Release
 
 These tasks must explicitly update the full protocol, not just the README narrative.
+
+- [ ] **Run an explicit hidden-trust-assumptions review**
+  - enumerate what is exact
+  - enumerate what is approximate
+  - enumerate what is statistical
+  - enumerate what is still operationally trusted
+  - ensure docs and claims match that list
 
 - [ ] **Update the full protocol specification in the paper**
   - exact / statistical / approximate boundaries
