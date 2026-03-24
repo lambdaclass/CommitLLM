@@ -172,6 +172,10 @@ Sampled serving is required for V6. Greedy remains the `temperature=0` special c
   - verify special-token handling binding
   - verify system-prompt binding
   - verify quantization-config binding against the committed quantization identity
+  - verify the quantization scheme family matches the committed scheme identity
+  - verify scale-derivation semantics match the committed quantization scheme
+  - verify block size / layout parameters for blockwise schemes
+  - reject unsupported or uncommitted quantization schemes explicitly
   - verify no uncommitted adapters / LoRA are active, or verify committed merged/adapted identity
   - verify RoPE / scaling configuration binding
   - verify RMSNorm epsilon binding
@@ -232,6 +236,22 @@ This comes before trusting final benchmarks or making strong publication claims.
   - not just "some error"
   - where possible, specific verifier failure messages
 
+- [ ] **Define a verification failure taxonomy**
+  - cryptographic failures (Freivalds / Merkle / hash-chain / commitment mismatch) hard reject
+  - semantic failures (wrong token / wrong stop behavior / wrong manifest semantics) hard reject
+  - operational/configuration failures fail closed
+  - approximate / statistical outcomes must be classified explicitly, not reported as exact success
+
+- [ ] **Add structured audit failure reporting**
+  - report which check failed
+  - report the relevant token / layer / proof component when safe
+  - include failure categories that are stable enough for regression tests
+
+- [ ] **Define partial-audit semantics explicitly**
+  - specify how routine/deep audit results are reported when only sampled checks were performed
+  - document detection probability versus completeness
+  - make partial statistical coverage impossible to confuse with full exact success
+
 ## 5. Conformance, Interoperability, and Challenge Specification
 
 - [ ] **Add golden / conformance vectors**
@@ -261,6 +281,31 @@ This comes before trusting final benchmarks or making strong publication claims.
   - assert prefix caching is disabled in verified mode
   - assert sync mode / capture mode match intended verified settings
   - fail closed on operational mismatch instead of silently drifting
+
+- [ ] **Add supported-architecture detection and fail-closed behavior**
+  - auto-detect the model family / capture layout assumptions in keygen or startup
+  - reject unsupported architectures explicitly instead of silently assuming Llama-style geometry
+  - treat encoder-decoder and other unsupported layouts as out of scope until implemented
+
+- [ ] **Handle buffer pressure and audit-state retention explicitly**
+  - define ring-buffer overflow behavior
+  - define retention TTL / cleanup policy for committed states
+  - add manual purge / cleanup controls if needed operationally
+
+- [ ] **Handle verifier-key rotation explicitly**
+  - version verifier keys
+  - ensure old receipts remain auditable with old keys
+  - ensure new receipts bind to the correct active key version
+
+- [ ] **Add health and readiness checks**
+  - verify capture hooks are active
+  - verify audit buffers are healthy
+  - verify model identity and verified-mode settings still match the committed configuration
+
+- [ ] **Add audit-endpoint abuse protection**
+  - rate limit audit requests
+  - validate challenge bounds strictly
+  - prevent audit amplification from unreasonable token/layer requests
 
 ## 7. Performance and Audit Cost
 
@@ -375,6 +420,17 @@ These tasks must explicitly update the full protocol, not just the README narrat
   - binary protocol path
   - routine vs deep audit
 
+- [ ] **Document privacy implications of receipts and audits**
+  - receipts expose commitments and protocol metadata even when they do not directly reveal content
+  - audit openings reveal token IDs and layer intermediates
+  - explain who can reconstruct what from an audit
+  - document recommended transport and deployment practices for privacy-sensitive use
+
+- [ ] **Document supported architectures and unsupported ones explicitly**
+  - list the model families/layouts currently supported by the protocol and implementation
+  - state which architectures are not yet supported
+  - make the implementation fail-closed story match that support matrix
+
 - [ ] **Update the article / writeup to match the full protocol**
 
 - [ ] **Add a pipeline figure**
@@ -407,6 +463,9 @@ These tasks must explicitly update the full protocol, not just the README narrat
 - [ ] **Client SDKs** — Python and TypeScript wrappers around the verifier
 - [ ] **llama.cpp tracing plugin**
 - [ ] **Fine-tuned models / LoRA support**
+- [ ] **Optional receipt / audit encryption for verifier-targeted privacy**
+  - encrypt receipts or audit payloads to the verifier's public key when the product surface needs it
+  - keep this out of the claim-critical path unless privacy requirements make it mandatory
 - [ ] **Generalize the packed retained-state path beyond constant-width decoder models**
   - replace fixed-layout assumptions with a versioned retained-state schema
   - carry per-layer shape metadata instead of assuming one global `hidden_dim`
@@ -467,7 +526,7 @@ Publish
 
 The target for V6 is:
 
-- exact shell / bridge / final-token path
+- exact shell / bridge / final-token path, including LM-head Freivalds binding plus exact logits replay
 - exact preprocessing, model, decode, and output policy binding
 - exact sampled replay as the default production mode
 - greedy mode available as the `temperature=0` special case
