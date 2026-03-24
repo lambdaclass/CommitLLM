@@ -11,3 +11,4 @@ __pycache__/
 *.pyc
 *.egg-info/
 .runpod_pod_state.json
+.runpod_pool_state.json

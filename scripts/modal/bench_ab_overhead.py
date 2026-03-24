@@ -1,32 +1,28 @@
 """
 A/B overhead benchmark: 5 scenarios, interleaved, two prompts.
 
-Each config runs on its own A100 in parallel via Modal.
-RunPod path runs sequentially on a single pod.
+Modal: parallel — each config gets its own A100 via spawn() (~6 min).
+RunPod: sequential — single model load, all configs run back-to-back (~12 min).
 
-Scenarios (all on same GPU per config, interleaved per round):
+Scenarios (interleaved per round on one GPU):
   1. Baseline — llm.generate, no capture, no hooks
   2. + capture wrapper — matmul wrapper active, no hooks
   3. + hooks + sync — capture + final_residual hook + cuda.synchronize, no commit
   4. Full path (unpacked) — server.chat with VERILM_PACKED_COMMIT=0
   5. Full path (packed) — server.chat with VERILM_PACKED_COMMIT=1
 
-Prompts:
-  - LONG_PROMPT: reliably generates max_tokens without EOS
-  - SHORT_PROMPT: triggers early EOS, exercises trim path
-
 Reports:
   - actual generated tokens
   - absolute ms (median)
   - delta vs baseline (ms)
   - extra ms/token vs baseline
-  - per-phase subphase timers (when VERILM_COMMIT_TIMERS=1)
+  - per-phase subphase timers (VERILM_COMMIT_TIMERS=1)
 
 Usage:
-    # Parallel on Modal (one A100 per config, ~6 min total):
+    # Parallel on Modal (one A100 per config, ~6 min):
     modal run --detach scripts/modal/bench_ab_overhead.py
 
-    # Sequential on RunPod (single pod, prints per-config):
+    # Sequential on RunPod (single pod, single model load, ~12 min):
     python scripts/runpod/test.py --script scripts/modal/bench_ab_overhead.py
 """
 
@@ -104,26 +100,23 @@ def _stats(times):
     return {"mean": mean, "med": med, "p5": p5, "p95": p95}
 
 
-def _run_single_config(config_key, prompt_label, prompt, max_tokens):
-    """Run one config's 5-scenario interleaved benchmark. One GPU."""
-    import logging
+def _load_model():
+    """Load model + server once. Returns (llm, server, buf, fr_capture)."""
     import os
-    import time
-
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     os.environ["VERILM_COMMIT_TIMERS"] = "1"
 
+    import logging
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    import torch
-    from vllm import LLM, SamplingParams
+    from vllm import LLM
 
     from verilm import capture as cap
     from verilm.capture import get_capture_buffer
     from verilm.hooks import FinalResidualCapture
     from verilm.server import VerifiedInferenceServer
 
-    print(f"[{config_key}] Loading {MODEL_ID}...")
+    print(f"Loading {MODEL_ID}...")
     llm = LLM(
         model=MODEL_ID, dtype="auto", max_model_len=8192,
         enforce_eager=True, enable_prefix_caching=False,
@@ -133,21 +126,36 @@ def _run_single_config(config_key, prompt_label, prompt, max_tokens):
     fr_capture = FinalResidualCapture()
     model = llm.llm_engine.model_executor.driver_worker.model_runner.model
     fr_capture.install(model)
-
     server = VerifiedInferenceServer(llm)
 
     # Warmup.
-    print(f"[{config_key}] Warmup: {N_WARMUP} iterations...")
+    print(f"Warmup: {N_WARMUP} iterations...")
     cap._capture_mode = "minimal"
     buf.enabled = True
     fr_capture.enabled = True
     for _ in range(N_WARMUP):
-        server.chat(prompt=prompt, max_tokens=min(max_tokens, 64))
-    print(f"[{config_key}] Warmup done.\n")
+        server.chat(prompt=LONG_PROMPT, max_tokens=64)
+    print("Warmup done.\n")
+
+    return llm, server, buf, fr_capture
+
+
+def _run_config(config_key, prompt_label, prompt, max_tokens, llm, server, buf, fr_capture):
+    """Run one config's 5-scenario interleaved benchmark on a pre-loaded model."""
+    import os
+    import time
+
+    import torch
+    from vllm import SamplingParams
+
+    from verilm import capture as cap
 
     params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
 
-    # Collect times per scenario across interleaved rounds.
+    print(f"\n{'='*78}")
+    print(f"  {config_key}: prompt={prompt_label}, max_tokens={max_tokens}, rounds={N_ROUNDS}")
+    print(f"{'='*78}")
+
     times = {s: [] for s in ["baseline", "capture", "hooks_sync", "full_unpacked", "full_packed"]}
     gen_tokens = {}
 
@@ -223,8 +231,7 @@ def _run_single_config(config_key, prompt_label, prompt, max_tokens):
     stats = {s: _stats(t) for s, t in times.items()}
     baseline_med = stats["baseline"]["med"]
 
-    print(f"\n[{config_key}] prompt={prompt_label}, max_tokens={max_tokens}, rounds={N_ROUNDS}")
-    print(f"{'Scenario':<30} {'Tokens':>6} {'Med ms':>9} {'Delta ms':>10} {'ms/tok':>8}")
+    print(f"\n{'Scenario':<30} {'Tokens':>6} {'Med ms':>9} {'Delta ms':>10} {'ms/tok':>8}")
     print(f"{'-'*68}")
     for scenario in ["baseline", "capture", "hooks_sync", "full_unpacked", "full_packed"]:
         s = stats[scenario]
@@ -271,23 +278,6 @@ def _run_single_config(config_key, prompt_label, prompt, max_tokens):
     }
 
 
-# ── RunPod path: sequential (single pod) ──
-
-def _run_bench():
-    """Sequential fallback for RunPod (single GPU)."""
-    all_results = {}
-    for config_key, prompt_label, prompt, max_tokens in CONFIGS:
-        result = _run_single_config(config_key, prompt_label, prompt, max_tokens)
-        all_results[config_key] = result
-    _print_summary(all_results)
-    return all_results
-
-
-def _run_test():
-    results = _run_bench()
-    return {"passed": True, "results": results}
-
-
 def _print_summary(all_results):
     print(f"\n{'='*78}")
     print("SUMMARY — Marginal overhead (median ms)")
@@ -308,11 +298,35 @@ def _print_summary(all_results):
         )
 
 
-# ── Modal path: parallel (one A100 per config) ──
+# ── RunPod path: single model load, sequential configs ──
+
+def _run_bench():
+    """Load model once, run all configs back-to-back."""
+    llm, server, buf, fr_capture = _load_model()
+
+    all_results = {}
+    for config_key, prompt_label, prompt, max_tokens in CONFIGS:
+        result = _run_config(config_key, prompt_label, prompt, max_tokens,
+                             llm, server, buf, fr_capture)
+        all_results[config_key] = result
+
+    _print_summary(all_results)
+    return all_results
+
+
+def _run_test():
+    results = _run_bench()
+    return {"passed": True, "results": results}
+
+
+# ── Modal path: parallel, one A100 per config ──
 
 @app.function(image=image, gpu="A100-80GB", timeout=600)
-def run_config(config_key: str, prompt_label: str, prompt: str, max_tokens: int):
-    return _run_single_config(config_key, prompt_label, prompt, max_tokens)
+def run_config_remote(config_key: str, prompt_label: str, prompt: str, max_tokens: int):
+    """Each config gets its own GPU container with its own model load."""
+    llm, server, buf, fr_capture = _load_model()
+    return _run_config(config_key, prompt_label, prompt, max_tokens,
+                       llm, server, buf, fr_capture)
 
 
 @app.local_entrypoint()
@@ -325,7 +339,7 @@ def main():
     handles = []
     for config_key, prompt_label, prompt, max_tokens in CONFIGS:
         print(f"  Spawning {config_key} (max_tokens={max_tokens})...")
-        h = run_config.spawn(config_key, prompt_label, prompt, max_tokens)
+        h = run_config_remote.spawn(config_key, prompt_label, prompt, max_tokens)
         handles.append((config_key, h))
 
     # Collect results as they finish.
