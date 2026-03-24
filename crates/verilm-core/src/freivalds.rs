@@ -100,12 +100,14 @@ impl Fp {
 
 use crate::constants::Q8_0_BLOCK_SIZE;
 
-/// Derive random batching coefficients for block Freivalds (Fiat-Shamir).
+/// Derive secret batching coefficients for block Freivalds from the verifier key seed.
 ///
-/// Coefficients are derived from the Merkle root commitment, layer index,
-/// and matrix type, so both prover and verifier can compute them post-commit.
+/// Coefficients are derived from the verifier's secret key seed (never shared
+/// with the prover), layer index, and matrix type. This is strictly stronger
+/// than Fiat-Shamir: the prover has zero information about the coefficients,
+/// so the Schwartz-Zippel soundness bound holds unconditionally.
 pub fn derive_block_coefficients(
-    merkle_root: &[u8; 32],
+    key_seed: &[u8; 32],
     layer: usize,
     matrix_idx: usize,
     n_blocks: usize,
@@ -115,8 +117,8 @@ pub fn derive_block_coefficients(
     let mut coeffs = Vec::with_capacity(n_blocks);
     for b in 0..n_blocks {
         let mut hasher = Sha256::new();
-        hasher.update(b"block_coeff");
-        hasher.update(merkle_root);
+        hasher.update(b"vi-block-coeff-v2");
+        hasher.update(key_seed);
         hasher.update((layer as u32).to_le_bytes());
         hasher.update((matrix_idx as u32).to_le_bytes());
         hasher.update((b as u32).to_le_bytes());
