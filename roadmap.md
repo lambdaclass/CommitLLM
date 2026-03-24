@@ -17,7 +17,7 @@ Do not claim "everything except attention" until all of these are complete:
 - [ ] decode/output policy completeness is finished
 - [ ] input/model preprocessing and manifest verification are explicit and complete
 - [ ] the exact final-token boundary starts at the captured pre-final-norm residual and is committed / fail-closed
-- [ ] the canonical LM-head verification path is resolved and matches the security claim
+- [ ] LM-head Freivalds binding is implemented, and exact logits replay is still used for token replay
 - [ ] exact full-prefix deep-audit mode exists
 - [ ] the V5 retained-state path is canonical
 - [ ] adversarial hardening is complete
@@ -130,19 +130,18 @@ Sampled serving is required for V6. Greedy remains the `temperature=0` special c
 
 ## 3. Remaining Exactness and Strengthening
 
-- [ ] **Resolve the LM-head verification mismatch as a claim-critical blocker**
-  - decide the canonical LM-head design:
-    - extend the protocol with `MatrixType::LM_HEAD` plus verifier-side Freivalds vectors and checks, or
-    - keep exact LM-head recomputation as the canonical implementation path
-  - make the code, verifier key story, benchmark story, and security claim all match that choice
-  - do not leave the paper/claim language implying LM-head Freivalds if the implementation is still exact recomputation
-  - explicitly track whether LM head is cryptographically weight-bound or only exact-recomputed, and make the claim language match
+- [ ] **Implement LM-head Freivalds as a claim-critical blocker**
+  - add `MatrixType::LM_HEAD`
+  - extend keygen with verifier-secret `r_lm_head` generation and `v_lm_head = r^T W_lm_head` precomputation
+  - add verifier-side Freivalds checks for LM head
+  - keep exact logits computation for argmax / sampled replay; Freivalds binds the linear map, exact replay uses the logits
+  - make the code, verifier key story, benchmark story, and security claim match this design
 
 - [ ] **Only claim "everything except attention" after all of the following are done**
   - sampled serving is live and replayable end to end
   - decode/output policy completeness is finished
   - the exact final-token boundary starts at the captured pre-final-norm residual
-  - the LM-head verification path is canonical and matches the claimed mechanism
+  - LM-head Freivalds binding exists and exact logits replay is used for token replay
   - exact full-prefix deep-audit mode exists
 
 - [ ] **Move the exact final-token boundary to the strongest post-attention state**
