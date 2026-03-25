@@ -343,11 +343,17 @@ class CaptureBuffer:
         # Get scales from Rust hook (fast path) or Python list (fallback).
         hook = _capture_hook
         if hook is not None:
-            # Rust hook: scales are pre-normalized (scalar tensors).
-            # Just torch.stack + one bulk D2H — no Python normalize loop.
+            # Rust hook: scale refs stored as-is (no per-call reshape).
+            # torch.cat on (1,)-shaped tensors → (N,) in one C++ call.
             scale_list, count = hook.drain_scales()
             if scale_list:
-                scales = torch.stack(scale_list).cpu().numpy()
+                cat = torch.cat(scale_list)
+                if cat.numel() != count:
+                    # Multi-element scales (prefill): reduce then re-cat.
+                    reduced = [s.max().unsqueeze(0) if s.numel() > 1 else s
+                               for s in scale_list]
+                    cat = torch.cat(reduced)
+                scales = cat.cpu().numpy()
             else:
                 import numpy as np
                 scales = np.array([], dtype=np.float32)
@@ -550,12 +556,11 @@ def _wrapped_cutlass_scaled_mm(
         buf = _capture_buffer
         if not buf.enabled:
             return output
-        # Normalize to 0-dim scalar tensor: reshape(()) for 1-element (decode),
-        # .max() for multi-element (prefill). Ensures torch.stack at drain
-        # produces (N,) not (N,1). reshape(()) is a zero-copy view.
-        is_o_proj = hook.record(
-            scale_a.reshape(()) if scale_a.numel() == 1 else scale_a.max()
-        )
+        # Store scale_a as-is (no reshape, no .max()). During decode (99%+
+        # of calls), scale_a is shape (1,). At drain, torch.cat produces
+        # (N,) directly. Multi-element prefill scales are handled lazily
+        # at drain time only when detected.
+        is_o_proj = hook.record(scale_a)
         if is_o_proj:
             if buf._pinned_slab is not None:
                 buf._slab_copy_o_proj(a)
