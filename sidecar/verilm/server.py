@@ -462,15 +462,7 @@ class VerifiedInferenceServer:
         # Pass numpy views directly — Rust reads via buffer protocol (no .tobytes() copy).
         capture_inputs = [c[2].numpy() for c in captures]
         capture_accs = [c[3].numpy() for c in captures]
-        capture_scales = []
-        for c in captures:
-            s = c[4]
-            if hasattr(s, 'numel') and s.numel() > 1:
-                capture_scales.append(float(s.max().item()))
-            elif hasattr(s, 'item'):
-                capture_scales.append(float(s.item()))
-            else:
-                capture_scales.append(float(s))
+        capture_scales = self._extract_scales([c[4] for c in captures])
 
         residuals = el_data.get("residuals")
         residual_bytes = None
@@ -494,6 +486,24 @@ class VerifiedInferenceServer:
             residuals=residual_bytes,
         )
 
+    @staticmethod
+    def _extract_scales(scale_refs):
+        """Extract scale floats from tensor references (post-sync).
+
+        For W8A8 models, all scale_a tensors are 0-dim or 1-element CUDA
+        scalars. Uses .item() per element — this is O(N) with ~8µs per call
+        dominated by cudaMemcpy overhead. Batched alternatives (torch.stack,
+        GPU buffer) tested and no faster due to per-element Python overhead.
+        """
+        if not scale_refs:
+            return []
+        # Fast path: already floats (rare).
+        if isinstance(scale_refs[0], (int, float)):
+            return [float(s) for s in scale_refs]
+        # Common W8A8 path: all scalar CUDA tensors.
+        # .item() works on both 0-dim and 1-element tensors.
+        return [float(s.item()) for s in scale_refs]
+
     def _commit_minimal(self, o_inputs, scale_refs, n_fwd, n_layers,
                          fwd_batch_sizes, all_token_ids, prompt, seed, manifest,
                          final_residuals_raw=None):
@@ -507,16 +517,7 @@ class VerifiedInferenceServer:
         import verilm_rs
 
         o_proj_inputs = [inp.numpy() for inp in o_inputs]
-
-        # Extract scale floats from tensor references (safe: cuda already synced).
-        scales = []
-        for s in scale_refs:
-            if hasattr(s, 'numel') and s.numel() > 1:
-                scales.append(float(s.max().item()))
-            elif hasattr(s, 'item'):
-                scales.append(float(s.item()))
-            else:
-                scales.append(float(s))
+        scales = self._extract_scales(scale_refs)
 
         # Organize per-token final residuals from per-forward-pass captures.
         # model.norm hook fires once per forward pass with shape (batch_sz, hidden_dim).
@@ -574,23 +575,18 @@ class VerifiedInferenceServer:
         # o_inputs already ordered fwd-major × layer-major.
         a_arrays = [inp.numpy().ravel() for inp in o_inputs]
 
-        # Extract scale floats from tensor references (safe: cuda already synced).
-        scales = []
-        for s in scale_refs:
-            if hasattr(s, 'numel') and s.numel() > 1:
-                scales.append(float(s.max().item()))
-            elif hasattr(s, 'item'):
-                scales.append(float(s.item()))
-            else:
-                scales.append(float(s))
+        if timers:
+            t_numpy = _t.monotonic()
+
+        scales = self._extract_scales(scale_refs)
 
         if timers:
-            t_loop = _t.monotonic()
+            t_scales = _t.monotonic()
 
         packed_a = np.concatenate(a_arrays)
 
         if timers:
-            t_pack_a = _t.monotonic()
+            t_concat = _t.monotonic()
 
         # Pack final residuals as contiguous f32 bytes, token-major.
         packed_fr = None
@@ -634,11 +630,12 @@ class VerifiedInferenceServer:
             t_rust = _t.monotonic()
             n_tok = sum(fwd_batch_sizes)
             logger.info(
-                "verilm commit timers: loop=%.1fms concat=%.1fms pack_fr=%.1fms rust=%.1fms "
-                "total=%.1fms (%d tokens, %.2fms/tok)",
-                (t_loop - t0) * 1000,
-                (t_pack_a - t_loop) * 1000,
-                (t_pack_fr - t_pack_a) * 1000,
+                "verilm commit timers: numpy=%.1fms scales=%.1fms concat=%.1fms "
+                "pack_fr=%.1fms rust=%.1fms total=%.1fms (%d tokens, %.2fms/tok)",
+                (t_numpy - t0) * 1000,
+                (t_scales - t_numpy) * 1000,
+                (t_concat - t_scales) * 1000,
+                (t_pack_fr - t_concat) * 1000,
                 (t_rust - t_pack_fr) * 1000,
                 (t_rust - t0) * 1000,
                 n_tok,

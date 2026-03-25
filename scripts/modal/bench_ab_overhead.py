@@ -163,6 +163,7 @@ def _run_config(config_key, prompt_label, prompt, max_tokens, llm, server, buf, 
         # ── 1. Baseline ──
         buf.enabled = False
         fr_capture.enabled = False
+        buf.wait_for_transfers()
         buf.drain()
         fr_capture.drain()
 
@@ -176,6 +177,7 @@ def _run_config(config_key, prompt_label, prompt, max_tokens, llm, server, buf, 
         buf.enabled = True
         cap._capture_mode = "minimal"
         fr_capture.enabled = False
+        buf.wait_for_transfers()
         buf.drain()
 
         t0 = time.monotonic()
@@ -183,18 +185,21 @@ def _run_config(config_key, prompt_label, prompt, max_tokens, llm, server, buf, 
         t1 = time.monotonic()
         times["capture"].append(t1 - t0)
         gen_tokens["capture"] = len(out[0].outputs[0].token_ids)
+        buf.wait_for_transfers()
         buf.drain()
 
         # ── 3. + hooks + sync, no commit ──
         buf.enabled = True
         cap._capture_mode = "minimal"
         fr_capture.enabled = True
+        buf.wait_for_transfers()
         buf.drain()
         fr_capture.drain()
 
         t0 = time.monotonic()
         out = llm.generate([prompt], params)
         torch.cuda.synchronize()
+        buf.wait_for_transfers()
         buf.drain()
         fr_capture.drain()
         t1 = time.monotonic()
