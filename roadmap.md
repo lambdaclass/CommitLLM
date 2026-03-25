@@ -16,6 +16,7 @@ Do not claim "everything except attention" until all of these are complete:
 - [ ] live sampled serving is replayable end to end
 - [ ] decode/output policy completeness is finished
 - [ ] input/model preprocessing and manifest verification are explicit and complete
+- [ ] the final four-spec commitment exists end to end: `input_spec_hash`, `model_spec_hash`, `decode_spec_hash`, `output_spec_hash`
 - [ ] the exact final-token boundary starts at the captured pre-final-norm residual and is committed / fail-closed
 - [ ] LM-head Freivalds binding is implemented, and exact logits replay is still used for token replay
 - [ ] exact full-prefix deep-audit mode exists
@@ -154,9 +155,14 @@ Sampled serving is required for V6. Greedy remains the `temperature=0` special c
     - decode policy
     - sampled token
 
-- [ ] **Complete the manifest in its final protocol form**
-  - input spec: tokenizer / normalization, chat template, BOS / EOS policy, truncation / padding, special-token handling, system prompt
-  - model spec: `R_W`, quantization config, adapter / LoRA / merged-checkpoint identity, RoPE / scaling config, RMSNorm epsilon, other architecture-affecting knobs
+- [ ] **Implement the final four-spec manifest end to end**
+  - receipts and verifier inputs commit literal spec hashes:
+    - `input_spec_hash`
+    - `model_spec_hash`
+    - `decode_spec_hash`
+    - `output_spec_hash`
+  - input spec binds: tokenizer / normalization, chat template, BOS / EOS policy, truncation / padding, special-token handling, system prompt
+  - model spec binds: `R_W`, quantization config, adapter / LoRA / merged-checkpoint identity, RoPE / scaling config, RMSNorm epsilon, other architecture-affecting knobs
   - decode spec and output spec are already required in Section 1 for sampled-serving completion
   - add explicit bound fields for:
     - chat-template hash / policy
@@ -392,12 +398,20 @@ These tasks must explicitly update the full protocol, not just the README narrat
   - enumerate what is exact
   - enumerate what is approximate
   - enumerate what is statistical
-  - enumerate what is still operationally trusted
+  - enumerate which deployment requirements are enforced fail-closed rather than silently trusted
   - explicitly enumerate standard cryptographic assumptions, verifier-key secrecy assumptions, and side-channel assumptions
   - ensure docs and claims match that list
 
+- [ ] **Keep the paper, README, and article normative to the final protocol**
+  - describe the destination protocol, not the transient implementation state
+  - make code converge to the four-spec manifest, exact/fail-closed boundary, and LM-head Freivalds design described in the docs
+  - keep benchmark/result sections factual even when protocol sections are normative
+
 - [ ] **Update the full protocol specification in the paper**
   - exact / statistical / approximate boundaries
+  - protocol-boundary subsection
+  - verification coverage matrix
+  - four-spec manifest structure
   - routine vs deep audit
   - greedy vs sampled mode status
   - retained-state canonical path
@@ -414,6 +428,9 @@ These tasks must explicitly update the full protocol, not just the README narrat
   - make clear that verified mode is minimally invasive to model execution, but not bit-for-bit identical to stock sampled serving
 
 - [ ] **Update the full protocol documentation in the README**
+  - final protocol framing rather than current-state tracking
+  - verification coverage table
+  - manifest surface
   - architecture
   - verifier model
   - exact / statistical / approximate guarantees
@@ -432,6 +449,10 @@ These tasks must explicitly update the full protocol, not just the README narrat
   - make the implementation fail-closed story match that support matrix
 
 - [ ] **Update the article / writeup to match the full protocol**
+  - narrative trust-boundary / pipeline figure
+  - four-spec manifest explanation
+  - exact / approximate / statistical / fail-closed boundary
+  - explicit unsupported-feature fail-closed rule
 
 - [ ] **Add a pipeline figure**
   - exact

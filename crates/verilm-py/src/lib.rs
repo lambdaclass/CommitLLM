@@ -1346,12 +1346,13 @@ fn derive_token_seed<'py>(
 ///     int — the selected token ID.
 #[pyfunction]
 fn canonical_sample(
-    logits: Vec<f32>,
+    logits: &Bound<'_, PyAny>,
     temperature: f32,
     top_k: u32,
     top_p: f32,
     token_seed: &[u8],
 ) -> PyResult<u32> {
+    let logits = extract_f32_vec(logits)?;
     if logits.is_empty() {
         return Err(PyValueError::new_err("logits must not be empty"));
     }

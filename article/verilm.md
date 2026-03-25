@@ -116,6 +116,17 @@ This yields a clean protocol boundary:
 - **Statistical:** prefix/KV provenance in routine audit mode.
 - **Exact again in deep audit:** full-prefix checking when the stronger audit mode is used.
 
+```mermaid
+flowchart LR
+    A["Input preprocessing<br/>Exact<br/><code>input_spec_hash</code>"] --> B["Embedding lookup<br/>Exact<br/>Merkle binding"]
+    B --> C["Shell matmuls + bridges<br/>Exact<br/>Freivalds + canonical replay"]
+    C --> D["Prefix / KV provenance<br/>Statistical by default<br/>Exact in deep audit"]
+    D --> E["Attention interior<br/>Approximate<br/>FP16/BF16 replay corridor"]
+    E --> F["Final-token boundary<br/>Exact<br/>captured pre-final-norm residual"]
+    F --> G["LM head<br/>Exact<br/>Freivalds + exact logits"]
+    G --> H["Decode / output policy<br/>Exact or fail-closed<br/><code>decode_spec_hash</code> + <code>output_spec_hash</code>"]
+```
+
 ## What a transformer computes, and where the hard part is
 
 Inside one layer, the high-level structure is:

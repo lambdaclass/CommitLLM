@@ -85,7 +85,7 @@ class VerifiedInferenceServer:
         # Install canonical sampler hook on LogitsProcessor module.
         # Must be AFTER capture hooks so capture sees original (unmasked) logits.
         from .sampler import CanonicalSamplerHook
-        self.sampler_hook = CanonicalSamplerHook()
+        self.sampler_hook = CanonicalSamplerHook(minimal=cap._capture_mode == "minimal")
         if not self.sampler_hook.install(model):
             raise RuntimeError(
                 "Could not install canonical sampler hook — "
@@ -275,7 +275,14 @@ class VerifiedInferenceServer:
 
         # Drain captures and hook data.
         el_data = self.el_capture.drain() if self.el_capture is not None else {}
+
+        if _chat_timers:
+            _ct_el_drain = time.monotonic()
+
         final_residuals_raw = self.final_res_capture.drain() if self.final_res_capture is not None else []
+
+        if _chat_timers:
+            _ct_fr_drain = time.monotonic()
 
         n_layers = cap._n_layers
         calls_per_fwd = n_layers * cap.PROJS_PER_LAYER
@@ -287,7 +294,7 @@ class VerifiedInferenceServer:
             o_inputs, scales, call_count = self.buf.drain_minimal()
 
             if _chat_timers:
-                _ct_drain = time.monotonic()
+                _ct_buf_drain = time.monotonic()
 
             logger.info(
                 "verilm: captures=%d (o_inputs=%d, scales=%d), calls_per_fwd=%d, "
@@ -339,12 +346,15 @@ class VerifiedInferenceServer:
                 if len(final_residuals_raw) == n_fwd + 1:
                     final_residuals_raw = final_residuals_raw[:-1]
                 n_tokens = sum(fwd_batch_sizes)
+
+            if _chat_timers:
+                _ct_prep = time.monotonic()
         else:
             # Full-mode: drain tuple-based captures.
             captures = self.buf.drain()
 
             if _chat_timers:
-                _ct_drain = time.monotonic()
+                _ct_buf_drain = time.monotonic()
 
             logger.info(
                 "verilm: captures=%d, calls_per_fwd=%d, prompt_tokens=%d, "
@@ -381,6 +391,9 @@ class VerifiedInferenceServer:
                     final_residuals_raw = final_residuals_raw[:-1]
                 n_tokens = sum(fwd_batch_sizes)
 
+            if _chat_timers:
+                _ct_prep = time.monotonic()
+
         if n_tokens != expected_traces:
             raise RuntimeError(
                 f"Token count ({n_tokens}) does not match expected "
@@ -410,6 +423,9 @@ class VerifiedInferenceServer:
             "max_tokens": max_tokens,
         }
 
+        if _chat_timers:
+            _ct_manifest = time.monotonic()
+
         if cap._capture_mode == "minimal":
             use_packed = os.environ.get("VERILM_PACKED_COMMIT", "1") == "1"
             commit_fn = self._commit_minimal_packed if use_packed else self._commit_minimal
@@ -425,26 +441,21 @@ class VerifiedInferenceServer:
 
         if _chat_timers:
             _ct_commit = time.monotonic()
-            n_tok = len(gen_token_ids)
-            logger.info(
-                "verilm chat timers: generate=%.1fms sync=%.1fms drain=%.1fms "
-                "commit=%.1fms total=%.1fms (%d tokens)",
-                (_ct_gen - _ct0) * 1000,
-                (_ct_sync - _ct_gen) * 1000,
-                (_ct_drain - _ct_sync) * 1000,
-                (_ct_commit - _ct_drain) * 1000,
-                (_ct_commit - _ct0) * 1000,
-                n_tok,
-            )
 
         # Store for audit.
         import uuid
         request_id = str(uuid.uuid4())
         self._store_audit(request_id, state)
 
+        if _chat_timers:
+            _ct_store = time.monotonic()
+
         commitment = json.loads(state.commitment_json())
 
-        return {
+        if _chat_timers:
+            _ct_json = time.monotonic()
+
+        response = {
             "request_id": request_id,
             "commitment": commitment,
             "token_ids": all_token_ids,
@@ -452,6 +463,32 @@ class VerifiedInferenceServer:
             "generated_text": generated_text,
             "n_tokens": state.n_tokens(),
         }
+
+        if _chat_timers:
+            _ct_end = time.monotonic()
+            n_tok = len(gen_token_ids)
+            logger.info(
+                "verilm chat timers: generate=%.1fms sync=%.1fms "
+                "el_drain=%.1fms fr_drain=%.1fms buf_drain=%.1fms "
+                "prep=%.1fms manifest=%.1fms commit=%.1fms "
+                "store=%.1fms json=%.1fms response=%.1fms "
+                "total=%.1fms (%d tokens)",
+                (_ct_gen - _ct0) * 1000,
+                (_ct_sync - _ct_gen) * 1000,
+                (_ct_el_drain - _ct_sync) * 1000,
+                (_ct_fr_drain - _ct_el_drain) * 1000,
+                (_ct_buf_drain - _ct_fr_drain) * 1000,
+                (_ct_prep - _ct_buf_drain) * 1000,
+                (_ct_manifest - _ct_prep) * 1000,
+                (_ct_commit - _ct_manifest) * 1000,
+                (_ct_store - _ct_commit) * 1000,
+                (_ct_json - _ct_store) * 1000,
+                (_ct_end - _ct_json) * 1000,
+                (_ct_end - _ct0) * 1000,
+                n_tok,
+            )
+
+        return response
 
     def _commit_full(self, captures, fwd_batch_sizes, n_layers, el_data,
                       all_token_ids, prompt, seed, manifest):
@@ -500,9 +537,16 @@ class VerifiedInferenceServer:
         # Fast path: already floats (rare).
         if isinstance(scale_refs[0], (int, float)):
             return [float(s) for s in scale_refs]
-        # Common W8A8 path: all scalar CUDA tensors.
-        # .item() works on both 0-dim and 1-element tensors.
-        return [float(s.item()) for s in scale_refs]
+        # W8A8 path: CUDA tensors. Most are 0-dim or 1-element scalars,
+        # but prefill rows produce per-row scales (batch_size,). Use .max()
+        # for multi-element tensors (conservative upper bound).
+        result = []
+        for s in scale_refs:
+            if hasattr(s, 'numel') and s.numel() > 1:
+                result.append(float(s.max().item()))
+            else:
+                result.append(float(s.item()))
+        return result
 
     def _commit_minimal(self, o_inputs, scale_refs, n_fwd, n_layers,
                          fwd_batch_sizes, all_token_ids, prompt, seed, manifest,
