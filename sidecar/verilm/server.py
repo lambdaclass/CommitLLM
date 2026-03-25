@@ -301,6 +301,18 @@ class VerifiedInferenceServer:
                 )
 
             n_fwd = call_count // calls_per_fwd
+            expected_o = n_fwd * n_layers
+            if len(o_inputs) != expected_o:
+                raise RuntimeError(
+                    f"o_inputs count ({len(o_inputs)}) != expected "
+                    f"({expected_o} = {n_fwd} fwd × {n_layers} layers). "
+                    f"Counter drift or missed o_proj append."
+                )
+            if len(scales) != call_count:
+                raise RuntimeError(
+                    f"scales count ({len(scales)}) != call_count ({call_count}). "
+                    f"Scale buffer out of sync."
+                )
             fwd_batch_sizes = [
                 o_inputs[i * n_layers].shape[0] for i in range(n_fwd)
             ]
