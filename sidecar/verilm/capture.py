@@ -179,6 +179,13 @@ class CaptureBuffer:
         self.total_captured = 0
         self.enabled = True
 
+        # Minimal-mode dedicated buffers: flat lists instead of tuples.
+        # o_inputs: one CPU tensor per o_proj call (n_fwd * n_layers).
+        # scales: one float per matmul call (n_fwd * calls_per_fwd).
+        self._minimal_o_inputs: List[torch.Tensor] = []
+        self._minimal_scales: List[float] = []
+        self._minimal_call_count: int = 0
+
         # Sync infrastructure — initialized lazily by set_sync_mode("event").
         self._sync_mode = "global"
         self._copy_stream: Optional[torch.cuda.Stream] = None
@@ -250,10 +257,11 @@ class CaptureBuffer:
             self._entries = self._entries[-self._max_entries:]
 
     def drain(self) -> List[CaptureTuple]:
-        """Remove and return all entries.
+        """Remove and return all entries (full-mode captures).
 
         In event mode, warns if transfers haven't been waited on yet
         and auto-waits to prevent reading incomplete data.
+        Also clears minimal-mode buffers (used as pre-request reset).
         """
         if self._transfers_pending:
             logger.warning(
@@ -263,7 +271,28 @@ class CaptureBuffer:
             self.wait_for_transfers()
         entries = self._entries
         self._entries = []
+        # Also clear minimal-mode buffers (pre-request reset).
+        self._minimal_o_inputs = []
+        self._minimal_scales = []
+        self._minimal_call_count = 0
         return entries
+
+    def drain_minimal(self):
+        """Drain minimal-mode buffers. Returns (o_inputs, scales, call_count).
+
+        o_inputs: list of CPU tensors, one per o_proj call (n_fwd * n_layers).
+        scales: flat list of floats, one per matmul call (n_fwd * calls_per_fwd).
+        call_count: total matmul calls captured (= len(scales)).
+        """
+        if self._transfers_pending:
+            self.wait_for_transfers()
+        o_inputs = self._minimal_o_inputs
+        scales = self._minimal_scales
+        count = self._minimal_call_count
+        self._minimal_o_inputs = []
+        self._minimal_scales = []
+        self._minimal_call_count = 0
+        return o_inputs, scales, count
 
     def reset_counter(self):
         """Reset the global call counter to zero.
@@ -401,9 +430,22 @@ def _wrapped_cutlass_scaled_mm(
     _call_counter += 1
 
     if _capture_mode == "minimal":
-        # V4 path: no _int_mm. Only transfer o_proj input to CPU.
-        a_cpu = buf.copy_to_cpu(a) if proj == "o_proj" else None
-        buf.append((layer, proj, a_cpu, None, scale_a))
+        # V4 fast path: flat lists, no tuple allocation.
+        # Store scale_a reference (GPU tensor); float extraction deferred to
+        # consumer after cuda.synchronize() to avoid per-call sync overhead.
+        buf._minimal_scales.append(scale_a)
+        buf._minimal_call_count += 1
+
+        # Only D2H copy for o_proj (1 of 4 projections per layer).
+        if proj == "o_proj":
+            buf._minimal_o_inputs.append(buf.copy_to_cpu(a))
+
+        buf.total_captured += 1
+        if buf.total_captured % _log_interval == 0:
+            logger.info(
+                "verilm: %d captures (pid=%d)", buf.total_captured, os.getpid()
+            )
+        return output
     else:
         # Full path: compute INT32 accumulator via _int_mm.
         M = a.shape[0]
