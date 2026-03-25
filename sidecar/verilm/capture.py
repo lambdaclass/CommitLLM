@@ -321,11 +321,12 @@ class CaptureBuffer:
             o_inputs = self._minimal_o_inputs
 
         # Bulk D2H for scales: one transfer instead of thousands of .item() calls.
-        count = self._scale_buf_idx
-        if count > 0 and self._scale_buf is not None:
+        count = self._minimal_call_count
+        if self._scale_buf is not None and self._scale_buf_idx > 0:
             import numpy as np
-            scales = self._scale_buf[:count].cpu().numpy()
+            scales = self._scale_buf[:self._scale_buf_idx].cpu().numpy()
         else:
+            # Fallback: no GPU scale buffer (e.g. no CUDA, not initialized).
             import numpy as np
             scales = np.array([], dtype=np.float32)
 
@@ -370,6 +371,8 @@ class CaptureBuffer:
 
     def record_scale(self, scale_a):
         """Write a scale value to the GPU buffer. One D2D scalar copy."""
+        if self._scale_buf is None:
+            self.init_scale_buffer(scale_a.device)
         idx = self._scale_buf_idx
         # Grow if needed (rare: only if request exceeds initial capacity).
         if idx >= self._scale_buf.shape[0]:
@@ -555,8 +558,7 @@ def _wrapped_cutlass_scaled_mm(
         # V4 fast path: write scale to pre-allocated GPU buffer (D2D scalar
         # copy on compute stream). Bulk D2H at drain time replaces per-call
         # .item() overhead.
-        if buf._scale_buf is not None:
-            buf.record_scale(scale_a)
+        buf.record_scale(scale_a)
         buf._minimal_call_count += 1
 
         # Only D2H copy for o_proj (1 of 4 projections per layer).
