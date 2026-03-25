@@ -80,6 +80,10 @@ _q_dim = 0              # num_heads * head_dim
 _kv_dim = 0             # num_kv_heads * head_dim
 _gate_up_half = 0       # intermediate_size (each half of gate_up)
 
+# Rust CaptureHook: handles counter/modulus/scale-storage in native code.
+# Created by configure_layer_count() when in minimal mode. None = Python fallback.
+_capture_hook = None
+
 
 def configure_layer_count(n_layers: int):
     """Set the number of transformer layers for call-counting identification.
@@ -87,7 +91,7 @@ def configure_layer_count(n_layers: int):
     Must be called once after model loading. The wrapper uses this to derive
     layer index and projection name from the matmul call sequence.
     """
-    global _n_layers, _calls_per_fwd, _configured
+    global _n_layers, _calls_per_fwd, _configured, _capture_hook
     _n_layers = n_layers
     _calls_per_fwd = n_layers * PROJS_PER_LAYER
     _configured = True
@@ -95,6 +99,20 @@ def configure_layer_count(n_layers: int):
         "verilm: configured for %d layers, %d calls/fwd (pid=%d)",
         n_layers, _calls_per_fwd, os.getpid(),
     )
+
+    # Create Rust capture hook for minimal mode — moves counter arithmetic,
+    # scale storage, and proj identification out of Python bytecode.
+    if _capture_mode == "minimal":
+        try:
+            import verilm_rs
+            _capture_hook = verilm_rs.CaptureHook(
+                calls_per_fwd=_calls_per_fwd,
+                projs_per_layer=PROJS_PER_LAYER,
+                o_proj_idx=_O_PROJ_IDX,
+            )
+            logger.info("verilm: Rust CaptureHook active (pid=%d)", os.getpid())
+        except (ImportError, AttributeError):
+            logger.info("verilm: Rust CaptureHook unavailable, using Python path")
 
 
 def configure_from_model(model):
@@ -287,6 +305,9 @@ class CaptureBuffer:
         self._minimal_call_count = 0
         self._pinned_slab_idx = 0
         self._slab_offsets = []
+        # Clear Rust hook state too (if active).
+        if _capture_hook is not None:
+            _capture_hook.drain_scales()
         return entries
 
     def drain_minimal(self):
@@ -319,18 +340,28 @@ class CaptureBuffer:
         else:
             o_inputs = self._minimal_o_inputs
 
-        # Stack scale refs on GPU then one bulk D2H — replaces thousands of
-        # individual .item() calls (~8µs each) with one torch.stack + .cpu().
-        count = self._minimal_call_count
-        if self._minimal_scales:
-            # Handle multi-element scales (prefill): reduce to scalar on GPU.
-            reduced = []
-            for s in self._minimal_scales:
-                reduced.append(s.max() if s.numel() > 1 else s.reshape(()))
-            scales = torch.stack(reduced).cpu().numpy()
+        # Get scales from Rust hook (fast path) or Python list (fallback).
+        hook = _capture_hook
+        if hook is not None:
+            # Rust hook: scales are pre-normalized (scalar tensors).
+            # Just torch.stack + one bulk D2H — no Python normalize loop.
+            scale_list, count = hook.drain_scales()
+            if scale_list:
+                scales = torch.stack(scale_list).cpu().numpy()
+            else:
+                import numpy as np
+                scales = np.array([], dtype=np.float32)
         else:
-            import numpy as np
-            scales = np.array([], dtype=np.float32)
+            # Python fallback: normalize multi-element scales then stack.
+            count = self._minimal_call_count
+            if self._minimal_scales:
+                reduced = []
+                for s in self._minimal_scales:
+                    reduced.append(s.max() if s.numel() > 1 else s.reshape(()))
+                scales = torch.stack(reduced).cpu().numpy()
+            else:
+                import numpy as np
+                scales = np.array([], dtype=np.float32)
 
         self._minimal_o_inputs = []
         self._minimal_scales = []
@@ -389,7 +420,7 @@ class CaptureBuffer:
         self._slab_offsets.append((idx, end))
 
     def reset_counter(self):
-        """Reset the global call counter to zero.
+        """Reset the call counter to zero (both Rust hook and Python global).
 
         Must be called before each inference request to realign the
         call-counting layer/proj identification. Without this, any
@@ -400,6 +431,8 @@ class CaptureBuffer:
         """
         global _call_counter
         _call_counter = 0
+        if _capture_hook is not None:
+            _capture_hook.reset_counter()
 
     def begin_request(
         self, request_id: str, prompt_token_ids: Optional[List[int]] = None
@@ -493,8 +526,9 @@ def _wrapped_cutlass_scaled_mm(
     """
     Wrapper around cutlass_scaled_mm that captures inputs for verification.
 
+    In "minimal" mode with Rust CaptureHook: counter/modulus/scale-storage
+    handled in native code (~2-3µs vs ~9µs in Python bytecode).
     In "full" mode: captures x_i8 + acc_i32 (via _int_mm) for all projections.
-    In "minimal" mode: captures only o_proj input (a_i8) + scales. No _int_mm.
     """
     global _call_counter
 
@@ -508,6 +542,28 @@ def _wrapped_cutlass_scaled_mm(
     # Always call the original kernel — output is unchanged
     output = real(a, b, scale_a, scale_b, out_dtype, bias)
 
+    # ── Rust fast path (minimal mode) ──
+    # CaptureHook handles counter, modulus, scale append in native code.
+    # Only the o_proj slab copy stays in Python (requires PyTorch tensor ops).
+    hook = _capture_hook
+    if hook is not None:
+        buf = _capture_buffer
+        if not buf.enabled:
+            return output
+        # Normalize to 0-dim scalar tensor: reshape(()) for 1-element (decode),
+        # .max() for multi-element (prefill). Ensures torch.stack at drain
+        # produces (N,) not (N,1). reshape(()) is a zero-copy view.
+        is_o_proj = hook.record(
+            scale_a.reshape(()) if scale_a.numel() == 1 else scale_a.max()
+        )
+        if is_o_proj:
+            if buf._pinned_slab is not None:
+                buf._slab_copy_o_proj(a)
+            else:
+                buf._minimal_o_inputs.append(buf.copy_to_cpu(a))
+        return output
+
+    # ── Python fallback (full mode, or Rust hook unavailable) ──
     buf = _capture_buffer
     if not buf.enabled:
         return output
@@ -524,12 +580,10 @@ def _wrapped_cutlass_scaled_mm(
     _call_counter += 1
 
     if _capture_mode == "minimal":
-        # V4 fast path: append scale reference (near-zero overhead).
-        # At drain time, torch.stack + one bulk D2H replaces per-call .item().
+        # Python fallback for minimal mode (no Rust hook).
         buf._minimal_scales.append(scale_a)
         buf._minimal_call_count += 1
 
-        # Only D2H copy for o_proj (1 of 4 projections per layer).
         if proj_idx == _O_PROJ_IDX:
             if buf._pinned_slab is not None:
                 buf._slab_copy_o_proj(a)

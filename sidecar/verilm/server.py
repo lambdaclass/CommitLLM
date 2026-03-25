@@ -296,12 +296,13 @@ class VerifiedInferenceServer:
             if _chat_timers:
                 _ct_buf_drain = time.monotonic()
 
+            _cc = cap._capture_hook.call_counter if cap._capture_hook is not None else cap._call_counter
             logger.info(
                 "verilm: captures=%d (o_inputs=%d, scales=%d), calls_per_fwd=%d, "
                 "prompt_tokens=%d, gen_tokens=%d, all_tokens=%d, call_counter=%d",
                 call_count, len(o_inputs), len(scales), calls_per_fwd,
                 len(prompt_token_ids), len(gen_token_ids),
-                len(all_token_ids), cap._call_counter,
+                len(all_token_ids), _cc,
             )
 
             if call_count == 0 or call_count % calls_per_fwd != 0:
@@ -309,7 +310,7 @@ class VerifiedInferenceServer:
                     f"Capture count {call_count} not a multiple of "
                     f"calls_per_fwd {calls_per_fwd} "
                     f"(prompt_tokens={len(prompt_token_ids)}, gen_tokens={len(gen_token_ids)}, "
-                    f"call_counter={cap._call_counter})"
+                    f"call_counter={_cc})"
                 )
 
             n_fwd = call_count // calls_per_fwd

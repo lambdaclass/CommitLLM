@@ -1369,6 +1369,97 @@ fn canonical_sample(
     Ok(verilm_core::sampling::sample(&logits, &params, &seed_arr))
 }
 
+// ── CaptureHook: Rust-side bookkeeping for the capture wrapper ──
+//
+// Moves counter arithmetic, scale storage, and proj identification out of
+// Python bytecode. The Python wrapper becomes:
+//
+//   output = real(a, b, scale_a, scale_b, out_dtype, bias)
+//   if hook is not None and buf.enabled:
+//       is_o_proj = hook.record(scale_a)
+//       if is_o_proj: buf._slab_copy_o_proj(a)
+//   return output
+//
+// Each record() call: ~2-3µs (PyO3 round-trip) vs ~9µs (Python bytecode).
+// At 28K calls/request, saves ~170ms.
+
+#[pyclass]
+struct CaptureHook {
+    calls_per_fwd: usize,
+    o_proj_idx: usize,
+    projs_per_layer: usize,
+    call_counter: usize,
+    minimal_call_count: usize,
+    total_captured: usize,
+    scales: Vec<Py<PyAny>>,
+}
+
+#[pymethods]
+impl CaptureHook {
+    #[new]
+    fn new(
+        calls_per_fwd: usize,
+        projs_per_layer: usize,
+        o_proj_idx: usize,
+    ) -> Self {
+        CaptureHook {
+            calls_per_fwd,
+            o_proj_idx,
+            projs_per_layer,
+            call_counter: 0,
+            minimal_call_count: 0,
+            total_captured: 0,
+            scales: Vec::with_capacity(65536),
+        }
+    }
+
+    /// Record a scale capture. Returns true if this call is an o_proj call
+    /// (caller should do the D2H slab copy for `a`).
+    ///
+    /// scale_a must already be reduced to a scalar tensor (caller handles
+    /// the numel>1 check + .max() in Python — only hits during prefill).
+    fn record(&mut self, scale_a: Py<PyAny>) -> bool {
+        let idx = self.call_counter % self.calls_per_fwd;
+        let proj_idx = idx % self.projs_per_layer;
+        self.call_counter += 1;
+        self.scales.push(scale_a);
+        self.minimal_call_count += 1;
+        self.total_captured += 1;
+        proj_idx == self.o_proj_idx
+    }
+
+    /// Drain accumulated scales. Returns (list_of_scale_tensors, call_count).
+    /// All returned tensors are 0-dim or 1-element GPU tensors — caller can
+    /// torch.stack() + .cpu().numpy() in one shot (no Python normalize loop).
+    fn drain_scales(&mut self, py: Python<'_>) -> PyResult<(Py<PyAny>, usize)> {
+        let count = self.minimal_call_count;
+        let scales = std::mem::take(&mut self.scales);
+        self.minimal_call_count = 0;
+        let list = PyList::new(py, scales)?;
+        Ok((list.into_any().unbind(), count))
+    }
+
+    /// Reset the call counter to zero (between requests).
+    fn reset_counter(&mut self) {
+        self.call_counter = 0;
+    }
+
+    #[getter]
+    fn get_call_counter(&self) -> usize {
+        self.call_counter
+    }
+
+    #[getter]
+    fn get_total_captured(&self) -> usize {
+        self.total_captured
+    }
+
+    #[getter]
+    fn get_minimal_call_count(&self) -> usize {
+        self.minimal_call_count
+    }
+}
+
 #[pymodule]
 fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(commit, m)?)?;
@@ -1388,5 +1479,6 @@ fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<MinimalBatchStateHandle>()?;
     m.add_function(wrap_pyfunction!(commit_minimal_packed, m)?)?;
     m.add_class::<PackedBatchStateHandle>()?;
+    m.add_class::<CaptureHook>()?;
     Ok(())
 }
