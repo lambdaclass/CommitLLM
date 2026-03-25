@@ -42,6 +42,8 @@ SETUP_COMMANDS = [
     # Rust toolchain.
     "command -v cargo || (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y)",
     'export PATH="$HOME/.cargo/bin:$PATH"',
+    # Clean corrupt package metadata that crashes pip's resolver.
+    "rm -rf /usr/local/lib/python3.11/dist-packages/~*",
     # Python deps.
     "pip install -q 'vllm>=0.8' torch numpy fastapi maturin modal",
 ]

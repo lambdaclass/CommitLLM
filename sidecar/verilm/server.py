@@ -62,10 +62,6 @@ class VerifiedInferenceServer:
         model = get_model_from_llm(llm)
         configure_from_model(model)
 
-        # Initialize pinned CPU slab for o_proj D2H (minimal mode).
-        if cap._hidden_size > 0:
-            self.buf.init_pinned_slab(cap._hidden_size)
-
         # Install embedding/logit hooks (skip in minimal mode — data unused).
         if cap._capture_mode != "minimal":
             self.el_capture = EmbeddingLogitCapture()
@@ -104,6 +100,11 @@ class VerifiedInferenceServer:
         self._system_prompt_hash = hashlib.sha256(b"").hexdigest()  # Default: empty prompt
 
         self.buf = get_capture_buffer()
+
+        # Initialize pinned CPU slab for o_proj D2H (minimal mode).
+        if cap._hidden_size > 0:
+            self.buf.init_pinned_slab(cap._hidden_size)
+
         self._audit_store: Dict[str, dict] = {}
         self._max_audit_entries = max_audit_entries
 
