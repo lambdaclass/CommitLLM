@@ -105,6 +105,14 @@ class VerifiedInferenceServer:
         if cap._hidden_size > 0:
             self.buf.init_pinned_slab(cap._hidden_size)
 
+        # Initialize GPU scale buffer for per-call scale capture (minimal mode).
+        # Scales are written as D2D scalar copies during the wrapper, then
+        # bulk-transferred to CPU at drain time (one D2H instead of N .item() calls).
+        if cap._capture_mode == "minimal":
+            import torch as _torch
+            if _torch.cuda.is_available():
+                self.buf.init_scale_buffer(_torch.device("cuda"))
+
         self._audit_store: Dict[str, dict] = {}
         self._max_audit_entries = max_audit_entries
 
@@ -527,10 +535,8 @@ class VerifiedInferenceServer:
     def _extract_scales(scale_refs):
         """Extract scale floats from tensor references (post-sync).
 
-        For W8A8 models, all scale_a tensors are 0-dim or 1-element CUDA
-        scalars. Uses .item() per element — this is O(N) with ~8µs per call
-        dominated by cudaMemcpy overhead. Batched alternatives (torch.stack,
-        GPU buffer) tested and no faster due to per-element Python overhead.
+        Used only by the full-mode commit path. In minimal mode, scales are
+        captured in a GPU buffer and bulk-transferred at drain time instead.
         """
         if not scale_refs:
             return []
@@ -548,20 +554,20 @@ class VerifiedInferenceServer:
                 result.append(float(s.item()))
         return result
 
-    def _commit_minimal(self, o_inputs, scale_refs, n_fwd, n_layers,
+    def _commit_minimal(self, o_inputs, scales, n_fwd, n_layers,
                          fwd_batch_sizes, all_token_ids, prompt, seed, manifest,
                          final_residuals_raw=None):
         """V4 retained-state commitment path (no _int_mm, no full traces).
 
         Args:
             o_inputs: list of CPU tensors (one per o_proj call, n_fwd * n_layers).
-            scale_refs: flat list of scale tensors/values (one per matmul call,
-                        n_fwd * n_layers * 4). Converted to floats here (post-sync).
+            scales: numpy float32 array of pre-extracted scale values (one per
+                    matmul call, n_fwd * n_layers * 4). Already bulk-transferred
+                    from GPU at drain time.
         """
         import verilm_rs
 
         o_proj_inputs = [inp.numpy() for inp in o_inputs]
-        scales = self._extract_scales(scale_refs)
 
         # Organize per-token final residuals from per-forward-pass captures.
         # model.norm hook fires once per forward pass with shape (batch_sz, hidden_dim).
@@ -595,7 +601,7 @@ class VerifiedInferenceServer:
             final_residuals=final_residuals,
         )
 
-    def _commit_minimal_packed(self, o_inputs, scale_refs, n_fwd, n_layers,
+    def _commit_minimal_packed(self, o_inputs, scales, n_fwd, n_layers,
                                fwd_batch_sizes, all_token_ids, prompt, seed, manifest,
                                final_residuals_raw=None):
         """Packed V4 commit: passes contiguous buffers to Rust, avoiding
@@ -603,8 +609,9 @@ class VerifiedInferenceServer:
 
         Args:
             o_inputs: list of CPU tensors (one per o_proj call, n_fwd * n_layers).
-            scale_refs: flat list of scale tensors/values (one per matmul call,
-                        n_fwd * n_layers * 4). Converted to floats here (post-sync).
+            scales: numpy float32 array of pre-extracted scale values (one per
+                    matmul call, n_fwd * n_layers * 4). Already bulk-transferred
+                    from GPU at drain time — no per-element extraction needed.
         """
         import numpy as np
         import verilm_rs
@@ -621,11 +628,8 @@ class VerifiedInferenceServer:
 
         if timers:
             t_numpy = _t.monotonic()
-
-        scales = self._extract_scales(scale_refs)
-
-        if timers:
-            t_scales = _t.monotonic()
+            # scales already extracted at drain time (GPU bulk D2H)
+            t_scales = t_numpy
 
         packed_a = np.concatenate(a_arrays)
 

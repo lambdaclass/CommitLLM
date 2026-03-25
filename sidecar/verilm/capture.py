@@ -182,8 +182,14 @@ class CaptureBuffer:
 
         # Minimal-mode dedicated buffers: flat lists instead of tuples.
         self._minimal_o_inputs: List[torch.Tensor] = []
-        self._minimal_scales: list = []
         self._minimal_call_count: int = 0
+
+        # GPU scale buffer: pre-allocated CUDA float32 tensor.
+        # Scales are written here during the wrapper (D2D scalar copy),
+        # then bulk-transferred to CPU at drain time (one D2H instead of
+        # thousands of individual .item() calls).
+        self._scale_buf: Optional[torch.Tensor] = None  # (capacity,) f32, CUDA
+        self._scale_buf_idx: int = 0
 
         # Pinned CPU slab for o_proj D2H: avoids per-call tensor allocation.
         # Initialized by init_pinned_slab() after model config is known.
@@ -278,8 +284,8 @@ class CaptureBuffer:
         self._entries = []
         # Also clear minimal-mode buffers (pre-request reset).
         self._minimal_o_inputs = []
-        self._minimal_scales = []
         self._minimal_call_count = 0
+        self._scale_buf_idx = 0
         self._pinned_slab_idx = 0
         self._slab_offsets = []
         return entries
@@ -290,7 +296,8 @@ class CaptureBuffer:
         o_inputs: list of CPU tensors, one per o_proj call (n_fwd * n_layers).
                   When pinned slab is active, these are views into contiguous
                   pinned memory (no per-call allocation was done).
-        scales: flat list of scale refs, one per matmul call.
+        scales: numpy float32 array of pre-extracted scale values, one per
+                matmul call. Bulk-transferred from GPU in a single D2H copy.
         call_count: total matmul calls captured (= len(scales)).
         """
         if self._transfers_pending:
@@ -313,10 +320,17 @@ class CaptureBuffer:
         else:
             o_inputs = self._minimal_o_inputs
 
-        scales = self._minimal_scales
-        count = self._minimal_call_count
+        # Bulk D2H for scales: one transfer instead of thousands of .item() calls.
+        count = self._scale_buf_idx
+        if count > 0 and self._scale_buf is not None:
+            import numpy as np
+            scales = self._scale_buf[:count].cpu().numpy()
+        else:
+            import numpy as np
+            scales = np.array([], dtype=np.float32)
+
         self._minimal_o_inputs = []
-        self._minimal_scales = []
+        self._scale_buf_idx = 0
         self._minimal_call_count = 0
         return o_inputs, scales, count
 
@@ -338,6 +352,37 @@ class CaptureBuffer:
             capacity_rows * hidden_dim / 1e6,
             os.getpid(),
         )
+
+    def init_scale_buffer(self, device, capacity: int = 65536):
+        """Allocate a GPU float32 buffer for per-call scale capture.
+
+        In the wrapper, each scale_a is written to this buffer (D2D scalar
+        copy on the compute stream — near-zero overhead). At drain time,
+        a single bulk D2H transfers all scales at once, replacing thousands
+        of individual .item() calls (~8µs each) with one ~0.1ms copy.
+        """
+        self._scale_buf = torch.zeros(capacity, dtype=torch.float32, device=device)
+        self._scale_buf_idx = 0
+        logger.info(
+            "verilm: scale buffer initialized (%d slots, %.1f KB, device=%s, pid=%d)",
+            capacity, capacity * 4 / 1024, device, os.getpid(),
+        )
+
+    def record_scale(self, scale_a):
+        """Write a scale value to the GPU buffer. One D2D scalar copy."""
+        idx = self._scale_buf_idx
+        # Grow if needed (rare: only if request exceeds initial capacity).
+        if idx >= self._scale_buf.shape[0]:
+            new_cap = self._scale_buf.shape[0] * 2
+            new_buf = torch.zeros(new_cap, dtype=torch.float32, device=self._scale_buf.device)
+            new_buf[:idx].copy_(self._scale_buf[:idx])
+            self._scale_buf = new_buf
+            logger.info("verilm: scale buffer grown to %d slots", new_cap)
+        if scale_a.numel() > 1:
+            self._scale_buf[idx] = scale_a.max()
+        else:
+            self._scale_buf[idx] = scale_a
+        self._scale_buf_idx += 1
 
     def _slab_copy_o_proj(self, a: torch.Tensor):
         """Copy o_proj activation into pinned slab. No tensor allocation."""
@@ -507,10 +552,11 @@ def _wrapped_cutlass_scaled_mm(
     _call_counter += 1
 
     if _capture_mode == "minimal":
-        # V4 fast path: flat lists, no tuple allocation.
-        # Store scale_a reference (GPU tensor); float extraction deferred to
-        # consumer after cuda.synchronize() to avoid per-call sync overhead.
-        buf._minimal_scales.append(scale_a)
+        # V4 fast path: write scale to pre-allocated GPU buffer (D2D scalar
+        # copy on compute stream). Bulk D2H at drain time replaces per-call
+        # .item() overhead.
+        if buf._scale_buf is not None:
+            buf.record_scale(scale_a)
         buf._minimal_call_count += 1
 
         # Only D2H copy for o_proj (1 of 4 projections per layer).

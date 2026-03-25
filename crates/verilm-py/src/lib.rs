@@ -948,7 +948,7 @@ impl MinimalBatchStateHandle {
 #[allow(clippy::too_many_arguments)]
 fn commit_minimal_from_captures(
     o_proj_inputs: &Bound<'_, PyList>,
-    scales: Vec<f32>,
+    scales: &Bound<'_, PyAny>,
     n_layers: usize,
     fwd_batch_sizes: Vec<usize>,
     token_ids: Vec<u32>,
@@ -958,6 +958,7 @@ fn commit_minimal_from_captures(
     weight_provider: Option<&WeightProvider>,
     final_residuals: Option<&Bound<'_, PyList>>,
 ) -> PyResult<MinimalBatchStateHandle> {
+    let scales = extract_f32_vec(scales)?;
     let n_entries = o_proj_inputs.len();
     let expected_scales = n_entries * 4;
     if scales.len() != expected_scales {
@@ -1129,7 +1130,7 @@ impl PackedBatchStateHandle {
 ///
 /// Args:
 ///     packed_a: buffer — contiguous i8 bytes, fwd-major × layer-major × batch-row-major.
-///     packed_scales: list[float] — 4 f32 scales per (fwd, layer): [scale_x_attn, scale_a, scale_x_ffn, scale_h].
+///     packed_scales: buffer — f32 scales via buffer protocol (numpy array). 4 per (fwd, layer): [scale_x_attn, scale_a, scale_x_ffn, scale_h].
 ///     n_layers: int — number of transformer layers.
 ///     hidden_dim: int — hidden dimension (a_i8 row length).
 ///     fwd_batch_sizes: list[int] — batch size for each forward pass.
@@ -1158,7 +1159,7 @@ impl PackedBatchStateHandle {
 #[allow(clippy::too_many_arguments)]
 fn commit_minimal_packed(
     packed_a: &Bound<'_, PyAny>,
-    packed_scales: Vec<f32>,
+    packed_scales: &Bound<'_, PyAny>,
     n_layers: usize,
     hidden_dim: usize,
     fwd_batch_sizes: Vec<usize>,
@@ -1189,6 +1190,9 @@ fn commit_minimal_packed(
             Err(PyValueError::new_err("packed_final_res must support buffer protocol"))
         }
     }).transpose()?;
+
+    // Extract scales via buffer protocol (numpy array → one bulk memcpy).
+    let packed_scales = extract_f32_vec(packed_scales)?;
 
     if sampling_seed.len() != 32 {
         return Err(PyValueError::new_err("sampling_seed must be exactly 32 bytes"));
