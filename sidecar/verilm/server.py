@@ -62,6 +62,10 @@ class VerifiedInferenceServer:
         model = get_model_from_llm(llm)
         configure_from_model(model)
 
+        # Initialize pinned CPU slab for o_proj D2H (minimal mode).
+        if cap._hidden_size > 0:
+            self.buf.init_pinned_slab(cap._hidden_size)
+
         # Install embedding/logit hooks (skip in minimal mode — data unused).
         if cap._capture_mode != "minimal":
             self.el_capture = EmbeddingLogitCapture()

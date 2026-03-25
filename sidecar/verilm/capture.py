@@ -62,6 +62,7 @@ CaptureTuple = Tuple[Optional[int], Optional[str], torch.Tensor, torch.Tensor, t
 
 PROJ_SEQUENCE = ("qkv_proj", "o_proj", "gate_up_proj", "down_proj")
 PROJS_PER_LAYER = len(PROJ_SEQUENCE)
+_O_PROJ_IDX = 1  # o_proj position in PROJ_SEQUENCE
 
 # Set by configure_layer_count() / configure_from_model() after model loading.
 _n_layers = 0           # Number of transformer layers
@@ -180,11 +181,15 @@ class CaptureBuffer:
         self.enabled = True
 
         # Minimal-mode dedicated buffers: flat lists instead of tuples.
-        # o_inputs: one CPU tensor per o_proj call (n_fwd * n_layers).
-        # scales: one float per matmul call (n_fwd * calls_per_fwd).
         self._minimal_o_inputs: List[torch.Tensor] = []
-        self._minimal_scales: List[float] = []
+        self._minimal_scales: list = []
         self._minimal_call_count: int = 0
+
+        # Pinned CPU slab for o_proj D2H: avoids per-call tensor allocation.
+        # Initialized by init_pinned_slab() after model config is known.
+        self._pinned_slab: Optional[torch.Tensor] = None  # (capacity, hidden_dim), i8
+        self._pinned_slab_idx: int = 0  # row write cursor
+        self._slab_offsets: List[tuple] = []  # (start_row, end_row) per o_proj call
 
         # Sync infrastructure — initialized lazily by set_sync_mode("event").
         self._sync_mode = "global"
@@ -275,24 +280,96 @@ class CaptureBuffer:
         self._minimal_o_inputs = []
         self._minimal_scales = []
         self._minimal_call_count = 0
+        self._pinned_slab_idx = 0
+        self._slab_offsets = []
         return entries
 
     def drain_minimal(self):
         """Drain minimal-mode buffers. Returns (o_inputs, scales, call_count).
 
         o_inputs: list of CPU tensors, one per o_proj call (n_fwd * n_layers).
-        scales: flat list of floats, one per matmul call (n_fwd * calls_per_fwd).
+                  When pinned slab is active, these are views into contiguous
+                  pinned memory (no per-call allocation was done).
+        scales: flat list of scale refs, one per matmul call.
         call_count: total matmul calls captured (= len(scales)).
         """
         if self._transfers_pending:
             self.wait_for_transfers()
-        o_inputs = self._minimal_o_inputs
+
+        # If pinned slab was used, split it into per-call views matching
+        # the same interface the consumer expects (list of 2D tensors).
+        if self._pinned_slab is not None and self._pinned_slab_idx > 0:
+            slab = self._pinned_slab[:self._pinned_slab_idx]
+            # Reconstruct per-o_proj-call views from the contiguous slab.
+            # The fallback list may also contain entries (e.g. if slab overflowed).
+            o_inputs = self._minimal_o_inputs  # may have fallback entries
+            if len(o_inputs) == 0:
+                # Pure slab path: split into views using _slab_offsets
+                o_inputs = []
+                for start, end in self._slab_offsets:
+                    o_inputs.append(slab[start:end])
+            self._pinned_slab_idx = 0
+            self._slab_offsets = []
+        else:
+            o_inputs = self._minimal_o_inputs
+
         scales = self._minimal_scales
         count = self._minimal_call_count
         self._minimal_o_inputs = []
         self._minimal_scales = []
         self._minimal_call_count = 0
         return o_inputs, scales, count
+
+    def init_pinned_slab(self, hidden_dim: int, capacity_rows: int = 32768):
+        """Allocate a pinned CPU slab for o_proj D2H copies.
+
+        Call once after configure_from_model(). The slab eliminates per-call
+        CPU tensor allocation: each o_proj D2H copies directly into a slice
+        of this pre-allocated pinned buffer.
+        """
+        self._pinned_slab = torch.empty(
+            capacity_rows, hidden_dim, dtype=torch.int8, pin_memory=True,
+        )
+        self._pinned_slab_idx = 0
+        self._slab_offsets: List[tuple] = []  # (start_row, end_row) per o_proj call
+        logger.info(
+            "verilm: pinned slab initialized (%d rows × %d, %.1f MB, pid=%d)",
+            capacity_rows, hidden_dim,
+            capacity_rows * hidden_dim / 1e6,
+            os.getpid(),
+        )
+
+    def _slab_copy_o_proj(self, a: torch.Tensor):
+        """Copy o_proj activation into pinned slab. No tensor allocation."""
+        batch_sz = a.shape[0]
+        idx = self._pinned_slab_idx
+        end = idx + batch_sz
+
+        # Grow if needed (rare: only if request exceeds initial capacity).
+        if end > self._pinned_slab.shape[0]:
+            new_cap = max(self._pinned_slab.shape[0] * 2, end + 1024)
+            new_slab = torch.empty(
+                new_cap, self._pinned_slab.shape[1],
+                dtype=torch.int8, pin_memory=True,
+            )
+            if idx > 0:
+                new_slab[:idx].copy_(self._pinned_slab[:idx])
+            self._pinned_slab = new_slab
+            logger.info("verilm: pinned slab grown to %d rows", new_cap)
+
+        target = self._pinned_slab[idx:end]
+
+        if self._sync_mode == "event" and self._copy_stream is not None:
+            self._copy_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(self._copy_stream):
+                target.copy_(a, non_blocking=True)
+                self._sync_event.record()
+        else:
+            target.copy_(a, non_blocking=True)
+
+        self._transfers_pending = True
+        self._pinned_slab_idx = end
+        self._slab_offsets.append((idx, end))
 
     def reset_counter(self):
         """Reset the global call counter to zero.
@@ -418,14 +495,14 @@ def _wrapped_cutlass_scaled_mm(
     if not buf.enabled:
         return output
 
-    # Derive layer/proj from call count (zero overhead vs PyTorch hooks)
+    # Derive layer/proj index from call count (integer arithmetic only).
     if _configured:
         idx = _call_counter % _calls_per_fwd
         layer = idx // PROJS_PER_LAYER
-        proj = PROJ_SEQUENCE[idx % PROJS_PER_LAYER]
+        proj_idx = idx % PROJS_PER_LAYER
     else:
         layer = None
-        proj = None
+        proj_idx = -1
 
     _call_counter += 1
 
@@ -437,8 +514,11 @@ def _wrapped_cutlass_scaled_mm(
         buf._minimal_call_count += 1
 
         # Only D2H copy for o_proj (1 of 4 projections per layer).
-        if proj == "o_proj":
-            buf._minimal_o_inputs.append(buf.copy_to_cpu(a))
+        if proj_idx == _O_PROJ_IDX:
+            if buf._pinned_slab is not None:
+                buf._slab_copy_o_proj(a)
+            else:
+                buf._minimal_o_inputs.append(buf.copy_to_cpu(a))
 
         buf.total_captured += 1
         if buf.total_captured % _log_interval == 0:
@@ -461,6 +541,7 @@ def _wrapped_cutlass_scaled_mm(
         else:
             acc_i32 = torch._int_mm(a, b)
 
+        proj = PROJ_SEQUENCE[proj_idx] if proj_idx >= 0 else None
         buf.append((layer, proj, buf.copy_to_cpu(a),
                     buf.copy_to_cpu(acc_i32), scale_a))
 
