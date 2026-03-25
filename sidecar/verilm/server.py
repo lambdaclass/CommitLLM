@@ -105,14 +105,6 @@ class VerifiedInferenceServer:
         if cap._hidden_size > 0:
             self.buf.init_pinned_slab(cap._hidden_size)
 
-        # Initialize GPU scale buffer for per-call scale capture (minimal mode).
-        # Scales are written as D2D scalar copies during the wrapper, then
-        # bulk-transferred to CPU at drain time (one D2H instead of N .item() calls).
-        if cap._capture_mode == "minimal":
-            import torch as _torch
-            if _torch.cuda.is_available():
-                self.buf.init_scale_buffer(_torch.device("cuda"))
-
         self._audit_store: Dict[str, dict] = {}
         self._max_audit_entries = max_audit_entries
 
