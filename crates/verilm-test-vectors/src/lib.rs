@@ -642,6 +642,8 @@ pub fn generate_key(cfg: &ModelConfig, model: &[LayerWeights], seed: [u8; 32]) -
         wo_norms: Vec::new(),
         max_v_norm: 0.0,
         lm_head: None,
+        r_lm_head: None,
+        v_lm_head: None,
         weight_hash: Some(weight_hash),
         rmsnorm_attn_weights: Vec::new(),
         rmsnorm_ffn_weights: Vec::new(),
@@ -665,6 +667,22 @@ pub fn generate_key_level_b_with_head(
     lm_head: Option<Vec<i8>>,
 ) -> VerifierKey {
     let mut key = generate_key(cfg, model, seed);
+    // Generate LM-head Freivalds vectors when lm_head is provided.
+    if let Some(ref lm) = lm_head {
+        use rand::{SeedableRng, Rng as _};
+        // Derive a separate seed for lm_head r vector (avoid reusing shell seed).
+        let mut lm_seed = seed;
+        lm_seed[0] ^= 0xff;
+        let mut lm_rng = ChaCha20Rng::from_seed(lm_seed);
+        let vocab_size = cfg.vocab_size;
+        let hidden_dim = cfg.hidden_dim;
+        let r: Vec<verilm_core::field::Fp> = (0..vocab_size)
+            .map(|_| verilm_core::field::Fp::new(lm_rng.gen::<u32>()))
+            .collect();
+        let v = verilm_core::freivalds::precompute_v(&r, lm, vocab_size, hidden_dim);
+        key.r_lm_head = Some(r);
+        key.v_lm_head = Some(v);
+    }
     key.lm_head = lm_head;
     key.wo_norms = model
         .iter()

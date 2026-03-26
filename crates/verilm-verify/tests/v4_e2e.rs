@@ -1014,7 +1014,7 @@ fn v4_unbound_initial_residual_rejected() {
 // LM head verification (greedy argmax)
 // ---------------------------------------------------------------------------
 
-/// Setup with lm_head: generate model with head, derive correct token_id via argmax.
+/// Setup with lm_head + Freivalds r/v: generate model with head, derive correct token_id.
 fn setup_lm_head() -> (
     ModelConfig,
     Vec<LayerWeights>,
@@ -1025,8 +1025,10 @@ fn setup_lm_head() -> (
 ) {
     let cfg = ModelConfig::toy();
     let toy = verilm_test_vectors::generate_model_with_head(&cfg, 12345);
-    let mut key = verilm_test_vectors::generate_key(&cfg, &toy.layers, [1u8; 32]);
-    key.lm_head = Some(toy.lm_head.clone());
+    // Use generate_key_level_b_with_head so r_lm_head / v_lm_head are populated.
+    let key = verilm_test_vectors::generate_key_level_b_with_head(
+        &cfg, &toy.layers, [1u8; 32], Some(toy.lm_head.clone()),
+    );
 
     let input: Vec<i8> = (0..cfg.hidden_dim as i8).collect();
     let traces = forward_pass(&cfg, &toy.layers, &input);
@@ -1092,8 +1094,9 @@ fn v4_lm_head_wrong_token_detected() {
 fn v4_lm_head_multi_token_pass() {
     let cfg = ModelConfig::toy();
     let toy = verilm_test_vectors::generate_model_with_head(&cfg, 12345);
-    let mut key = verilm_test_vectors::generate_key(&cfg, &toy.layers, [1u8; 32]);
-    key.lm_head = Some(toy.lm_head.clone());
+    let key = verilm_test_vectors::generate_key_level_b_with_head(
+        &cfg, &toy.layers, [1u8; 32], Some(toy.lm_head.clone()),
+    );
 
     // Generate 3 tokens, each with correct argmax token_id
     let inputs: Vec<Vec<i8>> = (0..3)
@@ -1132,6 +1135,51 @@ fn v4_lm_head_multi_token_pass() {
         assert_eq!(report.verdict, Verdict::Pass,
             "token {}: failures: {:?}", i, report.failures);
     }
+}
+
+#[test]
+fn v4_lm_head_freivalds_catches_tampered_weights() {
+    // The verifier key has r/v precomputed from the original lm_head.
+    // If the prover uses a different lm_head (tampered weights), the
+    // Freivalds check must fail even if the exact logit comparison passes
+    // (since the verifier recomputes logits from its own lm_head copy).
+    let cfg = ModelConfig::toy();
+    let toy = verilm_test_vectors::generate_model_with_head(&cfg, 12345);
+    let key = verilm_test_vectors::generate_key_level_b_with_head(
+        &cfg, &toy.layers, [1u8; 32], Some(toy.lm_head.clone()),
+    );
+
+    // Verify r_lm_head and v_lm_head are present.
+    assert!(key.r_lm_head.is_some(), "r_lm_head should be generated");
+    assert!(key.v_lm_head.is_some(), "v_lm_head should be generated");
+    assert_eq!(key.r_lm_head.as_ref().unwrap().len(), cfg.vocab_size);
+    assert_eq!(key.v_lm_head.as_ref().unwrap().len(), cfg.hidden_dim);
+
+    // Run normal verification — should pass (Freivalds + exact logits agree).
+    let input: Vec<i8> = (0..cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&cfg, &toy.layers, &input);
+    let final_hidden = verilm_core::requantize(&traces.last().unwrap().ffn_out);
+    let logits = verilm_core::sampling::recompute_logits(
+        &toy.lm_head, &final_hidden, cfg.vocab_size, cfg.hidden_dim,
+    );
+    let token_id = logits.iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(i, _)| i as u32)
+        .unwrap();
+
+    let retained = retained_from_traces(&traces);
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"freivalds lm_head test",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None);
+
+    let report = verify_v4(&key, &response);
+    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
 }
 
 // ---------------------------------------------------------------------------

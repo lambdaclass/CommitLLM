@@ -28,7 +28,7 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{IntoPyDict, PyBytes, PyDict, PyList};
 
 use verilm_core::serialize;
 use verilm_core::types::{
@@ -1428,15 +1428,67 @@ impl CaptureHook {
         proj_idx == self.o_proj_idx
     }
 
-    /// Drain accumulated scales. Returns (list_of_scale_tensors, call_count).
-    /// All returned tensors are 0-dim or 1-element GPU tensors — caller can
-    /// torch.stack() + .cpu().numpy() in one shot (no Python normalize loop).
+    /// Drain accumulated scales. Returns (numpy_array, call_count).
+    ///
+    /// Does torch.cat + .cpu() + .numpy() internally via PyO3 — avoids
+    /// returning 28K Python tensor objects that would need to be passed
+    /// to C++ for bulk cat (which costs ~30ms in pybind11 conversion).
+    /// Doing the cat here saves ~30ms per request.
     fn drain_scales(&mut self, py: Python<'_>) -> PyResult<(Py<PyAny>, usize)> {
         let count = self.minimal_call_count;
-        let scales = std::mem::take(&mut self.scales);
         self.minimal_call_count = 0;
-        let list = PyList::new(py, scales)?;
-        Ok((list.into_any().unbind(), count))
+
+        if self.scales.is_empty() {
+            let numpy = py.import("numpy")?;
+            let empty = numpy.call_method(
+                "array",
+                (Vec::<f32>::new(),),
+                Some(&[("dtype", numpy.getattr("float32")?)].into_py_dict(py)?),
+            )?;
+            return Ok((empty.unbind(), 0));
+        }
+
+        let scales = std::mem::take(&mut self.scales);
+        let torch_mod = py.import("torch")?;
+        let list = PyList::new(py, &scales)?;
+
+        // Fast path: torch.cat directly (works when all tensors are 1D — 99.6% of calls).
+        let cat = match torch_mod.call_method1("cat", (&list,)) {
+            Ok(t) => t,
+            Err(_) => {
+                // Mixed dimensions (prefill 2D + decode 1D): flatten each, re-cat.
+                let flat = PyList::empty(py);
+                for item in list.iter() {
+                    flat.append(item.call_method0("flatten")?)?;
+                }
+                torch_mod.call_method1("cat", (&flat,))?
+            }
+        };
+
+        // Handle multi-element prefill scales: reduce each to max.
+        let numel: usize = cat.call_method0("numel")?.extract()?;
+        let final_tensor = if numel != count {
+            let reduced = PyList::empty(py);
+            for item in list.iter() {
+                let n: usize = item.call_method0("numel")?.extract()?;
+                if n > 1 {
+                    let maxed = item.call_method0("max")?;
+                    reduced.append(maxed.call_method1("unsqueeze", (0i64,))?)?;
+                } else {
+                    reduced.append(item.call_method0("flatten")?)?;
+                }
+            }
+            torch_mod.call_method1("cat", (&reduced,))?
+        } else {
+            cat
+        };
+
+        // GPU→CPU + numpy: one bulk transfer.
+        let numpy_arr = final_tensor
+            .call_method0("cpu")?
+            .call_method0("numpy")?;
+
+        Ok((numpy_arr.unbind(), count))
     }
 
     /// Reset the call counter to zero (between requests).

@@ -105,8 +105,18 @@ class VerifiedInferenceServer:
         if cap._hidden_size > 0:
             self.buf.init_pinned_slab(cap._hidden_size)
 
+        # Try to activate native C++ capture wrapper.
+        # Must be after configure_from_model() + init_pinned_slab().
+        if cap._capture_mode == "minimal":
+            import torch
+            device_hint = torch.empty(1, device="cuda")
+            cap.activate_native_capture(device_hint_tensor=device_hint)
+
         self._audit_store: Dict[str, dict] = {}
         self._max_audit_entries = max_audit_entries
+
+        # Cache timer flag once at init (avoid per-request os.environ read).
+        self._chat_timers = os.environ.get("VERILM_COMMIT_TIMERS", "0") == "1"
 
         # Pre-load weight provider once for all future V4 audits.
         self._weight_provider = None
@@ -238,7 +248,7 @@ class VerifiedInferenceServer:
         # revealed only at audit time, preventing pre-computation attacks.
         seed = secrets.token_bytes(32)
 
-        _chat_timers = os.environ.get("VERILM_COMMIT_TIMERS", "0") == "1"
+        _chat_timers = self._chat_timers
         if _chat_timers:
             _ct0 = time.monotonic()
 
@@ -262,13 +272,10 @@ class VerifiedInferenceServer:
             _ct_gen = time.monotonic()
 
         # Ensure all non-blocking GPU→CPU transfers completed.
-        # 1. Capture buffer: event-based sync (only waits on the last D2H transfer).
+        # Each component uses its own dedicated CUDA stream + event.
         self.buf.wait_for_transfers()
-        # 2. Hook D2H copies (final_res_capture, el_capture) use non_blocking=True
-        #    without dedicated events. A device-wide sync ensures they're complete.
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        if self.final_res_capture is not None:
+            self.final_res_capture.wait_for_transfers()
 
         if _chat_timers:
             _ct_sync = time.monotonic()
@@ -296,7 +303,12 @@ class VerifiedInferenceServer:
             if _chat_timers:
                 _ct_buf_drain = time.monotonic()
 
-            _cc = cap._capture_hook.call_counter if cap._capture_hook is not None else cap._call_counter
+            if cap._native_capture is not None:
+                _cc = cap._native_capture.get_call_counter()
+            elif cap._capture_hook is not None:
+                _cc = cap._capture_hook.call_counter
+            else:
+                _cc = cap._call_counter
             logger.info(
                 "verilm: captures=%d (o_inputs=%d, scales=%d), calls_per_fwd=%d, "
                 "prompt_tokens=%d, gen_tokens=%d, all_tokens=%d, call_counter=%d",
@@ -611,7 +623,7 @@ class VerifiedInferenceServer:
         from . import capture as cap
 
         hidden_dim = cap._hidden_size
-        timers = os.environ.get("VERILM_COMMIT_TIMERS", "0") == "1"
+        timers = self._chat_timers
         if timers:
             import time as _t
             t0 = _t.monotonic()

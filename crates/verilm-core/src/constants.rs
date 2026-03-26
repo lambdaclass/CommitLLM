@@ -82,16 +82,10 @@ pub struct ModelConfig {
     pub n_layers: usize,
     pub n_q_heads: usize,
     pub n_kv_heads: usize,
-    /// Vocabulary size (number of logit entries). 0 if not applicable.
-    #[serde(default)]
+    /// Vocabulary size (number of logit entries).
     pub vocab_size: usize,
-    /// RoPE base frequency (theta). Default 10000.0 for Llama-family models.
-    #[serde(default = "default_rope_theta")]
+    /// RoPE base frequency (theta), e.g. 10000.0 for Llama-family models.
     pub rope_theta: f64,
-}
-
-fn default_rope_theta() -> f64 {
-    10000.0
 }
 
 impl ModelConfig {

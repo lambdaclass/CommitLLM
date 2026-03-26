@@ -43,7 +43,7 @@ image = (
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
         "VERILM_CAPTURE": "1",
     })
-    .pip_install("vllm>=0.8", "torch", "numpy", "fastapi", "maturin")
+    .pip_install("vllm>=0.8", "torch", "numpy", "fastapi", "maturin", "ninja")
     .add_local_dir("sidecar", remote_path="/opt/verilm", copy=True)
     .run_commands(
         "pip install -e /opt/verilm",
@@ -105,6 +105,7 @@ def _load_model():
     import os
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     os.environ["VERILM_COMMIT_TIMERS"] = "1"
+    os.environ["VERILM_CAPTURE_MODE"] = "minimal"
 
     import logging
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -115,6 +116,10 @@ def _load_model():
     from verilm.capture import get_capture_buffer
     from verilm.hooks import FinalResidualCapture
     from verilm.server import VerifiedInferenceServer
+
+    # Ensure minimal mode is set BEFORE server creation — native capture
+    # activation depends on this.
+    cap._capture_mode = "minimal"
 
     print(f"Loading {MODEL_ID}...")
     llm = LLM(
@@ -128,9 +133,14 @@ def _load_model():
     fr_capture.install(model)
     server = VerifiedInferenceServer(llm)
 
+    # Report native capture status.
+    if cap._native_capture is not None:
+        print(">>> NATIVE C++ accumulator ACTIVE (hybrid: Python kernel + C++ storage/drain)")
+    else:
+        print(">>> Python capture wrapper (native not available)")
+
     # Warmup.
     print(f"Warmup: {N_WARMUP} iterations...")
-    cap._capture_mode = "minimal"
     buf.enabled = True
     fr_capture.enabled = True
     for _ in range(N_WARMUP):

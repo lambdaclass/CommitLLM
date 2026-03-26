@@ -150,15 +150,28 @@ pub fn verify_margin(
             ));
             return failures;
         }
-        // Recompute logits: lm_head @ final_hidden
-        let recomputed_logits: Vec<f32> = (0..vocab_size)
+        // Compute logits as i32 (shared by Freivalds + exact comparison).
+        let logits_i32: Vec<i32> = (0..vocab_size)
             .map(|r| {
                 (0..hidden_dim)
                     .map(|c| lm_head[r * hidden_dim + c] as i32 * final_hidden[c] as i32)
-                    .sum::<i32>() as f32
+                    .sum::<i32>()
             })
             .collect();
-        // Compare against cert logits
+
+        // LM-head Freivalds check.
+        if let (Some(ref r_lm), Some(ref v_lm)) = (&key.r_lm_head, &key.v_lm_head) {
+            if !freivalds::check(v_lm, final_hidden, r_lm, &logits_i32) {
+                failures.push(format!(
+                    "token {}: lm_head Freivalds check failed",
+                    trace.token_index
+                ));
+                return failures;
+            }
+        }
+
+        // Exact logit comparison against cert.
+        let recomputed_logits: Vec<f32> = logits_i32.iter().map(|&v| v as f32).collect();
         if cert.logits.len() != recomputed_logits.len() {
             failures.push(format!(
                 "token {}: cert logits length {} != recomputed {}",
@@ -1782,19 +1795,37 @@ pub fn verify_v4(
             if let Some(ref lm_head) = key.lm_head {
                 if let Some(ref fh) = final_hidden {
                     if key.config.vocab_size > 0 {
+                        let vocab_size = key.config.vocab_size;
+                        let hidden_dim = key.config.hidden_dim;
+
+                        // Compute logits as i32 accumulators (used by both Freivalds and
+                        // exact token replay). Single pass over lm_head × final_hidden.
+                        let logits_i32: Vec<i32> = (0..vocab_size)
+                            .map(|row| {
+                                (0..hidden_dim)
+                                    .map(|c| lm_head[row * hidden_dim + c] as i32 * fh[c] as i32)
+                                    .sum::<i32>()
+                            })
+                            .collect();
+
+                        // LM-head Freivalds: v · final_hidden == r · logits_i32.
+                        if let (Some(ref r_lm), Some(ref v_lm)) = (&key.r_lm_head, &key.v_lm_head) {
+                            checks_run += 1;
+                            if !freivalds::check(v_lm, fh, r_lm, &logits_i32) {
+                                failures.push("lm_head: Freivalds check failed".into());
+                            }
+                        }
+
+                        // Exact token replay: cast to f32 logits, apply sampling, verify token_id.
                         checks_run += 1;
-                        let logits = verilm_core::sampling::recompute_logits(
-                            lm_head, fh, key.config.vocab_size, key.config.hidden_dim,
-                        );
+                        let logits: Vec<f32> = logits_i32.iter().map(|&v| v as f32).collect();
 
                         let expected_token = if let Some(ref dp) = decode_params {
-                            // Full sampling replay with decode params + revealed seed.
                             let token_seed = verilm_core::sampling::derive_token_seed(
                                 &response.revealed_seed, response.token_index,
                             );
                             verilm_core::sampling::sample(&logits, dp, &token_seed)
                         } else {
-                            // No manifest → greedy argmax fallback.
                             logits.iter()
                                 .enumerate()
                                 .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())

@@ -113,12 +113,18 @@ class FinalResidualCapture:
     between the approximate attention stack and the exact tail
     (RMSNorm -> lm_head -> sampling). The verifier uses this for exact
     token verification instead of the shell-replayed final hidden state.
+
+    Uses a dedicated CUDA stream + event for non_blocking D2H copies,
+    avoiding device-wide torch.cuda.synchronize() at drain time.
     """
 
     def __init__(self):
         self.residuals: List[torch.Tensor] = []
         self._handle = None
         self.enabled = True
+        self._copy_stream: Optional[torch.cuda.Stream] = None
+        self._sync_event: Optional[torch.cuda.Event] = None
+        self._transfers_pending = False
 
     def install(self, model) -> bool:
         """Install forward hook on the final RMSNorm (model.norm).
@@ -129,17 +135,36 @@ class FinalResidualCapture:
             if name == "model.norm":
                 self._handle = mod.register_forward_hook(self._hook)
                 logger.info("verilm: installed final residual hook on %s", name)
+                # Initialize dedicated copy stream + event for async D2H.
+                if torch.cuda.is_available():
+                    self._copy_stream = torch.cuda.Stream()
+                    self._sync_event = torch.cuda.Event()
                 return True
         logger.warning("verilm: could not find model.norm for final residual capture")
         return False
 
     def _hook(self, module, args, output):
         if self.enabled and len(args) > 0:
-            # Capture input in float32 for exact RMSNorm replay by verifier.
-            self.residuals.append(args[0].detach().float().to("cpu", non_blocking=True))
+            t = args[0].detach().float()
+            if self._copy_stream is not None:
+                self._copy_stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(self._copy_stream):
+                    cpu_t = t.to("cpu", non_blocking=True)
+                    self._sync_event.record()
+            else:
+                cpu_t = t.to("cpu", non_blocking=True)
+            self.residuals.append(cpu_t)
+            self._transfers_pending = True
+
+    def wait_for_transfers(self):
+        """Block until all non_blocking D2H copies are complete."""
+        if self._transfers_pending and self._sync_event is not None:
+            self._sync_event.synchronize()
+        self._transfers_pending = False
 
     def drain(self) -> List[torch.Tensor]:
         """Return and clear all captured final residuals."""
+        self.wait_for_transfers()
         result = self.residuals
         self.residuals = []
         return result

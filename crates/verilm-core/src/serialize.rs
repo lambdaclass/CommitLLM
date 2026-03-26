@@ -182,6 +182,8 @@ mod tests {
             wo_norms: Vec::new(),
             max_v_norm: 0.0,
             lm_head: None,
+            r_lm_head: None,
+            v_lm_head: None,
             weight_hash: None,
             rmsnorm_attn_weights: Vec::new(),
             rmsnorm_ffn_weights: Vec::new(),

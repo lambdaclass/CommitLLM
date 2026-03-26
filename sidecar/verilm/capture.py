@@ -84,6 +84,11 @@ _gate_up_half = 0       # intermediate_size (each half of gate_up)
 # Created by configure_layer_count() when in minimal mode. None = Python fallback.
 _capture_hook = None
 
+# Native C++ capture extension (JIT-compiled). When active, replaces the
+# Python wrapper entirely — vLLM calls the C++ function directly.
+# None = not loaded or not available.
+_native_capture = None
+
 
 def configure_layer_count(n_layers: int):
     """Set the number of transformer layers for call-counting identification.
@@ -168,6 +173,81 @@ def configure_from_model(model):
     )
 
 
+def activate_native_capture(device_hint_tensor=None):
+    """Load the native C++ capture accumulator for fast scale storage + drain.
+
+    Hybrid mode: the Python wrapper keeps calling the real kernel directly
+    (fastest path), but uses C++ record() for scale storage and C++ drain()
+    for bulk at::cat transfer. This avoids both:
+      - c10 typed dispatcher overhead (~5-8us/call) from full-replace mode
+      - Python torch.cat on 28K-element list overhead at drain time
+
+    Must be called AFTER:
+      - vllm._C is loaded (op registered in dispatcher)
+      - configure_layer_count() has been called
+      - init_pinned_slab() has been called (optional, for o_proj capture)
+
+    Returns True if native accumulator is active, False on fallback.
+    """
+    global _native_capture
+
+    if os.environ.get("VERILM_NO_NATIVE_ACC") == "1":
+        logger.info("verilm: native accumulator disabled via VERILM_NO_NATIVE_ACC=1")
+        return False
+
+    if not _configured:
+        logger.warning("verilm: activate_native_capture called before configure_layer_count")
+        return False
+
+    if _capture_mode != "minimal":
+        logger.info("verilm: native capture only supports minimal mode")
+        return False
+
+    # JIT-compile the C++ extension (suppress compiler warnings from torch headers).
+    try:
+        from torch.utils.cpp_extension import load
+        cpp_path = os.path.join(os.path.dirname(__file__), "csrc", "capture_native.cpp")
+        if not os.path.exists(cpp_path):
+            logger.info("verilm: native capture source not found at %s", cpp_path)
+            return False
+
+        _native_capture = load(
+            name="capture_native",
+            sources=[cpp_path],
+            extra_cflags=["-w"],   # suppress all compiler warnings
+            extra_cuda_cflags=["-w"] if torch.cuda.is_available() else [],
+            verbose=False,
+        )
+        logger.info("verilm: native capture extension compiled (pid=%d)", os.getpid())
+    except Exception as e:
+        logger.warning("verilm: native capture compilation failed: %s", e)
+        _native_capture = None
+        return False
+
+    # Initialize the accumulator (geometry + state reset).
+    try:
+        _native_capture.init(_calls_per_fwd, PROJS_PER_LAYER, _O_PROJ_IDX)
+    except Exception as e:
+        logger.warning("verilm: native capture init failed: %s", e)
+        _native_capture = None
+        return False
+
+    # Set up pinned slab (if already initialized).
+    buf = _capture_buffer
+    if buf._pinned_slab is not None:
+        _native_capture.init_slab(buf._pinned_slab)
+        logger.info("verilm: native capture using existing pinned slab")
+
+    # Hybrid mode: do NOT replace ops.cutlass_scaled_mm.
+    # The Python wrapper calls the real kernel directly, then uses
+    # native.record() + native.copy_slab() for C++ accumulation.
+    logger.info(
+        "verilm: native accumulator active — C++ scale storage + drain (pid=%d)",
+        os.getpid(),
+    )
+    return True
+
+
 # ── Capture buffer ──
 
 
@@ -196,7 +276,7 @@ class CaptureBuffer:
         self._entries: List[CaptureTuple] = []
         self._max_entries = max_entries
         self.total_captured = 0
-        self.enabled = True
+        self._enabled = True
 
         # Minimal-mode dedicated buffers: flat lists instead of tuples.
         self._minimal_o_inputs: List[torch.Tensor] = []
@@ -225,6 +305,17 @@ class CaptureBuffer:
         self._current_prompt_ids: List[int] = []
         self._request_start: float = 0.0
         self._request_entries_start: int = 0
+
+    @property
+    def enabled(self):
+        return self._enabled
+
+    @enabled.setter
+    def enabled(self, value):
+        self._enabled = value
+        # Sync with native C++ capture (it has its own enabled flag).
+        if _native_capture is not None:
+            _native_capture.set_enabled(value)
 
     def set_sync_mode(self, mode: str):
         """Set synchronization mode. Call once after CUDA is initialized.
@@ -308,6 +399,9 @@ class CaptureBuffer:
         # Clear Rust hook state too (if active).
         if _capture_hook is not None:
             _capture_hook.drain_scales()
+        # Clear native capture state (if active).
+        if _native_capture is not None:
+            _native_capture.drain_discard()
         return entries
 
     def drain_minimal(self):
@@ -322,6 +416,8 @@ class CaptureBuffer:
         """
         if self._transfers_pending:
             self.wait_for_transfers()
+
+        # ── Rust hook or Python fallback path ──
 
         # If pinned slab was used, split it into per-call views matching
         # the same interface the consumer expects (list of 2D tensors).
@@ -341,22 +437,11 @@ class CaptureBuffer:
             o_inputs = self._minimal_o_inputs
 
         # Get scales from Rust hook (fast path) or Python list (fallback).
+        # Rust hook does torch.cat + .cpu() + .numpy() internally via PyO3
+        # (avoids returning 28K Python tensor objects for C++/Python cat).
         hook = _capture_hook
         if hook is not None:
-            # Rust hook: scale refs stored as-is (no per-call reshape).
-            # torch.cat on (1,)-shaped tensors → (N,) in one C++ call.
-            scale_list, count = hook.drain_scales()
-            if scale_list:
-                cat = torch.cat(scale_list)
-                if cat.numel() != count:
-                    # Multi-element scales (prefill): reduce then re-cat.
-                    reduced = [s.max().unsqueeze(0) if s.numel() > 1 else s
-                               for s in scale_list]
-                    cat = torch.cat(reduced)
-                scales = cat.cpu().numpy()
-            else:
-                import numpy as np
-                scales = np.array([], dtype=np.float32)
+            scales, count = hook.drain_scales()  # returns (numpy_array, count)
         else:
             # Python fallback: normalize multi-element scales then stack.
             count = self._minimal_call_count
@@ -426,7 +511,7 @@ class CaptureBuffer:
         self._slab_offsets.append((idx, end))
 
     def reset_counter(self):
-        """Reset the call counter to zero (both Rust hook and Python global).
+        """Reset the call counter to zero (native, Rust hook, and Python global).
 
         Must be called before each inference request to realign the
         call-counting layer/proj identification. Without this, any
@@ -437,6 +522,8 @@ class CaptureBuffer:
         """
         global _call_counter
         _call_counter = 0
+        if _native_capture is not None:
+            _native_capture.reset_counter()
         if _capture_hook is not None:
             _capture_hook.reset_counter()
 
@@ -548,18 +635,16 @@ def _wrapped_cutlass_scaled_mm(
     # Always call the original kernel — output is unchanged
     output = real(a, b, scale_a, scale_b, out_dtype, bias)
 
-    # ── Rust fast path (minimal mode) ──
-    # CaptureHook handles counter, modulus, scale append in native code.
-    # Only the o_proj slab copy stays in Python (requires PyTorch tensor ops).
+    # ── Rust hook path (minimal mode) ──
+    # CaptureHook handles counter, modulus, scale append in native Rust code.
+    # Slab copy stays in Python (requires PyTorch tensor ops).
+    # At drain time, hook.drain_scales() does torch.cat + .cpu() + .numpy()
+    # internally via PyO3 and returns a numpy array directly.
     hook = _capture_hook
     if hook is not None:
         buf = _capture_buffer
         if not buf.enabled:
             return output
-        # Store scale_a as-is (no reshape, no .max()). During decode (99%+
-        # of calls), scale_a is shape (1,). At drain, torch.cat produces
-        # (N,) directly. Multi-element prefill scales are handled lazily
-        # at drain time only when detected.
         is_o_proj = hook.record(scale_a)
         if is_o_proj:
             if buf._pinned_slab is not None:

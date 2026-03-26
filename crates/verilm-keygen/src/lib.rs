@@ -462,17 +462,26 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         }
     };
 
-    // Load lm_head (unembedding matrix) for logit verification.
-    let lm_head = match load_weights_as_i8(&parsed, "lm_head.weight") {
+    // Load lm_head (unembedding matrix) for logit verification + Freivalds.
+    let (lm_head, r_lm_head, v_lm_head) = match load_weights_as_i8(&parsed, "lm_head.weight") {
         Ok((weights, scale)) => {
             let (_, lm_shape, _) = find_tensor_raw(&parsed, "lm_head.weight")?;
             let vocab_size = lm_shape[0];
-            eprintln!("  lm_head: {}x{} (scale={:.6})", vocab_size, cfg.hidden_dim, scale);
-            Some(weights)
+            let hidden_dim = cfg.hidden_dim;
+            eprintln!("  lm_head: {}x{} (scale={:.6})", vocab_size, hidden_dim, scale);
+
+            // Generate Freivalds r/v for lm_head.
+            // r_lm_head: length = vocab_size (output dim).
+            // v_lm_head = r^T @ lm_head: length = hidden_dim (input dim).
+            let r: Vec<Fp> = (0..vocab_size).map(|_| Fp::new(rng.gen::<u32>())).collect();
+            let v = freivalds::precompute_v(&r, &weights, vocab_size, hidden_dim);
+            eprintln!("  lm_head Freivalds: r[{}], v[{}]", r.len(), v.len());
+
+            (Some(weights), Some(r), Some(v))
         }
         Err(e) => {
             eprintln!("  warning: could not load lm_head.weight: {}", e);
-            None
+            (None, None, None)
         }
     };
 
@@ -513,6 +522,8 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         wo_norms: Vec::new(),
         max_v_norm: 0.0,
         lm_head,
+        r_lm_head,
+        v_lm_head,
         weight_hash: Some(weight_hash),
         rmsnorm_attn_weights,
         rmsnorm_ffn_weights,
