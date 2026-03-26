@@ -15,20 +15,8 @@ verilm-core = { path = ".." }
 arbitrary = { version = "1", features = ["derive"] }
 
 [[bin]]
-name = "fuzz_deserialize_compact_batch"
-path = "fuzz_targets/deserialize_compact_batch.rs"
-test = false
-doc = false
-
-[[bin]]
 name = "fuzz_deserialize_key"
 path = "fuzz_targets/deserialize_key.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "fuzz_deserialize_trace"
-path = "fuzz_targets/deserialize_trace.rs"
 test = false
 doc = false
 

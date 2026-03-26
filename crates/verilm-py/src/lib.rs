@@ -30,12 +30,11 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyBytes, PyDict, PyList};
 
-use verilm_core::serialize;
 use verilm_core::types::{
-    AuditChallenge, AuditTier, BatchCommitment,
-    DeploymentManifest, LayerTrace, VerifierKey,
+    AuditTier, BatchCommitment,
+    DeploymentManifest, VerifierKey,
 };
-use verilm_prover::{commit_with_full_binding, FullBindingParams};
+use verilm_prover::FullBindingParams;
 
 /// Read raw bytes from a Python buffer protocol object (numpy arrays, CPU tensors).
 /// Returns None if the object doesn't support the buffer protocol.
@@ -68,23 +67,6 @@ fn raw_to_i8(raw: Vec<u8>) -> Vec<i8> {
     unsafe { Vec::from_raw_parts(ptr as *mut i8, len, cap) }
 }
 
-/// Reinterpret raw bytes as i32 (native-endian bulk copy).
-fn raw_to_i32(src: &[u8]) -> PyResult<Vec<i32>> {
-    if src.len() % 4 != 0 {
-        return Err(PyValueError::new_err(format!(
-            "i32 bytes length {} not a multiple of 4",
-            src.len()
-        )));
-    }
-    let n = src.len() / 4;
-    let mut dst = Vec::with_capacity(n);
-    unsafe {
-        std::ptr::copy_nonoverlapping(src.as_ptr() as *const i32, dst.as_mut_ptr(), n);
-        dst.set_len(n);
-    }
-    Ok(dst)
-}
-
 /// Reinterpret raw bytes as f32 (native-endian bulk copy).
 fn raw_to_f32(src: &[u8]) -> PyResult<Vec<f32>> {
     if src.len() % 4 != 0 {
@@ -104,7 +86,6 @@ fn raw_to_f32(src: &[u8]) -> PyResult<Vec<f32>> {
 
 /// Extract a Vec<i8> from bytes, buffer protocol, or Python list.
 fn extract_i8_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<i8>> {
-    // Fast path: bytes object — zero-alloc reinterpret u8 → i8.
     if let Ok(b) = obj.cast::<PyBytes>() {
         let src = b.as_bytes();
         let mut dst = Vec::with_capacity(src.len());
@@ -114,26 +95,13 @@ fn extract_i8_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<i8>> {
         }
         return Ok(dst);
     }
-    // Buffer protocol: numpy arrays, CPU tensors (avoids Python-side .tobytes()).
     if let Some(raw) = try_buffer_as_bytes(obj) {
         return Ok(raw_to_i8(raw));
     }
-    // Fallback: Python list of ints.
     if let Ok(v) = obj.extract::<Vec<i8>>() {
         return Ok(v);
     }
     Err(PyValueError::new_err("expected bytes, buffer, or list of i8"))
-}
-
-/// Extract a Vec<i32> from bytes, buffer protocol, or Python list.
-fn extract_i32_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<i32>> {
-    if let Ok(b) = obj.cast::<PyBytes>() {
-        return raw_to_i32(b.as_bytes());
-    }
-    if let Some(raw) = try_buffer_as_bytes(obj) {
-        return raw_to_i32(&raw);
-    }
-    obj.extract::<Vec<i32>>()
 }
 
 /// Extract a Vec<f32> from bytes, buffer protocol, or Python list.
@@ -145,71 +113,6 @@ fn extract_f32_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
         return raw_to_f32(&raw);
     }
     obj.extract::<Vec<f32>>()
-}
-
-/// Extract a Vec<Vec<i8>> from a Python list of lists of ints.
-fn extract_nested_i8(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Vec<i8>>> {
-    let list = obj.cast::<PyList>()?;
-    let mut result = Vec::with_capacity(list.len());
-    for item in list.iter() {
-        result.push(extract_i8_vec(&item)?);
-    }
-    Ok(result)
-}
-
-/// Convert a Python dict to a LayerTrace.
-fn dict_to_layer_trace(d: &Bound<'_, PyDict>) -> PyResult<LayerTrace> {
-    Ok(LayerTrace {
-        x_attn: extract_i8_vec(&d.get_item("x_attn")?.ok_or_else(|| PyValueError::new_err("missing x_attn"))?)?,
-        q: extract_i32_vec(&d.get_item("q")?.ok_or_else(|| PyValueError::new_err("missing q"))?)?,
-        k: extract_i32_vec(&d.get_item("k")?.ok_or_else(|| PyValueError::new_err("missing k"))?)?,
-        v: extract_i32_vec(&d.get_item("v")?.ok_or_else(|| PyValueError::new_err("missing v"))?)?,
-        a: extract_i8_vec(&d.get_item("a")?.ok_or_else(|| PyValueError::new_err("missing a"))?)?,
-        attn_out: extract_i32_vec(&d.get_item("attn_out")?.ok_or_else(|| PyValueError::new_err("missing attn_out"))?)?,
-        x_ffn: extract_i8_vec(&d.get_item("x_ffn")?.ok_or_else(|| PyValueError::new_err("missing x_ffn"))?)?,
-        g: extract_i32_vec(&d.get_item("g")?.ok_or_else(|| PyValueError::new_err("missing g"))?)?,
-        u: extract_i32_vec(&d.get_item("u")?.ok_or_else(|| PyValueError::new_err("missing u"))?)?,
-        h: extract_i8_vec(&d.get_item("h")?.ok_or_else(|| PyValueError::new_err("missing h"))?)?,
-        ffn_out: extract_i32_vec(&d.get_item("ffn_out")?.ok_or_else(|| PyValueError::new_err("missing ffn_out"))?)?,
-        kv_cache_k: d.get_item("kv_cache_k")?
-            .map(|v| extract_nested_i8(&v))
-            .transpose()?
-            .unwrap_or_default(),
-        kv_cache_v: d.get_item("kv_cache_v")?
-            .map(|v| extract_nested_i8(&v))
-            .transpose()?
-            .unwrap_or_default(),
-        scale_x_attn: d.get_item("scale_x_attn")?
-            .map(|v| v.extract())
-            .transpose()?,
-        scale_a: d.get_item("scale_a")?
-            .map(|v| v.extract())
-            .transpose()?,
-        scale_x_ffn: d.get_item("scale_x_ffn")?
-            .map(|v| v.extract())
-            .transpose()?,
-        scale_h: d.get_item("scale_h")?
-            .map(|v| v.extract())
-            .transpose()?,
-        residual: d.get_item("residual")?
-            .map(|v| extract_f32_vec(&v))
-            .transpose()?,
-    })
-}
-
-/// Convert Python traces (list[list[dict]]) to Vec<Vec<LayerTrace>>.
-fn extract_traces(traces: &Bound<'_, PyList>) -> PyResult<Vec<Vec<LayerTrace>>> {
-    let mut result = Vec::with_capacity(traces.len());
-    for token_layers in traces.iter() {
-        let layers_list = token_layers.cast::<PyList>()?;
-        let mut layers = Vec::with_capacity(layers_list.len());
-        for layer_dict in layers_list.iter() {
-            let d = layer_dict.cast::<PyDict>()?;
-            layers.push(dict_to_layer_trace(d)?);
-        }
-        result.push(layers);
-    }
-    Ok(result)
 }
 
 /// Parse a manifest dict from Python.
@@ -296,263 +199,6 @@ fn extract_manifest(d: &Bound<'_, PyDict>) -> PyResult<DeploymentManifest> {
             .transpose()?
             .unwrap_or(0),
     })
-}
-
-/// Opaque handle to Rust BatchState + BatchCommitment.
-///
-/// Holds the full prover state in Rust memory. Python uses this to:
-/// - Read the commitment (as JSON)
-/// - Open proofs for challenged tokens
-/// - Get KV roots for streaming verification
-#[pyclass]
-struct BatchState {
-    inner: verilm_prover::BatchState,
-    commitment: BatchCommitment,
-}
-
-#[pymethods]
-impl BatchState {
-    /// Get the commitment as a JSON string.
-    fn commitment_json(&self) -> PyResult<String> {
-        serde_json::to_string(&self.commitment)
-            .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
-    }
-
-    /// Get the Merkle root as hex.
-    fn merkle_root_hex(&self) -> String {
-        hex::encode(self.commitment.merkle_root)
-    }
-
-    /// Get the IO root as hex.
-    fn io_root_hex(&self) -> String {
-        hex::encode(self.commitment.io_root)
-    }
-
-    /// Get the manifest hash as hex (or None).
-    fn manifest_hash_hex(&self) -> Option<String> {
-        self.commitment.manifest_hash.map(hex::encode)
-    }
-
-    /// Number of tokens in the commitment.
-    fn n_tokens(&self) -> u32 {
-        self.commitment.n_tokens
-    }
-
-    /// Number of layers per token.
-    fn n_layers(&self) -> usize {
-        self.inner.all_layers.first().map_or(0, |layers| layers.len())
-    }
-
-    /// Per-token KV Merkle roots as hex strings.
-    fn kv_roots_hex(&self) -> Vec<String> {
-        self.inner
-            .kv_merkle_roots
-            .as_ref()
-            .map(|roots| roots.iter().map(hex::encode).collect())
-            .unwrap_or_default()
-    }
-
-    /// Open a stratified audit proof (compact binary, zstd-compressed).
-    ///
-    /// Args:
-    ///     token_index: int — which token to audit
-    ///     layer_indices: list[int] — which layers to open
-    ///     tier: str — "routine" or "full"
-    ///
-    /// Returns:
-    ///     bytes — zstd-compressed compact audit response.
-    fn audit_stratified<'py>(&self, py: Python<'py>, token_index: u32, layer_indices: Vec<usize>, tier: String) -> PyResult<Bound<'py, PyBytes>> {
-        let tier = match tier.as_str() {
-            "routine" => AuditTier::Routine,
-            "full" => AuditTier::Full,
-            _ => return Err(PyValueError::new_err(format!("invalid tier: {}", tier))),
-        };
-
-        let challenge = AuditChallenge {
-            token_index,
-            layer_indices,
-            tier,
-        };
-
-        let response = verilm_prover::build_audit_response_from_state(&self.inner, &challenge);
-        let compact_bytes = serialize::serialize_compact_audit(&response);
-        let compressed = serialize::compress(&compact_bytes);
-        Ok(PyBytes::new(py, &compressed))
-    }
-}
-
-/// Build a commitment from per-token per-layer traces.
-///
-/// Args:
-///     traces: list[list[dict]] — per-token, per-layer trace dicts.
-///         Each dict must have keys: x_attn, q, k, v, a, attn_out,
-///         x_ffn, g, u, h, ffn_out. Optional: kv_cache_k, kv_cache_v.
-///     token_ids: list[int] — emitted token IDs.
-///     prompt: bytes — prompt text.
-///     sampling_seed: bytes — 32-byte sampling seed.
-///     manifest: dict — deployment manifest with keys:
-///         tokenizer_hash (hex str), temperature, top_k, top_p, eos_policy.
-///         Pass None to omit manifest binding.
-///
-/// Returns:
-///     BatchState — opaque handle for reading commitment and opening proofs.
-#[pyfunction]
-#[pyo3(signature = (traces, token_ids, prompt, sampling_seed, manifest=None))]
-fn commit(
-    traces: &Bound<'_, PyList>,
-    token_ids: Vec<u32>,
-    prompt: Vec<u8>,
-    sampling_seed: Vec<u8>,
-    manifest: Option<&Bound<'_, PyDict>>,
-) -> PyResult<BatchState> {
-    let all_layers = extract_traces(traces)?;
-
-    if sampling_seed.len() != 32 {
-        return Err(PyValueError::new_err("sampling_seed must be exactly 32 bytes"));
-    }
-    let mut seed = [0u8; 32];
-    seed.copy_from_slice(&sampling_seed);
-
-    let manifest_obj = manifest.map(extract_manifest).transpose()?;
-
-    let (commitment, inner) = commit_with_full_binding(
-        all_layers,
-        &FullBindingParams {
-            token_ids: &token_ids,
-            prompt: &prompt,
-            sampling_seed: seed,
-            manifest: manifest_obj.as_ref(),
-        },
-        None, // dict path: no pre-computed token KVs
-    );
-
-    Ok(BatchState { inner, commitment })
-}
-
-/// Build a commitment directly from raw captures (bypasses Python trace building).
-///
-/// Takes the flat capture buffer from the Python hook and does trace
-/// construction + commitment entirely in Rust. Eliminates the Python
-/// build_layer_traces and serialize phases.
-///
-/// Args:
-///     capture_inputs: list[bytes] — x_i8 tensors as bytes, in call order.
-///     capture_accumulators: list[bytes] — acc_i32 tensors as bytes, in call order.
-///     capture_scales: list[float] — per-capture activation scales.
-///     fwd_batch_sizes: list[int] — batch size for each forward pass.
-///     n_layers: int — number of transformer layers.
-///     q_dim: int — Q dimension (num_heads * head_dim).
-///     kv_dim: int — KV dimension (num_kv_heads * head_dim).
-///     intermediate_size: int — FFN intermediate size (gate_up half).
-///     level_c: bool — whether to accumulate KV cache snapshots.
-///     token_ids: list[int] — emitted token IDs.
-///     prompt: bytes — prompt text.
-///     sampling_seed: bytes — 32-byte sampling seed.
-///     manifest: dict — deployment manifest (optional).
-///     residuals: list[bytes] — f32 residual tensors, per fwd_pass per layer (optional).
-///
-/// Returns:
-///     BatchState — opaque handle for reading commitment and opening proofs.
-#[pyfunction]
-#[pyo3(signature = (
-    capture_inputs,
-    capture_accumulators,
-    capture_scales,
-    fwd_batch_sizes,
-    n_layers,
-    q_dim,
-    kv_dim,
-    intermediate_size,
-    level_c,
-    token_ids,
-    prompt,
-    sampling_seed,
-    manifest = None,
-    residuals = None,
-))]
-#[allow(clippy::too_many_arguments)]
-fn commit_from_captures(
-    capture_inputs: &Bound<'_, PyList>,
-    capture_accumulators: &Bound<'_, PyList>,
-    capture_scales: Vec<f32>,
-    fwd_batch_sizes: Vec<usize>,
-    n_layers: usize,
-    q_dim: usize,
-    kv_dim: usize,
-    intermediate_size: usize,
-    level_c: bool,
-    token_ids: Vec<u32>,
-    prompt: Vec<u8>,
-    sampling_seed: Vec<u8>,
-    manifest: Option<&Bound<'_, PyDict>>,
-    residuals: Option<&Bound<'_, PyList>>,
-) -> PyResult<BatchState> {
-    let n_captures = capture_inputs.len();
-    if capture_accumulators.len() != n_captures || capture_scales.len() != n_captures {
-        return Err(PyValueError::new_err(
-            "capture_inputs, capture_accumulators, and capture_scales must have the same length",
-        ));
-    }
-
-    // Parse captures from Python bytes.
-    let mut captures = Vec::with_capacity(n_captures);
-    for i in 0..n_captures {
-        let x_i8 = extract_i8_vec(&capture_inputs.get_item(i)?)?;
-        let acc_i32 = extract_i32_vec(&capture_accumulators.get_item(i)?)?;
-        captures.push(verilm_prover::CaptureEntry {
-            x_i8,
-            acc_i32,
-            scale_a: capture_scales[i],
-        });
-    }
-
-    // Parse residuals if provided.
-    let residual_vecs: Option<Vec<Vec<f32>>> = residuals.map(|res_list| {
-        let mut vecs = Vec::with_capacity(res_list.len());
-        for i in 0..res_list.len() {
-            let item = res_list.get_item(i).expect("residual item");
-            vecs.push(extract_f32_vec(&item).expect("residual f32 bytes"));
-        }
-        vecs
-    });
-    let residual_refs: Option<&[Vec<f32>]> = residual_vecs.as_deref();
-
-    // Build traces in Rust.
-    let geom = verilm_prover::ModelGeometry {
-        n_layers,
-        q_dim,
-        kv_dim,
-        intermediate_size,
-    };
-    let (all_layers, token_kvs) = verilm_prover::build_traces_from_captures(
-        &captures,
-        &geom,
-        &fwd_batch_sizes,
-        level_c,
-        residual_refs,
-    );
-
-    // Commit.
-    if sampling_seed.len() != 32 {
-        return Err(PyValueError::new_err("sampling_seed must be exactly 32 bytes"));
-    }
-    let mut seed = [0u8; 32];
-    seed.copy_from_slice(&sampling_seed);
-
-    let manifest_obj = manifest.map(extract_manifest).transpose()?;
-
-    let (commitment, inner) = commit_with_full_binding(
-        all_layers,
-        &FullBindingParams {
-            token_ids: &token_ids,
-            prompt: &prompt,
-            sampling_seed: seed,
-            manifest: manifest_obj.as_ref(),
-        },
-        token_kvs, // pre-computed: no re-requantize in commit
-    );
-
-    Ok(BatchState { inner, commitment })
 }
 
 /// Build an audit challenge from a verifier-generated challenge seed.
@@ -1360,8 +1006,6 @@ impl CaptureHook {
 
 #[pymodule]
 fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(commit, m)?)?;
-    m.add_function(wrap_pyfunction!(commit_from_captures, m)?)?;
     m.add_function(wrap_pyfunction!(commit_minimal_from_captures, m)?)?;
     m.add_function(wrap_pyfunction!(build_audit_challenge, m)?)?;
     m.add_function(wrap_pyfunction!(compute_weight_hash, m)?)?;
@@ -1371,7 +1015,6 @@ fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(derive_token_seed, m)?)?;
     m.add_function(wrap_pyfunction!(canonical_sample, m)?)?;
     m.add_class::<WeightProvider>()?;
-    m.add_class::<BatchState>()?;
     m.add_class::<MinimalBatchStateHandle>()?;
     m.add_function(wrap_pyfunction!(commit_minimal_packed, m)?)?;
     m.add_class::<PackedBatchStateHandle>()?;
