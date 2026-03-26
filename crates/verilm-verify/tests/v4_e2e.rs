@@ -1254,7 +1254,8 @@ fn v4_manifest_greedy_sampling_replay_pass() {
         manifest: Some(&manifest),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    attach_toy_logits(&mut response, &_lm_head, &cfg);
 
     let report = verify_v4(&key, &response);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
@@ -1565,6 +1566,35 @@ fn v4_final_residual_fail_closed_missing() {
         report.failures);
     assert!(report.failures.iter().any(|f| f.contains("final_residual")),
         "should mention final_residual in failure, failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_lm_head_fail_closed_missing_logits() {
+    // When key has LmHead Freivalds vectors, missing logits_i32 must reject.
+    let (cfg, model, key, final_residual, input, token_id) = setup_final_residual();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"fail closed logits",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+    };
+    let (_commitment, state) = commit_minimal(
+        vec![retained], &params,
+        Some(vec![final_residual]),
+    );
+    // open_v4 without tail → logits_i32 = None
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    assert!(response.shell_opening.as_ref().unwrap().logits_i32.is_none());
+
+    let report = verify_v4(&key, &response);
+    assert_eq!(report.verdict, Verdict::Fail,
+        "should fail when logits_i32 missing but key has LmHead Freivalds, failures: {:?}",
+        report.failures);
+    assert!(report.failures.iter().any(|f| f.contains("logits_i32")),
+        "should mention logits_i32 in failure, failures: {:?}", report.failures);
 }
 
 #[test]

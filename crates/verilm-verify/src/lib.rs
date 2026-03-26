@@ -1795,51 +1795,57 @@ pub fn verify_v4(
 
             // LM-head Freivalds: verify the prover's claimed logits_i32.
             //
-            // The prover provides logits_i32 = lm_head @ quantize(final_norm(final_residual)).
-            // The verifier independently derives final_hidden (above) and checks:
-            //   v_lm · final_hidden == r_lm · logits_i32   (in F_p)
-            //
-            // This is a real binding: the verifier does NOT recompute the matmul.
-            // Freivalds catches a dishonest prover with probability 1 - 1/p ≈ 1 - 2^{-32}.
+            // Fail-closed: if the key has LmHead Freivalds vectors, the prover
+            // MUST supply logits_i32. Missing claim = reject.
             let r_lm = key.r_for(MatrixType::LmHead);
-            if let (Some(ref claimed_logits), false, Some(ref v_lm)) =
-                (&shell.logits_i32, r_lm.is_empty(), &key.v_lm_head)
-            {
-                if let Some(ref fh) = final_hidden {
-                    checks_run += 1;
-                    if !freivalds::check(v_lm, fh, r_lm, claimed_logits) {
-                        failures.push("lm_head: Freivalds check failed on prover's logits_i32 claim".into());
-                    }
+            let key_has_lm_freivalds = !r_lm.is_empty() && key.v_lm_head.is_some();
 
-                    // Token replay: use the prover's (now Freivalds-verified) logits.
-                    if key.config.vocab_size > 0 {
+            if key_has_lm_freivalds {
+                let v_lm = key.v_lm_head.as_ref().unwrap();
+
+                match (&shell.logits_i32, &final_hidden) {
+                    (Some(ref claimed_logits), Some(ref fh)) => {
                         checks_run += 1;
-                        let logits: Vec<f32> = claimed_logits.iter().map(|&v| v as f32).collect();
+                        if !freivalds::check(v_lm, fh, r_lm, claimed_logits) {
+                            failures.push("lm_head: Freivalds check failed on prover's logits_i32 claim".into());
+                        }
 
-                        let expected_token = if let Some(ref dp) = decode_params {
-                            let token_seed = verilm_core::sampling::derive_token_seed(
-                                &response.revealed_seed, response.token_index,
-                            );
-                            verilm_core::sampling::sample(&logits, dp, &token_seed)
-                        } else {
-                            logits.iter()
-                                .enumerate()
-                                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-                                .map(|(i, _)| i as u32)
-                                .unwrap_or(0)
-                        };
+                        // Token replay: use the prover's (now Freivalds-verified) logits.
+                        if key.config.vocab_size > 0 {
+                            checks_run += 1;
+                            let logits: Vec<f32> = claimed_logits.iter().map(|&v| v as f32).collect();
 
-                        if expected_token != response.token_id {
-                            failures.push(format!(
-                                "lm_head: expected token_id={} but claimed token_id={}",
-                                expected_token, response.token_id
-                            ));
+                            let expected_token = if let Some(ref dp) = decode_params {
+                                let token_seed = verilm_core::sampling::derive_token_seed(
+                                    &response.revealed_seed, response.token_index,
+                                );
+                                verilm_core::sampling::sample(&logits, dp, &token_seed)
+                            } else {
+                                logits.iter()
+                                    .enumerate()
+                                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                                    .map(|(i, _)| i as u32)
+                                    .unwrap_or(0)
+                            };
+
+                            if expected_token != response.token_id {
+                                failures.push(format!(
+                                    "lm_head: expected token_id={} but claimed token_id={}",
+                                    expected_token, response.token_id
+                                ));
+                            }
                         }
                     }
-                } else {
-                    failures.push(
-                        "lm_head: Freivalds vectors present but shell did not produce final_hidden".into()
-                    );
+                    (None, _) => {
+                        failures.push(
+                            "lm_head: key requires logits_i32 but shell opening did not provide it".into()
+                        );
+                    }
+                    (Some(_), None) => {
+                        failures.push(
+                            "lm_head: logits_i32 present but no final_hidden to check against".into()
+                        );
+                    }
                 }
             }
         }
