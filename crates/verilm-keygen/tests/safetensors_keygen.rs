@@ -21,7 +21,7 @@ fn make_toy_safetensors() -> (TempDir, ModelConfig, Vec<Vec<(MatrixType, Vec<i8>
 
     for layer in 0..cfg.n_layers {
         let mut layer_weights = Vec::new();
-        for mt in &MatrixType::ALL {
+        for mt in &MatrixType::PER_LAYER {
             let rows = mt.output_dim(&cfg);
             let cols = mt.input_dim(&cfg);
             let w: Vec<i8> = (0..rows * cols).map(|_| rng.gen::<i8>()).collect();
@@ -70,18 +70,18 @@ fn test_generate_key_dimensions() {
     let key = verilm_keygen::generate_key(dir.path(), seed).unwrap();
 
     assert_eq!(key.version, 1);
-    assert_eq!(key.r_vectors.len(), 7);
+    assert_eq!(key.r_vectors.len(), 8);
     assert_eq!(key.v_vectors.len(), cfg.n_layers);
 
     // Check r vector dimensions
-    for (j, mt) in MatrixType::ALL.iter().enumerate() {
+    for (j, mt) in MatrixType::PER_LAYER.iter().enumerate() {
         assert_eq!(key.r_vectors[j].len(), mt.output_dim(&cfg));
     }
 
     // Check v vector dimensions
     for layer in &key.v_vectors {
         assert_eq!(layer.len(), 7);
-        for (j, mt) in MatrixType::ALL.iter().enumerate() {
+        for (j, mt) in MatrixType::PER_LAYER.iter().enumerate() {
             assert_eq!(layer[j].len(), mt.input_dim(&cfg));
         }
     }
@@ -258,7 +258,7 @@ fn make_bf16_safetensors() -> (tempfile::TempDir, ModelConfig) {
     let mut tensor_data = Vec::new(); // BF16 bytes
 
     for layer in 0..cfg.n_layers {
-        for mt in &MatrixType::ALL {
+        for mt in &MatrixType::PER_LAYER {
             let rows = mt.output_dim(&cfg);
             let cols = mt.input_dim(&cfg);
             let name = mt.weight_name().replace("{}", &layer.to_string());
@@ -326,7 +326,7 @@ fn test_bf16_keygen_produces_valid_key() {
     }
 
     // Dimensions should be correct
-    assert_eq!(key.r_vectors.len(), 7);
+    assert_eq!(key.r_vectors.len(), 8);
     assert_eq!(key.v_vectors.len(), cfg.n_layers);
 }
 
@@ -408,7 +408,7 @@ fn test_weight_provider_freivalds_compatible() {
     let mut rng = ChaCha20Rng::seed_from_u64(5555);
 
     for layer_idx in 0..cfg.n_layers {
-        for mt in MatrixType::ALL.iter() {
+        for mt in MatrixType::PER_LAYER.iter() {
             let cols = mt.input_dim(&cfg);
             let rows = mt.output_dim(&cfg);
             let x: Vec<i8> = (0..cols).map(|_| rng.gen::<i8>()).collect();

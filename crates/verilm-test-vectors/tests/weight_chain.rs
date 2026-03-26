@@ -72,7 +72,7 @@ fn test_weight_hash_bound_to_source_dtype() {
         cfg.n_layers,
         &[],
         |layer, mt_idx| get_weights(&model, layer, mt_idx),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
 
     let hash_bf16 = hash_weights(
@@ -80,7 +80,7 @@ fn test_weight_hash_bound_to_source_dtype() {
         cfg.n_layers,
         &[],
         |layer, mt_idx| get_weights(&model, layer, mt_idx),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
 
     assert_ne!(hash_i8, hash_bf16);
@@ -93,10 +93,10 @@ fn test_weight_hash_bound_to_quantization_scales() {
     let model = generate_model(&cfg, 42);
 
     let scales_a: Vec<Vec<f32>> = (0..cfg.n_layers)
-        .map(|_| vec![1.0f32; MatrixType::ALL.len()])
+        .map(|_| vec![1.0f32; MatrixType::PER_LAYER.len()])
         .collect();
     let scales_b: Vec<Vec<f32>> = (0..cfg.n_layers)
-        .map(|_| vec![2.0f32; MatrixType::ALL.len()])
+        .map(|_| vec![2.0f32; MatrixType::PER_LAYER.len()])
         .collect();
 
     let hash_a = hash_weights(
@@ -104,7 +104,7 @@ fn test_weight_hash_bound_to_quantization_scales() {
         cfg.n_layers,
         &scales_a,
         |layer, mt_idx| get_weights(&model, layer, mt_idx),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
 
     let hash_b = hash_weights(
@@ -112,7 +112,7 @@ fn test_weight_hash_bound_to_quantization_scales() {
         cfg.n_layers,
         &scales_b,
         |layer, mt_idx| get_weights(&model, layer, mt_idx),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
 
     assert_ne!(hash_a, hash_b);
@@ -142,7 +142,7 @@ fn test_weight_hash_matches_direct_computation() {
         cfg.n_layers,
         &[],
         |layer, mt_idx| get_weights(&model, layer, mt_idx),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
 
     assert_eq!(key.weight_hash.unwrap(), direct_hash);
@@ -150,7 +150,7 @@ fn test_weight_hash_matches_direct_computation() {
 
 fn get_weights(model: &[LayerWeights], layer: usize, mt_idx: usize) -> Vec<i8> {
     let lw = &model[layer];
-    match MatrixType::ALL[mt_idx] {
+    match MatrixType::PER_LAYER[mt_idx] {
         MatrixType::Wq => lw.wq.clone(),
         MatrixType::Wk => lw.wk.clone(),
         MatrixType::Wv => lw.wv.clone(),
@@ -158,5 +158,6 @@ fn get_weights(model: &[LayerWeights], layer: usize, mt_idx: usize) -> Vec<i8> {
         MatrixType::Wg => lw.wg.clone(),
         MatrixType::Wu => lw.wu.clone(),
         MatrixType::Wd => lw.wd.clone(),
+        MatrixType::LmHead => unreachable!(),
     }
 }

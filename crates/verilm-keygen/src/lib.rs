@@ -353,7 +353,7 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
 
     let mut rng = ChaCha20Rng::from_seed(seed);
 
-    // Generate per-matrix-type r vectors
+    // Generate per-matrix-type r vectors (all 8, including LmHead)
     let r_vectors: Vec<Vec<Fp>> = MatrixType::ALL
         .iter()
         .map(|mt| {
@@ -384,11 +384,11 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
     let mut rmsnorm_ffn_weights: Vec<Vec<f32>> = Vec::with_capacity(cfg.n_layers);
 
     for layer_idx in 0..cfg.n_layers {
-        let mut layer_vs = Vec::with_capacity(7);
-        let mut layer_scales = Vec::with_capacity(7);
-        let mut layer_weights = Vec::with_capacity(7);
+        let mut layer_vs = Vec::with_capacity(MatrixType::PER_LAYER.len());
+        let mut layer_scales = Vec::with_capacity(MatrixType::PER_LAYER.len());
+        let mut layer_weights = Vec::with_capacity(MatrixType::PER_LAYER.len());
 
-        for (j, mt) in MatrixType::ALL.iter().enumerate() {
+        for (j, mt) in MatrixType::PER_LAYER.iter().enumerate() {
             let name = mt.weight_name().replace("{}", &layer_idx.to_string());
             let (weights, scale) = load_weights_as_i8(&parsed, &name)?;
 
@@ -443,7 +443,7 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         cfg.n_layers,
         &quantization_scales,
         |layer, mt_idx| all_weights[layer][mt_idx].clone(),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
 
     eprintln!("  weight hash: {}", hex::encode(weight_hash));
@@ -463,25 +463,24 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
     };
 
     // Load lm_head (unembedding matrix) for logit verification + Freivalds.
-    let (lm_head, r_lm_head, v_lm_head) = match load_weights_as_i8(&parsed, "lm_head.weight") {
+    // The r vector is already in r_vectors[LmHead].
+    let lm_head_idx = MatrixType::ALL.iter().position(|&m| m == MatrixType::LmHead).unwrap();
+    let (lm_head, v_lm_head) = match load_weights_as_i8(&parsed, "lm_head.weight") {
         Ok((weights, scale)) => {
             let (_, lm_shape, _) = find_tensor_raw(&parsed, "lm_head.weight")?;
             let vocab_size = lm_shape[0];
             let hidden_dim = cfg.hidden_dim;
             eprintln!("  lm_head: {}x{} (scale={:.6})", vocab_size, hidden_dim, scale);
 
-            // Generate Freivalds r/v for lm_head.
-            // r_lm_head: length = vocab_size (output dim).
-            // v_lm_head = r^T @ lm_head: length = hidden_dim (input dim).
-            let r: Vec<Fp> = (0..vocab_size).map(|_| Fp::new(rng.gen::<u32>())).collect();
-            let v = freivalds::precompute_v(&r, &weights, vocab_size, hidden_dim);
+            let r = &r_vectors[lm_head_idx];
+            let v = freivalds::precompute_v(r, &weights, vocab_size, hidden_dim);
             eprintln!("  lm_head Freivalds: r[{}], v[{}]", r.len(), v.len());
 
-            (Some(weights), Some(r), Some(v))
+            (Some(weights), Some(v))
         }
         Err(e) => {
             eprintln!("  warning: could not load lm_head.weight: {}", e);
-            (None, None, None)
+            (None, None)
         }
     };
 
@@ -522,7 +521,6 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         wo_norms: Vec::new(),
         max_v_norm: 0.0,
         lm_head,
-        r_lm_head,
         v_lm_head,
         weight_hash: Some(weight_hash),
         rmsnorm_attn_weights,
@@ -565,10 +563,10 @@ pub fn compute_weight_hash(dir: &Path) -> Result<[u8; 32]> {
     let mut all_weights: Vec<Vec<Vec<i8>>> = Vec::with_capacity(cfg.n_layers);
 
     for layer_idx in 0..cfg.n_layers {
-        let mut layer_scales = Vec::with_capacity(7);
-        let mut layer_weights = Vec::with_capacity(7);
+        let mut layer_scales = Vec::with_capacity(MatrixType::PER_LAYER.len());
+        let mut layer_weights = Vec::with_capacity(MatrixType::PER_LAYER.len());
 
-        for mt in MatrixType::ALL.iter() {
+        for mt in MatrixType::PER_LAYER.iter() {
             let name = mt.weight_name().replace("{}", &layer_idx.to_string());
             let (weights, scale) = load_weights_as_i8(&parsed, &name)?;
             layer_scales.push(scale);
@@ -584,7 +582,7 @@ pub fn compute_weight_hash(dir: &Path) -> Result<[u8; 32]> {
         cfg.n_layers,
         &quantization_scales,
         |layer, mt_idx| all_weights[layer][mt_idx].clone(),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     ))
 }
 
@@ -668,9 +666,9 @@ impl SafetensorsWeightProvider {
         let mut rmsnorm_ffn_weights = Vec::with_capacity(config.n_layers);
 
         for layer_idx in 0..config.n_layers {
-            let mut layer_weights = Vec::with_capacity(MatrixType::ALL.len());
-            let mut layer_scales = Vec::with_capacity(MatrixType::ALL.len());
-            for mt in MatrixType::ALL {
+            let mut layer_weights = Vec::with_capacity(MatrixType::PER_LAYER.len());
+            let mut layer_scales = Vec::with_capacity(MatrixType::PER_LAYER.len());
+            for mt in MatrixType::PER_LAYER {
                 let name = mt.weight_name().replace("{}", &layer_idx.to_string());
                 let (w, scale) = load_weights_as_i8(&parsed, &name)?;
                 layer_weights.push(w);
@@ -706,7 +704,7 @@ impl SafetensorsWeightProvider {
             config.n_layers,
             &scales,
             |layer, mt_idx| weights[layer][mt_idx].clone(),
-            MatrixType::ALL.len(),
+            MatrixType::PER_LAYER.len(),
         );
 
         // Load lm_head and final norm for tail computation at audit time.
@@ -807,8 +805,8 @@ impl SafetensorsWeightProvider {
 
 impl ShellWeights for SafetensorsWeightProvider {
     fn weight(&self, layer: usize, mt: MatrixType) -> &[i8] {
-        let mt_idx = MatrixType::ALL.iter().position(|&m| m == mt)
-            .expect("unknown MatrixType");
+        let mt_idx = MatrixType::PER_LAYER.iter().position(|&m| m == mt)
+            .expect("weight(): only per-layer matrices, not LmHead");
         &self.weights[layer][mt_idx]
     }
 }

@@ -132,18 +132,17 @@ pub struct VerifierKey {
     pub source_dtype: String,
 
     /// Per-tensor absmax quantization scales, if source was BF16/FP16.
-    /// Outer: layer. Inner: MatrixType::ALL order.
+    /// Outer: layer. Inner: MatrixType::PER_LAYER order.
     /// Empty if source was already INT8.
     pub quantization_scales: Vec<Vec<f32>>,
 
     /// SECRET: Per-matrix-type random vectors r_j.
-    /// Index: MatrixType::ALL order (Wq, Wk, Wv, Wo, Wg, Wu, Wd).
+    /// Index: MatrixType::ALL order (8 entries: Wq..Wd + LmHead).
     /// Must never be revealed to the prover.
     pub r_vectors: Vec<Vec<Fp>>,
 
-    /// SECRET: Precomputed v_j^(i) = r_j^T W_j^(i).
-    /// Outer index: layer. Inner index: MatrixType::ALL order.
-    /// v_vectors[layer][matrix_type] has length = input_dim of that matrix.
+    /// SECRET: Precomputed v_j^(i) = r_j^T W_j^(i) for per-layer matrices.
+    /// Outer index: layer. Inner index: MatrixType::PER_LAYER order (7 entries).
     /// Leaking v is equivalent to leaking r (prover knows W).
     pub v_vectors: Vec<Vec<Vec<Fp>>>,
 
@@ -163,14 +162,9 @@ pub struct VerifierKey {
     /// instead of trusting the margin certificate's self-reported logits.
     pub lm_head: Option<Vec<i8>>,
 
-    /// SECRET: Random vector for LM-head Freivalds check.
-    /// Length = vocab_size (output dimension of lm_head).
-    /// Single global vector (not per-layer — lm_head is shared).
-    pub r_lm_head: Option<Vec<Fp>>,
-
-    /// SECRET: Precomputed v_lm_head = r_lm_head^T @ lm_head.
+    /// SECRET: Precomputed v_lm = r_lm^T @ lm_head.
     /// Length = hidden_dim (input dimension of lm_head).
-    /// Used for Freivalds check: v · final_hidden == r · logits_i32.
+    /// Global (not per-layer). Use `r_for(MatrixType::LmHead)` for the r vector.
     pub v_lm_head: Option<Vec<Fp>>,
 
     /// SHA-256 hash of all INT8 weights in canonical order (weight chain).
@@ -210,13 +204,17 @@ pub struct VerifierKey {
 }
 
 impl VerifierKey {
+    /// Random vector r for any matrix type (including LmHead).
     pub fn r_for(&self, mt: MatrixType) -> &[Fp] {
         let idx = MatrixType::ALL.iter().position(|&m| m == mt).unwrap();
         &self.r_vectors[idx]
     }
 
+    /// Precomputed v = r^T W for a per-layer matrix.
+    /// Panics on LmHead — use `v_lm_head` for the global unembedding matrix.
     pub fn v_for(&self, layer: usize, mt: MatrixType) -> &[Fp] {
-        let idx = MatrixType::ALL.iter().position(|&m| m == mt).unwrap();
+        let idx = MatrixType::PER_LAYER.iter().position(|&m| m == mt)
+            .expect("v_for: use v_lm_head for LmHead");
         &self.v_vectors[layer][idx]
     }
 
@@ -226,7 +224,8 @@ impl VerifierKey {
         if self.weight_scales.is_empty() || layer >= self.weight_scales.len() {
             return 0.0;
         }
-        let idx = MatrixType::ALL.iter().position(|&m| m == mt).unwrap();
+        let idx = MatrixType::PER_LAYER.iter().position(|&m| m == mt)
+            .expect("weight_scale_for: not applicable for LmHead");
         if idx >= self.weight_scales[layer].len() {
             return 0.0;
         }

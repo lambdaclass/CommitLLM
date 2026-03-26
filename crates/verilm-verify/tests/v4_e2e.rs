@@ -25,6 +25,7 @@ impl ShellWeights for ToyWeights<'_> {
             MatrixType::Wg => &lw.wg,
             MatrixType::Wu => &lw.wu,
             MatrixType::Wd => &lw.wd,
+            MatrixType::LmHead => panic!("ToyWeights: LmHead is not a per-layer weight"),
         }
     }
 }
@@ -369,7 +370,7 @@ fn setup_with_scales() -> (
     let mut key = generate_key(&cfg, &model, [1u8; 32]);
 
     // Synthetic weight scales: non-zero → triggers scale-aware path.
-    let n_mt = verilm_core::constants::MatrixType::ALL.len();
+    let n_mt = verilm_core::constants::MatrixType::PER_LAYER.len();
     let weight_scales: Vec<Vec<f32>> = (0..cfg.n_layers)
         .map(|l| (0..n_mt).map(|m| 0.01 + 0.001 * (l * n_mt + m) as f32).collect())
         .collect();
@@ -460,7 +461,7 @@ fn v4_scale_mismatch_detected() {
 
     // Prover uses WRONG scales (all 1.0) while verifier has non-trivial scales.
     let wrong_ws: Vec<Vec<f32>> = (0..cfg.n_layers)
-        .map(|_| vec![1.0; verilm_core::constants::MatrixType::ALL.len()])
+        .map(|_| vec![1.0; verilm_core::constants::MatrixType::PER_LAYER.len()])
         .collect();
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &wrong_ws, None, None, None);
 
@@ -491,7 +492,7 @@ fn setup_full_bridge() -> (
     let model = generate_model(&cfg, 12345);
     let mut key = generate_key(&cfg, &model, [1u8; 32]);
 
-    let n_mt = MatrixType::ALL.len();
+    let n_mt = MatrixType::PER_LAYER.len();
     let weight_scales: Vec<Vec<f32>> = (0..cfg.n_layers)
         .map(|l| (0..n_mt).map(|m| 0.01 + 0.001 * (l * n_mt + m) as f32).collect())
         .collect();
@@ -540,7 +541,7 @@ fn full_bridge_forward(
         let (scale_x_attn, scale_a, scale_x_ffn, scale_h) = scales[l];
 
         let ws = |mt: MatrixType| -> f32 {
-            let idx = MatrixType::ALL.iter().position(|&m| m == mt).unwrap();
+            let idx = MatrixType::PER_LAYER.iter().position(|&m| m == mt).unwrap();
             weight_scales[l][idx]
         };
 
@@ -1171,7 +1172,7 @@ fn v4_lm_head_freivalds_catches_tampered_logits() {
         &cfg, &toy.layers, [1u8; 32], Some(toy.lm_head.clone()),
     );
 
-    assert!(key.r_lm_head.is_some(), "r_lm_head should be generated");
+    assert!(!key.r_for(MatrixType::LmHead).is_empty(), "r for LmHead should be generated");
     assert!(key.v_lm_head.is_some(), "v_lm_head should be generated");
 
     let input: Vec<i8> = (0..cfg.hidden_dim as i8).collect();

@@ -1038,7 +1038,7 @@ pub fn compute_shell_opening(
         if weight_scales.is_empty() || layer >= weight_scales.len() {
             return 0.0;
         }
-        let idx = MatrixType::ALL.iter().position(|&m| m == mt).unwrap();
+        let idx = MatrixType::PER_LAYER.iter().position(|&m| m == mt).unwrap();
         weight_scales[layer][idx]
     };
 

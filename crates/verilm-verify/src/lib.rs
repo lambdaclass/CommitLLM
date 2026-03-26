@@ -160,7 +160,8 @@ pub fn verify_margin(
             .collect();
 
         // LM-head Freivalds check.
-        if let (Some(ref r_lm), Some(ref v_lm)) = (&key.r_lm_head, &key.v_lm_head) {
+        let r_lm = key.r_for(MatrixType::LmHead);
+        if let (false, Some(ref v_lm)) = (r_lm.is_empty(), &key.v_lm_head) {
             if !freivalds::check(v_lm, final_hidden, r_lm, &logits_i32) {
                 failures.push(format!(
                     "token {}: lm_head Freivalds check failed",
@@ -537,8 +538,8 @@ pub fn verify_rmsnorm_chain(
         return failures;
     }
 
-    let wo_idx = MatrixType::ALL.iter().position(|&m| m == MatrixType::Wo).unwrap();
-    let wd_idx = MatrixType::ALL.iter().position(|&m| m == MatrixType::Wd).unwrap();
+    let wo_idx = MatrixType::PER_LAYER.iter().position(|&m| m == MatrixType::Wo).unwrap();
+    let wd_idx = MatrixType::PER_LAYER.iter().position(|&m| m == MatrixType::Wd).unwrap();
 
     for (layer_idx, lt) in trace.layers.iter().enumerate() {
         // Skip layers without the pre-attention residual stream
@@ -677,7 +678,7 @@ pub fn verify_rope(
 
         // Get weight scale for K projection
         let scale_w = if layer_idx < key.weight_scales.len() {
-            let wk_idx = MatrixType::ALL.iter().position(|&m| m == MatrixType::Wk).unwrap();
+            let wk_idx = MatrixType::PER_LAYER.iter().position(|&m| m == MatrixType::Wk).unwrap();
             if wk_idx < key.weight_scales[layer_idx].len() {
                 Some(key.weight_scales[layer_idx][wk_idx])
             } else {
@@ -1800,8 +1801,9 @@ pub fn verify_v4(
             //
             // This is a real binding: the verifier does NOT recompute the matmul.
             // Freivalds catches a dishonest prover with probability 1 - 1/p ≈ 1 - 2^{-32}.
-            if let (Some(ref claimed_logits), Some(ref r_lm), Some(ref v_lm)) =
-                (&shell.logits_i32, &key.r_lm_head, &key.v_lm_head)
+            let r_lm = key.r_for(MatrixType::LmHead);
+            if let (Some(ref claimed_logits), false, Some(ref v_lm)) =
+                (&shell.logits_i32, r_lm.is_empty(), &key.v_lm_head)
             {
                 if let Some(ref fh) = final_hidden {
                     checks_run += 1;

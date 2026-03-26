@@ -29,6 +29,7 @@ impl ShellWeights for ToyWeights<'_> {
             MatrixType::Wg => &lw.wg,
             MatrixType::Wu => &lw.wu,
             MatrixType::Wd => &lw.wd,
+            MatrixType::LmHead => panic!("ToyWeights: LmHead is not a per-layer weight"),
         }
     }
 }
@@ -59,7 +60,7 @@ fn setup_full_bridge() -> (ModelConfig, Vec<LayerWeights>, verilm_core::types::V
         .collect();
 
     let weight_scales: Vec<Vec<f32>> = (0..cfg.n_layers)
-        .map(|l| MatrixType::ALL.iter().enumerate()
+        .map(|l| MatrixType::PER_LAYER.iter().enumerate()
             .map(|(j, _)| 0.01 + 0.002 * (l * 7 + j) as f32).collect())
         .collect();
 
@@ -93,7 +94,7 @@ fn full_bridge_forward(
     for (l, lw) in model.iter().enumerate() {
         let (scale_x_attn, scale_a, scale_x_ffn, scale_h) = scales[l];
         let ws = |mt: MatrixType| -> f32 {
-            let idx = MatrixType::ALL.iter().position(|&m| m == mt).unwrap();
+            let idx = MatrixType::PER_LAYER.iter().position(|&m| m == mt).unwrap();
             weight_scales[l][idx]
         };
 

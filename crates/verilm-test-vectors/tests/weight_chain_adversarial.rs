@@ -21,7 +21,7 @@ fn toy_cfg() -> ModelConfig {
 
 fn get_weights(model: &[LayerWeights], layer: usize, mt_idx: usize) -> Vec<i8> {
     let lw = &model[layer];
-    match MatrixType::ALL[mt_idx] {
+    match MatrixType::PER_LAYER[mt_idx] {
         MatrixType::Wq => lw.wq.clone(),
         MatrixType::Wk => lw.wk.clone(),
         MatrixType::Wv => lw.wv.clone(),
@@ -29,6 +29,7 @@ fn get_weights(model: &[LayerWeights], layer: usize, mt_idx: usize) -> Vec<i8> {
         MatrixType::Wg => lw.wg.clone(),
         MatrixType::Wu => lw.wu.clone(),
         MatrixType::Wd => lw.wd.clone(),
+        MatrixType::LmHead => unreachable!(),
     }
 }
 
@@ -164,7 +165,7 @@ fn test_mixed_key_material_detected() {
         cfg.n_layers,
         &[],
         |layer, mt_idx| get_weights(&model_a, layer, mt_idx),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
 
     assert_ne!(
@@ -186,7 +187,7 @@ fn test_canonical_order_is_layer_then_matrix_type() {
         cfg.n_layers,
         &[],
         |layer, mt_idx| get_weights(&model, layer, mt_idx),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
 
     // Swap Wq (index 0) and Wk (index 1) in the iteration
@@ -202,7 +203,7 @@ fn test_canonical_order_is_layer_then_matrix_type() {
             };
             get_weights(&model, layer, effective_idx)
         },
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
 
     assert_ne!(
@@ -254,11 +255,11 @@ mod proptest_weight_chain {
             let hash_before = hash_weights(
                 "I8", cfg.n_layers, &[],
                 |l, m| get_weights(&model, l, m),
-                MatrixType::ALL.len(),
+                MatrixType::PER_LAYER.len(),
             );
 
             // Mutate one byte
-            let weights = match MatrixType::ALL[matrix_idx] {
+            let weights = match MatrixType::PER_LAYER[matrix_idx] {
                 MatrixType::Wq => &mut model[layer_idx].wq,
                 MatrixType::Wk => &mut model[layer_idx].wk,
                 MatrixType::Wv => &mut model[layer_idx].wv,
@@ -266,6 +267,7 @@ mod proptest_weight_chain {
                 MatrixType::Wg => &mut model[layer_idx].wg,
                 MatrixType::Wu => &mut model[layer_idx].wu,
                 MatrixType::Wd => &mut model[layer_idx].wd,
+                MatrixType::LmHead => unreachable!(),
             };
             let idx = byte_offset % weights.len();
             weights[idx] = weights[idx].wrapping_add(delta);
@@ -273,7 +275,7 @@ mod proptest_weight_chain {
             let hash_after = hash_weights(
                 "I8", cfg.n_layers, &[],
                 |l, m| get_weights(&model, l, m),
-                MatrixType::ALL.len(),
+                MatrixType::PER_LAYER.len(),
             );
 
             prop_assert_ne!(hash_before, hash_after);
@@ -290,13 +292,13 @@ mod proptest_weight_chain {
             let model = generate_model(&cfg, 42);
 
             let mut scales: Vec<Vec<f32>> = (0..cfg.n_layers)
-                .map(|_| vec![1.0f32; MatrixType::ALL.len()])
+                .map(|_| vec![1.0f32; MatrixType::PER_LAYER.len()])
                 .collect();
 
             let hash_before = hash_weights(
                 "BF16", cfg.n_layers, &scales,
                 |l, m| get_weights(&model, l, m),
-                MatrixType::ALL.len(),
+                MatrixType::PER_LAYER.len(),
             );
 
             scales[layer_idx][matrix_idx] += delta;
@@ -304,7 +306,7 @@ mod proptest_weight_chain {
             let hash_after = hash_weights(
                 "BF16", cfg.n_layers, &scales,
                 |l, m| get_weights(&model, l, m),
-                MatrixType::ALL.len(),
+                MatrixType::PER_LAYER.len(),
             );
 
             prop_assert_ne!(hash_before, hash_after);
@@ -319,12 +321,12 @@ mod proptest_weight_chain {
             let h1 = hash_weights(
                 "I8", cfg.n_layers, &[],
                 |l, m| get_weights(&model, l, m),
-                MatrixType::ALL.len(),
+                MatrixType::PER_LAYER.len(),
             );
             let h2 = hash_weights(
                 "I8", cfg.n_layers, &[],
                 |l, m| get_weights(&model, l, m),
-                MatrixType::ALL.len(),
+                MatrixType::PER_LAYER.len(),
             );
 
             prop_assert_eq!(h1, h2);
@@ -433,7 +435,7 @@ fn test_end_to_end_published_checkpoint_binding() {
         cfg.n_layers,
         &[],
         |l, m| get_weights(&model, l, m),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
 
     // Step 2: Verifier independently generates key from same weights
@@ -468,7 +470,7 @@ fn test_end_to_end_wrong_checkpoint_detected() {
         cfg.n_layers,
         &[],
         |l, m| get_weights(&model_b, l, m),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
 
     let key_a = generate_key(&cfg, &model_a, [1u8; 32]);
@@ -507,7 +509,7 @@ fn test_end_to_end_trace_passes_but_wrong_model_detected_at_binding() {
         cfg.n_layers,
         &[],
         |l, m| get_weights(&model_legit, l, m),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
 
     assert_ne!(
@@ -528,7 +530,7 @@ fn test_scale_only_change_detected() {
     let model = generate_model(&cfg, 42);
 
     let scales_a: Vec<Vec<f32>> = (0..cfg.n_layers)
-        .map(|_| vec![0.5f32; MatrixType::ALL.len()])
+        .map(|_| vec![0.5f32; MatrixType::PER_LAYER.len()])
         .collect();
     let mut scales_b = scales_a.clone();
     scales_b[0][0] = 0.500001; // tiny change in one scale
@@ -538,14 +540,14 @@ fn test_scale_only_change_detected() {
         cfg.n_layers,
         &scales_a,
         |l, m| get_weights(&model, l, m),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
     let hash_b = hash_weights(
         "BF16",
         cfg.n_layers,
         &scales_b,
         |l, m| get_weights(&model, l, m),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
 
     assert_ne!(hash_a, hash_b, "scale-only change must be detected");
@@ -560,7 +562,7 @@ fn test_weight_only_change_with_fixed_scales_detected() {
     model_b[0].wq[0] = model_b[0].wq[0].wrapping_add(1);
 
     let scales: Vec<Vec<f32>> = (0..cfg.n_layers)
-        .map(|_| vec![1.0f32; MatrixType::ALL.len()])
+        .map(|_| vec![1.0f32; MatrixType::PER_LAYER.len()])
         .collect();
 
     let hash_a = hash_weights(
@@ -568,14 +570,14 @@ fn test_weight_only_change_with_fixed_scales_detected() {
         cfg.n_layers,
         &scales,
         |l, m| get_weights(&model_a, l, m),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
     let hash_b = hash_weights(
         "BF16",
         cfg.n_layers,
         &scales,
         |l, m| get_weights(&model_b, l, m),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
 
     assert_ne!(hash_a, hash_b, "weight-only change must be detected");
@@ -597,14 +599,14 @@ fn test_dtype_label_f16_vs_fp16() {
         cfg.n_layers,
         &[],
         |l, m| get_weights(&model, l, m),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
     let hash_fp16 = hash_weights(
         "FP16",
         cfg.n_layers,
         &[],
         |l, m| get_weights(&model, l, m),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
 
     assert_ne!(
@@ -623,14 +625,14 @@ fn test_dtype_label_case_sensitive() {
         cfg.n_layers,
         &[],
         |l, m| get_weights(&model, l, m),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
     let hash_lower = hash_weights(
         "bf16",
         cfg.n_layers,
         &[],
         |l, m| get_weights(&model, l, m),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
 
     assert_ne!(hash_upper, hash_lower, "dtype label must be case-sensitive");
@@ -905,7 +907,7 @@ fn test_fixture_recompute_published_hash_matches_keygen() {
         cfg.n_layers,
         &[], // native INT8, no quantization scales
         |layer, mt_idx| get_weights(&model, layer, mt_idx),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
 
     // Step 3: Verifier generates key independently (different seed!)
@@ -940,7 +942,7 @@ fn test_fixture_recompute_detects_checkpoint_mismatch() {
     let published_hash = hash_weights(
         "I8", cfg.n_layers, &[],
         |l, m| get_weights(&model_legit, l, m),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
 
     let evil_key = generate_key(&cfg, &model_evil, [1u8; 32]);
@@ -973,7 +975,7 @@ fn test_fixture_second_verifier_reproduces_same_hash() {
     let published = hash_weights(
         "I8", cfg.n_layers, &[],
         |l, m| get_weights(&model, l, m),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
     assert_eq!(key_1.weight_hash.unwrap(), published);
     assert_eq!(key_2.weight_hash.unwrap(), published);
@@ -990,7 +992,7 @@ fn test_fixture_batch_end_to_end_with_published_hash() {
     let published_hash = hash_weights(
         "I8", cfg.n_layers, &[],
         |l, m| get_weights(&model, l, m),
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
 
     // Hash binding passes

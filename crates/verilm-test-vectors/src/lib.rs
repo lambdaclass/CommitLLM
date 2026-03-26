@@ -576,7 +576,7 @@ pub fn forward_pass_autoregressive_level_c(
 pub fn generate_key(cfg: &ModelConfig, model: &[LayerWeights], seed: [u8; 32]) -> VerifierKey {
     let mut rng = ChaCha20Rng::from_seed(seed);
 
-    // Generate per-matrix-type r vectors
+    // Generate per-matrix-type r vectors (all 8, including LmHead)
     let r_vectors: Vec<Vec<Fp>> = MatrixType::ALL
         .iter()
         .map(|mt| {
@@ -585,11 +585,11 @@ pub fn generate_key(cfg: &ModelConfig, model: &[LayerWeights], seed: [u8; 32]) -
         })
         .collect();
 
-    // Precompute v_j^(i) = r_j^T W_j^(i) for each layer and matrix type
+    // Precompute v_j^(i) = r_j^T W_j^(i) for each layer and per-layer matrix type
     let v_vectors: Vec<Vec<Vec<Fp>>> = model
         .iter()
         .map(|lw| {
-            MatrixType::ALL
+            MatrixType::PER_LAYER
                 .iter()
                 .enumerate()
                 .map(|(j, mt)| {
@@ -604,6 +604,7 @@ pub fn generate_key(cfg: &ModelConfig, model: &[LayerWeights], seed: [u8; 32]) -
                         MatrixType::Wg => &lw.wg,
                         MatrixType::Wu => &lw.wu,
                         MatrixType::Wd => &lw.wd,
+                        MatrixType::LmHead => unreachable!(),
                     };
                     freivalds::precompute_v(r, w, rows, cols)
                 })
@@ -618,7 +619,7 @@ pub fn generate_key(cfg: &ModelConfig, model: &[LayerWeights], seed: [u8; 32]) -
         &[],  // no quantization scales for native INT8
         |layer, mt_idx| {
             let lw = &model[layer];
-            match MatrixType::ALL[mt_idx] {
+            match MatrixType::PER_LAYER[mt_idx] {
                 MatrixType::Wq => lw.wq.clone(),
                 MatrixType::Wk => lw.wk.clone(),
                 MatrixType::Wv => lw.wv.clone(),
@@ -626,9 +627,10 @@ pub fn generate_key(cfg: &ModelConfig, model: &[LayerWeights], seed: [u8; 32]) -
                 MatrixType::Wg => lw.wg.clone(),
                 MatrixType::Wu => lw.wu.clone(),
                 MatrixType::Wd => lw.wd.clone(),
+                MatrixType::LmHead => unreachable!(),
             }
         },
-        MatrixType::ALL.len(),
+        MatrixType::PER_LAYER.len(),
     );
 
     VerifierKey {
@@ -642,7 +644,6 @@ pub fn generate_key(cfg: &ModelConfig, model: &[LayerWeights], seed: [u8; 32]) -
         wo_norms: Vec::new(),
         max_v_norm: 0.0,
         lm_head: None,
-        r_lm_head: None,
         v_lm_head: None,
         weight_hash: Some(weight_hash),
         rmsnorm_attn_weights: Vec::new(),
@@ -667,20 +668,10 @@ pub fn generate_key_level_b_with_head(
     lm_head: Option<Vec<i8>>,
 ) -> VerifierKey {
     let mut key = generate_key(cfg, model, seed);
-    // Generate LM-head Freivalds vectors when lm_head is provided.
+    // Compute v_lm_head from the r already in r_vectors[LmHead].
     if let Some(ref lm) = lm_head {
-        use rand::{SeedableRng, Rng as _};
-        // Derive a separate seed for lm_head r vector (avoid reusing shell seed).
-        let mut lm_seed = seed;
-        lm_seed[0] ^= 0xff;
-        let mut lm_rng = ChaCha20Rng::from_seed(lm_seed);
-        let vocab_size = cfg.vocab_size;
-        let hidden_dim = cfg.hidden_dim;
-        let r: Vec<verilm_core::field::Fp> = (0..vocab_size)
-            .map(|_| verilm_core::field::Fp::new(lm_rng.gen::<u32>()))
-            .collect();
-        let v = verilm_core::freivalds::precompute_v(&r, lm, vocab_size, hidden_dim);
-        key.r_lm_head = Some(r);
+        let r = key.r_for(MatrixType::LmHead);
+        let v = verilm_core::freivalds::precompute_v(r, lm, cfg.vocab_size, cfg.hidden_dim);
         key.v_lm_head = Some(v);
     }
     key.lm_head = lm_head;

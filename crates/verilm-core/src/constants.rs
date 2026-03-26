@@ -18,10 +18,12 @@ pub enum MatrixType {
     Wg,
     Wu,
     Wd,
+    LmHead,
 }
 
 impl MatrixType {
-    pub const ALL: [MatrixType; 7] = [
+    /// The 7 per-layer matrices (one set per transformer layer).
+    pub const PER_LAYER: [MatrixType; 7] = [
         MatrixType::Wq,
         MatrixType::Wk,
         MatrixType::Wv,
@@ -29,6 +31,18 @@ impl MatrixType {
         MatrixType::Wg,
         MatrixType::Wu,
         MatrixType::Wd,
+    ];
+
+    /// All 8 matrices including the global LM-head.
+    pub const ALL: [MatrixType; 8] = [
+        MatrixType::Wq,
+        MatrixType::Wk,
+        MatrixType::Wv,
+        MatrixType::Wo,
+        MatrixType::Wg,
+        MatrixType::Wu,
+        MatrixType::Wd,
+        MatrixType::LmHead,
     ];
 
     /// Output dimension m_j (the dimension of r_j).
@@ -41,6 +55,7 @@ impl MatrixType {
             MatrixType::Wg => cfg.ffn_dim,
             MatrixType::Wu => cfg.ffn_dim,
             MatrixType::Wd => cfg.hidden_dim,
+            MatrixType::LmHead => cfg.vocab_size,
         }
     }
 
@@ -54,11 +69,12 @@ impl MatrixType {
             MatrixType::Wg => cfg.hidden_dim,
             MatrixType::Wu => cfg.hidden_dim,
             MatrixType::Wd => cfg.ffn_dim,
+            MatrixType::LmHead => cfg.hidden_dim,
         }
     }
 
     /// Safetensors weight name pattern for this matrix type.
-    /// Layer index is substituted for `{}`.
+    /// Layer index is substituted for `{}` (not applicable for LmHead).
     pub fn weight_name(&self) -> &'static str {
         match self {
             MatrixType::Wq => "model.layers.{}.self_attn.q_proj.weight",
@@ -68,6 +84,7 @@ impl MatrixType {
             MatrixType::Wg => "model.layers.{}.mlp.gate_proj.weight",
             MatrixType::Wu => "model.layers.{}.mlp.up_proj.weight",
             MatrixType::Wd => "model.layers.{}.mlp.down_proj.weight",
+            MatrixType::LmHead => "lm_head.weight",
         }
     }
 }
@@ -170,6 +187,7 @@ mod tests {
 
     #[test]
     fn test_all_matrix_types() {
-        assert_eq!(MatrixType::ALL.len(), 7);
+        assert_eq!(MatrixType::ALL.len(), 8);
+        assert_eq!(MatrixType::PER_LAYER.len(), 7);
     }
 }
