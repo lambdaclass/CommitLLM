@@ -147,16 +147,12 @@ pub struct VerifierKey {
     pub v_vectors: Vec<Vec<Vec<Fp>>>,
 
     /// Per-layer infinity-norm of W_o (max absolute row sum, scaled).
-    /// Used for margin certificate perturbation bounds (Level B).
-    /// Empty if not computed (Level A only).
     pub wo_norms: Vec<f32>,
 
     /// Max L-infinity norm of V head vectors across all layers and heads.
-    /// Used for margin certificate perturbation bounds (Level B).
-    /// 0.0 if not computed (Level A only).
     pub max_v_norm: f32,
 
-    /// Unembedding matrix (lm_head) for Level B logit verification.
+    /// Unembedding matrix (lm_head) for logit verification.
     /// Shape: (vocab_size, hidden_dim), row-major INT8.
     /// When present, the verifier recomputes logits from final_hidden
     /// instead of trusting the margin certificate's self-reported logits.

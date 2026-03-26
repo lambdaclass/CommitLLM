@@ -592,9 +592,8 @@ class VerifiedInferenceServer:
     ):
         """Open an audit proof.
 
-        For full-trace (V1-V3) state: returns zstd-compressed binary.
-        For V4 retained-state: returns binary (bincode+zstd) by default,
-        or JSON string when binary=False (debug only).
+        Returns binary (bincode+zstd) by default, or JSON string when
+        binary=False (debug only).
 
         Args:
             request_id: from the /chat response.
@@ -679,7 +678,7 @@ def create_app(llm, **kwargs):
                 tier=request.get("tier", "routine"),
                 binary=use_binary,
             )
-            # Binary V4 or V1-V3 returns bytes.
+            # Binary response returns bytes.
             if isinstance(result, (bytes, memoryview)):
                 return Response(
                     content=bytes(result),

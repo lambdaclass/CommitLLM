@@ -204,8 +204,7 @@ pub fn hash_trace_direct(layers: &[crate::types::LayerTrace], final_hidden: Opti
 /// and the dynamic quantization scales needed for audit replay.
 /// Used for V4 (retained-state) commitments.
 ///
-/// Domain separator `"vi-retained-v1"` prevents collisions with
-/// the full-trace hash (`"vi-trace-v2"`).
+/// Domain separator `"vi-retained-v1"` ensures hash uniqueness.
 pub fn hash_retained_state_direct(state: &crate::types::RetainedTokenState) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"vi-retained-v1");
