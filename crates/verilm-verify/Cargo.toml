@@ -5,10 +5,7 @@ edition = "2021"
 
 [dependencies]
 verilm-core = { path = "../verilm-core" }
-clap = { version = "4", features = ["derive"] }
-anyhow = "1"
 bincode = "1.3"
-hex = "0.4"
 sha2 = "0.10"
 
 [dev-dependencies]

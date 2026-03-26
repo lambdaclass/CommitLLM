@@ -10,8 +10,7 @@ use verilm_core::constants::{MatrixType, ModelConfig};
 use verilm_core::merkle::hash_weights;
 use verilm_core::serialize;
 use verilm_test_vectors::{
-    build_trace, commit, forward_pass, forward_pass_autoregressive,
-    generate_key, generate_model, open, LayerWeights,
+    generate_key, generate_model, LayerWeights,
 };
 use verilm_verify::WeightHashResult;
 
@@ -419,45 +418,6 @@ fn test_weight_hash_none_survives_roundtrip() {
 // =====================================================================
 
 #[test]
-fn test_end_to_end_published_checkpoint_binding() {
-    // Simulate the full workflow:
-    // 1. Model publisher computes and publishes expected_hash from their checkpoint.
-    // 2. Verifier generates key from same checkpoint.
-    // 3. Verifier checks key.weight_hash == expected_hash.
-    // 4. Prover produces trace, verifier checks trace against the bound key.
-
-    let cfg = toy_cfg();
-    let model = generate_model(&cfg, 42);
-
-    // Step 1: Publisher computes reference hash
-    let published_hash = hash_weights(
-        "I8",
-        cfg.n_layers,
-        &[],
-        |l, m| get_weights(&model, l, m),
-        MatrixType::PER_LAYER.len(),
-    );
-
-    // Step 2: Verifier independently generates key from same weights
-    let key = generate_key(&cfg, &model, [77u8; 32]); // different seed!
-
-    // Step 3: Binding check
-    assert_eq!(
-        key.weight_hash.unwrap(),
-        published_hash,
-        "verifier's key must match publisher's hash"
-    );
-
-    // Step 4: Now run a trace and verify it (Level A)
-    let input = vec![1i8; cfg.hidden_dim];
-    let traces = verilm_test_vectors::forward_pass(&cfg, &model, &input);
-    let trace = verilm_test_vectors::build_trace(traces, 0, 1);
-
-    let result = verilm_verify::verify_trace(&key, &trace);
-    assert_eq!(result.verdict, verilm_verify::Verdict::Pass, "honest trace must pass");
-}
-
-#[test]
 fn test_end_to_end_wrong_checkpoint_detected() {
     // Verifier has key from model A, but published hash is from model B.
     // The binding check must fail.
@@ -479,43 +439,6 @@ fn test_end_to_end_wrong_checkpoint_detected() {
         key_a.weight_hash.unwrap(),
         published_hash,
         "key from wrong checkpoint must not match published hash"
-    );
-}
-
-#[test]
-fn test_end_to_end_trace_passes_but_wrong_model_detected_at_binding() {
-    // A trace can pass Freivalds checks (it was honestly computed)
-    // but still be rejected because the key's weight_hash doesn't match
-    // the published checkpoint. This is the core scenario Task 19 prevents.
-    let cfg = toy_cfg();
-
-    // Attacker uses model_evil but claims it's model_legit
-    let model_legit = generate_model(&cfg, 42);
-    let model_evil = generate_model(&cfg, 666);
-
-    // Attacker generates key from evil model, computes honest trace
-    let key_evil = generate_key(&cfg, &model_evil, [1u8; 32]);
-    let input = vec![1i8; cfg.hidden_dim];
-    let traces = verilm_test_vectors::forward_pass(&cfg, &model_evil, &input);
-    let trace = verilm_test_vectors::build_trace(traces, 0, 1);
-
-    // The trace passes Freivalds (it WAS computed correctly with evil model)
-    let result = verilm_verify::verify_trace(&key_evil, &trace);
-    assert_eq!(result.verdict, verilm_verify::Verdict::Pass, "trace is honestly computed, Freivalds passes");
-
-    // But the binding check catches the substitution
-    let published_hash = hash_weights(
-        "I8",
-        cfg.n_layers,
-        &[],
-        |l, m| get_weights(&model_legit, l, m),
-        MatrixType::PER_LAYER.len(),
-    );
-
-    assert_ne!(
-        key_evil.weight_hash.unwrap(),
-        published_hash,
-        "weight hash binding detects the model substitution even though Freivalds passed"
     );
 }
 
@@ -716,102 +639,10 @@ fn test_check_single_trace_with_correct_expected_hash() {
     let key = generate_key(&cfg, &model, [1u8; 32]);
     let expected = key.weight_hash.unwrap();
 
-    let input = vec![1i8; cfg.hidden_dim];
-    let layers = forward_pass(&cfg, &model, &input);
-    let trace = build_trace(layers, 0, 1);
-
-    // Weight hash check passes
     assert_eq!(
         verilm_verify::verify_weight_hash(&key, Some(&expected)),
         WeightHashResult::Match
     );
-    // Trace also passes
-    let report = verilm_verify::verify_trace(&key, &trace);
-    assert_eq!(report.verdict, verilm_verify::Verdict::Pass);
-}
-
-#[test]
-fn test_check_single_trace_with_wrong_expected_hash_rejects() {
-    // Trace passes Freivalds but weight hash doesn't match — reject.
-    let cfg = toy_cfg();
-    let model = generate_model(&cfg, 42);
-    let key = generate_key(&cfg, &model, [1u8; 32]);
-    let wrong = [0x00u8; 32];
-
-    let input = vec![1i8; cfg.hidden_dim];
-    let layers = forward_pass(&cfg, &model, &input);
-    let trace = build_trace(layers, 0, 1);
-
-    // Trace passes Freivalds
-    let report = verilm_verify::verify_trace(&key, &trace);
-    assert_eq!(report.verdict, verilm_verify::Verdict::Pass);
-
-    // But weight hash binding fails
-    match verilm_verify::verify_weight_hash(&key, Some(&wrong)) {
-        WeightHashResult::Mismatch { .. } => {} // expected
-        other => panic!("expected Mismatch, got {:?}", other),
-    }
-}
-
-// =====================================================================
-// 7. verify_weight_hash with batch verification end-to-end
-// =====================================================================
-
-#[test]
-fn test_check_batch_with_correct_expected_hash() {
-    let cfg = toy_cfg();
-    let model = generate_model(&cfg, 42);
-    let key = generate_key(&cfg, &model, [1u8; 32]);
-    let expected = key.weight_hash.unwrap();
-
-    let input: Vec<i8> = (0..cfg.hidden_dim).map(|i| (i % 256) as i8).collect();
-    let all_layers = forward_pass_autoregressive(&cfg, &model, &input, 10);
-    let (commitment, state) = commit(all_layers);
-
-    let seed = [42u8; 32];
-    let challenge_k = 3;
-    let challenges = verilm_core::merkle::derive_challenges(
-        &commitment.merkle_root, &seed, commitment.n_tokens, challenge_k,
-    );
-    let proof = open(&state, &challenges);
-
-    // Weight hash check passes
-    assert_eq!(
-        verilm_verify::verify_weight_hash(&key, Some(&expected)),
-        WeightHashResult::Match
-    );
-    // Batch verification also passes
-    let report = verilm_verify::verify_batch(&key, &proof, seed, challenge_k);
-    assert_eq!(report.verdict, verilm_verify::Verdict::Pass);
-}
-
-#[test]
-fn test_check_batch_with_wrong_expected_hash_rejects() {
-    let cfg = toy_cfg();
-    let model = generate_model(&cfg, 42);
-    let key = generate_key(&cfg, &model, [1u8; 32]);
-    let wrong = [0xBBu8; 32];
-
-    let input: Vec<i8> = (0..cfg.hidden_dim).map(|i| (i % 256) as i8).collect();
-    let all_layers = forward_pass_autoregressive(&cfg, &model, &input, 10);
-    let (commitment, state) = commit(all_layers);
-
-    let seed = [42u8; 32];
-    let challenge_k = 3;
-    let challenges = verilm_core::merkle::derive_challenges(
-        &commitment.merkle_root, &seed, commitment.n_tokens, challenge_k,
-    );
-    let proof = open(&state, &challenges);
-
-    // Batch passes Freivalds
-    let report = verilm_verify::verify_batch(&key, &proof, seed, challenge_k);
-    assert_eq!(report.verdict, verilm_verify::Verdict::Pass);
-
-    // But weight hash binding fails
-    match verilm_verify::verify_weight_hash(&key, Some(&wrong)) {
-        WeightHashResult::Mismatch { .. } => {}
-        other => panic!("expected Mismatch, got {:?}", other),
-    }
 }
 
 #[test]
@@ -920,14 +751,6 @@ fn test_fixture_recompute_published_hash_matches_keygen() {
         WeightHashResult::Match,
         "verifier's independently generated key must match publisher's hash"
     );
-
-    // Step 5: Run a trace and verify everything
-    let input = vec![7i8; cfg.hidden_dim];
-    let layers = forward_pass(&cfg, &model, &input);
-    let trace = build_trace(layers, 0, 1);
-
-    let report = verilm_verify::verify_trace(&key, &trace);
-    assert_eq!(report.verdict, verilm_verify::Verdict::Pass, "honest trace must pass Freivalds");
 }
 
 #[test]
@@ -981,37 +804,3 @@ fn test_fixture_second_verifier_reproduces_same_hash() {
     assert_eq!(key_2.weight_hash.unwrap(), published);
 }
 
-#[test]
-fn test_fixture_batch_end_to_end_with_published_hash() {
-    // Full batch workflow: keygen → autoregressive → commit → challenge → verify
-    // with published hash binding at every step.
-    let cfg = toy_cfg();
-    let model = generate_model(&cfg, 12345);
-    let key = generate_key(&cfg, &model, [0xCC; 32]);
-
-    let published_hash = hash_weights(
-        "I8", cfg.n_layers, &[],
-        |l, m| get_weights(&model, l, m),
-        MatrixType::PER_LAYER.len(),
-    );
-
-    // Hash binding passes
-    assert_eq!(
-        verilm_verify::verify_weight_hash(&key, Some(&published_hash)),
-        WeightHashResult::Match,
-    );
-
-    // Batch verification passes
-    let input: Vec<i8> = (0..cfg.hidden_dim).map(|i| ((i * 3) % 256) as i8).collect();
-    let all_layers = forward_pass_autoregressive(&cfg, &model, &input, 15);
-    let (commitment, state) = commit(all_layers);
-
-    let seed = [0xDD; 32];
-    let challenges = verilm_core::merkle::derive_challenges(
-        &commitment.merkle_root, &seed, commitment.n_tokens, 4,
-    );
-    let proof = open(&state, &challenges);
-
-    let report = verilm_verify::verify_batch(&key, &proof, seed, 4);
-    assert_eq!(report.verdict, verilm_verify::Verdict::Pass);
-}

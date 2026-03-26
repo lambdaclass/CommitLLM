@@ -32,8 +32,8 @@ use pyo3::types::{IntoPyDict, PyBytes, PyDict, PyList};
 
 use verilm_core::serialize;
 use verilm_core::types::{
-    AuditChallenge, AuditTier, BatchCommitment, BatchProof, CommitmentVersion,
-    DeploymentManifest, LayerTrace, TokenTrace, VerificationPolicy, VerifierKey,
+    AuditChallenge, AuditTier, BatchCommitment,
+    DeploymentManifest, LayerTrace, VerifierKey,
 };
 use verilm_prover::{commit_with_full_binding, FullBindingParams};
 
@@ -613,162 +613,6 @@ fn decode_hex32(hex_str: &str, field_name: &str) -> PyResult<[u8; 32]> {
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
     Ok(arr)
-}
-
-/// Extract a `VerificationPolicy` from a Python dict.
-///
-/// Expected keys (all optional):
-///   - `min_version`: int (1, 2, or 3)
-///   - `expected_prompt_hash`: hex string (64 chars)
-///   - `expected_manifest_hash`: hex string (64 chars)
-fn extract_policy(d: &Bound<'_, PyDict>) -> PyResult<VerificationPolicy> {
-    let min_version = d
-        .get_item("min_version")?
-        .map(|v| {
-            let n: u32 = v.extract()?;
-            match n {
-                1 => Ok(CommitmentVersion::V1),
-                2 => Ok(CommitmentVersion::V2),
-                3 => Ok(CommitmentVersion::V3),
-                _ => Err(PyValueError::new_err(format!(
-                    "invalid min_version {}: expected 1, 2, or 3",
-                    n
-                ))),
-            }
-        })
-        .transpose()?;
-
-    let expected_prompt_hash = d
-        .get_item("expected_prompt_hash")?
-        .map(|v| {
-            let hex_str: String = v.extract()?;
-            decode_hex32(&hex_str, "expected_prompt_hash")
-        })
-        .transpose()?;
-
-    let expected_manifest_hash = d
-        .get_item("expected_manifest_hash")?
-        .map(|v| {
-            let hex_str: String = v.extract()?;
-            decode_hex32(&hex_str, "expected_manifest_hash")
-        })
-        .transpose()?;
-
-    Ok(VerificationPolicy {
-        min_version,
-        expected_prompt_hash,
-        expected_manifest_hash,
-    })
-}
-
-/// Format a list of failure strings into Python dicts with `description` field.
-///
-/// We parse failure strings that follow the `"layer N MatrixType: ..."` pattern
-/// to extract structured `layer`, `matrix`, `kind` fields. For failures that
-/// don't match that pattern, `layer` and `matrix` are `None`.
-fn failures_to_py_list<'py>(
-    py: Python<'py>,
-    failures: &[String],
-) -> PyResult<Bound<'py, PyList>> {
-    let items = PyList::empty(py);
-    for f in failures {
-        let d = PyDict::new(py);
-        d.set_item("description", f)?;
-
-        // Try to parse structured failure: "layer N MatrixType: ..."
-        if f.starts_with("layer ") {
-            let rest = &f["layer ".len()..];
-            if let Some(space_pos) = rest.find(' ') {
-                if let Ok(layer_idx) = rest[..space_pos].parse::<usize>() {
-                    d.set_item("layer", layer_idx)?;
-                    let after_layer = &rest[space_pos + 1..];
-                    if let Some(colon_pos) = after_layer.find(':') {
-                        d.set_item("matrix", &after_layer[..colon_pos])?;
-                        d.set_item("kind", after_layer[colon_pos + 1..].trim())?;
-                    }
-                }
-            }
-        }
-
-        items.append(d)?;
-    }
-    Ok(items)
-}
-
-/// Verify a batch proof against a verifier key.
-///
-/// Args:
-///     proof_json: JSON-serialized `BatchProof`.
-///     key_json: JSON-serialized `VerifierKey`.
-///     challenge_seed: hex string (64 chars) — verifier-generated challenge seed.
-///     challenge_k: number of tokens to challenge.
-///     policy: optional dict with `min_version`, `expected_prompt_hash`,
-///         `expected_manifest_hash`.
-///
-/// Returns:
-///     dict with `passed` (bool), `failures` (list of dicts).
-#[pyfunction]
-#[pyo3(signature = (proof_json, key_json, challenge_seed, challenge_k, policy=None))]
-fn verify_batch<'py>(
-    py: Python<'py>,
-    proof_json: &str,
-    key_json: &str,
-    challenge_seed: &str,
-    challenge_k: u32,
-    policy: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Bound<'py, PyDict>> {
-    let proof: BatchProof = serde_json::from_str(proof_json)
-        .map_err(|e| PyValueError::new_err(format!("failed to deserialize BatchProof: {}", e)))?;
-    let key: VerifierKey = serde_json::from_str(key_json)
-        .map_err(|e| PyValueError::new_err(format!("failed to deserialize VerifierKey: {}", e)))?;
-    let challenge_seed_bytes = decode_hex32(challenge_seed, "challenge_seed")?;
-
-    let policy_obj = policy.map(extract_policy).transpose()?.unwrap_or_default();
-
-    let report = verilm_verify::verify_batch_with_policy(
-        &key,
-        &proof,
-        challenge_seed_bytes,
-        challenge_k,
-        &policy_obj,
-    );
-
-    let result = PyDict::new(py);
-    result.set_item("passed", report.verdict == verilm_verify::Verdict::Pass)?;
-    result.set_item("failures", failures_to_py_list(py, &report.failures)?)?;
-    result.set_item("n_tokens", report.n_tokens)?;
-    result.set_item("n_challenged", report.n_challenged)?;
-    result.set_item("tokens_passed", report.tokens_passed)?;
-    Ok(result)
-}
-
-/// Verify a single token trace against a verifier key.
-///
-/// Args:
-///     trace_json: JSON-serialized `TokenTrace`.
-///     key_json: JSON-serialized `VerifierKey`.
-///
-/// Returns:
-///     dict with `passed` (bool), `failures` (list of dicts).
-#[pyfunction]
-fn verify_single<'py>(
-    py: Python<'py>,
-    trace_json: &str,
-    key_json: &str,
-) -> PyResult<Bound<'py, PyDict>> {
-    let trace: TokenTrace = serde_json::from_str(trace_json)
-        .map_err(|e| PyValueError::new_err(format!("failed to deserialize TokenTrace: {}", e)))?;
-    let key: VerifierKey = serde_json::from_str(key_json)
-        .map_err(|e| PyValueError::new_err(format!("failed to deserialize VerifierKey: {}", e)))?;
-
-    let report = verilm_verify::verify_trace(&key, &trace);
-
-    let result = PyDict::new(py);
-    result.set_item("passed", report.verdict == verilm_verify::Verdict::Pass)?;
-    result.set_item("failures", failures_to_py_list(py, &report.failures)?)?;
-    result.set_item("checks_run", report.checks_run)?;
-    result.set_item("checks_passed", report.checks_passed)?;
-    Ok(result)
 }
 
 /// Compute the paper's R_W (weight-chain hash) from safetensors files.
@@ -1520,8 +1364,6 @@ fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(commit_from_captures, m)?)?;
     m.add_function(wrap_pyfunction!(commit_minimal_from_captures, m)?)?;
     m.add_function(wrap_pyfunction!(build_audit_challenge, m)?)?;
-    m.add_function(wrap_pyfunction!(verify_batch, m)?)?;
-    m.add_function(wrap_pyfunction!(verify_single, m)?)?;
     m.add_function(wrap_pyfunction!(compute_weight_hash, m)?)?;
     m.add_function(wrap_pyfunction!(generate_key, m)?)?;
     m.add_function(wrap_pyfunction!(verify_v4, m)?)?;

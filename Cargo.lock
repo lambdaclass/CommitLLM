@@ -914,10 +914,7 @@ dependencies = [
 name = "verilm-verify"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "bincode",
- "clap",
- "hex",
  "serde_json",
  "sha2",
  "verilm-core",

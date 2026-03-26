@@ -22,7 +22,6 @@ pub use verilm_prover::{
     commit_with_full_binding, open, build_batch,
     build_audit_response, build_audit_response_from_state,
     build_streaming_kv_verifier,
-    verify_batch, verify_batch_with_policy, verify_trace,
 };
 
 /// Random INT8 weight matrix (row-major).
