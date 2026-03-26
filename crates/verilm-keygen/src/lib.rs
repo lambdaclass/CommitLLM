@@ -640,6 +640,12 @@ pub struct SafetensorsWeightProvider {
     model_dir: std::path::PathBuf,
     /// R_W: SHA-256 weight-chain hash over all INT8 weights and scales.
     weight_hash: [u8; 32],
+    /// LM-head (unembedding) matrix, row-major INT8. Shape: (vocab_size, hidden_dim).
+    lm_head: Option<Vec<i8>>,
+    /// Final RMSNorm weight vector (model.norm.weight). Length = hidden_dim.
+    final_norm_weights: Option<Vec<f32>>,
+    /// RMSNorm epsilon from config.
+    rmsnorm_eps_value: f64,
 }
 
 impl SafetensorsWeightProvider {
@@ -703,6 +709,12 @@ impl SafetensorsWeightProvider {
             MatrixType::ALL.len(),
         );
 
+        // Load lm_head and final norm for tail computation at audit time.
+        let lm_head = load_weights_as_i8(&parsed, "lm_head.weight")
+            .map(|(w, _scale)| w)
+            .ok();
+        let final_norm_weights = load_1d_f32(&parsed, "model.norm.weight").ok();
+
         Ok(SafetensorsWeightProvider {
             config,
             weights,
@@ -712,6 +724,9 @@ impl SafetensorsWeightProvider {
             embedding_tree,
             model_dir: dir.to_path_buf(),
             weight_hash,
+            lm_head,
+            final_norm_weights,
+            rmsnorm_eps_value: 1e-5, // Llama default; overridden if config has it
         })
     }
 
@@ -765,6 +780,28 @@ impl SafetensorsWeightProvider {
     /// Embedding Merkle root, if available.
     pub fn embedding_merkle_root(&self) -> Option<[u8; 32]> {
         self.embedding_tree.as_ref().map(|tree| tree.root)
+    }
+
+    /// LM-head (unembedding) matrix as INT8, if loaded.
+    pub fn lm_head(&self) -> Option<&[i8]> {
+        self.lm_head.as_deref()
+    }
+
+    /// Final RMSNorm weight vector, if loaded.
+    pub fn final_norm_weights(&self) -> Option<&[f32]> {
+        self.final_norm_weights.as_deref()
+    }
+
+    /// Build `TailParams` for LM-head logit computation at audit time.
+    /// Returns `None` if lm_head or final_norm_weights are not available.
+    pub fn tail_params(&self) -> Option<verilm_core::types::TailParams<'_>> {
+        let lm = self.lm_head.as_deref()?;
+        let fnw = self.final_norm_weights.as_deref()?;
+        Some(verilm_core::types::TailParams {
+            lm_head: lm,
+            final_norm_weights: fnw,
+            rmsnorm_eps: self.rmsnorm_eps_value,
+        })
     }
 }
 

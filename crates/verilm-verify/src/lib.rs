@@ -1792,33 +1792,27 @@ pub fn verify_v4(
                 shell_final_hidden
             };
 
-            if let Some(ref lm_head) = key.lm_head {
+            // LM-head Freivalds: verify the prover's claimed logits_i32.
+            //
+            // The prover provides logits_i32 = lm_head @ quantize(final_norm(final_residual)).
+            // The verifier independently derives final_hidden (above) and checks:
+            //   v_lm · final_hidden == r_lm · logits_i32   (in F_p)
+            //
+            // This is a real binding: the verifier does NOT recompute the matmul.
+            // Freivalds catches a dishonest prover with probability 1 - 1/p ≈ 1 - 2^{-32}.
+            if let (Some(ref claimed_logits), Some(ref r_lm), Some(ref v_lm)) =
+                (&shell.logits_i32, &key.r_lm_head, &key.v_lm_head)
+            {
                 if let Some(ref fh) = final_hidden {
+                    checks_run += 1;
+                    if !freivalds::check(v_lm, fh, r_lm, claimed_logits) {
+                        failures.push("lm_head: Freivalds check failed on prover's logits_i32 claim".into());
+                    }
+
+                    // Token replay: use the prover's (now Freivalds-verified) logits.
                     if key.config.vocab_size > 0 {
-                        let vocab_size = key.config.vocab_size;
-                        let hidden_dim = key.config.hidden_dim;
-
-                        // Compute logits as i32 accumulators (used by both Freivalds and
-                        // exact token replay). Single pass over lm_head × final_hidden.
-                        let logits_i32: Vec<i32> = (0..vocab_size)
-                            .map(|row| {
-                                (0..hidden_dim)
-                                    .map(|c| lm_head[row * hidden_dim + c] as i32 * fh[c] as i32)
-                                    .sum::<i32>()
-                            })
-                            .collect();
-
-                        // LM-head Freivalds: v · final_hidden == r · logits_i32.
-                        if let (Some(ref r_lm), Some(ref v_lm)) = (&key.r_lm_head, &key.v_lm_head) {
-                            checks_run += 1;
-                            if !freivalds::check(v_lm, fh, r_lm, &logits_i32) {
-                                failures.push("lm_head: Freivalds check failed".into());
-                            }
-                        }
-
-                        // Exact token replay: cast to f32 logits, apply sampling, verify token_id.
                         checks_run += 1;
-                        let logits: Vec<f32> = logits_i32.iter().map(|&v| v as f32).collect();
+                        let logits: Vec<f32> = claimed_logits.iter().map(|&v| v as f32).collect();
 
                         let expected_token = if let Some(ref dp) = decode_params {
                             let token_seed = verilm_core::sampling::derive_token_seed(
@@ -1842,7 +1836,7 @@ pub fn verify_v4(
                     }
                 } else {
                     failures.push(
-                        "key has lm_head but shell verification did not produce final_hidden".into()
+                        "lm_head: Freivalds vectors present but shell did not produce final_hidden".into()
                     );
                 }
             }

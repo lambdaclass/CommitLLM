@@ -440,6 +440,7 @@ mod tests {
             initial_residual: None,
             embedding_proof: None,
             final_residual: None,
+            logits_i32: None,
         };
         let resp = V4AuditResponse {
             token_index: 7,

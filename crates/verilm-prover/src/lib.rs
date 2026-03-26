@@ -8,7 +8,7 @@ use verilm_core::merkle;
 use verilm_core::requantize;
 use verilm_core::rmsnorm::{bridge_residual_rmsnorm, dequant_add_residual, rmsnorm_f64_input, quantize_f64_to_i8};
 use verilm_core::types::{
-    AuditChallenge, AuditResponse, BatchCommitment, BatchProof, BridgeParams, CommitmentVersion,
+    AuditChallenge, AuditResponse, BatchCommitment, BatchProof, BridgeParams, CommitmentVersion, TailParams,
     DeploymentManifest, LayerTrace, RetainedLayerState, RetainedTokenState,
     ShellLayerOpening, ShellTokenOpening, ShellWeights,
     TokenTrace, V4AuditResponse, VerificationPolicy, VerifierKey,
@@ -935,6 +935,7 @@ pub fn open_v4_packed(
     cfg: &verilm_core::constants::ModelConfig,
     weight_scales: &[Vec<f32>],
     bridge: Option<&BridgeParams>,
+    tail: Option<&TailParams>,
     layer_filter: Option<&[usize]>,
 ) -> V4AuditResponse {
     let i = token_index as usize;
@@ -974,6 +975,17 @@ pub fn open_v4_packed(
         &retained_token, weights, cfg, weight_scales, bridge, layer_filter,
     );
     shell.final_residual = state.extract_final_residual(i);
+
+    // Compute LM-head logits claim for Freivalds verification.
+    if let (Some(ref fr), Some(tp)) = (&shell.final_residual, tail) {
+        let res_f64: Vec<f64> = fr.iter().map(|&v| v as f64).collect();
+        let normed = verilm_core::rmsnorm::rmsnorm_f64_input(
+            &res_f64, tp.final_norm_weights, tp.rmsnorm_eps,
+        );
+        let fh: Vec<i8> = normed.iter().map(|&v| v.round().clamp(-128.0, 127.0) as i8).collect();
+        let logits = matmul_i32(tp.lm_head, &fh, cfg.vocab_size, cfg.hidden_dim);
+        shell.logits_i32 = Some(logits);
+    }
 
     V4AuditResponse {
         token_index,
@@ -1123,6 +1135,7 @@ pub fn compute_shell_opening(
         initial_residual: bridge.map(|b| b.initial_residual.to_vec()),
         embedding_proof: bridge.and_then(|b| b.embedding_proof.clone()),
         final_residual: None, // Set by open_v4 from captured GPU state
+        logits_i32: None,     // Set by open_v4 when tail params available
     }
 }
 
@@ -1136,6 +1149,9 @@ pub fn compute_shell_opening(
 ///
 /// When `bridge` is `Some`, uses full dequant→residual→RMSNorm→quantize chain.
 /// When `None`, falls back to simplified bridge.
+///
+/// When `tail` is `Some`, computes `logits_i32 = lm_head @ quantize(final_norm(final_residual))`
+/// for Freivalds verification by the verifier.
 pub fn open_v4(
     state: &MinimalBatchState,
     token_index: u32,
@@ -1143,6 +1159,7 @@ pub fn open_v4(
     cfg: &verilm_core::constants::ModelConfig,
     weight_scales: &[Vec<f32>],
     bridge: Option<&BridgeParams>,
+    tail: Option<&TailParams>,
     layer_filter: Option<&[usize]>,
 ) -> V4AuditResponse {
     let mut response = open_v4_structural(state, token_index);
@@ -1155,6 +1172,18 @@ pub fn open_v4(
         .as_ref()
         .and_then(|frs| frs.get(token_index as usize))
         .cloned();
+
+    // Compute LM-head logits claim for Freivalds verification.
+    if let (Some(ref fr), Some(tp)) = (&shell.final_residual, tail) {
+        let res_f64: Vec<f64> = fr.iter().map(|&v| v as f64).collect();
+        let normed = verilm_core::rmsnorm::rmsnorm_f64_input(
+            &res_f64, tp.final_norm_weights, tp.rmsnorm_eps,
+        );
+        let fh: Vec<i8> = normed.iter().map(|&v| v.round().clamp(-128.0, 127.0) as i8).collect();
+        let logits = matmul_i32(tp.lm_head, &fh, cfg.vocab_size, cfg.hidden_dim);
+        shell.logits_i32 = Some(logits);
+    }
+
     response.shell_opening = Some(shell);
     response
 }

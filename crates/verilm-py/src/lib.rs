@@ -914,9 +914,10 @@ impl MinimalBatchStateHandle {
                 embedding_proof: emb_proof.clone(),
             }
         });
+        let tail = provider.tail_params();
         Ok(verilm_prover::open_v4(
             &self.inner, token_index, provider.as_ref(), provider.config(),
-            provider.weight_scales(), bridge.as_ref(), layer_filter,
+            provider.weight_scales(), bridge.as_ref(), tail.as_ref(), layer_filter,
         ))
     }
 }
@@ -1115,9 +1116,10 @@ impl PackedBatchStateHandle {
                 embedding_proof: emb_proof.clone(),
             }
         });
+        let tail = provider.tail_params();
         Ok(verilm_prover::open_v4_packed(
             &self.inner, token_index, provider.as_ref(), provider.config(),
-            provider.weight_scales(), bridge.as_ref(), layer_filter,
+            provider.weight_scales(), bridge.as_ref(), tail.as_ref(), layer_filter,
         ))
     }
 }

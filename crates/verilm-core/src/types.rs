@@ -48,39 +48,51 @@ pub struct DeploymentManifest {
     pub eos_policy: String,
     /// Merkle root over all INT8 weight matrices (R_W).
     /// Binds the commitment to a specific quantized checkpoint.
+    #[serde(default)]
     pub weight_hash: Option<[u8; 32]>,
     /// Hash of the quantization scheme (e.g. W8A8, Q8_0).
     /// Prevents substitution of a differently-quantized checkpoint.
+    #[serde(default)]
     pub quant_hash: Option<[u8; 32]>,
     /// SHA-256 of the system prompt prepended to user input.
     /// Prevents system-prompt injection or substitution.
+    #[serde(default)]
     pub system_prompt_hash: Option<[u8; 32]>,
 
     // --- Logit-modifying parameters (affect token selection) ---
 
     /// Repetition penalty: multiplicative factor on logits of previously generated tokens.
     /// 1.0 = disabled (no penalty).
+    #[serde(default = "default_repetition_penalty")]
     pub repetition_penalty: f32,
     /// Frequency penalty: additive penalty proportional to token frequency in output.
     /// 0.0 = disabled.
+    #[serde(default)]
     pub frequency_penalty: f32,
     /// Presence penalty: additive penalty for any token that appeared in output.
     /// 0.0 = disabled.
+    #[serde(default)]
     pub presence_penalty: f32,
     /// Logit bias: (token_id, additive_bias) pairs, sorted by token_id.
     /// Empty = disabled.
+    #[serde(default)]
     pub logit_bias: Vec<(u32, f32)>,
     /// Guided decoding grammar/schema identifier. Empty = disabled.
     /// When non-empty, constrains sampling to tokens valid under this grammar.
+    #[serde(default)]
     pub guided_decoding: String,
 
     // --- Output-level parameters ---
 
     /// Stop sequences that terminate generation. Empty = rely on eos_policy only.
+    #[serde(default)]
     pub stop_sequences: Vec<String>,
     /// Maximum tokens to generate. 0 = no explicit limit.
+    #[serde(default)]
     pub max_tokens: u32,
 }
+
+fn default_repetition_penalty() -> f32 { 1.0 }
 
 impl DeploymentManifest {
     /// Return default (disabled) values for all logit-modifying and output parameters.
@@ -243,18 +255,24 @@ pub struct LayerTrace {
     pub ffn_out: Vec<i32>,  // W_d h (i32 accumulator)
     /// Requantized K vectors for all tokens in the KV cache at this layer
     /// (Level C only). Each inner Vec has length kv_dim. Empty for Level A/B.
+    #[serde(default)]
     pub kv_cache_k: Vec<Vec<i8>>,
     /// Requantized V vectors for all tokens in the KV cache at this layer
     /// (Level C only). Each inner Vec has length kv_dim. Empty for Level A/B.
+    #[serde(default)]
     pub kv_cache_v: Vec<Vec<i8>>,
     /// Per-tensor activation scale for x_attn (QKV projection input).
     /// `None` for toy model (unit scale / simplified clamp requantization).
+    #[serde(default)]
     pub scale_x_attn: Option<f32>,
     /// Per-tensor activation scale for a (W_o projection input).
+    #[serde(default)]
     pub scale_a: Option<f32>,
     /// Per-tensor activation scale for x_ffn (gate_up projection input).
+    #[serde(default)]
     pub scale_x_ffn: Option<f32>,
     /// Per-tensor activation scale for h (down projection input).
+    #[serde(default)]
     pub scale_h: Option<f32>,
     /// Pre-attention residual stream (f32).
     ///
@@ -267,6 +285,7 @@ pub struct LayerTrace {
     ///   `x_ffn  = quantize(RMSNorm_ffn(residual + dequant(attn_out)), scale_x_ffn)`
     ///
     /// `None` for toy model (simplified clamp chain, no residual/RMSNorm).
+    #[serde(default)]
     pub residual: Option<Vec<f32>>,
 }
 
@@ -339,19 +358,28 @@ pub struct ShellTokenOpening {
     /// `None` means all layers (full audit). When `Some`, `layers[i]` corresponds
     /// to `layer_indices[i]`. Must be a contiguous prefix 0..=L_max for bridge
     /// verification (sequential residual chain).
+    #[serde(default)]
     pub layer_indices: Option<Vec<usize>>,
     /// Initial residual stream (embedding[token_id]) for full bridge verification.
     /// When present, enables residual-tracking RMSNorm bridge (paper-correct).
     /// `None` for toy model (simplified clamp bridge).
+    #[serde(default)]
     pub initial_residual: Option<Vec<f32>>,
     /// Merkle proof binding `initial_residual` to the embedding table committed
     /// in the verifier key. `leaf_index` = token_id, leaf = `hash_embedding_row(initial_residual)`.
+    #[serde(default)]
     pub embedding_proof: Option<MerkleProof>,
     /// Captured pre-final-norm residual stream from the actual GPU inference.
     /// When present, the verifier uses this for exact LM-head/token verification
     /// instead of the shell-replayed final hidden state (which diverges after
     /// many layers of approximate attention).
+    #[serde(default)]
     pub final_residual: Option<Vec<f32>>,
+    /// Prover-claimed LM-head logits: `lm_head @ quantize(final_norm(final_residual))`.
+    /// The verifier checks this claim via Freivalds (v · fh == r · logits_i32)
+    /// instead of recomputing the full matmul. Length = vocab_size.
+    #[serde(default)]
+    pub logits_i32: Option<Vec<i32>>,
 }
 
 /// Parameters for the full bridge computation (dequant → residual → RMSNorm → quantize).
@@ -372,6 +400,19 @@ pub struct BridgeParams<'a> {
     pub initial_residual: &'a [f32],
     /// Embedding Merkle proof for this token. Forwarded into `ShellTokenOpening`.
     pub embedding_proof: Option<MerkleProof>,
+}
+
+/// Parameters for computing LM-head logits in the prover's opening.
+///
+/// When provided, the prover computes `logits_i32 = lm_head @ quantize(final_norm(final_residual))`
+/// and includes the result in `ShellTokenOpening.logits_i32` for Freivalds verification.
+pub struct TailParams<'a> {
+    /// Unembedding matrix (lm_head), row-major INT8. Shape: (vocab_size, hidden_dim).
+    pub lm_head: &'a [i8],
+    /// Final RMSNorm weight vector (`model.norm.weight`). Length = hidden_dim.
+    pub final_norm_weights: &'a [f32],
+    /// RMSNorm epsilon.
+    pub rmsnorm_eps: f64,
 }
 
 /// V4 audit response: opens retained leaves for challenged and prefix tokens,
@@ -414,6 +455,7 @@ pub struct V4AuditResponse {
     /// Deployment manifest included at audit time. The verifier checks
     /// `hash_manifest(manifest) == commitment.manifest_hash` and extracts
     /// decode parameters for sampling replay.
+    #[serde(default)]
     pub manifest: Option<DeploymentManifest>,
 }
 
@@ -560,13 +602,20 @@ pub struct CompactLayerTrace {
     // h omitted: verifier derives as silu(requant(g), requant(u))
     pub ffn_out: Vec<i32>,  // W_d h (i32 accumulator)
     /// KV cache K vectors (Level C only). Empty for Level A/B.
+    #[serde(default)]
     pub kv_cache_k: Vec<Vec<i8>>,
     /// KV cache V vectors (Level C only). Empty for Level A/B.
+    #[serde(default)]
     pub kv_cache_v: Vec<Vec<i8>>,
+    #[serde(default)]
     pub scale_x_attn: Option<f32>,
+    #[serde(default)]
     pub scale_a: Option<f32>,
+    #[serde(default)]
     pub scale_x_ffn: Option<f32>,
+    #[serde(default)]
     pub scale_h: Option<f32>,
+    #[serde(default)]
     pub residual: Option<Vec<f32>>,
 }
 
@@ -646,12 +695,16 @@ pub struct CompactTokenTrace {
     pub merkle_root: [u8; 32],
     pub merkle_proof: MerkleProof,
     pub io_proof: MerkleProof,
+    #[serde(default)]
     pub final_hidden: Option<Vec<i8>>,
     /// Emitted token ID (mirrored from TokenTrace for compact format).
+    #[serde(default)]
     pub token_id: Option<u32>,
     /// Previous token's IO hash for V3 transcript chaining (mirrored from TokenTrace).
+    #[serde(default)]
     pub prev_io_hash: Option<[u8; 32]>,
     /// Previous token's KV chain hash (mirrored from TokenTrace).
+    #[serde(default)]
     pub prev_kv_hash: Option<[u8; 32]>,
 }
 
@@ -700,6 +753,7 @@ impl CompactTokenTrace {
 pub struct CompactBatchProof {
     pub commitment: BatchCommitment,
     pub traces: Vec<CompactTokenTrace>,
+    #[serde(default)]
     pub revealed_seed: Option<[u8; 32]>,
 }
 
@@ -736,26 +790,31 @@ pub struct TokenTrace {
     /// Proof in the IO tree binding this token's input/output to the commitment.
     pub io_proof: MerkleProof,
     /// Optional margin certificate for Level B verification.
+    #[serde(default)]
     pub margin_cert: Option<crate::margin::MarginCertificate>,
     /// Final hidden state (requantized last-layer output) for Level B logit binding.
     /// When present, the verifier recomputes logits = lm_head @ final_hidden and
     /// checks them against the margin certificate's self-reported logits.
     /// Also included in the Merkle leaf hash to bind it to the commitment.
+    #[serde(default)]
     pub final_hidden: Option<Vec<i8>>,
     /// Emitted token ID (vocabulary index) for this position.
     /// When present, bound into the IO tree leaf hash (V2 format) so that
     /// the commitment pins the actual sampled token, not just the computation.
     /// `None` for legacy traces that predate token-ID binding.
+    #[serde(default)]
     pub token_id: Option<u32>,
     /// Previous token's IO hash for V3 transcript chaining.
     /// Provided by the prover during open so the verifier can reconstruct
     /// the chained IO hash for arbitrary (non-consecutive) challenge sets.
     /// For token 0, this is the genesis zero hash `[0u8; 32]`.
     /// `None` for V1/V2 traces.
+    #[serde(default)]
     pub prev_io_hash: Option<[u8; 32]>,
     /// Previous token's KV chain hash for KV provenance chaining.
     /// For token 0, this is the genesis zero hash `[0u8; 32]`.
     /// `None` for traces without KV provenance binding.
+    #[serde(default)]
     pub prev_kv_hash: Option<[u8; 32]>,
 }
 
@@ -799,24 +858,28 @@ pub struct BatchCommitment {
     pub io_root: [u8; 32],
     pub n_tokens: u32,
     /// Hash of the deployment manifest (Level B). Binds configuration to commitment.
+    #[serde(default)]
     pub manifest_hash: Option<[u8; 32]>,
     /// Protocol version for the IO hash format.
     /// V1 = legacy (no token-ID binding), V2 = token-ID bound, V3 = transcript-chained.
-    /// Defaults to V1 for backward compatibility with serialized proofs.
+    #[serde(default)]
     pub version: CommitmentVersion,
     /// SHA-256 of the canonicalized prompt / request input.
     /// Prevents cross-request replay: a valid proof for prompt A
     /// cannot be reused as proof for prompt B.
+    #[serde(default)]
     pub prompt_hash: Option<[u8; 32]>,
     /// SHA-256 of the sampling seed, committed before inference.
     /// The prover reveals the seed after inference; the verifier checks
     /// `SHA-256(revealed_seed) == seed_commitment` and replays sampling.
     /// Prevents re-rolling, cherry-picking, and biased sampling.
+    #[serde(default)]
     pub seed_commitment: Option<[u8; 32]>,
     /// Root of a Merkle tree over per-token KV chain hashes.
     /// Binds each token's K/V projections into a running provenance chain,
     /// preventing KV cache fabrication under partial opening.
     /// `None` for commitments that predate KV provenance chaining.
+    #[serde(default)]
     pub kv_chain_root: Option<[u8; 32]>,
 }
 
@@ -828,6 +891,7 @@ pub struct BatchProof {
     /// Revealed sampling seed (opened after inference).
     /// Verifier checks `SHA-256(revealed_seed) == commitment.seed_commitment`.
     /// `None` for proofs without sampling binding.
+    #[serde(default)]
     pub revealed_seed: Option<[u8; 32]>,
 }
 
