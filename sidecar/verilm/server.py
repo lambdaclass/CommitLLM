@@ -62,14 +62,7 @@ class VerifiedInferenceServer:
         model = get_model_from_llm(llm)
         configure_from_model(model)
 
-        # Install embedding/logit hooks (skip in minimal mode — data unused).
-        if cap._capture_mode != "minimal":
-            self.el_capture = EmbeddingLogitCapture()
-            n_hooks = self.el_capture.install(model)
-            logger.info("Installed %d embedding/logit hooks", n_hooks)
-        else:
-            self.el_capture = None
-            logger.info("Minimal mode: skipping embedding/logit hooks")
+        self.el_capture = None
 
         # Install final residual capture (always, even in minimal mode).
         # Captures the pre-final-norm residual for exact LM-head verification.
@@ -85,7 +78,7 @@ class VerifiedInferenceServer:
         # Install canonical sampler hook on LogitsProcessor module.
         # Must be AFTER capture hooks so capture sees original (unmasked) logits.
         from .sampler import CanonicalSamplerHook
-        self.sampler_hook = CanonicalSamplerHook(minimal=cap._capture_mode == "minimal")
+        self.sampler_hook = CanonicalSamplerHook(minimal=True)
         if not self.sampler_hook.install(model):
             raise RuntimeError(
                 "Could not install canonical sampler hook — "
@@ -107,10 +100,9 @@ class VerifiedInferenceServer:
 
         # Try to activate native C++ capture wrapper.
         # Must be after configure_from_model() + init_pinned_slab().
-        if cap._capture_mode == "minimal":
-            import torch
-            device_hint = torch.empty(1, device="cuda")
-            cap.activate_native_capture(device_hint_tensor=device_hint)
+        import torch
+        device_hint = torch.empty(1, device="cuda")
+        cap.activate_native_capture(device_hint_tensor=device_hint)
 
         self._audit_store: Dict[str, dict] = {}
         self._max_audit_entries = max_audit_entries
@@ -296,116 +288,70 @@ class VerifiedInferenceServer:
         all_token_ids = prompt_token_ids + gen_token_ids
         expected_traces = len(all_token_ids) - 1
 
-        if cap._capture_mode == "minimal":
-            # Minimal-mode fast path: drain flat lists (no tuples).
-            o_inputs, scales, call_count = self.buf.drain_minimal()
+        o_inputs, scales, call_count = self.buf.drain_minimal()
 
-            if _chat_timers:
-                _ct_buf_drain = time.monotonic()
+        if _chat_timers:
+            _ct_buf_drain = time.monotonic()
 
-            if cap._native_capture is not None:
-                _cc = cap._native_capture.get_call_counter()
-            elif cap._capture_hook is not None:
-                _cc = cap._capture_hook.call_counter
-            else:
-                _cc = cap._call_counter
-            logger.info(
-                "verilm: captures=%d (o_inputs=%d, scales=%d), calls_per_fwd=%d, "
-                "prompt_tokens=%d, gen_tokens=%d, all_tokens=%d, call_counter=%d",
-                call_count, len(o_inputs), len(scales), calls_per_fwd,
-                len(prompt_token_ids), len(gen_token_ids),
-                len(all_token_ids), _cc,
-            )
-
-            if call_count == 0 or call_count % calls_per_fwd != 0:
-                raise RuntimeError(
-                    f"Capture count {call_count} not a multiple of "
-                    f"calls_per_fwd {calls_per_fwd} "
-                    f"(prompt_tokens={len(prompt_token_ids)}, gen_tokens={len(gen_token_ids)}, "
-                    f"call_counter={_cc})"
-                )
-
-            n_fwd = call_count // calls_per_fwd
-            expected_o = n_fwd * n_layers
-            if len(o_inputs) != expected_o:
-                raise RuntimeError(
-                    f"o_inputs count ({len(o_inputs)}) != expected "
-                    f"({expected_o} = {n_fwd} fwd × {n_layers} layers). "
-                    f"Counter drift or missed o_proj append."
-                )
-            if len(scales) != call_count:
-                raise RuntimeError(
-                    f"scales count ({len(scales)}) != call_count ({call_count}). "
-                    f"Scale buffer out of sync."
-                )
-            fwd_batch_sizes = [
-                o_inputs[i * n_layers].shape[0] for i in range(n_fwd)
-            ]
-            n_tokens = sum(fwd_batch_sizes)
-
-            # EOS trailing forward pass trim.
-            if (n_tokens == expected_traces + 1
-                    and len(gen_token_ids) < max_tokens
-                    and fwd_batch_sizes[-1] == 1):
-                logger.info(
-                    "verilm: trimming trailing EOS forward pass "
-                    "(gen=%d < max=%d, n_fwd %d→%d)",
-                    len(gen_token_ids), max_tokens, n_fwd, n_fwd - 1,
-                )
-                o_inputs = o_inputs[:-n_layers]
-                scales = scales[:-calls_per_fwd]
-                n_fwd -= 1
-                fwd_batch_sizes = fwd_batch_sizes[:-1]
-                if len(final_residuals_raw) == n_fwd + 1:
-                    final_residuals_raw = final_residuals_raw[:-1]
-                n_tokens = sum(fwd_batch_sizes)
-
-            if _chat_timers:
-                _ct_prep = time.monotonic()
+        if cap._native_capture is not None:
+            _cc = cap._native_capture.get_call_counter()
+        elif cap._capture_hook is not None:
+            _cc = cap._capture_hook.call_counter
         else:
-            # Full-mode: drain tuple-based captures.
-            captures = self.buf.drain()
+            _cc = cap._call_counter
+        logger.info(
+            "verilm: captures=%d (o_inputs=%d, scales=%d), calls_per_fwd=%d, "
+            "prompt_tokens=%d, gen_tokens=%d, all_tokens=%d, call_counter=%d",
+            call_count, len(o_inputs), len(scales), calls_per_fwd,
+            len(prompt_token_ids), len(gen_token_ids),
+            len(all_token_ids), _cc,
+        )
 
-            if _chat_timers:
-                _ct_buf_drain = time.monotonic()
-
-            logger.info(
-                "verilm: captures=%d, calls_per_fwd=%d, prompt_tokens=%d, "
-                "gen_tokens=%d, all_tokens=%d, call_counter=%d",
-                len(captures), calls_per_fwd, len(prompt_token_ids),
-                len(gen_token_ids), len(all_token_ids), cap._call_counter,
+        if call_count == 0 or call_count % calls_per_fwd != 0:
+            raise RuntimeError(
+                f"Capture count {call_count} not a multiple of "
+                f"calls_per_fwd {calls_per_fwd} "
+                f"(prompt_tokens={len(prompt_token_ids)}, gen_tokens={len(gen_token_ids)}, "
+                f"call_counter={_cc})"
             )
 
-            if len(captures) == 0 or len(captures) % calls_per_fwd != 0:
-                raise RuntimeError(
-                    f"Capture count {len(captures)} not a multiple of "
-                    f"calls_per_fwd {calls_per_fwd} "
-                    f"(prompt_tokens={len(prompt_token_ids)}, gen_tokens={len(gen_token_ids)}, "
-                    f"call_counter={cap._call_counter})"
-                )
+        n_fwd = call_count // calls_per_fwd
+        expected_o = n_fwd * n_layers
+        if len(o_inputs) != expected_o:
+            raise RuntimeError(
+                f"o_inputs count ({len(o_inputs)}) != expected "
+                f"({expected_o} = {n_fwd} fwd × {n_layers} layers). "
+                f"Counter drift or missed o_proj append."
+            )
+        if len(scales) != call_count:
+            raise RuntimeError(
+                f"scales count ({len(scales)}) != call_count ({call_count}). "
+                f"Scale buffer out of sync."
+            )
+        fwd_batch_sizes = [
+            o_inputs[i * n_layers].shape[0] for i in range(n_fwd)
+        ]
+        n_tokens = sum(fwd_batch_sizes)
 
-            n_fwd = len(captures) // calls_per_fwd
-            fwd_batch_sizes = [captures[i * calls_per_fwd][2].shape[0] for i in range(n_fwd)]
+        # EOS trailing forward pass trim.
+        if (n_tokens == expected_traces + 1
+                and len(gen_token_ids) < max_tokens
+                and fwd_batch_sizes[-1] == 1):
+            logger.info(
+                "verilm: trimming trailing EOS forward pass "
+                "(gen=%d < max=%d, n_fwd %d→%d)",
+                len(gen_token_ids), max_tokens, n_fwd, n_fwd - 1,
+            )
+            o_inputs = o_inputs[:-n_layers]
+            scales = scales[:-calls_per_fwd]
+            n_fwd -= 1
+            fwd_batch_sizes = fwd_batch_sizes[:-1]
+            if len(final_residuals_raw) == n_fwd + 1:
+                final_residuals_raw = final_residuals_raw[:-1]
             n_tokens = sum(fwd_batch_sizes)
 
-            # EOS trailing forward pass trim.
-            if (n_tokens == expected_traces + 1
-                    and len(gen_token_ids) < max_tokens
-                    and fwd_batch_sizes[-1] == 1):
-                logger.info(
-                    "verilm: trimming trailing EOS forward pass "
-                    "(gen=%d < max=%d, n_fwd %d→%d)",
-                    len(gen_token_ids), max_tokens, n_fwd, n_fwd - 1,
-                )
-                captures = captures[:-calls_per_fwd]
-                n_fwd -= 1
-                fwd_batch_sizes = fwd_batch_sizes[:-1]
-                if len(final_residuals_raw) == n_fwd + 1:
-                    final_residuals_raw = final_residuals_raw[:-1]
-                n_tokens = sum(fwd_batch_sizes)
-
-            if _chat_timers:
-                _ct_prep = time.monotonic()
+        if _chat_timers:
+            _ct_prep = time.monotonic()
 
         if n_tokens != expected_traces:
             raise RuntimeError(
@@ -439,18 +385,12 @@ class VerifiedInferenceServer:
         if _chat_timers:
             _ct_manifest = time.monotonic()
 
-        if cap._capture_mode == "minimal":
-            use_packed = os.environ.get("VERILM_PACKED_COMMIT", "1") == "1"
-            commit_fn = self._commit_minimal_packed if use_packed else self._commit_minimal
-            state = commit_fn(
-                o_inputs, scales, n_fwd, n_layers, fwd_batch_sizes,
-                all_token_ids, prompt, seed, manifest, final_residuals_raw,
-            )
-        else:
-            state = self._commit_full(
-                captures, fwd_batch_sizes, n_layers, el_data,
-                all_token_ids, prompt, seed, manifest,
-            )
+        use_packed = os.environ.get("VERILM_PACKED_COMMIT", "1") == "1"
+        commit_fn = self._commit_minimal_packed if use_packed else self._commit_minimal
+        state = commit_fn(
+            o_inputs, scales, n_fwd, n_layers, fwd_batch_sizes,
+            all_token_ids, prompt, seed, manifest, final_residuals_raw,
+        )
 
         if _chat_timers:
             _ct_commit = time.monotonic()
@@ -502,62 +442,6 @@ class VerifiedInferenceServer:
             )
 
         return response
-
-    def _commit_full(self, captures, fwd_batch_sizes, n_layers, el_data,
-                      all_token_ids, prompt, seed, manifest):
-        """Full-trace commitment path (existing V1-V3)."""
-        import verilm_rs
-        from . import capture as cap
-
-        # Pass numpy views directly — Rust reads via buffer protocol (no .tobytes() copy).
-        capture_inputs = [c[2].numpy() for c in captures]
-        capture_accs = [c[3].numpy() for c in captures]
-        capture_scales = self._extract_scales([c[4] for c in captures])
-
-        residuals = el_data.get("residuals")
-        residual_bytes = None
-        if residuals:
-            residual_bytes = [r.float().numpy() for r in residuals]
-
-        return verilm_rs.commit_from_captures(
-            capture_inputs=capture_inputs,
-            capture_accumulators=capture_accs,
-            capture_scales=capture_scales,
-            fwd_batch_sizes=fwd_batch_sizes,
-            n_layers=n_layers,
-            q_dim=cap._q_dim,
-            kv_dim=cap._kv_dim,
-            intermediate_size=cap._gate_up_half,
-            level_c=True,
-            token_ids=[int(t) for t in all_token_ids[1:]],
-            prompt=prompt.encode(),
-            sampling_seed=seed,
-            manifest=manifest,
-            residuals=residual_bytes,
-        )
-
-    @staticmethod
-    def _extract_scales(scale_refs):
-        """Extract scale floats from tensor references (post-sync).
-
-        Used only by the full-mode commit path. In minimal mode, scales are
-        captured in a GPU buffer and bulk-transferred at drain time instead.
-        """
-        if not scale_refs:
-            return []
-        # Fast path: already floats (rare).
-        if isinstance(scale_refs[0], (int, float)):
-            return [float(s) for s in scale_refs]
-        # W8A8 path: CUDA tensors. Most are 0-dim or 1-element scalars,
-        # but prefill rows produce per-row scales (batch_size,). Use .max()
-        # for multi-element tensors (conservative upper bound).
-        result = []
-        for s in scale_refs:
-            if hasattr(s, 'numel') and s.numel() > 1:
-                result.append(float(s.max().item()))
-            else:
-                result.append(float(s.item()))
-        return result
 
     def _commit_minimal(self, o_inputs, scales, n_fwd, n_layers,
                          fwd_batch_sizes, all_token_ids, prompt, seed, manifest,
@@ -729,14 +613,9 @@ class VerifiedInferenceServer:
 
         state = entry["state"]
 
-        # V4 retained-state path.
-        if hasattr(state, 'audit_v4'):
-            if binary:
-                return state.audit_v4_binary(token_index, layer_indices)
-            return state.audit_v4(token_index, layer_indices)
-
-        # V1-V3 full-trace path.
-        return state.audit_stratified(token_index, layer_indices, tier)
+        if binary:
+            return state.audit_v4_binary(token_index, layer_indices)
+        return state.audit_v4(token_index, layer_indices)
 
     def _store_audit(self, request_id: str, state):
         """Store audit state with TTL."""

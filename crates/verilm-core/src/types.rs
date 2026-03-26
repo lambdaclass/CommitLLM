@@ -581,20 +581,8 @@ pub struct Q8LayerTrace {
 
 
 /// Protocol version for the IO hash format used in the commitment.
-///
-/// Explicit version discriminant so deployments can reject legacy proofs
-/// by policy rather than inferring the version from optional fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommitmentVersion {
-    /// V1: IO leaf = H(first_input || requant(last_output)). No token-ID binding.
-    V1 = 1,
-    /// V2: IO leaf = H("vi-io-v2" || first_input || requant(last_output) || token_id).
-    /// Binds emitted token ID into the commitment.
-    V2 = 2,
-    /// V3: IO leaf = H("vi-io-v3" || first_input || requant(last_output) || token_id || prev_io_hash).
-    /// Adds transcript chaining: each token's IO leaf depends on the previous,
-    /// preventing insertion, deletion, reordering, and retroactive edits.
-    V3 = 3,
     /// V4: Retained-state commitment. Trace tree leaf is
     /// `hash_retained_state_direct(retained)` over per-layer `a_i8 + scale_a`
     /// plus transitional replay scales.
@@ -606,7 +594,7 @@ pub enum CommitmentVersion {
 
 impl Default for CommitmentVersion {
     fn default() -> Self {
-        CommitmentVersion::V1
+        CommitmentVersion::V4
     }
 }
 

@@ -103,8 +103,6 @@ pub fn replay_sampling(
 }
 
 /// Recompute logits: `logits[r] = sum_c(lm_head[r*hidden_dim + c] * final_hidden[c])`.
-///
-/// Matches the logit computation in `verilm-verify::verify_margin`.
 pub fn recompute_logits(
     lm_head: &[i8],
     final_hidden: &[i8],

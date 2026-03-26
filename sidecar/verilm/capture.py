@@ -4,16 +4,9 @@ Core capture logic for verified inference.
 Wraps cutlass_scaled_mm to capture inputs and identifies each capture's
 position in the transformer (layer index, projection name).
 
-Two capture modes (set via VERILM_CAPTURE_MODE env var):
-
-  "full" (default):
-    Captures INT8 inputs, INT32 accumulators (via _int_mm), and scales for
-    all projections. Used with commit_from_captures for full-trace proofs.
-
-  "minimal":
-    Captures only the o_proj input (post-attention 'a') and per-projection
-    scales. Skips _int_mm entirely — the biggest GPU overhead. Used with
-    commit_minimal_from_captures for retained-state (V4) commitments.
+Captures only the o_proj input (post-attention 'a') and per-projection
+scales. Skips _int_mm entirely — the biggest GPU overhead. Used with
+commit_minimal_from_captures for retained-state (V4) commitments.
 
 Layer/proj identity is derived from call counting (zero overhead) rather
 than PyTorch model hooks. Both Llama and Qwen W8A8 models use fused
@@ -105,19 +98,18 @@ def configure_layer_count(n_layers: int):
         n_layers, _calls_per_fwd, os.getpid(),
     )
 
-    # Create Rust capture hook for minimal mode — moves counter arithmetic,
+    # Create Rust capture hook — moves counter arithmetic,
     # scale storage, and proj identification out of Python bytecode.
-    if _capture_mode == "minimal":
-        try:
-            import verilm_rs
-            _capture_hook = verilm_rs.CaptureHook(
-                calls_per_fwd=_calls_per_fwd,
-                projs_per_layer=PROJS_PER_LAYER,
-                o_proj_idx=_O_PROJ_IDX,
-            )
-            logger.info("verilm: Rust CaptureHook active (pid=%d)", os.getpid())
-        except (ImportError, AttributeError):
-            logger.info("verilm: Rust CaptureHook unavailable, using Python path")
+    try:
+        import verilm_rs
+        _capture_hook = verilm_rs.CaptureHook(
+            calls_per_fwd=_calls_per_fwd,
+            projs_per_layer=PROJS_PER_LAYER,
+            o_proj_idx=_O_PROJ_IDX,
+        )
+        logger.info("verilm: Rust CaptureHook active (pid=%d)", os.getpid())
+    except (ImportError, AttributeError):
+        logger.info("verilm: Rust CaptureHook unavailable, using Python path")
 
 
 def configure_from_model(model):
@@ -197,10 +189,6 @@ def activate_native_capture(device_hint_tensor=None):
 
     if not _configured:
         logger.warning("verilm: activate_native_capture called before configure_layer_count")
-        return False
-
-    if _capture_mode != "minimal":
-        logger.info("verilm: native capture only supports minimal mode")
         return False
 
     # JIT-compile the C++ extension (suppress compiler warnings from torch headers).
@@ -604,13 +592,7 @@ _patched = False
 _call_counter = 0
 _log_interval = 5000
 
-# "full" = capture x_i8 + acc_i32 for all projections (existing path).
-# "minimal" = capture only o_proj a_i8 + all scales, skip _int_mm (V4 path).
-_capture_mode = "full"
-
-# Reusable padded buffers for decode-path _int_mm (M < 16, full mode only).
-# Keyed by (N, device) to avoid per-call torch.nn.functional.pad allocation.
-_pad_buffers: dict = {}
+_capture_mode = "minimal"
 
 
 def _wrapped_cutlass_scaled_mm(
@@ -669,47 +651,21 @@ def _wrapped_cutlass_scaled_mm(
 
     _call_counter += 1
 
-    if _capture_mode == "minimal":
-        # Python fallback for minimal mode (no Rust hook).
-        buf._minimal_scales.append(scale_a)
-        buf._minimal_call_count += 1
+    # Python fallback for minimal mode (no Rust hook).
+    buf._minimal_scales.append(scale_a)
+    buf._minimal_call_count += 1
 
-        if proj_idx == _O_PROJ_IDX:
-            if buf._pinned_slab is not None:
-                buf._slab_copy_o_proj(a)
-            else:
-                buf._minimal_o_inputs.append(buf.copy_to_cpu(a))
-
-        buf.total_captured += 1
-        if buf.total_captured % _log_interval == 0:
-            logger.info(
-                "verilm: %d captures (pid=%d)", buf.total_captured, os.getpid()
-            )
-        return output
-    else:
-        # Full path: compute INT32 accumulator via _int_mm.
-        M = a.shape[0]
-        if M <= 16:
-            N = a.shape[1]
-            pad_key = (N, a.device)
-            pad_buf = _pad_buffers.get(pad_key)
-            if pad_buf is None:
-                pad_buf = torch.zeros(32, N, dtype=torch.int8, device=a.device)
-                _pad_buffers[pad_key] = pad_buf
-            pad_buf[:M, :] = a
-            acc_i32 = torch._int_mm(pad_buf, b)[:M, :]
+    if proj_idx == _O_PROJ_IDX:
+        if buf._pinned_slab is not None:
+            buf._slab_copy_o_proj(a)
         else:
-            acc_i32 = torch._int_mm(a, b)
+            buf._minimal_o_inputs.append(buf.copy_to_cpu(a))
 
-        proj = PROJ_SEQUENCE[proj_idx] if proj_idx >= 0 else None
-        buf.append((layer, proj, buf.copy_to_cpu(a),
-                    buf.copy_to_cpu(acc_i32), scale_a))
-
+    buf.total_captured += 1
     if buf.total_captured % _log_interval == 0:
         logger.info(
             "verilm: %d captures (pid=%d)", buf.total_captured, os.getpid()
         )
-
     return output
 
 
@@ -757,10 +713,9 @@ def register():
 
     Env vars:
         VERILM_CAPTURE: "0" to disable capture entirely.
-        VERILM_CAPTURE_MODE: "full" (default) or "minimal" (V4, no _int_mm).
         VERILM_SYNC_MODE: "global" (default) or "event" (dedicated copy stream).
     """
-    global _patched, _capture_mode
+    global _patched
 
     if _patched:
         return
@@ -771,12 +726,6 @@ def register():
         _capture_buffer.enabled = False
         _patched = True
         return
-
-    mode_env = os.environ.get("VERILM_CAPTURE_MODE", "full")
-    if mode_env in ("full", "minimal"):
-        _capture_mode = mode_env
-    else:
-        logger.warning("verilm: unknown VERILM_CAPTURE_MODE=%s, using full", mode_env)
 
     # Sync mode: "global" (torch.cuda.synchronize) or "event" (dedicated copy stream).
     sync_env = os.environ.get("VERILM_SYNC_MODE", "global")
@@ -804,6 +753,6 @@ def register():
     _patched = True
 
     logger.info(
-        "verilm: wrapped cutlass_scaled_mm (mode=%s, buffer max=%d)",
-        _capture_mode, _capture_buffer._max_entries,
+        "verilm: wrapped cutlass_scaled_mm (buffer max=%d)",
+        _capture_buffer._max_entries,
     )

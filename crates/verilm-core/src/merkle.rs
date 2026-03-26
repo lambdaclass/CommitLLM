@@ -436,69 +436,6 @@ pub fn hash_weights(
     hasher.finalize().into()
 }
 
-/// Binding context for computing IO leaf hashes.
-///
-/// Determines the hash version and what fields are included.
-pub enum IoHashBinding {
-    /// V1 legacy: `H(first_input || requant(last_output))`.
-    Legacy,
-    /// V2: `H("vi-io-v2" || first_input || requant(last_output) || token_id)`.
-    TokenId(u32),
-    /// V3: `H("vi-io-v3" || first_input || requant(last_output) || token_id || prev_io_hash)`.
-    /// Transcript-chained: each token's IO hash depends on the previous token's IO hash.
-    Chained { token_id: u32, prev_io_hash: [u8; 32] },
-}
-
-/// Compute the IO hash for a token.
-///
-/// The domain separator in each version ensures hashes never collide
-/// across versions, so old proofs cannot ambiguously verify under a
-/// newer scheme.
-pub fn io_hash(first_input: &[i8], last_output_i32: &[i32], binding: &IoHashBinding) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-
-    // Common helper: hash the tensor data
-    let hash_tensors = |h: &mut Sha256| {
-        for &b in first_input {
-            h.update([b as u8]);
-        }
-        for &v in last_output_i32 {
-            let clamped = v.clamp(-128, 127) as i8;
-            h.update([clamped as u8]);
-        }
-    };
-
-    match binding {
-        IoHashBinding::Legacy => {
-            hash_tensors(&mut hasher);
-        }
-        IoHashBinding::TokenId(tid) => {
-            hasher.update(b"vi-io-v2");
-            hash_tensors(&mut hasher);
-            hasher.update(tid.to_le_bytes());
-        }
-        IoHashBinding::Chained { token_id, prev_io_hash } => {
-            hasher.update(b"vi-io-v3");
-            hash_tensors(&mut hasher);
-            hasher.update(token_id.to_le_bytes());
-            hasher.update(prev_io_hash);
-        }
-    }
-    hasher.finalize().into()
-}
-
-/// Convenience: build `IoHashBinding` from optional fields.
-/// - `None` token_id → Legacy
-/// - `Some` token_id, `None` prev → TokenId
-/// - `Some` token_id, `Some` prev → Chained
-pub fn io_binding(token_id: Option<u32>, prev_io_hash: Option<[u8; 32]>) -> IoHashBinding {
-    match (token_id, prev_io_hash) {
-        (None, _) => IoHashBinding::Legacy,
-        (Some(tid), None) => IoHashBinding::TokenId(tid),
-        (Some(tid), Some(prev)) => IoHashBinding::Chained { token_id: tid, prev_io_hash: prev },
-    }
-}
-
 /// Compute the KV provenance chain hash for a token.
 ///
 /// Chain: `H("vi-kv-v1" || prev_kv_hash || requantize(k_t) || requantize(v_t) || token_index_le32)`
