@@ -328,6 +328,42 @@ fn extract_manifest(d: &Bound<'_, PyDict>) -> PyResult<DeploymentManifest> {
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract::<String>())
             .transpose()?,
+        quant_family: d.get_item("quant_family")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract::<String>())
+            .transpose()?,
+        scale_derivation: d.get_item("scale_derivation")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract::<String>())
+            .transpose()?,
+        quant_block_size: d.get_item("quant_block_size")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract())
+            .transpose()?,
+        kv_dim: d.get_item("kv_dim")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract())
+            .transpose()?,
+        ffn_dim: d.get_item("ffn_dim")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract())
+            .transpose()?,
+        d_head: d.get_item("d_head")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract())
+            .transpose()?,
+        n_q_heads: d.get_item("n_q_heads")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract())
+            .transpose()?,
+        n_kv_heads: d.get_item("n_kv_heads")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract())
+            .transpose()?,
+        rope_theta: d.get_item("rope_theta")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract::<f64>())
+            .transpose()?,
     })
 }
 

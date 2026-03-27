@@ -149,6 +149,39 @@ pub struct DeploymentManifest {
     #[serde(default)]
     pub embedding_merkle_root: Option<[u8; 32]>,
 
+    // --- Quantization fields that flow through to ModelSpec (#5-7) ---
+
+    /// Quantization family label (e.g. "W8A8", "Q8_0", "AWQ", "GPTQ").
+    #[serde(default)]
+    pub quant_family: Option<String>,
+    /// Scale derivation method (e.g. "absmax", "zeropoint", "group_absmax").
+    #[serde(default)]
+    pub scale_derivation: Option<String>,
+    /// Block size for blockwise quantization schemes (e.g. 32 for Q8_0).
+    #[serde(default)]
+    pub quant_block_size: Option<u32>,
+
+    // --- Remaining architecture fields that flow through to ModelSpec (#8) ---
+
+    /// KV dimension (n_kv_heads * d_head).
+    #[serde(default)]
+    pub kv_dim: Option<u32>,
+    /// FFN intermediate dimension.
+    #[serde(default)]
+    pub ffn_dim: Option<u32>,
+    /// Per-head dimension.
+    #[serde(default)]
+    pub d_head: Option<u32>,
+    /// Number of query heads.
+    #[serde(default)]
+    pub n_q_heads: Option<u32>,
+    /// Number of key-value heads (GQA).
+    #[serde(default)]
+    pub n_kv_heads: Option<u32>,
+    /// RoPE base frequency (theta).
+    #[serde(default)]
+    pub rope_theta: Option<f64>,
+
     // --- Fields that flow through to OutputSpec ---
 
     /// Minimum tokens before EOS is allowed. 0 = no minimum.
@@ -269,6 +302,39 @@ pub struct ModelSpec {
     /// Merkle root over embedding table rows.
     #[serde(default)]
     pub embedding_merkle_root: Option<[u8; 32]>,
+
+    // --- Quantization identity (#5-7) ---
+
+    /// Quantization family label (e.g. "W8A8", "Q8_0", "AWQ", "GPTQ").
+    #[serde(default)]
+    pub quant_family: Option<String>,
+    /// Scale derivation method (e.g. "absmax", "zeropoint", "group_absmax").
+    #[serde(default)]
+    pub scale_derivation: Option<String>,
+    /// Block size for blockwise quantization schemes (e.g. 32 for Q8_0).
+    #[serde(default)]
+    pub quant_block_size: Option<u32>,
+
+    // --- Remaining architecture knobs (#8) ---
+
+    /// KV dimension (n_kv_heads * d_head).
+    #[serde(default)]
+    pub kv_dim: Option<u32>,
+    /// FFN intermediate dimension.
+    #[serde(default)]
+    pub ffn_dim: Option<u32>,
+    /// Per-head dimension.
+    #[serde(default)]
+    pub d_head: Option<u32>,
+    /// Number of query heads.
+    #[serde(default)]
+    pub n_q_heads: Option<u32>,
+    /// Number of key-value heads (GQA).
+    #[serde(default)]
+    pub n_kv_heads: Option<u32>,
+    /// RoPE base frequency (theta).
+    #[serde(default)]
+    pub rope_theta: Option<f64>,
 }
 
 impl From<&DeploymentManifest> for ModelSpec {
@@ -283,6 +349,15 @@ impl From<&DeploymentManifest> for ModelSpec {
             hidden_dim: m.hidden_dim,
             vocab_size: m.vocab_size,
             embedding_merkle_root: m.embedding_merkle_root,
+            quant_family: m.quant_family.clone(),
+            scale_derivation: m.scale_derivation.clone(),
+            quant_block_size: m.quant_block_size,
+            kv_dim: m.kv_dim,
+            ffn_dim: m.ffn_dim,
+            d_head: m.d_head,
+            n_q_heads: m.n_q_heads,
+            n_kv_heads: m.n_kv_heads,
+            rope_theta: m.rope_theta,
         }
     }
 }

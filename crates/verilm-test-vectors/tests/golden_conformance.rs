@@ -137,6 +137,15 @@ fn golden_manifest() -> DeploymentManifest {
         hidden_dim: Some(4096),
         vocab_size: Some(32000),
         embedding_merkle_root: Some([0x04; 32]),
+        quant_family: None,
+        scale_derivation: None,
+        quant_block_size: None,
+        kv_dim: None,
+        ffn_dim: None,
+        d_head: None,
+        n_q_heads: None,
+        n_kv_heads: None,
+        rope_theta: None,
         min_tokens: 0,
         ignore_eos: false,
         detokenization_policy: None,
@@ -152,7 +161,7 @@ fn golden_manifest_hash() {
     let h = verilm_core::merkle::hash_manifest(&manifest);
     assert_eq!(
         hex::encode(h),
-        "d7290021cf3f2559789193de45938b5cad0b2d824e734eb69e2f11c872126cd9",
+        "35809d758dcfd9ea40f6d14212c376d9724f74b2a6912546f4a9e9d14a0cf152",
         "manifest hash drifted — was the four-spec hash format changed?"
     );
 }
@@ -164,7 +173,7 @@ fn golden_model_spec_hash() {
     let h = verilm_core::merkle::hash_model_spec(&model_spec);
     assert_eq!(
         hex::encode(h),
-        "de2d212e5826e571710011988ec7d8b1525e5c59b046e8802681785e095fbd9f",
+        "4a5a121ff13fedf3d6f6425598ea00346effef40583ce0c519dead3c176d4890",
         "model_spec hash drifted — was the model-spec hash format changed?"
     );
 }

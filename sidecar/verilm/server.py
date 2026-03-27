@@ -102,6 +102,20 @@ class VerifiedInferenceServer:
         self._adapter_hash = self._compute_adapter_hash(model)
         self._eos_token_id = self._extract_eos_token_id(llm)
 
+        # Quantization fields (#5-7).
+        self._quant_family = self._extract_quant_family(model)
+        self._scale_derivation = self._extract_scale_derivation(model)
+        self._quant_block_size = self._extract_quant_block_size(model)
+
+        # Architecture fields (#8).
+        arch = self._extract_architecture(model)
+        self._kv_dim = arch.get("kv_dim")
+        self._ffn_dim = arch.get("ffn_dim")
+        self._d_head = arch.get("d_head")
+        self._n_q_heads = arch.get("n_q_heads")
+        self._n_kv_heads = arch.get("n_kv_heads")
+        self._rope_theta = arch.get("rope_theta")
+
         self.buf = get_capture_buffer()
 
         # Initialize pinned CPU slab for o_proj D2H (minimal mode).
@@ -302,6 +316,108 @@ class VerifiedInferenceServer:
             return "none"
         except Exception:
             return "none"
+
+    @staticmethod
+    def _extract_quant_family(model) -> Optional[str]:
+        """Derive quantization family from model config (e.g. 'W8A8', 'GPTQ')."""
+        try:
+            cfg = getattr(model, "config", None)
+            quant_cfg = getattr(cfg, "quantization_config", None)
+            if quant_cfg is None:
+                return None
+            if hasattr(quant_cfg, "to_dict"):
+                d = quant_cfg.to_dict()
+            elif isinstance(quant_cfg, dict):
+                d = quant_cfg
+            else:
+                return None
+            # Common keys: "quant_method" (GPTQ/AWQ), or infer from config shape
+            method = d.get("quant_method")
+            if method:
+                return str(method).upper()
+            return None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _extract_scale_derivation(model) -> Optional[str]:
+        """Derive scale derivation method from quantization config."""
+        try:
+            cfg = getattr(model, "config", None)
+            quant_cfg = getattr(cfg, "quantization_config", None)
+            if quant_cfg is None:
+                return None
+            if hasattr(quant_cfg, "to_dict"):
+                d = quant_cfg.to_dict()
+            elif isinstance(quant_cfg, dict):
+                d = quant_cfg
+            else:
+                return None
+            # Look for scale derivation hints
+            if d.get("is_marlin_format"):
+                return "channel_absmax"
+            if d.get("sym", True):
+                return "absmax"
+            return "zeropoint"
+        except Exception:
+            return None
+
+    @staticmethod
+    def _extract_quant_block_size(model) -> Optional[int]:
+        """Derive quantization block size from config."""
+        try:
+            cfg = getattr(model, "config", None)
+            quant_cfg = getattr(cfg, "quantization_config", None)
+            if quant_cfg is None:
+                return None
+            if hasattr(quant_cfg, "to_dict"):
+                d = quant_cfg.to_dict()
+            elif isinstance(quant_cfg, dict):
+                d = quant_cfg
+            else:
+                return None
+            return d.get("group_size") or d.get("block_size")
+        except Exception:
+            return None
+
+    @staticmethod
+    def _extract_architecture(model) -> dict:
+        """Extract architecture dimensions from model config."""
+        result = {}
+        try:
+            cfg = getattr(model, "config", None)
+            if cfg is None:
+                return result
+            # Head dimension
+            d_head = getattr(cfg, "head_dim", None)
+            if d_head is None:
+                hidden = getattr(cfg, "hidden_size", None)
+                n_heads = getattr(cfg, "num_attention_heads", None)
+                if hidden and n_heads:
+                    d_head = hidden // n_heads
+            if d_head:
+                result["d_head"] = int(d_head)
+            # Head counts
+            n_q = getattr(cfg, "num_attention_heads", None)
+            if n_q:
+                result["n_q_heads"] = int(n_q)
+            n_kv = getattr(cfg, "num_key_value_heads", None)
+            if n_kv:
+                result["n_kv_heads"] = int(n_kv)
+            # KV dim
+            if d_head and n_kv:
+                result["kv_dim"] = int(n_kv) * int(d_head)
+            # FFN dim
+            ffn = getattr(cfg, "intermediate_size", None)
+            if ffn:
+                result["ffn_dim"] = int(ffn)
+            # RoPE theta
+            rope_theta = getattr(cfg, "rope_theta", None)
+            if rope_theta is not None:
+                result["rope_theta"] = float(rope_theta)
+        except Exception:
+            pass
+        return result
 
     @staticmethod
     def _extract_special_token_policy(llm) -> str:
@@ -600,6 +716,15 @@ class VerifiedInferenceServer:
             "decode_mode": "greedy" if temperature == 0.0 else "sampled",
             # ModelSpec fields.
             "adapter_hash": self._adapter_hash,
+            "quant_family": self._quant_family,
+            "scale_derivation": self._scale_derivation,
+            "quant_block_size": self._quant_block_size,
+            "kv_dim": self._kv_dim,
+            "ffn_dim": self._ffn_dim,
+            "d_head": self._d_head,
+            "n_q_heads": self._n_q_heads,
+            "n_kv_heads": self._n_kv_heads,
+            "rope_theta": self._rope_theta,
             # OutputSpec fields.
             "min_tokens": min_tokens,
             "ignore_eos": ignore_eos,

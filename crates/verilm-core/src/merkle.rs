@@ -274,6 +274,15 @@ pub fn hash_model_spec(spec: &crate::types::ModelSpec) -> [u8; 32] {
     hash_optional_u32(&mut hasher, spec.hidden_dim);
     hash_optional_u32(&mut hasher, spec.vocab_size);
     hash_optional_32(&mut hasher, spec.embedding_merkle_root.as_ref());
+    hash_optional_string(&mut hasher, spec.quant_family.as_deref());
+    hash_optional_string(&mut hasher, spec.scale_derivation.as_deref());
+    hash_optional_u32(&mut hasher, spec.quant_block_size);
+    hash_optional_u32(&mut hasher, spec.kv_dim);
+    hash_optional_u32(&mut hasher, spec.ffn_dim);
+    hash_optional_u32(&mut hasher, spec.d_head);
+    hash_optional_u32(&mut hasher, spec.n_q_heads);
+    hash_optional_u32(&mut hasher, spec.n_kv_heads);
+    hash_optional_f64(&mut hasher, spec.rope_theta);
     hasher.finalize().into()
 }
 
@@ -370,6 +379,16 @@ fn hash_optional_32(hasher: &mut Sha256, opt: Option<&[u8; 32]>) {
 }
 
 fn hash_optional_u32(hasher: &mut Sha256, opt: Option<u32>) {
+    match opt {
+        Some(v) => {
+            hasher.update(b"\x01");
+            hasher.update(v.to_le_bytes());
+        }
+        None => hasher.update(b"\x00"),
+    }
+}
+
+fn hash_optional_f64(hasher: &mut Sha256, opt: Option<f64>) {
     match opt {
         Some(v) => {
             hasher.update(b"\x01");
@@ -655,6 +674,15 @@ mod tests {
             hidden_dim: None,
             vocab_size: None,
             embedding_merkle_root: None,
+            quant_family: None,
+            scale_derivation: None,
+            quant_block_size: None,
+            kv_dim: None,
+            ffn_dim: None,
+            d_head: None,
+            n_q_heads: None,
+            n_kv_heads: None,
+            rope_theta: None,
         };
         let decode = DecodeSpec {
             temperature: 0.7,
@@ -716,6 +744,15 @@ mod tests {
             hidden_dim: None,
             vocab_size: None,
             embedding_merkle_root: None,
+            quant_family: None,
+            scale_derivation: None,
+            quant_block_size: None,
+            kv_dim: None,
+            ffn_dim: None,
+            d_head: None,
+            n_q_heads: None,
+            n_kv_heads: None,
+            rope_theta: None,
         };
         let decode = DecodeSpec {
             temperature: 0.0,
@@ -805,6 +842,15 @@ mod tests {
             hidden_dim: None,
             vocab_size: None,
             embedding_merkle_root: None,
+            quant_family: None,
+            scale_derivation: None,
+            quant_block_size: None,
+            kv_dim: None,
+            ffn_dim: None,
+            d_head: None,
+            n_q_heads: None,
+            n_kv_heads: None,
+            rope_theta: None,
             min_tokens: 0,
             ignore_eos: false,
             detokenization_policy: None,

@@ -598,6 +598,67 @@ pub fn verify_v4_full(
                     }
                 }
 
+                // Cross-check: kv_dim
+                if let Some(v) = model_spec.kv_dim {
+                    checks_run += 1;
+                    if v as usize != key.config.kv_dim {
+                        failures.push(format!(
+                            "kv_dim mismatch: manifest={} key={}", v, key.config.kv_dim
+                        ));
+                    }
+                }
+
+                // Cross-check: ffn_dim
+                if let Some(v) = model_spec.ffn_dim {
+                    checks_run += 1;
+                    if v as usize != key.config.ffn_dim {
+                        failures.push(format!(
+                            "ffn_dim mismatch: manifest={} key={}", v, key.config.ffn_dim
+                        ));
+                    }
+                }
+
+                // Cross-check: d_head
+                if let Some(v) = model_spec.d_head {
+                    checks_run += 1;
+                    if v as usize != key.config.d_head {
+                        failures.push(format!(
+                            "d_head mismatch: manifest={} key={}", v, key.config.d_head
+                        ));
+                    }
+                }
+
+                // Cross-check: n_q_heads
+                if let Some(v) = model_spec.n_q_heads {
+                    checks_run += 1;
+                    if v as usize != key.config.n_q_heads {
+                        failures.push(format!(
+                            "n_q_heads mismatch: manifest={} key={}", v, key.config.n_q_heads
+                        ));
+                    }
+                }
+
+                // Cross-check: n_kv_heads
+                if let Some(v) = model_spec.n_kv_heads {
+                    checks_run += 1;
+                    if v as usize != key.config.n_kv_heads {
+                        failures.push(format!(
+                            "n_kv_heads mismatch: manifest={} key={}", v, key.config.n_kv_heads
+                        ));
+                    }
+                }
+
+                // Cross-check: rope_theta
+                if let Some(manifest_theta) = model_spec.rope_theta {
+                    checks_run += 1;
+                    if (manifest_theta - key.config.rope_theta).abs() > f64::EPSILON {
+                        failures.push(format!(
+                            "rope_theta mismatch: manifest={} key={}",
+                            manifest_theta, key.config.rope_theta
+                        ));
+                    }
+                }
+
                 match response.commitment.decode_spec_hash {
                     None => failures.push("commitment missing decode_spec_hash".into()),
                     Some(committed) if h_dec != committed =>

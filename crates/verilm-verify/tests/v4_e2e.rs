@@ -1281,6 +1281,15 @@ fn make_manifest(temperature: f32, top_k: u32, top_p: f32) -> DeploymentManifest
         hidden_dim: None,
         vocab_size: None,
         embedding_merkle_root: None,
+        quant_family: None,
+        scale_derivation: None,
+        quant_block_size: None,
+        kv_dim: None,
+        ffn_dim: None,
+        d_head: None,
+        n_q_heads: None,
+        n_kv_heads: None,
+        rope_theta: None,
         min_tokens: 0,
         ignore_eos: false,
         detokenization_policy: None,
@@ -1686,6 +1695,158 @@ fn v4_decode_mode_greedy_consistent_pass() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+}
+
+// ---------------------------------------------------------------------------
+// Extended architecture cross-checks (#8: kv_dim, ffn_dim, d_head, n_q/kv_heads, rope_theta)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn v4_manifest_kv_dim_mismatch_rejected() {
+    let (_cfg, _model, key, mut manifest, _) = setup_manifest_crosscheck();
+    manifest.kv_dim = Some(9999);
+    let params = FullBindingParams {
+        token_ids: &[42], prompt: b"arch crosscheck",
+        sampling_seed: [7u8; 32], manifest: Some(&manifest), n_prompt_tokens: Some(1),
+    };
+    let input: Vec<i8> = (0.._cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&_cfg, &_model, &input);
+    let retained = retained_from_traces(&traces);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    response.manifest = Some(manifest);
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("kv_dim mismatch")),
+        "expected kv_dim mismatch, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_ffn_dim_mismatch_rejected() {
+    let (_cfg, _model, key, mut manifest, _) = setup_manifest_crosscheck();
+    manifest.ffn_dim = Some(9999);
+    let params = FullBindingParams {
+        token_ids: &[42], prompt: b"arch crosscheck",
+        sampling_seed: [7u8; 32], manifest: Some(&manifest), n_prompt_tokens: Some(1),
+    };
+    let input: Vec<i8> = (0.._cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&_cfg, &_model, &input);
+    let retained = retained_from_traces(&traces);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    response.manifest = Some(manifest);
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("ffn_dim mismatch")),
+        "expected ffn_dim mismatch, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_d_head_mismatch_rejected() {
+    let (_cfg, _model, key, mut manifest, _) = setup_manifest_crosscheck();
+    manifest.d_head = Some(9999);
+    let params = FullBindingParams {
+        token_ids: &[42], prompt: b"arch crosscheck",
+        sampling_seed: [7u8; 32], manifest: Some(&manifest), n_prompt_tokens: Some(1),
+    };
+    let input: Vec<i8> = (0.._cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&_cfg, &_model, &input);
+    let retained = retained_from_traces(&traces);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    response.manifest = Some(manifest);
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("d_head mismatch")),
+        "expected d_head mismatch, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_n_q_heads_mismatch_rejected() {
+    let (_cfg, _model, key, mut manifest, _) = setup_manifest_crosscheck();
+    manifest.n_q_heads = Some(9999);
+    let params = FullBindingParams {
+        token_ids: &[42], prompt: b"arch crosscheck",
+        sampling_seed: [7u8; 32], manifest: Some(&manifest), n_prompt_tokens: Some(1),
+    };
+    let input: Vec<i8> = (0.._cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&_cfg, &_model, &input);
+    let retained = retained_from_traces(&traces);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    response.manifest = Some(manifest);
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("n_q_heads mismatch")),
+        "expected n_q_heads mismatch, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_n_kv_heads_mismatch_rejected() {
+    let (_cfg, _model, key, mut manifest, _) = setup_manifest_crosscheck();
+    manifest.n_kv_heads = Some(9999);
+    let params = FullBindingParams {
+        token_ids: &[42], prompt: b"arch crosscheck",
+        sampling_seed: [7u8; 32], manifest: Some(&manifest), n_prompt_tokens: Some(1),
+    };
+    let input: Vec<i8> = (0.._cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&_cfg, &_model, &input);
+    let retained = retained_from_traces(&traces);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    response.manifest = Some(manifest);
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("n_kv_heads mismatch")),
+        "expected n_kv_heads mismatch, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_rope_theta_mismatch_rejected() {
+    let (_cfg, _model, key, mut manifest, _) = setup_manifest_crosscheck();
+    manifest.rope_theta = Some(99999.0);
+    let params = FullBindingParams {
+        token_ids: &[42], prompt: b"arch crosscheck",
+        sampling_seed: [7u8; 32], manifest: Some(&manifest), n_prompt_tokens: Some(1),
+    };
+    let input: Vec<i8> = (0.._cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&_cfg, &_model, &input);
+    let retained = retained_from_traces(&traces);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    response.manifest = Some(manifest);
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("rope_theta mismatch")),
+        "expected rope_theta mismatch, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_full_architecture_pass() {
+    let (cfg, model, key, mut manifest, _) = setup_manifest_crosscheck();
+    // Set all architecture fields to correct values.
+    manifest.n_layers = Some(cfg.n_layers as u32);
+    manifest.hidden_dim = Some(cfg.hidden_dim as u32);
+    manifest.vocab_size = Some(cfg.vocab_size as u32);
+    manifest.kv_dim = Some(cfg.kv_dim as u32);
+    manifest.ffn_dim = Some(cfg.ffn_dim as u32);
+    manifest.d_head = Some(cfg.d_head as u32);
+    manifest.n_q_heads = Some(cfg.n_q_heads as u32);
+    manifest.n_kv_heads = Some(cfg.n_kv_heads as u32);
+    manifest.rope_theta = Some(cfg.rope_theta);
+    let params = FullBindingParams {
+        token_ids: &[42], prompt: b"arch crosscheck",
+        sampling_seed: [7u8; 32], manifest: Some(&manifest), n_prompt_tokens: Some(1),
+    };
+    let input: Vec<i8> = (0..cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+    // 3 original + 4 arch + 6 new arch + 1 manifest + 1 sampler + 1 decode params = many checks
+    assert!(report.checks_run >= 17, "expected full architecture checks, got {}", report.checks_run);
 }
 
 // ---------------------------------------------------------------------------
