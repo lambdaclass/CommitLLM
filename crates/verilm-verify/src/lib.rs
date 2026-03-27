@@ -158,41 +158,6 @@ pub fn verify_input_tokenization(
     failures
 }
 
-/// Result of verifying a weight-chain hash against an expected value.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WeightHashResult {
-    /// Key hash matches expected.
-    Match,
-    /// Key hash does not match expected.
-    Mismatch {
-        key_hash: [u8; 32],
-        expected: [u8; 32],
-    },
-    /// Key has no weight hash (legacy key) but an expected hash was provided.
-    LegacyKeyNoHash,
-    /// No expected hash was provided — skipped.
-    Skipped,
-}
-
-/// Check whether the verifier key's weight hash matches an externally published
-/// expected hash. This is the binding that closes the trust gap between
-/// "the INT8 computation was correct" and "it used the published checkpoint."
-///
-/// Returns [`WeightHashResult::Skipped`] if `expected` is `None`.
-pub fn verify_weight_hash(key: &VerifierKey, expected: Option<&[u8; 32]>) -> WeightHashResult {
-    let Some(expected) = expected else {
-        return WeightHashResult::Skipped;
-    };
-
-    match key.weight_hash {
-        Some(actual) if actual == *expected => WeightHashResult::Match,
-        Some(actual) => WeightHashResult::Mismatch {
-            key_hash: actual,
-            expected: *expected,
-        },
-        None => WeightHashResult::LegacyKeyNoHash,
-    }
-}
 // ---------------------------------------------------------------------------
 // Stratified audit verification
 // ---------------------------------------------------------------------------
