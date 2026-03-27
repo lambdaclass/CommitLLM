@@ -740,50 +740,59 @@ pub fn verify_v4_full(
 
     // Detokenization verification: check claimed output text matches decoded tokens.
     //
-    // When the response carries output_text, a detokenizer is provided, and the
-    // manifest specifies a detokenization_policy, decode the generation token IDs
-    // and compare. Full-generation check when challenged token is last; otherwise
-    // prefix check up to the challenged position.
-    if let (Some(ref claimed_text), Some(detok)) = (&response.output_text, detokenizer) {
-        let detok_policy = response.manifest.as_ref()
-            .map(|m| OutputSpec::from(m))
-            .and_then(|os| os.detokenization_policy);
-
-        // Collect generation token IDs: prefix after prompt boundary + challenged token.
-        let gen_start = response.n_prompt_tokens
-            .unwrap_or(1)
-            .saturating_sub(1) as usize;
-        let mut gen_token_ids: Vec<u32> = response.prefix_token_ids
-            .get(gen_start..)
-            .unwrap_or(&[])
-            .to_vec();
-        gen_token_ids.push(response.token_id);
-
-        let is_last_token = response.token_index == response.commitment.n_tokens.saturating_sub(1);
-
+    // Fail-closed: when a detokenizer is provided, the response MUST carry
+    // output_text. Missing output_text with a detokenizer = prover did not
+    // include the claimed text for verification.
+    if let Some(detok) = detokenizer {
         checks_run += 1;
-        match detok.decode(&gen_token_ids, detok_policy.as_deref()) {
-            Ok(decoded) => {
-                if is_last_token {
-                    // Full generation — exact match required.
-                    if decoded != *claimed_text {
-                        failures.push(format!(
-                            "detokenization mismatch (policy={:?}): decoded={:?} vs claimed={:?}",
-                            detok_policy, decoded, claimed_text
-                        ));
+        match &response.output_text {
+            Some(ref claimed_text) => {
+                let detok_policy = response.manifest.as_ref()
+                    .map(|m| OutputSpec::from(m))
+                    .and_then(|os| os.detokenization_policy);
+
+                // Collect generation token IDs: prefix after prompt boundary + challenged token.
+                let gen_start = response.n_prompt_tokens
+                    .unwrap_or(1)
+                    .saturating_sub(1) as usize;
+                let mut gen_token_ids: Vec<u32> = response.prefix_token_ids
+                    .get(gen_start..)
+                    .unwrap_or(&[])
+                    .to_vec();
+                gen_token_ids.push(response.token_id);
+
+                let is_last_token = response.token_index == response.commitment.n_tokens.saturating_sub(1);
+
+                match detok.decode(&gen_token_ids, detok_policy.as_deref()) {
+                    Ok(decoded) => {
+                        if is_last_token {
+                            // Full generation — exact match required.
+                            if decoded != *claimed_text {
+                                failures.push(format!(
+                                    "detokenization mismatch (policy={:?}): decoded={:?} vs claimed={:?}",
+                                    detok_policy, decoded, claimed_text
+                                ));
+                            }
+                        } else {
+                            // Partial generation — decoded must be a prefix of the claimed text.
+                            if !claimed_text.starts_with(&decoded) {
+                                failures.push(format!(
+                                    "detokenization prefix mismatch (policy={:?}): decoded={:?} is not a prefix of claimed={:?}",
+                                    detok_policy, decoded, claimed_text
+                                ));
+                            }
+                        }
                     }
-                } else {
-                    // Partial generation — decoded must be a prefix of the claimed text.
-                    if !claimed_text.starts_with(&decoded) {
-                        failures.push(format!(
-                            "detokenization prefix mismatch (policy={:?}): decoded={:?} is not a prefix of claimed={:?}",
-                            detok_policy, decoded, claimed_text
-                        ));
+                    Err(e) => {
+                        failures.push(format!("detokenization failed: {}", e));
                     }
                 }
             }
-            Err(e) => {
-                failures.push(format!("detokenization failed: {}", e));
+            None => {
+                failures.push(
+                    "detokenizer provided but response missing output_text \
+                     (prover must include claimed output text for detokenization verification)".into()
+                );
             }
         }
     }

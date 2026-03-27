@@ -2735,8 +2735,8 @@ fn v4_detokenization_error_reported() {
 }
 
 #[test]
-fn v4_detokenization_skipped_without_output_text() {
-    // When output_text is None, detokenization check is skipped (no failure).
+fn v4_detokenization_fails_closed_without_output_text() {
+    // Fail-closed: when detokenizer is provided but output_text is None, reject.
     let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
     let traces = forward_pass(&cfg, &model, &input);
     let retained = retained_from_traces(&traces);
@@ -2752,14 +2752,43 @@ fn v4_detokenization_skipped_without_output_text() {
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
-    // response.output_text is already None (default)
+    // response.output_text is None — fail-closed should reject.
 
     let detok = FixedDetokenizer { text: "anything".into() };
     let report = verify_v4_full(
         &key, &response, None, None,
         Some(&detok as &dyn Detokenizer),
     );
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("missing output_text")),
+        "expected fail-closed for missing output_text, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_detokenization_not_checked_without_detokenizer() {
+    // When no detokenizer is provided, output_text is ignored — no failure.
+    let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"detok test",
+        sampling_seed: [12u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    attach_toy_logits(&mut response, &_lm_head, &cfg);
+    response.output_text = Some("some text".into());
+
+    // No detokenizer → check not run, pass.
+    let no_detok: Option<&dyn Detokenizer> = None;
+    let report = verify_v4_full(
+        &key, &response, None, None,
+        no_detok,
+    );
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
-    assert!(!report.failures.iter().any(|f| f.contains("detokenization")),
-        "should not have any detokenization failures");
 }

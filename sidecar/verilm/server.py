@@ -593,7 +593,7 @@ class VerifiedInferenceServer:
         # Store for audit.
         import uuid
         request_id = str(uuid.uuid4())
-        self._store_audit(request_id, state)
+        self._store_audit(request_id, state, generated_text)
 
         if _chat_timers:
             _ct_store = time.monotonic()
@@ -808,12 +808,13 @@ class VerifiedInferenceServer:
             raise KeyError(f"Audit state expired for: {request_id}")
 
         state = entry["state"]
+        output_text = entry.get("output_text")
 
         if binary:
-            return state.audit_v4_binary(token_index, layer_indices)
-        return state.audit_v4(token_index, layer_indices)
+            return state.audit_v4_binary(token_index, layer_indices, output_text)
+        return state.audit_v4(token_index, layer_indices, output_text)
 
-    def _store_audit(self, request_id: str, state):
+    def _store_audit(self, request_id: str, state, output_text: str = ""):
         """Store audit state with TTL."""
         # Evict expired entries.
         now = time.time()
@@ -828,6 +829,7 @@ class VerifiedInferenceServer:
 
         self._audit_store[request_id] = {
             "state": state,
+            "output_text": output_text,
             "expires_at": now + self.ttl_secs,
         }
 

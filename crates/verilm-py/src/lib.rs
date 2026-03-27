@@ -457,15 +457,19 @@ impl MinimalBatchStateHandle {
     /// token's retained state, Merkle/IO proofs, all prefix tokens' retained
     /// states + proofs, and prover-computed shell openings for the challenged
     /// token (so the verifier can check with key-only Freivalds).
-    fn audit_v4(&self, token_index: u32, layer_indices: Option<Vec<usize>>) -> PyResult<String> {
-        let response = self.build_v4_response(token_index, layer_indices.as_deref())?;
+    #[pyo3(signature = (token_index, layer_indices=None, output_text=None))]
+    fn audit_v4(&self, token_index: u32, layer_indices: Option<Vec<usize>>, output_text: Option<String>) -> PyResult<String> {
+        let mut response = self.build_v4_response(token_index, layer_indices.as_deref())?;
+        response.output_text = output_text;
         serde_json::to_string(&response)
             .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
     }
 
     /// Binary V4 audit: bincode + zstd. Returns bytes.
-    fn audit_v4_binary<'py>(&self, py: Python<'py>, token_index: u32, layer_indices: Option<Vec<usize>>) -> PyResult<Bound<'py, PyBytes>> {
-        let response = self.build_v4_response(token_index, layer_indices.as_deref())?;
+    #[pyo3(signature = (token_index, layer_indices=None, output_text=None))]
+    fn audit_v4_binary<'py>(&self, py: Python<'py>, token_index: u32, layer_indices: Option<Vec<usize>>, output_text: Option<String>) -> PyResult<Bound<'py, PyBytes>> {
+        let mut response = self.build_v4_response(token_index, layer_indices.as_deref())?;
+        response.output_text = output_text;
         let data = verilm_core::serialize::serialize_v4_audit(&response);
         Ok(PyBytes::new(py, &data))
     }
@@ -662,14 +666,18 @@ impl PackedBatchStateHandle {
         Vec::new()
     }
 
-    fn audit_v4(&self, token_index: u32, layer_indices: Option<Vec<usize>>) -> PyResult<String> {
-        let response = self.build_v4_response(token_index, layer_indices.as_deref())?;
+    #[pyo3(signature = (token_index, layer_indices=None, output_text=None))]
+    fn audit_v4(&self, token_index: u32, layer_indices: Option<Vec<usize>>, output_text: Option<String>) -> PyResult<String> {
+        let mut response = self.build_v4_response(token_index, layer_indices.as_deref())?;
+        response.output_text = output_text;
         serde_json::to_string(&response)
             .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
     }
 
-    fn audit_v4_binary<'py>(&self, py: Python<'py>, token_index: u32, layer_indices: Option<Vec<usize>>) -> PyResult<Bound<'py, PyBytes>> {
-        let response = self.build_v4_response(token_index, layer_indices.as_deref())?;
+    #[pyo3(signature = (token_index, layer_indices=None, output_text=None))]
+    fn audit_v4_binary<'py>(&self, py: Python<'py>, token_index: u32, layer_indices: Option<Vec<usize>>, output_text: Option<String>) -> PyResult<Bound<'py, PyBytes>> {
+        let mut response = self.build_v4_response(token_index, layer_indices.as_deref())?;
+        response.output_text = output_text;
         let data = verilm_core::serialize::serialize_v4_audit(&response);
         Ok(PyBytes::new(py, &data))
     }
