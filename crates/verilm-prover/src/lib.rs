@@ -148,9 +148,11 @@ pub fn commit_minimal(
 
     let t_leaf = if timers { Some(std::time::Instant::now()) } else { None };
 
-    // IO tree: chain the leaf hash (not ad hoc features) for splice resistance.
+    // IO tree: chain the leaf hash for splice resistance.
+    // Genesis is bound to the request via prompt_hash.
+    let prompt_hash = merkle::hash_prompt(params.prompt);
     let mut io_leaves = Vec::with_capacity(n_tokens);
-    let mut prev_io = [0u8; 32];
+    let mut prev_io = merkle::io_genesis_v4(prompt_hash);
     for (i, leaf_hash) in trace_leaves.iter().enumerate() {
         let io = merkle::io_hash_v4(*leaf_hash, params.token_ids[i], prev_io);
         io_leaves.push(io);
@@ -503,9 +505,10 @@ pub fn commit_minimal_packed(
 
     let t_leaf = if timers { Some(std::time::Instant::now()) } else { None };
 
-    // IO tree: sequential chain.
+    // IO tree: sequential chain, genesis bound to request.
+    let prompt_hash = merkle::hash_prompt(params.prompt);
     let mut io_leaves = Vec::with_capacity(n_tokens);
-    let mut prev_io = [0u8; 32];
+    let mut prev_io = merkle::io_genesis_v4(prompt_hash);
     for (i, leaf_hash) in trace_leaves.iter().enumerate() {
         let io = merkle::io_hash_v4(*leaf_hash, params.token_ids[i], prev_io);
         io_leaves.push(io);
@@ -635,7 +638,7 @@ pub fn open_v4_packed(
     }
 
     let prev_io_hash = if i == 0 {
-        [0u8; 32]
+        merkle::io_genesis_v4(state.prompt_hash)
     } else {
         state.io_hashes[i - 1]
     };
@@ -896,7 +899,7 @@ pub fn open_v4_structural(state: &MinimalBatchState, token_index: u32) -> V4Audi
     }
 
     let prev_io_hash = if i == 0 {
-        [0u8; 32]
+        merkle::io_genesis_v4(state.prompt_hash)
     } else {
         state.io_hashes[i - 1]
     };
@@ -990,7 +993,7 @@ mod tests {
             prompt: b"test prompt",
             sampling_seed: [42u8; 32],
             manifest: None,
-            n_prompt_tokens: None,
+            n_prompt_tokens: Some(1),
         };
 
         let (commitment, state) = commit_minimal(retained, &params, None);
@@ -1020,7 +1023,7 @@ mod tests {
             prompt: b"p",
             sampling_seed: [0u8; 32],
             manifest: None,
-            n_prompt_tokens: None,
+            n_prompt_tokens: Some(1),
         };
 
         let (_, state) = commit_minimal(retained.clone(), &params, None);
@@ -1029,7 +1032,8 @@ mod tests {
         let leaf0 = merkle::hash_retained_state_direct(&retained[0]);
         let leaf1 = merkle::hash_retained_state_direct(&retained[1]);
 
-        let expected_io0 = merkle::io_hash_v4(leaf0, 10, [0u8; 32]);
+        let genesis = merkle::io_genesis_v4(merkle::hash_prompt(b"p"));
+        let expected_io0 = merkle::io_hash_v4(leaf0, 10, genesis);
         let expected_io1 = merkle::io_hash_v4(leaf1, 20, expected_io0);
 
         assert_eq!(state.io_hashes[0], expected_io0);
@@ -1047,7 +1051,7 @@ mod tests {
             prompt: b"hello",
             sampling_seed: [7u8; 32],
             manifest: None,
-            n_prompt_tokens: None,
+            n_prompt_tokens: Some(1),
         };
 
         let retained1 = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
@@ -1072,7 +1076,7 @@ mod tests {
             prompt: b"test",
             sampling_seed: [5u8; 32],
             manifest: None,
-            n_prompt_tokens: None,
+            n_prompt_tokens: Some(1),
         };
 
         let (commitment, state) = commit_minimal(retained, &params, None);
@@ -1106,7 +1110,8 @@ mod tests {
         // Verify IO chain.
         let leaf_hash_0 = response.prefix_leaf_hashes[0];
         let leaf_hash_1 = response.prefix_leaf_hashes[1];
-        let io_0 = merkle::io_hash_v4(leaf_hash_0, 10, [0u8; 32]);
+        let genesis = merkle::io_genesis_v4(merkle::hash_prompt(b"test"));
+        let io_0 = merkle::io_hash_v4(leaf_hash_0, 10, genesis);
         let io_1 = merkle::io_hash_v4(leaf_hash_1, 20, io_0);
         assert_eq!(response.prev_io_hash, io_1);
     }
@@ -1123,7 +1128,7 @@ mod tests {
             prompt: b"p",
             sampling_seed: [0u8; 32],
             manifest: None,
-            n_prompt_tokens: None,
+            n_prompt_tokens: Some(1),
         };
 
         let (_, state) = commit_minimal(retained, &params, None);
@@ -1131,7 +1136,8 @@ mod tests {
 
         assert_eq!(response.prefix_leaf_hashes.len(), 0);
         assert_eq!(response.prefix_merkle_proofs.len(), 0);
-        assert_eq!(response.prev_io_hash, [0u8; 32]);
+        let genesis = merkle::io_genesis_v4(merkle::hash_prompt(b"p"));
+        assert_eq!(response.prev_io_hash, genesis);
     }
 
     // ── Packed commit equivalence tests ────────────────────────────────
@@ -1180,7 +1186,7 @@ mod tests {
             prompt: b"test prompt",
             sampling_seed: [42u8; 32],
             manifest: None,
-            n_prompt_tokens: None,
+            n_prompt_tokens: Some(1),
         };
         let (commit_old, state_old) = commit_minimal(retained, &params, None);
 
@@ -1233,7 +1239,7 @@ mod tests {
             prompt: b"batched",
             sampling_seed: [7u8; 32],
             manifest: None,
-            n_prompt_tokens: None,
+            n_prompt_tokens: Some(1),
         };
         let (commit_old, state_old) = commit_minimal(retained, &params, None);
 
@@ -1263,7 +1269,7 @@ mod tests {
             prompt: b"p",
             sampling_seed: [0u8; 32],
             manifest: None,
-            n_prompt_tokens: None,
+            n_prompt_tokens: Some(1),
         };
         let (packed_a, packed_scales) = make_packed_data(n_layers, n_tokens, hidden, &fwd_batch_sizes);
         let (_, packed_state) = commit_minimal_packed(
@@ -1294,7 +1300,7 @@ mod tests {
             prompt: b"p",
             sampling_seed: [0u8; 32],
             manifest: None,
-            n_prompt_tokens: None,
+            n_prompt_tokens: Some(1),
         };
 
         let (_, state_old) = commit_minimal(retained.clone(), &params, None);
@@ -1338,7 +1344,7 @@ mod tests {
             prompt: b"fr",
             sampling_seed: [0u8; 32],
             manifest: None,
-            n_prompt_tokens: None,
+            n_prompt_tokens: Some(1),
         };
         let (commit_old, _) = commit_minimal(retained, &params, final_residuals);
 
@@ -1413,7 +1419,7 @@ mod tests {
             prompt: b"s",
             sampling_seed: [0u8; 32],
             manifest: None,
-            n_prompt_tokens: None,
+            n_prompt_tokens: Some(1),
         };
         let (_, packed_state) = commit_minimal_packed(
             packed_a, packed_scales, n_layers, hidden, vec![1], &params, None, 0,

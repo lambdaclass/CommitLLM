@@ -91,7 +91,7 @@ fn v4_protocol_single_token_pass() {
         prompt: b"hello",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
@@ -122,7 +122,7 @@ fn v4_protocol_multi_token_pass() {
         prompt: b"multi token test",
         sampling_seed: [99u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(all_retained, &params, None);
 
@@ -145,7 +145,7 @@ fn v4_protocol_token_zero_pass() {
         prompt: b"token zero",
         sampling_seed: [3u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
@@ -177,7 +177,7 @@ fn v4_tampered_io_chain_detected() {
         prompt: b"io chain test",
         sampling_seed: [55u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(all_retained, &params, None);
 
@@ -205,7 +205,7 @@ fn v4_wrong_seed_detected() {
         prompt: b"hello",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
@@ -232,7 +232,7 @@ fn v4_wrong_shell_opening_detected() {
         prompt: b"hello",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
 
@@ -262,7 +262,7 @@ fn v4_missing_shell_opening_detected() {
         prompt: b"hello",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     // Structural-only open: no shell opening
@@ -293,7 +293,7 @@ fn v4_weights_single_token_pass() {
         prompt: b"hello",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
@@ -324,7 +324,7 @@ fn v4_weights_multi_token_pass() {
         prompt: b"multi token test",
         sampling_seed: [99u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(all_retained, &params, None);
 
@@ -348,7 +348,7 @@ fn v4_weights_wrong_weights_detected() {
         prompt: b"hello",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
@@ -418,7 +418,7 @@ fn v4_scale_aware_single_token_pass() {
         prompt: b"hello",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, None, None, None);
@@ -444,7 +444,7 @@ fn v4_scale_aware_multi_token_pass() {
         prompt: b"multi token scaled",
         sampling_seed: [99u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(all_retained, &params, None);
     let response = open_v4(&state, 2, &ToyWeights(&model), &cfg, &ws, None, None, None);
@@ -468,7 +468,7 @@ fn v4_scale_mismatch_detected() {
         prompt: b"hello",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
 
@@ -642,7 +642,7 @@ fn v4_full_bridge_single_token_pass() {
         prompt: b"full bridge",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None);
@@ -690,7 +690,7 @@ fn v4_full_bridge_cross_layer_chain() {
         prompt: b"multi token full bridge",
         sampling_seed: [99u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(all_retained, &params, None);
 
@@ -737,7 +737,7 @@ fn v4_full_bridge_wrong_residual_detected() {
         prompt: b"wrong residual",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None);
@@ -790,7 +790,7 @@ fn v4_full_bridge_qkv_layer0() {
         prompt: b"qkv layer0",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None);
@@ -859,7 +859,7 @@ fn v4_embedding_proof_pass() {
         prompt: b"embedding proof",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None);
@@ -901,7 +901,7 @@ fn v4_embedding_proof_tampered_residual_detected() {
         prompt: b"tampered embedding",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None);
@@ -938,7 +938,7 @@ fn v4_embedding_proof_missing_when_root_present() {
         prompt: b"missing proof",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None);
@@ -977,7 +977,7 @@ fn v4_embedding_proof_wrong_token_id_detected() {
         prompt: b"wrong token proof",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None);
@@ -1009,7 +1009,7 @@ fn v4_downgrade_omit_initial_residual_detected() {
         prompt: b"downgrade",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, None, None, None);
@@ -1045,7 +1045,7 @@ fn v4_unbound_initial_residual_rejected() {
         prompt: b"unbound residual",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None);
@@ -1102,7 +1102,7 @@ fn v4_lm_head_greedy_pass() {
         prompt: b"lm_head test",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
@@ -1127,7 +1127,7 @@ fn v4_lm_head_wrong_token_detected() {
         prompt: b"lm_head tamper test",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
@@ -1174,7 +1174,7 @@ fn v4_lm_head_multi_token_pass() {
         prompt: b"lm_head multi",
         sampling_seed: [99u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(all_retained, &params, None);
 
@@ -1219,7 +1219,7 @@ fn v4_lm_head_freivalds_catches_tampered_logits() {
         prompt: b"freivalds lm_head test",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let mut response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None, None);
@@ -1290,7 +1290,7 @@ fn v4_manifest_greedy_sampling_replay_pass() {
         prompt: b"manifest greedy",
         sampling_seed: [7u8; 32],
         manifest: Some(&manifest),
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
@@ -1333,7 +1333,7 @@ fn v4_manifest_sampled_replay_pass() {
         prompt: b"manifest sampled",
         sampling_seed,
         manifest: Some(&manifest),
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None, None);
@@ -1377,7 +1377,7 @@ fn v4_manifest_wrong_sampled_token_detected() {
         prompt: b"manifest wrong token",
         sampling_seed,
         manifest: Some(&manifest),
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let mut response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None, None);
@@ -1402,7 +1402,7 @@ fn v4_manifest_hash_mismatch_detected() {
         prompt: b"manifest mismatch",
         sampling_seed: [7u8; 32],
         manifest: Some(&manifest),
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
@@ -1500,7 +1500,7 @@ fn v4_captured_final_residual_pass() {
         prompt: b"captured residual test",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     // Commit with final_residuals so open_v4 attaches it to the shell.
     let (_commitment, state) = commit_minimal(
@@ -1533,7 +1533,7 @@ fn v4_captured_final_residual_wrong_token_detected() {
         prompt: b"captured residual tamper",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(
         vec![retained], &params,
@@ -1568,7 +1568,7 @@ fn v4_captured_final_residual_tampered_residual_detected() {
         prompt: b"captured residual tampered",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(
         vec![retained], &params,
@@ -1599,7 +1599,7 @@ fn v4_final_residual_fail_closed_missing() {
         prompt: b"fail closed test",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     // Commit WITHOUT final_residuals — shell.final_residual will be None.
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
@@ -1626,7 +1626,7 @@ fn v4_lm_head_fail_closed_missing_logits() {
         prompt: b"fail closed logits",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(
         vec![retained], &params,
@@ -1656,7 +1656,7 @@ fn v4_final_residual_commitment_binding() {
         prompt: b"binding test",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(
         vec![retained], &params,
@@ -1708,7 +1708,7 @@ fn verify_with_manifest(manifest: DeploymentManifest) -> verilm_verify::V4Verify
         prompt: b"manifest rejection test",
         sampling_seed: [7u8; 32],
         manifest: Some(&manifest),
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained_from_traces(&traces)], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None, None);
@@ -1806,7 +1806,7 @@ fn v4_manifest_rejects_exceeded_max_tokens() {
         prompt: b"max_tokens test",
         sampling_seed: [7u8; 32],
         manifest: Some(&manifest),
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(
         vec![retained.clone(), retained], &params, None,
@@ -1850,7 +1850,7 @@ fn v4_manifest_rejects_overlong_transcript() {
         prompt: b"overlong transcript",
         sampling_seed: [7u8; 32],
         manifest: Some(&manifest),
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(
         vec![retained.clone(), retained.clone(), retained], &params, None,
@@ -1900,7 +1900,7 @@ fn v4_manifest_rejects_missing_spec_hashes() {
         prompt: b"missing spec hashes",
         sampling_seed: [7u8; 32],
         manifest: Some(&manifest),
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
@@ -1967,7 +1967,7 @@ fn v4_prompt_hash_tamper_detected() {
         prompt: b"original prompt",
         sampling_seed: [7u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
@@ -2060,14 +2060,14 @@ fn v4_cross_request_splice_shell_opening() {
         prompt: b"request A",
         sampling_seed: [1u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let params_b = FullBindingParams {
         token_ids: &[99],
         prompt: b"request B",
         sampling_seed: [2u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
 
     let (_commit_a, state_a) = commit_minimal(vec![retained_a], &params_a, None);
@@ -2113,14 +2113,14 @@ fn v4_cross_request_splice_with_manifest() {
         prompt: b"greedy request",
         sampling_seed: [1u8; 32],
         manifest: Some(&manifest_a),
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let params_b = FullBindingParams {
         token_ids: &[99],
         prompt: b"sampled request",
         sampling_seed: [2u8; 32],
         manifest: Some(&manifest_b),
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
 
     let (_commit_a, state_a) = commit_minimal(vec![retained_a], &params_a, None);
@@ -2172,14 +2172,14 @@ fn v4_cross_request_splice_token_id_swap() {
         prompt: b"multi A",
         sampling_seed: [1u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
     let params_b = FullBindingParams {
         token_ids: &[40, 50, 60],
         prompt: b"multi B",
         sampling_seed: [2u8; 32],
         manifest: None,
-        n_prompt_tokens: None,
+        n_prompt_tokens: Some(1),
     };
 
     let (_commit_a, state_a) = commit_minimal(all_retained_a, &params_a, None);

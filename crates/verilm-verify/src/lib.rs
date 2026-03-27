@@ -316,6 +316,31 @@ pub fn verify_v4(
                 );
             }
 
+            // Prompt/generation boundary consistency: if we know n_prompt_tokens and
+            // the challenged token is within the prompt range, verify the embedding
+            // proof binds the correct token_id (already done above). Additionally,
+            // if the challenged token is a generated token (token_index >= n_prompt-1),
+            // sampling replay must agree — this is checked later in LM-head verification.
+            if let Some(npt) = response.n_prompt_tokens {
+                // The first prompt token (position 0 in all_token_ids) is the
+                // embedding input and is not in the committed token_ids array.
+                // Committed positions 0..npt-2 are prompt tokens (positions 1..npt-1 in all_token_ids).
+                // Committed positions npt-1.. are generated tokens.
+                let gen_start = npt.saturating_sub(1); // first generated token in committed array
+                if response.token_index >= gen_start {
+                    // This is a generated token — sampling replay will verify it.
+                    // The embedding proof (if present) binds token_id to the correct row.
+                } else {
+                    // This is a prompt token — it should match the tokenizer's output.
+                    // The verifier can't re-tokenize, but the binding chain is:
+                    //   prompt_hash binds prompt text
+                    //   n_prompt_tokens binds the boundary
+                    //   IO chain binds each token_id
+                    //   embedding proof binds token_id → embedding row
+                    // No additional check needed here beyond what's already verified.
+                }
+            }
+
             let (c, f, shell_final_hidden) = verify_shell_opening(key, &response.retained, shell);
             checks_run += c;
             failures.extend(f);
@@ -867,7 +892,7 @@ fn verify_v4_structural(
         }
     }
 
-    // 3. Prompt hash binding: verify hash(prompt) == commitment.prompt_hash
+    // 3. Prompt hash binding (fail-closed): prompt MUST be present and hash MUST match.
     checks_run += 1;
     match (&response.prompt, response.commitment.prompt_hash) {
         (Some(prompt), Some(committed_hash)) => {
@@ -877,24 +902,40 @@ fn verify_v4_structural(
             }
         }
         (None, Some(_)) => {
-            // Prompt not in response but hash is committed — can't verify binding.
-            // Accept for backward compatibility (legacy responses without prompt field).
+            failures.push("commitment has prompt_hash but response missing prompt bytes".into());
         }
-        (_, None) => {
+        (Some(_), None) => {
+            failures.push("response has prompt but commitment missing prompt_hash".into());
+        }
+        (None, None) => {
             failures.push("V4 commitment missing prompt_hash".into());
         }
     }
 
-    // 3b. Prompt token count binding
-    if let (Some(committed_npt), Some(response_npt)) =
-        (response.commitment.n_prompt_tokens, response.n_prompt_tokens)
-    {
-        checks_run += 1;
-        if committed_npt != response_npt {
-            failures.push(format!(
-                "n_prompt_tokens mismatch: commitment={} response={}",
-                committed_npt, response_npt
-            ));
+    // 3b. Prompt token count binding (fail-closed): n_prompt_tokens MUST be present.
+    checks_run += 1;
+    match (response.commitment.n_prompt_tokens, response.n_prompt_tokens) {
+        (Some(committed_npt), Some(response_npt)) => {
+            if committed_npt != response_npt {
+                failures.push(format!(
+                    "n_prompt_tokens mismatch: commitment={} response={}",
+                    committed_npt, response_npt
+                ));
+            }
+            // Sanity: n_prompt_tokens must be <= total tokens + 1 (the +1 is the
+            // first token consumed as embedding input, not in the committed array).
+            if committed_npt > response.commitment.n_tokens + 1 {
+                failures.push(format!(
+                    "n_prompt_tokens {} exceeds n_tokens {} + 1",
+                    committed_npt, response.commitment.n_tokens
+                ));
+            }
+        }
+        (None, _) => {
+            failures.push("commitment missing n_prompt_tokens".into());
+        }
+        (_, None) => {
+            failures.push("response missing n_prompt_tokens".into());
         }
     }
 
@@ -932,9 +973,13 @@ fn verify_v4_structural(
         }
     }
 
-    // 6. IO chain verification
+    // 6. IO chain verification (genesis bound to request via prompt_hash).
     checks_run += 1;
-    let mut prev_io = [0u8; 32];
+    let io_genesis = match response.commitment.prompt_hash {
+        Some(ph) => merkle::io_genesis_v4(ph),
+        None => [0u8; 32], // already failed at check 3
+    };
+    let mut prev_io = io_genesis;
     for (j, prefix_leaf_hash) in response.prefix_leaf_hashes.iter().enumerate() {
         prev_io = merkle::io_hash_v4(*prefix_leaf_hash, response.prefix_token_ids[j], prev_io);
     }

@@ -479,6 +479,17 @@ pub fn hash_prompt(prompt_bytes: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Compute the IO chain genesis from the committed prompt hash.
+///
+/// Replaces the previous `[0u8; 32]` genesis, binding the IO chain start
+/// to the specific request. Prevents cross-request IO chain splicing.
+pub fn io_genesis_v4(prompt_hash: [u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"vi-io-genesis-v4");
+    hasher.update(prompt_hash);
+    hasher.finalize().into()
+}
+
 /// Derive `k` unique challenge indices from a commitment root and verifier challenge seed.
 ///
 /// Uses `SHA256(root || challenge_seed || counter)` to generate each index mod
