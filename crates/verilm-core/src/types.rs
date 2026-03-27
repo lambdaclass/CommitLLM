@@ -107,6 +107,10 @@ pub struct DeploymentManifest {
     /// Canonical sampler version identifier (e.g. "chacha20-vi-sample-v1").
     #[serde(default)]
     pub sampler_version: Option<String>,
+    /// Decode mode: explicit commitment to "greedy" or "sampled".
+    /// When present, the verifier cross-checks against temperature.
+    #[serde(default)]
+    pub decode_mode: Option<String>,
 
     // --- Fields that flow through to InputSpec ---
 
@@ -119,6 +123,10 @@ pub struct DeploymentManifest {
     /// Special-token handling policy (e.g. "encode", "strip", "pass").
     #[serde(default)]
     pub special_token_policy: Option<String>,
+    /// Padding policy (e.g. "right", "left", "none").
+    /// Controls how inputs are padded to sequence length.
+    #[serde(default)]
+    pub padding_policy: Option<String>,
 
     // --- Fields that flow through to ModelSpec ---
 
@@ -208,6 +216,10 @@ pub struct InputSpec {
     /// Controls how special tokens in user input are processed.
     #[serde(default)]
     pub special_token_policy: Option<String>,
+    /// Padding policy (e.g. "right", "left", "none").
+    /// Controls how inputs are padded to sequence length.
+    #[serde(default)]
+    pub padding_policy: Option<String>,
 }
 
 impl From<&DeploymentManifest> for InputSpec {
@@ -219,6 +231,7 @@ impl From<&DeploymentManifest> for InputSpec {
             bos_eos_policy: m.bos_eos_policy.clone(),
             truncation_policy: m.truncation_policy.clone(),
             special_token_policy: m.special_token_policy.clone(),
+            padding_policy: m.padding_policy.clone(),
         }
     }
 }
@@ -304,6 +317,9 @@ pub struct DecodeSpec {
     /// Canonical sampler version identifier (e.g. "chacha20-v1").
     #[serde(default)]
     pub sampler_version: Option<String>,
+    /// Decode mode: explicit commitment to "greedy" or "sampled".
+    #[serde(default)]
+    pub decode_mode: Option<String>,
 }
 
 impl From<&DeploymentManifest> for DecodeSpec {
@@ -318,6 +334,7 @@ impl From<&DeploymentManifest> for DecodeSpec {
             logit_bias: m.logit_bias.clone(),
             guided_decoding: m.guided_decoding.clone(),
             sampler_version: m.sampler_version.clone(),
+            decode_mode: m.decode_mode.clone(),
         }
     }
 }

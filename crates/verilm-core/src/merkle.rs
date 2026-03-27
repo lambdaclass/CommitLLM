@@ -251,6 +251,7 @@ pub fn hash_input_spec(spec: &crate::types::InputSpec) -> [u8; 32] {
     hash_optional_string(&mut hasher, spec.bos_eos_policy.as_deref());
     hash_optional_string(&mut hasher, spec.truncation_policy.as_deref());
     hash_optional_string(&mut hasher, spec.special_token_policy.as_deref());
+    hash_optional_string(&mut hasher, spec.padding_policy.as_deref());
     hasher.finalize().into()
 }
 
@@ -301,6 +302,7 @@ pub fn hash_decode_spec(spec: &crate::types::DecodeSpec) -> [u8; 32] {
         }
         None => hasher.update(b"\x00"),
     }
+    hash_optional_string(&mut hasher, spec.decode_mode.as_deref());
     hasher.finalize().into()
 }
 
@@ -641,6 +643,7 @@ mod tests {
             bos_eos_policy: None,
             truncation_policy: None,
             special_token_policy: None,
+            padding_policy: None,
         };
         let model = ModelSpec {
             weight_hash: Some([3u8; 32]),
@@ -663,6 +666,7 @@ mod tests {
             logit_bias: vec![],
             guided_decoding: String::new(),
             sampler_version: None,
+            decode_mode: None,
         };
         let output = OutputSpec {
             eos_policy: "stop".into(),
@@ -700,6 +704,7 @@ mod tests {
             bos_eos_policy: None,
             truncation_policy: None,
             special_token_policy: None,
+            padding_policy: None,
         };
         let model = ModelSpec {
             weight_hash: None,
@@ -722,6 +727,7 @@ mod tests {
             logit_bias: vec![],
             guided_decoding: String::new(),
             sampler_version: None,
+            decode_mode: None,
         };
         let output = OutputSpec {
             eos_policy: "stop".into(),
@@ -803,6 +809,8 @@ mod tests {
             ignore_eos: false,
             detokenization_policy: None,
             eos_token_id: None,
+            padding_policy: None,
+            decode_mode: None,
         };
 
         // hash_manifest splits internally, so this tests the round-trip.

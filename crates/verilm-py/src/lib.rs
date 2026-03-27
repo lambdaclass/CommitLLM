@@ -320,6 +320,14 @@ fn extract_manifest(d: &Bound<'_, PyDict>) -> PyResult<DeploymentManifest> {
                 decode_hex32(&hex_str, "embedding_merkle_root")
             })
             .transpose()?,
+        padding_policy: d.get_item("padding_policy")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract::<String>())
+            .transpose()?,
+        decode_mode: d.get_item("decode_mode")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract::<String>())
+            .transpose()?,
     })
 }
 

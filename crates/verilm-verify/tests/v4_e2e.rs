@@ -1285,6 +1285,8 @@ fn make_manifest(temperature: f32, top_k: u32, top_p: f32) -> DeploymentManifest
         ignore_eos: false,
         detokenization_policy: None,
         eos_token_id: None,
+        padding_policy: None,
+        decode_mode: None,
     }
 }
 
@@ -1584,6 +1586,106 @@ fn v4_manifest_architecture_fields_pass() {
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
     // Should have at least the 3 extra architecture checks (n_layers, hidden_dim, vocab_size).
     assert!(report.checks_run >= 11, "expected extra architecture checks, got {}", report.checks_run);
+}
+
+// ---------------------------------------------------------------------------
+// Decode mode cross-checks (#9)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn v4_decode_mode_greedy_with_nonzero_temp_rejected() {
+    let (_cfg, _model, key, mut manifest, _) = setup_manifest_crosscheck();
+    manifest.decode_mode = Some("greedy".into());
+    manifest.temperature = 1.0; // inconsistent: greedy but temp != 0
+    let params = FullBindingParams {
+        token_ids: &[42],
+        prompt: b"decode mode check",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let input: Vec<i8> = (0.._cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&_cfg, &_model, &input);
+    let retained = retained_from_traces(&traces);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    response.manifest = Some(manifest);
+
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("decode_mode='greedy'")),
+        "expected decode_mode/temperature mismatch, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_decode_mode_sampled_with_zero_temp_rejected() {
+    let (_cfg, _model, key, mut manifest, _) = setup_manifest_crosscheck();
+    manifest.decode_mode = Some("sampled".into());
+    manifest.temperature = 0.0; // inconsistent: sampled but temp = 0
+    let params = FullBindingParams {
+        token_ids: &[42],
+        prompt: b"decode mode check",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let input: Vec<i8> = (0.._cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&_cfg, &_model, &input);
+    let retained = retained_from_traces(&traces);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    response.manifest = Some(manifest);
+
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("decode_mode='sampled'")),
+        "expected decode_mode/temperature mismatch, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_decode_mode_unknown_rejected() {
+    let (_cfg, _model, key, mut manifest, _) = setup_manifest_crosscheck();
+    manifest.decode_mode = Some("nucleus".into()); // unsupported mode
+    let params = FullBindingParams {
+        token_ids: &[42],
+        prompt: b"decode mode check",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let input: Vec<i8> = (0.._cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&_cfg, &_model, &input);
+    let retained = retained_from_traces(&traces);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    response.manifest = Some(manifest);
+
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("unsupported decode_mode")),
+        "expected unsupported decode_mode, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_decode_mode_greedy_consistent_pass() {
+    let (cfg, model, key, mut manifest, _) = setup_manifest_crosscheck();
+    manifest.decode_mode = Some("greedy".into());
+    manifest.temperature = 0.0; // consistent
+    let params = FullBindingParams {
+        token_ids: &[42],
+        prompt: b"decode mode check",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let input: Vec<i8> = (0..cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
 }
 
 // ---------------------------------------------------------------------------

@@ -141,6 +141,8 @@ fn golden_manifest() -> DeploymentManifest {
         ignore_eos: false,
         detokenization_policy: None,
         eos_token_id: None,
+        padding_policy: None,
+        decode_mode: None,
     }
 }
 
@@ -150,7 +152,7 @@ fn golden_manifest_hash() {
     let h = verilm_core::merkle::hash_manifest(&manifest);
     assert_eq!(
         hex::encode(h),
-        "30fdc2373ceb632826dfdd8ebe32d060fa342e658d8bfb651086584f823a52b1",
+        "d7290021cf3f2559789193de45938b5cad0b2d824e734eb69e2f11c872126cd9",
         "manifest hash drifted — was the four-spec hash format changed?"
     );
 }

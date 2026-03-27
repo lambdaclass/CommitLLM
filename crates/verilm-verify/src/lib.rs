@@ -636,6 +636,34 @@ pub fn verify_v4_full(
                     }
                 }
 
+                // Cross-check: decode_mode must be consistent with temperature.
+                if let Some(ref dm) = decode_spec.decode_mode {
+                    checks_run += 1;
+                    match dm.as_str() {
+                        "greedy" => {
+                            if decode_spec.temperature != 0.0 {
+                                failures.push(format!(
+                                    "decode_mode='greedy' but temperature={} (must be 0.0)",
+                                    decode_spec.temperature
+                                ));
+                            }
+                        }
+                        "sampled" => {
+                            if decode_spec.temperature == 0.0 {
+                                failures.push(
+                                    "decode_mode='sampled' but temperature=0.0 (must be >0.0)".into()
+                                );
+                            }
+                        }
+                        other => {
+                            failures.push(format!(
+                                "unsupported decode_mode='{}' (expected 'greedy' or 'sampled')",
+                                other
+                            ));
+                        }
+                    }
+                }
+
                 // Reject decode parameters the canonical sampler doesn't support.
                 // These are bound in the spec hash, so a prover can't hide them.
                 checks_run += 1;
