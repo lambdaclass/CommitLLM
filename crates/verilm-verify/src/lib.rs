@@ -583,6 +583,16 @@ pub fn verify_v4_full(
                     }
                 }
 
+                // Cross-check: manifest weight_hash (R_W) must agree with verifier key.
+                if let (Some(manifest_rw), Some(key_rw)) =
+                    (model_spec.weight_hash, key.weight_hash)
+                {
+                    checks_run += 1;
+                    if manifest_rw != key_rw {
+                        failures.push("weight_hash mismatch: manifest != key".into());
+                    }
+                }
+
                 match response.commitment.decode_spec_hash {
                     None => failures.push("commitment missing decode_spec_hash".into()),
                     Some(committed) if h_dec != committed =>
