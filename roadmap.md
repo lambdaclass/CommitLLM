@@ -22,7 +22,7 @@ The following blockers are already closed and are therefore omitted from the rem
 10. [ ] Bind logit bias and bad-word masking in the decode spec, done when those token-level logit modifications are committed explicitly.
 11. [ ] Bind tie-breaking rules in the decode spec, done when any ambiguity in equal-logit or equal-probability selection is committed explicitly.
 12. [ ] Bind transcript-randomness derivation in the decode spec, done when the decode spec commits exactly how per-request and per-token randomness are derived.
-13. [ ] Add sampled end-to-end tests through the live HTTP/server path, done when honest sampled pass, wrong seed, wrong manifest, wrong sampled token, and cross-request splice failures are all covered by tests.
+13. [x] Add sampled end-to-end tests through the live HTTP/server path, done when honest sampled pass, wrong seed, wrong manifest, wrong sampled token, and cross-request splice failures are all covered by tests.
 14. [ ] Add sampler drift protection, done when version-locked conformance tests catch silent changes in sampler behavior across dependency or implementation updates.
 15. [ ] Make sampled decoding the default verified-serving mode, done when verified production mode defaults to the canonical sampled path and greedy remains the explicit `temperature=0` special case.
 16. [ ] Remove or clearly demote transitional V4 framing, done when docs, code comments, and tests no longer present transitional V4 semantics as the long-term target.

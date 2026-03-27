@@ -19,6 +19,7 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 - Prefix embedding binding for prefix tokens, including per-prefix embedding rows and Merkle proofs in rich-prefix mode.
 - Exact deep-prefix audit support, including `prefix_retained`, `prefix_shell_openings`, retained-hash consistency checks, and Freivalds/bridge checks on prefix tokens.
 - End-to-end detokenization verification via `Detokenizer`, `output_text` in audit responses, and Python verifier plumbing for detokenizer callbacks.
+- End-to-end HTTP coverage for `/chat` and `/audit`, including greedy and sampled JSON audit verification, binary audit verification, routine-tier coverage, and HTTP error-path coverage.
 - Tokenizer identity commitment based on canonicalized `tokenizer.json` content via `backend_tokenizer.to_str()`, with deterministic JSON normalization and legacy vocab-only fallback.
 - Explicit `weight_hash` / `R_W` cross-checking in the canonical verifier path, in addition to model-spec hash binding.
 
@@ -34,11 +35,13 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 - The verifier now cross-checks committed model-spec values against verifier-key values for `rmsnorm_eps`, `rope_config_hash`, and `weight_hash`.
 - Decode-spec handling is fail-closed for unsupported sampler versions and unsupported non-default decode features; only the canonical sampler version is accepted and supported decode features are replayed.
 - Audit retrieval now preserves claimed output text end to end so detokenization checks can run in the canonical verifier flow.
+- Bridge documentation and call sites now explicitly treat `bridge_residual_rmsnorm()` as the canonical production W8A8 bridge, while `bridge_requantize()` is demoted to toy-model and last-layer fallback use only.
 - The roadmap and protocol framing now treat the kept canonical protocol as structurally complete, with remaining work focused on hardening, conformance, benchmarks, and documentation.
 
 ### Removed
 
 - Legacy V1/V2/V3 protocol framing and code paths from the kept protocol story.
 - Dead full-trace artifacts and stale legacy comments that only served the removed pre-V4 protocol paths.
+- Dead `requantize_bridge()` and `verify_bridge()` bridge helpers superseded by `bridge_residual_rmsnorm()`.
 - Unused `kv_chain_root` commitment field and related dead code.
 - Transitional reliance on weight-backed replay as part of the canonical verifier path; weight-backed replay remains debug/oracle-only.
