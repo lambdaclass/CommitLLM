@@ -135,6 +135,10 @@ pub struct DeploymentManifest {
     /// Detokenization policy (e.g. "default", "strip_special", "raw").
     #[serde(default)]
     pub detokenization_policy: Option<String>,
+    /// EOS token ID for the model's tokenizer. Required for min_tokens and
+    /// ignore_eos enforcement.
+    #[serde(default)]
+    pub eos_token_id: Option<u32>,
 }
 
 fn default_repetition_penalty() -> f32 { 1.0 }
@@ -307,6 +311,10 @@ pub struct OutputSpec {
     /// Controls how token IDs are converted to final output text.
     #[serde(default)]
     pub detokenization_policy: Option<String>,
+    /// EOS token ID for the model's tokenizer.
+    /// Required for min_tokens and ignore_eos enforcement.
+    #[serde(default)]
+    pub eos_token_id: Option<u32>,
 }
 
 impl From<&DeploymentManifest> for OutputSpec {
@@ -318,6 +326,7 @@ impl From<&DeploymentManifest> for OutputSpec {
             min_tokens: m.min_tokens,
             ignore_eos: m.ignore_eos,
             detokenization_policy: m.detokenization_policy.clone(),
+            eos_token_id: m.eos_token_id,
         }
     }
 }

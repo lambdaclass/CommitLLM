@@ -314,6 +314,10 @@ pub fn hash_output_spec(spec: &crate::types::OutputSpec) -> [u8; 32] {
     hasher.update(spec.min_tokens.to_le_bytes());
     hasher.update([spec.ignore_eos as u8]);
     hash_optional_string(&mut hasher, spec.detokenization_policy.as_deref());
+    match spec.eos_token_id {
+        Some(id) => { hasher.update([1u8]); hasher.update(id.to_le_bytes()); }
+        None => { hasher.update([0u8]); }
+    }
     hasher.finalize().into()
 }
 
@@ -688,6 +692,7 @@ mod tests {
             min_tokens: 0,
             ignore_eos: false,
             detokenization_policy: None,
+            eos_token_id: None,
         };
 
         let h1 = hash_manifest_composed(
@@ -742,6 +747,7 @@ mod tests {
             min_tokens: 0,
             ignore_eos: false,
             detokenization_policy: None,
+            eos_token_id: None,
         };
 
         let base = hash_manifest_composed(
@@ -809,6 +815,7 @@ mod tests {
             min_tokens: 0,
             ignore_eos: false,
             detokenization_policy: None,
+            eos_token_id: None,
         };
 
         // hash_manifest splits internally, so this tests the round-trip.

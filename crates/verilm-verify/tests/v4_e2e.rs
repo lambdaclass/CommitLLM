@@ -96,7 +96,7 @@ fn v4_protocol_single_token_pass() {
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
     // Structural (~8) + Freivalds per layer:
     //   Layer 0: 4 (Wo, Wg, Wu, Wd) — no QKV (embedding unknown)
@@ -127,7 +127,7 @@ fn v4_protocol_multi_token_pass() {
     let (_commitment, state) = commit_minimal(all_retained, &params, None);
 
     let response = open_v4(&state, 2, &ToyWeights(&model), &cfg, &[], None, None, None);
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
     // Structural + shell Freivalds for challenged token only
     assert!(report.checks_run >= 8 + cfg.n_layers * 4);
@@ -150,7 +150,7 @@ fn v4_protocol_token_zero_pass() {
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
     assert_eq!(response.prefix_leaf_hashes.len(), 0);
 }
@@ -184,7 +184,7 @@ fn v4_tampered_io_chain_detected() {
     let mut response = open_v4(&state, 1, &ToyWeights(&model), &cfg, &[], None, None, None);
     response.prev_io_hash[0] ^= 0xff;
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report.failures.iter().any(|f| f.contains("prev_io_hash") || f.contains("IO chain")),
@@ -211,7 +211,7 @@ fn v4_wrong_seed_detected() {
     let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
     response.revealed_seed[0] ^= 0xff;
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report.failures.iter().any(|f| f.contains("seed")),
@@ -241,7 +241,7 @@ fn v4_wrong_shell_opening_detected() {
     let wrong_model = generate_model(&cfg, 99999);
     let response = open_v4(&state, 0, &ToyWeights(&wrong_model), &cfg, &[], None, None, None);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report.failures.iter().any(|f| f.contains("Freivalds")),
@@ -268,7 +268,7 @@ fn v4_missing_shell_opening_detected() {
     // Structural-only open: no shell opening
     let response = open_v4_structural(&state, 0);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report.failures.iter().any(|f| f.contains("shell_opening")),
@@ -423,7 +423,7 @@ fn v4_scale_aware_single_token_pass() {
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, None, None, None);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
 }
 
@@ -449,7 +449,7 @@ fn v4_scale_aware_multi_token_pass() {
     let (_commitment, state) = commit_minimal(all_retained, &params, None);
     let response = open_v4(&state, 2, &ToyWeights(&model), &cfg, &ws, None, None, None);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
 }
 
@@ -478,7 +478,7 @@ fn v4_scale_mismatch_detected() {
         .collect();
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &wrong_ws, None, None, None);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "scale mismatch should cause failure");
     assert!(
         report.failures.iter().any(|f| f.contains("Freivalds")),
@@ -647,7 +647,7 @@ fn v4_full_bridge_single_token_pass() {
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
     // 1 embedding check + structural (7 for token 0) + 7 Freivalds per layer
     assert!(report.checks_run >= 8 + cfg.n_layers * 7,
@@ -705,7 +705,7 @@ fn v4_full_bridge_cross_layer_chain() {
     };
     let response = open_v4(&state, 2, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
 }
 
@@ -752,7 +752,7 @@ fn v4_full_bridge_wrong_residual_detected() {
         }
     }
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "wrong residual should be detected");
     assert!(
         report.failures.iter().any(|f| f.contains("embedding Merkle proof")),
@@ -802,7 +802,7 @@ fn v4_full_bridge_qkv_layer0() {
     assert!(shell.layers[0].v.is_some());
 
     // Verification passes with all 7 checks per layer (QKV at layer 0 included)
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
 
     // Full bridge: 1 embedding + 7 structural + 7 Freivalds per layer
@@ -864,7 +864,7 @@ fn v4_embedding_proof_pass() {
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
     // Should have embedding proof check + structural + bridge checks
     assert!(report.checks_run >= 8 + cfg.n_layers * 7,
@@ -906,7 +906,7 @@ fn v4_embedding_proof_tampered_residual_detected() {
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "tampered residual should be caught");
     assert!(report.failures.iter().any(|f| f.contains("embedding Merkle proof")),
         "should fail on embedding proof, failures: {:?}", report.failures);
@@ -943,7 +943,7 @@ fn v4_embedding_proof_missing_when_root_present() {
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "missing proof should be caught");
     assert!(report.failures.iter().any(|f| f.contains("missing embedding_proof")),
         "should fail on missing proof, failures: {:?}", report.failures);
@@ -982,7 +982,7 @@ fn v4_embedding_proof_wrong_token_id_detected() {
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "wrong token_id should be caught");
     assert!(report.failures.iter().any(|f| f.contains("leaf_index") && f.contains("token_id")),
         "should fail on token_id mismatch, failures: {:?}", report.failures);
@@ -1014,7 +1014,7 @@ fn v4_downgrade_omit_initial_residual_detected() {
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, None, None, None);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "omitted initial_residual should be caught");
     assert!(report.failures.iter().any(|f| f.contains("initial_residual")),
         "should fail on missing initial_residual, failures: {:?}", report.failures);
@@ -1050,7 +1050,7 @@ fn v4_unbound_initial_residual_rejected() {
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "unbound initial_residual should be rejected");
     assert!(report.failures.iter().any(|f| f.contains("embedding_merkle_root")),
         "should fail on missing embedding root, failures: {:?}", report.failures);
@@ -1108,7 +1108,7 @@ fn v4_lm_head_greedy_pass() {
     let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
     attach_toy_logits(&mut response, &lm_head, &cfg);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
     assert!(report.failures.is_empty());
 }
@@ -1133,7 +1133,7 @@ fn v4_lm_head_wrong_token_detected() {
     let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
     attach_toy_logits(&mut response, &lm_head, &cfg);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "wrong token should be detected");
     assert!(report.failures.iter().any(|f| f.contains("lm_head")),
         "should fail on lm_head check, failures: {:?}", report.failures);
@@ -1182,7 +1182,7 @@ fn v4_lm_head_multi_token_pass() {
     for i in 0..3 {
         let mut response = open_v4(&state, i, &ToyWeights(&toy.layers), &cfg, &[], None, None, None);
         attach_toy_logits(&mut response, &toy.lm_head, &cfg);
-        let report = verify_v4(&key, &response);
+        let report = verify_v4(&key, &response, None);
         assert_eq!(report.verdict, Verdict::Pass,
             "token {}: failures: {:?}", i, report.failures);
     }
@@ -1226,7 +1226,7 @@ fn v4_lm_head_freivalds_catches_tampered_logits() {
 
     // Attach honest logits — should pass.
     attach_toy_logits(&mut response, &toy.lm_head, &cfg);
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "honest logits should pass: {:?}", report.failures);
 
     // Now tamper: flip some logits values.
@@ -1235,7 +1235,7 @@ fn v4_lm_head_freivalds_catches_tampered_logits() {
     logits[0] = logits[0].wrapping_add(1000);
     logits[1] = logits[1].wrapping_sub(500);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "tampered logits should be caught");
     assert!(report.failures.iter().any(|f| f.contains("Freivalds")),
         "should fail on Freivalds check, got: {:?}", report.failures);
@@ -1273,6 +1273,7 @@ fn make_manifest(temperature: f32, top_k: u32, top_p: f32) -> DeploymentManifest
         min_tokens: 0,
         ignore_eos: false,
         detokenization_policy: None,
+        eos_token_id: None,
     }
 }
 
@@ -1296,7 +1297,7 @@ fn v4_manifest_greedy_sampling_replay_pass() {
     let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
 }
 
@@ -1338,7 +1339,7 @@ fn v4_manifest_sampled_replay_pass() {
     let (_commitment, state) = commit_minimal(vec![retained], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None, None);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
 }
 
@@ -1383,7 +1384,7 @@ fn v4_manifest_wrong_sampled_token_detected() {
     let mut response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None, None);
     attach_toy_logits(&mut response, &toy.lm_head, &cfg);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report.failures.iter().any(|f| f.contains("lm_head")),
         "should fail on lm_head sampling check, failures: {:?}", report.failures);
@@ -1410,7 +1411,7 @@ fn v4_manifest_hash_mismatch_detected() {
     // Tamper with the manifest in the response (different temperature).
     response.manifest = Some(make_manifest(1.0, 0, 1.0));
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report.failures.iter().any(|f| f.contains("manifest hash")),
         "should fail on manifest hash, failures: {:?}", report.failures);
@@ -1515,7 +1516,7 @@ fn v4_captured_final_residual_pass() {
     let fnw = key.final_norm_weights.as_ref().unwrap();
     let lm = key.lm_head.as_ref().unwrap();
     attach_tail_logits(&mut response, lm, fnw, &cfg);
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
 }
 
@@ -1544,7 +1545,7 @@ fn v4_captured_final_residual_wrong_token_detected() {
     let lm = key.lm_head.as_ref().unwrap();
     attach_tail_logits(&mut response, lm, fnw, &cfg);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "wrong token should be detected");
     assert!(report.failures.iter().any(|f| f.contains("lm_head")),
         "should fail on lm_head check, failures: {:?}", report.failures);
@@ -1579,7 +1580,7 @@ fn v4_captured_final_residual_tampered_residual_detected() {
     let lm = key.lm_head.as_ref().unwrap();
     attach_tail_logits(&mut response, lm, fnw, &cfg);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     // Tampered residual → different final_hidden → different argmax → lm_head mismatch.
     assert_eq!(report.verdict, Verdict::Fail,
         "tampered residual should be detected, failures: {:?}", report.failures);
@@ -1606,7 +1607,7 @@ fn v4_final_residual_fail_closed_missing() {
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
 
     assert!(response.shell_opening.as_ref().unwrap().final_residual.is_none());
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail,
         "should fail when final_residual missing but key requires it, failures: {:?}",
         report.failures);
@@ -1636,7 +1637,7 @@ fn v4_lm_head_fail_closed_missing_logits() {
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
     assert!(response.shell_opening.as_ref().unwrap().logits_i32.is_none());
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail,
         "should fail when logits_i32 missing but key has LmHead Freivalds, failures: {:?}",
         report.failures);
@@ -1671,7 +1672,7 @@ fn v4_final_residual_commitment_binding() {
     tampered[0] = 127.0;
     response.shell_opening.as_mut().unwrap().final_residual = Some(tampered);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail,
         "post-commitment swap of final_residual must be detected, failures: {:?}",
         report.failures);
@@ -1713,7 +1714,7 @@ fn verify_with_manifest(manifest: DeploymentManifest) -> verilm_verify::V4Verify
     let (_commitment, state) = commit_minimal(vec![retained_from_traces(&traces)], &params, None);
     let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None, None);
 
-    verify_v4(&key, &response)
+    verify_v4(&key, &response, None)
 }
 
 #[test]
@@ -1814,7 +1815,7 @@ fn v4_manifest_rejects_exceeded_max_tokens() {
     // Open token_index 1 — exceeds max_tokens=1
     let response = open_v4(&state, 1, &ToyWeights(&toy.layers), &cfg, &[], None, None, None);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report.failures.iter().any(|f| f.contains("max_tokens")),
         "expected max_tokens rejection, got: {:?}", report.failures);
@@ -1858,7 +1859,7 @@ fn v4_manifest_rejects_overlong_transcript() {
     // Open token_index 0 — valid per-token, but transcript is overlong
     let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None, None);
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report.failures.iter().any(|f| f.contains("committed n_tokens") && f.contains("max_tokens")),
         "expected transcript-level max_tokens rejection, got: {:?}", report.failures);
@@ -1912,7 +1913,7 @@ fn v4_manifest_rejects_missing_spec_hashes() {
     response.commitment.decode_spec_hash = None;
     response.commitment.output_spec_hash = None;
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report.failures.iter().any(|f| f.contains("missing input_spec_hash")),
         "should fail on missing input_spec_hash, failures: {:?}", report.failures);
@@ -1950,7 +1951,7 @@ fn v4_prompt_hash_binding() {
     assert_eq!(response.n_prompt_tokens, Some(2));
 
     // Prompt hash should verify.
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert!(!report.failures.iter().any(|f| f.contains("prompt_hash")),
         "prompt hash should verify, failures: {:?}", report.failures);
 }
@@ -1975,7 +1976,7 @@ fn v4_prompt_hash_tamper_detected() {
     // Tamper the prompt.
     response.prompt = Some(b"different prompt".to_vec());
 
-    let report = verify_v4(&key, &response);
+    let report = verify_v4(&key, &response, None);
     assert!(report.failures.iter().any(|f| f.contains("prompt_hash mismatch")),
         "should detect prompt tampering, failures: {:?}", report.failures);
 }
@@ -2081,7 +2082,7 @@ fn v4_cross_request_splice_shell_opening() {
     response_a.shell_opening = response_b.shell_opening.clone();
     response_a.retained = response_b.retained.clone();
 
-    let report = verify_v4(&key, &response_a);
+    let report = verify_v4(&key, &response_a, None);
     assert_eq!(report.verdict, Verdict::Fail,
         "cross-request splice must be detected, got: {:?}", report.failures);
     // The retained leaf hash from B won't match A's Merkle tree
@@ -2135,7 +2136,7 @@ fn v4_cross_request_splice_with_manifest() {
     response_a.retained = response_b.retained.clone();
     response_a.manifest = response_b.manifest.clone();
 
-    let report = verify_v4(&key, &response_a);
+    let report = verify_v4(&key, &response_a, None);
     assert_eq!(report.verdict, Verdict::Fail,
         "cross-request splice with manifest must be detected, got: {:?}", report.failures);
     // Manifest from B doesn't match A's commitment hash.
@@ -2193,10 +2194,208 @@ fn v4_cross_request_splice_token_id_swap() {
     response_a.shell_opening = response_b.shell_opening.clone();
     response_a.token_id = response_b.token_id;
 
-    let report = verify_v4(&key, &response_a);
+    let report = verify_v4(&key, &response_a, None);
     assert_eq!(report.verdict, Verdict::Fail,
         "cross-request token splice must be detected, got: {:?}", report.failures);
     assert!(report.failures.iter().any(|f|
         f.contains("Merkle proof") || f.contains("IO") || f.contains("chain")),
         "expected Merkle or IO chain failure, got: {:?}", report.failures);
+}
+
+// ---------------------------------------------------------------------------
+// verify_v4 integrated tokenization check
+// ---------------------------------------------------------------------------
+
+#[test]
+fn v4_integrated_tokenization_pass() {
+    // Correct prompt token IDs passed through verify_v4's new parameter.
+    let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"test",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+        n_prompt_tokens: Some(2),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    attach_toy_logits(&mut response, &_lm_head, &cfg);
+
+    // expected: [100, token_id] — first is embedding input, second is in the chain.
+    let expected = vec![100u32, token_id];
+    let report = verify_v4(&key, &response, Some(&expected));
+    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_integrated_tokenization_mismatch_detected() {
+    let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"test",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+        n_prompt_tokens: Some(2),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    attach_toy_logits(&mut response, &_lm_head, &cfg);
+
+    // Wrong token ID in expected prompt.
+    let wrong = vec![100u32, token_id + 1];
+    let report = verify_v4(&key, &response, Some(&wrong));
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("prompt token mismatch")),
+        "should detect mismatch, failures: {:?}", report.failures);
+}
+
+// ---------------------------------------------------------------------------
+// Output policy enforcement: min_tokens + ignore_eos
+// ---------------------------------------------------------------------------
+
+#[test]
+fn v4_min_tokens_pass_when_respected() {
+    // Token at generation position >= min_tokens and non-EOS → pass.
+    let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.min_tokens = 1;
+    manifest.eos_token_id = Some(999); // EOS is 999, our token is not 999
+
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"min_tokens pass",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    attach_toy_logits(&mut response, &_lm_head, &cfg);
+
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_min_tokens_rejects_early_eos() {
+    // Token at generation position 0 is EOS but min_tokens=5 → fail.
+    let (cfg, model, key, _lm_head, input, _token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let eos_id = 42u32; // Pick a specific EOS token
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.min_tokens = 5;
+    manifest.eos_token_id = Some(eos_id);
+
+    // Force token_id to be EOS.
+    let params = FullBindingParams {
+        token_ids: &[eos_id],
+        prompt: b"early eos",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    attach_toy_logits(&mut response, &_lm_head, &cfg);
+
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("min_tokens")),
+        "should reject early EOS, failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_min_tokens_rejects_short_generation() {
+    // Committed n_tokens < min_tokens → reject.
+    let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.min_tokens = 10; // Way more than our 1 generated token
+    manifest.eos_token_id = Some(999);
+
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"short gen",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    attach_toy_logits(&mut response, &_lm_head, &cfg);
+
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("min_tokens")),
+        "should reject short generation, failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_ignore_eos_rejects_eos_token() {
+    // ignore_eos=true but the challenged token IS EOS → fail.
+    let (cfg, model, key, _lm_head, input, _token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let eos_id = 42u32;
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.ignore_eos = true;
+    manifest.eos_token_id = Some(eos_id);
+
+    let params = FullBindingParams {
+        token_ids: &[eos_id],
+        prompt: b"ignore eos",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    attach_toy_logits(&mut response, &_lm_head, &cfg);
+
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("ignore_eos")),
+        "should reject EOS when ignore_eos=true, failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_output_policy_fails_closed_without_eos_token_id() {
+    // min_tokens > 0 but eos_token_id missing → fail-closed.
+    let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.min_tokens = 5;
+    // eos_token_id left as None (from make_manifest default)
+
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"no eos id",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    attach_toy_logits(&mut response, &_lm_head, &cfg);
+
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("eos_token_id is missing")),
+        "should fail-closed without eos_token_id, failures: {:?}", report.failures);
 }

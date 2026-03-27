@@ -99,6 +99,7 @@ class VerifiedInferenceServer:
         self._special_token_policy = self._extract_special_token_policy(llm)
         self._detokenization_policy = self._extract_detokenization_policy(llm)
         self._adapter_hash = self._compute_adapter_hash(model)
+        self._eos_token_id = self._extract_eos_token_id(llm)
 
         self.buf = get_capture_buffer()
 
@@ -338,6 +339,21 @@ class VerifiedInferenceServer:
         except Exception:
             return None
 
+    @staticmethod
+    def _extract_eos_token_id(llm) -> Optional[int]:
+        """Extract the EOS token ID from the tokenizer.
+
+        Required for min_tokens and ignore_eos enforcement in the verifier.
+        """
+        try:
+            tokenizer = llm.get_tokenizer()
+            eos_id = getattr(tokenizer, "eos_token_id", None)
+            if eos_id is not None:
+                return int(eos_id)
+            return None
+        except Exception:
+            return None
+
     def _compute_quant_hash(self, model) -> str:
         """SHA-256 of quantization config, if present."""
         try:
@@ -555,6 +571,7 @@ class VerifiedInferenceServer:
             "min_tokens": min_tokens,
             "ignore_eos": ignore_eos,
             "detokenization_policy": self._detokenization_policy,
+            "eos_token_id": self._eos_token_id,
         }
 
         if _chat_timers:

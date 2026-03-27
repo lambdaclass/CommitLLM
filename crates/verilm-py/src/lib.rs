@@ -234,6 +234,10 @@ fn extract_manifest(d: &Bound<'_, PyDict>) -> PyResult<DeploymentManifest> {
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract::<String>())
             .transpose()?,
+        eos_token_id: d.get_item("eos_token_id")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract())
+            .transpose()?,
     })
 }
 
@@ -804,7 +808,7 @@ fn verify_v4<'py>(
     let key: VerifierKey = serde_json::from_str(key_json)
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize VerifierKey: {}", e)))?;
 
-    let report = verilm_verify::verify_v4(&key, &response);
+    let report = verilm_verify::verify_v4(&key, &response, None);
 
     let result = PyDict::new(py);
     result.set_item("passed", report.verdict == verilm_verify::Verdict::Pass)?;
@@ -831,7 +835,7 @@ fn verify_v4_binary<'py>(
     let key: VerifierKey = serde_json::from_str(key_json)
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize VerifierKey: {}", e)))?;
 
-    let report = verilm_verify::verify_v4(&key, &response);
+    let report = verilm_verify::verify_v4(&key, &response, None);
 
     let result = PyDict::new(py);
     result.set_item("passed", report.verdict == verilm_verify::Verdict::Pass)?;

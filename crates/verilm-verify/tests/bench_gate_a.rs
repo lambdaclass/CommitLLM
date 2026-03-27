@@ -223,7 +223,7 @@ fn bench_gate_a() {
     let mut verify_simple_times = Vec::with_capacity(ITERS);
     for _ in 0..ITERS {
         let start = Instant::now();
-        let report = verify_v4(&key, &response_simple);
+        let report = verify_v4(&key, &response_simple, None);
         verify_simple_times.push(start.elapsed());
         assert_eq!(report.verdict, Verdict::Pass, "simplified: {:?}", report.failures);
     }
@@ -272,7 +272,7 @@ fn bench_gate_a() {
     let mut verify_full_times = Vec::with_capacity(ITERS);
     for _ in 0..ITERS {
         let start = Instant::now();
-        let report = verify_v4(&fb_key, &response_full);
+        let report = verify_v4(&fb_key, &response_full, None);
         verify_full_times.push(start.elapsed());
         assert_eq!(report.verdict, Verdict::Pass, "full bridge: {:?}", report.failures);
     }

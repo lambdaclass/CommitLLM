@@ -270,12 +270,24 @@ impl std::fmt::Display for V4VerifyReport {
 /// 2. Shell opening: Freivalds on each matmul (W_o, W_g, W_u, W_d, optionally QKV)
 /// 3. Bridge consistency: verifier derives intermediate i8 values from i32 accumulators
 /// 4. Retained-state binding: shell openings must be consistent with committed `a`
+/// 5. Input tokenization: if `expected_prompt_token_ids` is provided, verifies
+///    the prompt token chain matches the externally-tokenized result.
+/// 6. Output policy: min_tokens and ignore_eos enforcement when manifest is present.
 pub fn verify_v4(
     key: &VerifierKey,
     response: &V4AuditResponse,
+    expected_prompt_token_ids: Option<&[u32]>,
 ) -> V4VerifyReport {
     let start = Instant::now();
     let (mut checks_run, mut failures) = verify_v4_structural(response);
+
+    // Input tokenization verification: if the caller provides expected prompt
+    // token IDs (from an external tokenizer), verify they match the committed chain.
+    if let Some(expected_tids) = expected_prompt_token_ids {
+        checks_run += 1;
+        let tok_failures = verify_input_tokenization(response, expected_tids);
+        failures.extend(tok_failures);
+    }
 
     // Protocol path: check shell openings with key-only Freivalds.
     match &response.shell_opening {
@@ -447,6 +459,56 @@ pub fn verify_v4(
                             response.commitment.n_tokens, output_spec.max_tokens
                         ));
                     }
+                }
+
+                // Output policy enforcement: min_tokens and ignore_eos.
+                //
+                // These checks verify that the committed generation length
+                // and challenged token are consistent with the output policy.
+                // Requires eos_token_id to identify EOS tokens.
+                if let Some(eos_id) = output_spec.eos_token_id {
+                    // min_tokens: generation must produce at least this many tokens
+                    // before the model is allowed to select EOS.
+                    // n_prompt_tokens - 1 = number of prompt tokens in the committed array.
+                    // Generated tokens start at index (n_prompt_tokens - 1).
+                    if output_spec.min_tokens > 0 {
+                        checks_run += 1;
+                        let gen_start = response.n_prompt_tokens
+                            .unwrap_or(1)
+                            .saturating_sub(1);
+                        // The number of generated tokens committed.
+                        let n_generated = response.commitment.n_tokens.saturating_sub(gen_start);
+                        if n_generated < output_spec.min_tokens {
+                            failures.push(format!(
+                                "committed only {} generated tokens but output_spec requires min_tokens={}",
+                                n_generated, output_spec.min_tokens
+                            ));
+                        }
+                        // If the challenged token is within the min_tokens window and is EOS, reject.
+                        let gen_index = response.token_index.saturating_sub(gen_start);
+                        if gen_index < output_spec.min_tokens && response.token_id == eos_id {
+                            failures.push(format!(
+                                "token at generation position {} is EOS ({}) but min_tokens={}",
+                                gen_index, eos_id, output_spec.min_tokens
+                            ));
+                        }
+                    }
+
+                    // ignore_eos: if true, the model must never select EOS.
+                    if output_spec.ignore_eos {
+                        checks_run += 1;
+                        if response.token_id == eos_id {
+                            failures.push(format!(
+                                "token_id {} is EOS but ignore_eos=true",
+                                response.token_id
+                            ));
+                        }
+                    }
+                } else if output_spec.min_tokens > 0 || output_spec.ignore_eos {
+                    // Fail-closed: can't enforce min_tokens or ignore_eos without eos_token_id.
+                    failures.push(
+                        "output_spec requires min_tokens or ignore_eos but eos_token_id is missing".into()
+                    );
                 }
 
                 Some(verilm_core::sampling::DecodeParams {
