@@ -269,6 +269,10 @@ pub fn hash_model_spec(spec: &crate::types::ModelSpec) -> [u8; 32] {
         None => hasher.update(b"\x00"),
     }
     hash_optional_32(&mut hasher, spec.adapter_hash.as_ref());
+    hash_optional_u32(&mut hasher, spec.n_layers);
+    hash_optional_u32(&mut hasher, spec.hidden_dim);
+    hash_optional_u32(&mut hasher, spec.vocab_size);
+    hash_optional_32(&mut hasher, spec.embedding_merkle_root.as_ref());
     hasher.finalize().into()
 }
 
@@ -358,6 +362,16 @@ fn hash_optional_32(hasher: &mut Sha256, opt: Option<&[u8; 32]>) {
         Some(h) => {
             hasher.update(b"\x01");
             hasher.update(h);
+        }
+        None => hasher.update(b"\x00"),
+    }
+}
+
+fn hash_optional_u32(hasher: &mut Sha256, opt: Option<u32>) {
+    match opt {
+        Some(v) => {
+            hasher.update(b"\x01");
+            hasher.update(v.to_le_bytes());
         }
         None => hasher.update(b"\x00"),
     }
@@ -634,6 +648,10 @@ mod tests {
             rope_config_hash: None,
             rmsnorm_eps: Some(1e-5),
             adapter_hash: None,
+            n_layers: None,
+            hidden_dim: None,
+            vocab_size: None,
+            embedding_merkle_root: None,
         };
         let decode = DecodeSpec {
             temperature: 0.7,
@@ -689,6 +707,10 @@ mod tests {
             rope_config_hash: None,
             rmsnorm_eps: None,
             adapter_hash: None,
+            n_layers: None,
+            hidden_dim: None,
+            vocab_size: None,
+            embedding_merkle_root: None,
         };
         let decode = DecodeSpec {
             temperature: 0.0,
@@ -773,6 +795,10 @@ mod tests {
             truncation_policy: None,
             special_token_policy: None,
             adapter_hash: None,
+            n_layers: None,
+            hidden_dim: None,
+            vocab_size: None,
+            embedding_merkle_root: None,
             min_tokens: 0,
             ignore_eos: false,
             detokenization_policy: None,

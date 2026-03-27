@@ -1277,6 +1277,10 @@ fn make_manifest(temperature: f32, top_k: u32, top_p: f32) -> DeploymentManifest
         truncation_policy: None,
         special_token_policy: None,
         adapter_hash: None,
+        n_layers: None,
+        hidden_dim: None,
+        vocab_size: None,
+        embedding_merkle_root: None,
         min_tokens: 0,
         ignore_eos: false,
         detokenization_policy: None,
@@ -1422,6 +1426,164 @@ fn v4_manifest_hash_mismatch_detected() {
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report.failures.iter().any(|f| f.contains("manifest hash")),
         "should fail on manifest hash, failures: {:?}", report.failures);
+}
+
+// ---------------------------------------------------------------------------
+// Architecture field cross-checks (n_layers, hidden_dim, vocab_size, embedding_merkle_root)
+// ---------------------------------------------------------------------------
+
+/// Helper: commit + open a manifest-bound response for architecture cross-check tests.
+fn setup_manifest_crosscheck() -> (
+    verilm_core::constants::ModelConfig,
+    Vec<LayerWeights>,
+    verilm_core::types::VerifierKey,
+    DeploymentManifest,
+    verilm_core::types::V4AuditResponse,
+) {
+    let cfg = ModelConfig::toy();
+    let model = verilm_test_vectors::generate_model(&cfg, 12345);
+    let key = verilm_test_vectors::generate_key(&cfg, &model, [1u8; 32]);
+    let input: Vec<i8> = (0..cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let params = FullBindingParams {
+        token_ids: &[42],
+        prompt: b"arch crosscheck",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+
+    (cfg, model, key, manifest, response)
+}
+
+#[test]
+fn v4_manifest_n_layers_mismatch_rejected() {
+    let (_cfg, _model, key, mut manifest, _) = setup_manifest_crosscheck();
+    // Set wrong n_layers in manifest
+    manifest.n_layers = Some(999);
+    let params = FullBindingParams {
+        token_ids: &[42],
+        prompt: b"arch crosscheck",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let input: Vec<i8> = (0.._cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&_cfg, &_model, &input);
+    let retained = retained_from_traces(&traces);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    response.manifest = Some(manifest);
+
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("n_layers mismatch")),
+        "expected n_layers mismatch, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_hidden_dim_mismatch_rejected() {
+    let (_cfg, _model, key, mut manifest, _) = setup_manifest_crosscheck();
+    manifest.hidden_dim = Some(9999);
+    let params = FullBindingParams {
+        token_ids: &[42],
+        prompt: b"arch crosscheck",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let input: Vec<i8> = (0.._cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&_cfg, &_model, &input);
+    let retained = retained_from_traces(&traces);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    response.manifest = Some(manifest);
+
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("hidden_dim mismatch")),
+        "expected hidden_dim mismatch, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_vocab_size_mismatch_rejected() {
+    let (_cfg, _model, key, mut manifest, _) = setup_manifest_crosscheck();
+    manifest.vocab_size = Some(99999);
+    let params = FullBindingParams {
+        token_ids: &[42],
+        prompt: b"arch crosscheck",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let input: Vec<i8> = (0.._cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&_cfg, &_model, &input);
+    let retained = retained_from_traces(&traces);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    response.manifest = Some(manifest);
+
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("vocab_size mismatch")),
+        "expected vocab_size mismatch, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_embedding_root_mismatch_rejected() {
+    let (_cfg, _model, mut key, mut manifest, _) = setup_manifest_crosscheck();
+    // Both sides must have embedding_merkle_root for the cross-check to fire.
+    key.embedding_merkle_root = Some([0xAA; 32]);
+    manifest.embedding_merkle_root = Some([0xBB; 32]);
+    let params = FullBindingParams {
+        token_ids: &[42],
+        prompt: b"arch crosscheck",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let input: Vec<i8> = (0.._cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&_cfg, &_model, &input);
+    let retained = retained_from_traces(&traces);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    response.manifest = Some(manifest);
+
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("embedding_merkle_root mismatch")),
+        "expected embedding_merkle_root mismatch, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_architecture_fields_pass() {
+    let (cfg, model, key, mut manifest, _) = setup_manifest_crosscheck();
+    // Set correct architecture values matching the key config.
+    manifest.n_layers = Some(cfg.n_layers as u32);
+    manifest.hidden_dim = Some(cfg.hidden_dim as u32);
+    manifest.vocab_size = Some(cfg.vocab_size as u32);
+    let params = FullBindingParams {
+        token_ids: &[42],
+        prompt: b"arch crosscheck",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let input: Vec<i8> = (0..cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+    // Should have at least the 3 extra architecture checks (n_layers, hidden_dim, vocab_size).
+    assert!(report.checks_run >= 11, "expected extra architecture checks, got {}", report.checks_run);
 }
 
 // ---------------------------------------------------------------------------

@@ -126,6 +126,21 @@ pub struct DeploymentManifest {
     #[serde(default)]
     pub adapter_hash: Option<[u8; 32]>,
 
+    // --- Architecture fields that flow through to ModelSpec ---
+
+    /// Number of transformer layers.
+    #[serde(default)]
+    pub n_layers: Option<u32>,
+    /// Hidden dimension (embedding width).
+    #[serde(default)]
+    pub hidden_dim: Option<u32>,
+    /// Vocabulary size (number of logit entries).
+    #[serde(default)]
+    pub vocab_size: Option<u32>,
+    /// Merkle root over embedding table rows.
+    #[serde(default)]
+    pub embedding_merkle_root: Option<[u8; 32]>,
+
     // --- Fields that flow through to OutputSpec ---
 
     /// Minimum tokens before EOS is allowed. 0 = no minimum.
@@ -229,6 +244,18 @@ pub struct ModelSpec {
     /// Hash of adapter / LoRA / merged-checkpoint identity.
     #[serde(default)]
     pub adapter_hash: Option<[u8; 32]>,
+    /// Number of transformer layers.
+    #[serde(default)]
+    pub n_layers: Option<u32>,
+    /// Hidden dimension (embedding width).
+    #[serde(default)]
+    pub hidden_dim: Option<u32>,
+    /// Vocabulary size (number of logit entries).
+    #[serde(default)]
+    pub vocab_size: Option<u32>,
+    /// Merkle root over embedding table rows.
+    #[serde(default)]
+    pub embedding_merkle_root: Option<[u8; 32]>,
 }
 
 impl From<&DeploymentManifest> for ModelSpec {
@@ -239,6 +266,10 @@ impl From<&DeploymentManifest> for ModelSpec {
             rope_config_hash: m.rope_config_hash,
             rmsnorm_eps: m.rmsnorm_eps,
             adapter_hash: m.adapter_hash,
+            n_layers: m.n_layers,
+            hidden_dim: m.hidden_dim,
+            vocab_size: m.vocab_size,
+            embedding_merkle_root: m.embedding_merkle_root,
         }
     }
 }

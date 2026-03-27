@@ -301,6 +301,25 @@ fn extract_manifest(d: &Bound<'_, PyDict>) -> PyResult<DeploymentManifest> {
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract())
             .transpose()?,
+        n_layers: d.get_item("n_layers")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract())
+            .transpose()?,
+        hidden_dim: d.get_item("hidden_dim")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract())
+            .transpose()?,
+        vocab_size: d.get_item("vocab_size")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract())
+            .transpose()?,
+        embedding_merkle_root: d.get_item("embedding_merkle_root")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| {
+                let hex_str: String = v.extract()?;
+                decode_hex32(&hex_str, "embedding_merkle_root")
+            })
+            .transpose()?,
     })
 }
 

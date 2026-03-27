@@ -558,6 +558,46 @@ pub fn verify_v4_full(
                     }
                 }
 
+                // Cross-check: n_layers
+                if let Some(n) = model_spec.n_layers {
+                    checks_run += 1;
+                    if n as usize != key.config.n_layers {
+                        failures.push(format!(
+                            "n_layers mismatch: manifest={} key={}", n, key.config.n_layers
+                        ));
+                    }
+                }
+
+                // Cross-check: hidden_dim
+                if let Some(d) = model_spec.hidden_dim {
+                    checks_run += 1;
+                    if d as usize != key.config.hidden_dim {
+                        failures.push(format!(
+                            "hidden_dim mismatch: manifest={} key={}", d, key.config.hidden_dim
+                        ));
+                    }
+                }
+
+                // Cross-check: vocab_size
+                if let Some(v) = model_spec.vocab_size {
+                    checks_run += 1;
+                    if v as usize != key.config.vocab_size {
+                        failures.push(format!(
+                            "vocab_size mismatch: manifest={} key={}", v, key.config.vocab_size
+                        ));
+                    }
+                }
+
+                // Cross-check: embedding_merkle_root
+                if let (Some(manifest_emr), Some(key_emr)) =
+                    (model_spec.embedding_merkle_root, key.embedding_merkle_root)
+                {
+                    checks_run += 1;
+                    if manifest_emr != key_emr {
+                        failures.push("embedding_merkle_root mismatch: manifest != key".into());
+                    }
+                }
+
                 match response.commitment.decode_spec_hash {
                     None => failures.push("commitment missing decode_spec_hash".into()),
                     Some(committed) if h_dec != committed =>
