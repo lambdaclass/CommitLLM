@@ -751,9 +751,13 @@ pub fn open_v4_packed(
 /// `weight_scales` is per-layer, per-MatrixType quantization scales.
 /// Empty for native INT8 / toy model (bridges fall back to clamp).
 ///
-/// When `bridge` is `Some`, uses the paper-correct full bridge:
+/// **Canonical path** (`bridge` is `Some`): uses the paper-correct full bridge:
 ///   dequant → residual += → RMSNorm → quantize
-/// When `None`, falls back to simplified bridge.
+/// via `bridge_residual_rmsnorm()`. This is the only path for production
+/// W8A8 models.
+///
+/// **Toy fallback** (`bridge` is `None`): simplified `bridge_requantize()`
+/// with no residual tracking. Only valid for toy-model tests.
 pub fn compute_shell_opening(
     retained: &RetainedTokenState,
     weights: &dyn ShellWeights,
@@ -810,11 +814,13 @@ pub fn compute_shell_opening(
 
         // Post-attention bridge: derive x_ffn
         let x_ffn = if let (Some(ref mut res), Some(b)) = (&mut residual, bridge) {
+            // Canonical: dequant → residual += attn_out → RMSNorm_ffn → quantize
             bridge_residual_rmsnorm(
                 &attn_out, ws(layer_idx, MatrixType::Wo), rs.scale_a,
                 res, &b.rmsnorm_ffn_weights[layer_idx], b.rmsnorm_eps, rs.scale_x_ffn,
             )
         } else {
+            // Toy-model fallback: no residual, no RMSNorm
             bridge_requantize(&attn_out, ws(layer_idx, MatrixType::Wo), rs.scale_a, rs.scale_x_ffn)
         };
 
@@ -842,19 +848,21 @@ pub fn compute_shell_opening(
 
         x_attn = if let (Some(ref mut res), Some(b)) = (&mut residual, bridge) {
             if layer_idx + 1 < b.rmsnorm_attn_weights.len() {
+                // Canonical: dequant → residual += ffn_out → RMSNorm_attn_{l+1} → quantize
                 Some(bridge_residual_rmsnorm(
                     &ffn_out, ws(layer_idx, MatrixType::Wd), rs.scale_h,
                     res, &b.rmsnorm_attn_weights[layer_idx + 1], b.rmsnorm_eps,
                     next_scale_x_attn,
                 ))
             } else {
-                // Last layer: update residual, simplified bridge for unused x_attn
+                // Last layer: update residual for final_hidden, no subsequent RMSNorm
                 dequant_add_residual(&ffn_out, ws(layer_idx, MatrixType::Wd), rs.scale_h, res);
                 Some(bridge_requantize(
                     &ffn_out, ws(layer_idx, MatrixType::Wd), rs.scale_h, next_scale_x_attn,
                 ))
             }
         } else {
+            // Toy-model fallback: no residual, no RMSNorm
             Some(bridge_requantize(
                 &ffn_out, ws(layer_idx, MatrixType::Wd), rs.scale_h, next_scale_x_attn,
             ))

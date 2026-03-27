@@ -909,9 +909,14 @@ pub fn verify_v4_full(
 /// accumulators with precomputed Freivalds keys and verifies bridge
 /// consistency by deriving intermediate i8 values from the accumulators.
 ///
-/// When `shell.initial_residual` is present and the key has RMSNorm weights,
-/// uses the full bridge (dequant → residual → RMSNorm → quantize). This
-/// also enables QKV Freivalds at layer 0.
+/// **Canonical path**: when `shell.initial_residual` is present and the key
+/// has RMSNorm weights, uses the full bridge
+/// (dequant → residual += → RMSNorm → quantize) via `bridge_residual_rmsnorm()`.
+/// This enables QKV Freivalds at all layers including layer 0.
+///
+/// **Toy fallback**: when residual data is absent (toy-model tests), falls
+/// back to `bridge_requantize()` with no residual tracking. QKV at layer 0
+/// is skipped. Not valid for production W8A8 verification.
 ///
 /// Returns `(checks_run, failures, final_hidden)`. `final_hidden` is the
 /// i8 hidden state after the last layer, derived from the bridge chain.
@@ -1022,6 +1027,7 @@ fn verify_shell_opening(
 
             // Post-attention bridge: derive x_ffn
             let x_ffn = if let Some(ref mut res) = residual {
+                // Canonical: dequant → residual += attn_out → RMSNorm_ffn → quantize
                 verilm_core::rmsnorm::bridge_residual_rmsnorm(
                     &sl.attn_out,
                     key.weight_scale_for(layer_idx, MatrixType::Wo),
@@ -1032,6 +1038,7 @@ fn verify_shell_opening(
                     rs.scale_x_ffn,
                 )
             } else {
+                // Toy-model fallback: no residual, no RMSNorm
                 verilm_core::bridge_requantize(
                     &sl.attn_out,
                     key.weight_scale_for(layer_idx, MatrixType::Wo),
@@ -1086,6 +1093,7 @@ fn verify_shell_opening(
 
             x_attn = if let Some(ref mut res) = residual {
                 if layer_idx + 1 < key.rmsnorm_attn_weights.len() {
+                    // Canonical: dequant → residual += ffn_out → RMSNorm_attn_{l+1} → quantize
                     Some(verilm_core::rmsnorm::bridge_residual_rmsnorm(
                         &sl.ffn_out,
                         key.weight_scale_for(layer_idx, MatrixType::Wd),
@@ -1096,6 +1104,7 @@ fn verify_shell_opening(
                         next_scale_x_attn,
                     ))
                 } else {
+                    // Last layer: update residual for final_hidden, no subsequent RMSNorm
                     verilm_core::rmsnorm::dequant_add_residual(
                         &sl.ffn_out,
                         key.weight_scale_for(layer_idx, MatrixType::Wd),
@@ -1110,6 +1119,7 @@ fn verify_shell_opening(
                     ))
                 }
             } else {
+                // Toy-model fallback: no residual, no RMSNorm
                 Some(verilm_core::bridge_requantize(
                     &sl.ffn_out,
                     key.weight_scale_for(layer_idx, MatrixType::Wd),
@@ -1358,9 +1368,13 @@ fn verify_v4_structural(
 
 /// Replay one token's computation shell from retained state + public weights.
 ///
-/// When the key has RMSNorm weights and `initial_residual` is provided,
-/// uses full bridge and enables QKV at layer 0. Otherwise falls back to
-/// simplified bridge (layer 0 QKV skipped).
+/// **Canonical path**: when the key has RMSNorm weights and `initial_residual`
+/// is provided, uses full bridge (`bridge_residual_rmsnorm`) and enables QKV
+/// Freivalds at all layers including layer 0.
+///
+/// **Toy fallback**: when `initial_residual` is absent, falls back to
+/// `bridge_requantize()` with no residual tracking. Layer 0 QKV is skipped.
+/// Not valid for production W8A8 verification.
 ///
 /// Returns (checks_run, failures).
 fn replay_token_shell(
@@ -1444,6 +1458,7 @@ fn replay_token_shell(
 
         // Post-attention bridge: derive x_ffn
         let x_ffn = if let Some(ref mut res) = residual {
+            // Canonical: dequant → residual += attn_out → RMSNorm_ffn → quantize
             verilm_core::rmsnorm::bridge_residual_rmsnorm(
                 &attn_out,
                 key.weight_scale_for(layer_idx, MatrixType::Wo),
@@ -1454,6 +1469,7 @@ fn replay_token_shell(
                 rs.scale_x_ffn,
             )
         } else {
+            // Toy-model fallback: no residual, no RMSNorm
             verilm_core::bridge_requantize(
                 &attn_out,
                 key.weight_scale_for(layer_idx, MatrixType::Wo),
@@ -1529,6 +1545,7 @@ fn replay_token_shell(
 
         x_attn = if let Some(ref mut res) = residual {
             if layer_idx + 1 < key.rmsnorm_attn_weights.len() {
+                // Canonical: dequant → residual += ffn_out → RMSNorm_attn_{l+1} → quantize
                 Some(verilm_core::rmsnorm::bridge_residual_rmsnorm(
                     &ffn_out,
                     key.weight_scale_for(layer_idx, MatrixType::Wd),
@@ -1539,6 +1556,7 @@ fn replay_token_shell(
                     next_scale_x_attn,
                 ))
             } else {
+                // Last layer: update residual for final_hidden, no subsequent RMSNorm
                 verilm_core::rmsnorm::dequant_add_residual(
                     &ffn_out,
                     key.weight_scale_for(layer_idx, MatrixType::Wd),
@@ -1553,6 +1571,7 @@ fn replay_token_shell(
                 ))
             }
         } else {
+            // Toy-model fallback: no residual, no RMSNorm
             Some(verilm_core::bridge_requantize(
                 &ffn_out,
                 key.weight_scale_for(layer_idx, MatrixType::Wd),

@@ -15,21 +15,25 @@ pub mod types;
 
 /// Clamp i32 accumulators to INT8 range (simplified requantize).
 ///
-/// This is the toy-model requantization: saturating clamp to [-128, 127].
-/// For production W8A8 models, use [`bridge_requantize`] which accounts
-/// for weight and activation quantization scales.
+/// **Toy-model only.** Saturating clamp to [-128, 127] with no scale awareness.
+/// Production W8A8 models must use [`rmsnorm::bridge_residual_rmsnorm`] which
+/// implements the full dequant → residual += → RMSNorm → quantize chain.
 pub fn requantize(acc: &[i32]) -> Vec<i8> {
     acc.iter().map(|&v| v.clamp(-128, 127) as i8).collect()
 }
 
-/// Scale-aware simplified requantization bridge for V4 verification.
+/// Scale-aware simplified requantization (toy / last-layer fallback only).
 ///
 /// Converts i32 matmul accumulators to i8 using quantization scales:
 ///   output = round(acc * scale_w * scale_x / scale_out).clamp(-128, 127)
 ///
+/// **Not the canonical bridge.** This omits the residual connection and
+/// RMSNorm that real W8A8 models require. The canonical bridge is
+/// [`rmsnorm::bridge_residual_rmsnorm`]. This function is only used:
+/// - In toy-model tests (no BridgeParams / no residual tracking)
+/// - At the last transformer layer (no subsequent RMSNorm to apply)
+///
 /// For native INT8 (scale_w == 0.0): falls back to toy-model clamp behavior.
-/// This is a simplified bridge — it does not include the residual connection
-/// or RMSNorm. For the full bridge, see [`rmsnorm::requantize_bridge`].
 pub fn bridge_requantize(acc: &[i32], scale_w: f32, scale_x: f32, scale_out: f32) -> Vec<i8> {
     if scale_w == 0.0 {
         return requantize(acc);

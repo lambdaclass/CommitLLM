@@ -53,6 +53,9 @@ fn attach_toy_logits(
     shell.logits_i32 = Some(logits_i32);
 }
 
+/// Toy-model setup: no bridge, no residual, no RMSNorm.
+/// Only valid for toy-model tests — NOT for production W8A8 verification.
+/// For canonical bridge tests, use `setup_full_bridge()`.
 fn setup() -> (ModelConfig, Vec<LayerWeights>, verilm_core::types::VerifierKey) {
     let cfg = ModelConfig::toy();
     let model = generate_model(&cfg, 12345);
@@ -369,7 +372,9 @@ fn v4_weights_wrong_weights_detected() {
 // Scale-aware bridge: prover and verifier agree with non-trivial scales
 // ---------------------------------------------------------------------------
 
-/// Build a key with synthetic weight_scales to exercise scale-aware bridges.
+/// Toy-model setup with non-trivial scales but no residual/RMSNorm.
+/// Exercises the simplified `bridge_requantize()` path with scale awareness.
+/// For canonical bridge tests, use `setup_full_bridge()`.
 fn setup_with_scales() -> (
     ModelConfig,
     Vec<LayerWeights>,
@@ -489,7 +494,8 @@ fn v4_scale_mismatch_detected() {
 }
 
 // ---------------------------------------------------------------------------
-// Full bridge: dequant → residual → RMSNorm → quantize
+// Canonical bridge: dequant → residual += → RMSNorm → quantize
+// This is the only valid path for production W8A8 verification.
 // ---------------------------------------------------------------------------
 
 /// Build synthetic RMSNorm weights and initial residual for full-bridge tests.

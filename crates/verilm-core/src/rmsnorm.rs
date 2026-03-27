@@ -72,44 +72,6 @@ pub fn quantize_f64_to_i8(x: &[f64], scale: f64) -> Vec<i8> {
         .collect()
 }
 
-/// Full requantization bridge: dequantize i32 accumulator → add residual
-/// → RMSNorm → quantize to i8.
-///
-/// This is the chain between consecutive layers in a real W8A8 model:
-///   1. Dequantize: f32 = acc_i32 * scale_w * scale_x
-///   2. Add residual: f64 = dequantized + residual
-///   3. RMSNorm: f64 = RMSNorm(sum, weights, eps)
-///   4. Quantize: i8 = round(f64 / scale_next) clamped to [-128, 127]
-///
-/// Returns the requantized i8 vector.
-pub fn requantize_bridge(
-    acc_i32: &[i32],
-    scale_w: f32,
-    scale_x: f32,
-    residual: &[f64],
-    rmsnorm_weights: &[f32],
-    eps: f64,
-    scale_next: f32,
-) -> Vec<i8> {
-    assert_eq!(acc_i32.len(), residual.len());
-    assert_eq!(acc_i32.len(), rmsnorm_weights.len());
-
-    let dequant_scale = (scale_w as f64) * (scale_x as f64);
-
-    // Step 1+2: dequantize and add residual
-    let post_residual: Vec<f64> = acc_i32
-        .iter()
-        .zip(residual.iter())
-        .map(|(&acc, &res)| (acc as f64) * dequant_scale + res)
-        .collect();
-
-    // Step 3: RMSNorm
-    let normed = rmsnorm_f64_input(&post_residual, rmsnorm_weights, eps);
-
-    // Step 4: quantize
-    quantize_f64_to_i8(&normed, scale_next as f64)
-}
-
 /// Dequantize i32 accumulator and add to residual in place.
 ///
 /// Computes: `residual[i] += acc_i32[i] * scale_w * scale_x`
@@ -120,14 +82,19 @@ pub fn dequant_add_residual(acc_i32: &[i32], scale_w: f32, scale_x: f32, residua
     }
 }
 
-/// Full bridge: dequant → residual += → RMSNorm → quantize to i8.
+/// **Canonical bridge**: dequant → residual += → RMSNorm → quantize to i8.
 ///
 /// Updates residual **in place** and returns the requantized i8 output.
-/// This is the paper-correct bridge for W8A8 models:
+/// This is the only correct bridge for production W8A8 models:
 ///   1. Dequantize: `f64 = acc_i32 * scale_w * scale_x`
 ///   2. Update residual: `residual += dequantized`
 ///   3. RMSNorm: `f64 = RMSNorm(residual, weights, eps)`
 ///   4. Quantize: `i8 = round(f64 / scale_next)` clamped to [-128, 127]
+///
+/// Both prover (`compute_shell_opening`) and verifier (`verify_shell_opening`,
+/// `replay_token_shell`) use this function when BridgeParams / initial_residual
+/// is present. The simplified `bridge_requantize()` fallback exists only for
+/// toy-model tests.
 pub fn bridge_residual_rmsnorm(
     acc_i32: &[i32],
     scale_w: f32,
@@ -140,34 +107,6 @@ pub fn bridge_residual_rmsnorm(
     dequant_add_residual(acc_i32, scale_w, scale_x, residual);
     let normed = rmsnorm_f64_input(residual, rmsnorm_weights, eps);
     quantize_f64_to_i8(&normed, scale_next as f64)
-}
-
-/// Verify the requantization bridge between two layers.
-///
-/// Checks that `next_input_i8` matches the canonical recomputation:
-///   dequant(acc_i32) + residual → RMSNorm → quantize(scale_next)
-///
-/// Returns true if every element matches exactly.
-pub fn verify_bridge(
-    acc_i32: &[i32],
-    scale_w: f32,
-    scale_x: f32,
-    residual: &[f64],
-    rmsnorm_weights: &[f32],
-    eps: f64,
-    scale_next: f32,
-    next_input_i8: &[i8],
-) -> bool {
-    let expected = requantize_bridge(
-        acc_i32,
-        scale_w,
-        scale_x,
-        residual,
-        rmsnorm_weights,
-        eps,
-        scale_next,
-    );
-    expected == next_input_i8
 }
 
 #[cfg(test)]
@@ -225,15 +164,18 @@ mod tests {
     }
 
     #[test]
-    fn test_bridge_roundtrip() {
-        // Simple case: unit scales, zero residual, identity RMSNorm weights
+    fn test_bridge_residual_rmsnorm_roundtrip() {
+        // Canonical bridge: unit scales, zero residual, identity RMSNorm weights
         let acc = vec![10, 20, -10, 0];
-        let residual = vec![0.0; 4];
+        let mut residual = vec![0.0f64; 4];
         let weights = vec![1.0f32; 4];
-        let result = requantize_bridge(&acc, 1.0, 1.0, &residual, &weights, 0.0, 1.0);
+        let result = bridge_residual_rmsnorm(&acc, 1.0, 1.0, &mut residual, &weights, 0.0, 1.0);
         // RMS of [10,20,-10,0] = sqrt((100+400+100+0)/4) = sqrt(150) ≈ 12.247
         // Output: [10/12.247, 20/12.247, -10/12.247, 0] ≈ [0.816, 1.633, -0.816, 0]
         // Quantized with scale=1.0: round to [1, 2, -1, 0]
         assert_eq!(result, vec![1, 2, -1, 0]);
+        // Residual was updated in place
+        assert!((residual[0] - 10.0).abs() < 1e-10);
+        assert!((residual[1] - 20.0).abs() < 1e-10);
     }
 }
