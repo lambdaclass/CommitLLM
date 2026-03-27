@@ -112,7 +112,7 @@ VeriLM is designed around three constraints:
 
 The final protocol uses four guarantee classes:
 
-+ *Exact.* A property is cryptographically checked or canonically recomputed with fully specified semantics.
++ *Exact.* A property is cryptographically bound and then checked by information-theoretically sound algebraic verification or canonical recomputation with fully specified semantics.
 + *Approximate.* The verifier independently replays the computation and constrains it tightly, but native FP16/BF16 execution is not bit-reproducible across hardware.
 + *Statistical.* Commitment binding is exact, but correctness of unopened positions depends on challenge sampling unless deep audit is used.
 + *Fail-closed.* A feature is either replayed exactly or rejected explicitly; the verifier never silently accepts unsupported semantics.
@@ -145,14 +145,14 @@ The final protocol targets autoregressive decoder-only transformers with a commi
 
 VeriLM's verification is structured in six layers. This section defines the taxonomy and key terms; the full procedure is specified in @sec-protocol.
 
-The *shell* is the non-attention path through each transformer layer: seven INT8 weight matrix multiplications ($W_q$, $W_k$, $W_v$, $W_o$, $W_"gate"$, $W_"up"$, $W_"down"$), *requantization bridges* (the $"i32" arrow.r "i8"$ conversions between consecutive matmul stages), RoPE, RMSNorm, and SiLU. The shell includes nonlinear operations (RMSNorm, SiLU), but all shell operations are deterministic or canonically recomputable. Its exactness is a composition: cryptographic checks (Freivalds @freivalds1979) on the weight matmuls, plus deterministic or canonical recomputation on the bridge operations.
+The *shell* is the non-attention path through each transformer layer: seven INT8 weight matrix multiplications ($W_q$, $W_k$, $W_v$, $W_o$, $W_"gate"$, $W_"up"$, $W_"down"$), *requantization bridges* (the $"i32" arrow.r "i8"$ conversions between consecutive matmul stages), RoPE, RMSNorm, and SiLU. The shell includes nonlinear operations (RMSNorm, SiLU), but all shell operations are deterministic or canonically recomputable. Its exactness is a composition: information-theoretically sound algebraic checks (Freivalds @freivalds1979) on the weight matmuls, plus deterministic or canonical recomputation on the bridge operations.
 
 Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not bit-reproducible across hardware --- this is the only non-exact component. The final exact tail starts from a captured pre-final-norm residual after the last layer, applies final RMSNorm exactly, binds the LM head with Freivalds, computes logits exactly, and replays the decode/output policy.
 
 The six layers are:
 
 + *Input/model binding (exact).* Preprocessing policy, model identity, quantization scheme, architecture parameters, and deployment specs are committed and checked against known-good values.
-+ *Shell verification (exact).* Cryptographic Freivalds checks ($lt.eq 1\/2^(32)$ false-accept) on all shell weight matmuls, plus deterministic recomputation of requantization bridges, RoPE, RMSNorm, and SiLU.
++ *Shell verification (exact).* Information-theoretically sound Freivalds checks ($lt.eq 1\/2^(32)$ false-accept) on all shell weight matmuls, plus deterministic recomputation of requantization bridges, RoPE, RMSNorm, and SiLU.
 + *KV provenance (statistical by default).* Merkle-committed per-token K,V history; sampled positions are shell-verified. Binding is exact; correctness of unsampled positions depends on sampling rate unless deep audit is used.
 + *Cross-layer consistency (structural).* Opening multiple layers on the same token creates algebraic coupling through the residual stream --- fake attention must stay consistent across all opened layers.
 + *Attention replay (approximate).* The verifier recomputes attention from shell-verified Q and committed prefix K,V in FP64, quantizes to INT8, and compares. Limited by FP16$arrow.l.r$FP64 mismatch.
@@ -438,14 +438,15 @@ The deployment commitment $M$ binds four specs into the receipt: preprocessing, 
 
 The protocol does not assume honest prover hardware or honest provider runtime behavior. Those are the target of verification. The explicit assumptions outside protocol scope are:
 
-+ standard cryptographic assumptions for the hash functions and finite-field checks
++ standard cryptographic assumptions for the hash functions
++ information-theoretic soundness of the finite-field Freivalds checks
 + secrecy of verifier-only material such as the Freivalds vectors
 + no side-channel leakage of verifier-secret material
 + correct execution of the verifier itself
 
 = The Attention Gap <sec-attention-gap>
 
-The shell is exactly verifiable because its operations are deterministic or canonically recomputable: INT8 matmuls are checked cryptographically via Freivalds, while requantization, RoPE, SiLU, and RMSNorm are verified by exact or canonical recomputation. Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not bit-reproducible across hardware.
+The shell is exactly verifiable because its operations are deterministic or canonically recomputable: INT8 matmuls are checked with information-theoretically sound Freivalds checks, while requantization, RoPE, SiLU, and RMSNorm are verified by exact or canonical recomputation. Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not bit-reproducible across hardware.
 
 The protocol constrains the attention interior from both sides: inputs ($Q$, $K$, $V$) and outputs (post-$W_o$) are exactly verified by the shell. Attention replay directly checks consistency. Cross-layer constraints force fake attention to survive the residual stream.
 

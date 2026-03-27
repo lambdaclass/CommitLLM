@@ -52,7 +52,7 @@ v · x  =?  r^T · z
 
 with arithmetic in a finite field `F_p` for a prime `p ≥ 2^32`. If `z = W @ x`, the equality always holds. If the provider used the wrong weights or the wrong output, it fails except with probability at most `1/p`.
 
-This matters because transformers are mostly matrix multiplication. Once those multiplications become cheap to audit, the verifier can check model identity without rerunning the full model.
+This is an information-theoretically sound check: if the provider uses the wrong weights or wrong output, the false-accept probability is at most `1/p`. That matters because transformers are mostly matrix multiplication. Once those multiplications become cheap to audit, the verifier can check model identity without rerunning the full model.
 
 In the final VeriLM protocol, Freivalds is used for:
 
@@ -293,7 +293,8 @@ VeriLM does not assume honest prover hardware or honest provider runtime behavio
 
 The explicit assumptions outside protocol scope are:
 
-- standard cryptographic assumptions for the hash functions and finite-field checks
+- standard cryptographic assumptions for the hash functions
+- information-theoretic soundness of the finite-field Freivalds checks
 - secrecy of verifier-only material such as the Freivalds vectors
 - no side-channel leakage of verifier-secret material
 - correct execution of the verifier itself

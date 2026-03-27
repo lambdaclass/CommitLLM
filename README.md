@@ -12,7 +12,7 @@ A provider serves responses normally and returns a compact receipt. Later, a ver
 
 The design goal is:
 
-> Everything except the attention interior is exact, replayable, and cryptographically bound.
+> Everything except the attention interior is exact, replayable, and bound by cryptographic commitments plus information-theoretically sound checks.
 
 This README describes the final protocol boundary. The implementation roadmap for reaching that boundary is in [roadmap.md](./roadmap.md).
 
@@ -22,7 +22,7 @@ VeriLM uses four guarantee classes:
 
 | Class | Meaning |
 |---|---|
-| Exact | Cryptographically checked or canonically recomputed with no ambiguity in the protocol semantics |
+| Exact | Cryptographically bound and then checked by information-theoretically sound algebraic verification or canonical recomputation with no ambiguity in the protocol semantics |
 | Approximate | Replayed and constrained, but not bit-reproducible because native FP16/BF16 attention is hardware-sensitive |
 | Statistical | Commitment binding is exact, but correctness of unopened positions depends on challenge sampling unless deep audit is used |
 | Fail-closed | A feature is either replayed exactly or rejected explicitly; the verifier never silently accepts unsupported semantics |
@@ -33,12 +33,12 @@ VeriLM uses four guarantee classes:
 |---|---|---|
 | Input preprocessing | Bound by `input_spec_hash` | Exact |
 | Embedding lookup | Merkle proof against committed embedding root | Exact |
-| Shell matmuls (`W_q`, `W_k`, `W_v`, `W_o`, `W_gate`, `W_up`, `W_down`) | Verifier-secret Freivalds | Exact |
+| Shell matmuls (`W_q`, `W_k`, `W_v`, `W_o`, `W_gate`, `W_up`, `W_down`) | Information-theoretically sound Freivalds with verifier-secret challenges | Exact |
 | Bridge operations (requantization, residual, RMSNorm, RoPE, SiLU) | Canonical recomputation | Exact |
 | Prefix / KV provenance | Merkle commitment plus sampled shell verification, or exact deep audit | Statistical by default; Exact in deep audit |
 | Attention interior | Independent replay against committed prefix and committed post-attention output | Approximate |
 | Final-token boundary | Start from captured pre-final-norm residual | Exact |
-| LM head | Freivalds binding plus exact logits replay | Exact |
+| LM head | Information-theoretically sound Freivalds binding plus exact logits replay | Exact |
 | Decode policy | Canonical sampler replay or explicit fail-closed rejection | Exact / Fail-closed |
 | Output policy | Exact stopping / output replay or explicit fail-closed rejection | Exact / Fail-closed |
 
@@ -224,7 +224,8 @@ The remaining explicit assumptions outside protocol scope are:
 
 - standard cryptographic assumptions:
   - collision resistance of the hash functions used for Merkle commitments and manifest binding
-  - the usual finite-field soundness assumptions behind Freivalds checks
+- information-theoretic soundness:
+  - the finite-field Freivalds checks have the stated false-accept bound when verifier-secret randomness remains secret
 - verifier-secret secrecy:
   - the prover does not learn the verifier’s secret Freivalds vectors or equivalent verifier-only randomness
 - no side-channel leakage of verifier-secret material
