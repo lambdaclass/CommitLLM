@@ -614,6 +614,7 @@ pub fn open_v4_packed(
     tail: Option<&TailParams>,
     layer_filter: Option<&[usize]>,
     embedding_lookup: Option<&dyn EmbeddingLookup>,
+    deep_prefix: bool,
 ) -> V4AuditResponse {
     let i = token_index as usize;
     assert!(i < state.n_tokens(), "token_index out of range");
@@ -683,6 +684,39 @@ pub fn open_v4_packed(
             (rows, proofs)
         });
 
+    // Deep prefix: full retained state + shell openings for prefix tokens.
+    let (dp_retained, dp_shells) = if deep_prefix {
+        if let (Some(lookup), Some(b)) = (embedding_lookup, bridge) {
+            let mut prefix_ret = Vec::with_capacity(i);
+            let mut prefix_shells = Vec::with_capacity(i);
+            for j in 0..i {
+                let retained_j = state.extract_token(j);
+                let tid_j = state.token_ids[j];
+                if let Some((emb_row, _emb_proof)) = lookup.embedding_row_and_proof(tid_j) {
+                    let bridge_j = BridgeParams {
+                        rmsnorm_attn_weights: b.rmsnorm_attn_weights,
+                        rmsnorm_ffn_weights: b.rmsnorm_ffn_weights,
+                        rmsnorm_eps: b.rmsnorm_eps,
+                        initial_residual: &emb_row,
+                        embedding_proof: None,
+                    };
+                    let mut shell_j = compute_shell_opening(
+                        &retained_j, weights, cfg, weight_scales,
+                        Some(&bridge_j), layer_filter,
+                    );
+                    shell_j.final_residual = state.extract_final_residual(j);
+                    prefix_ret.push(retained_j);
+                    prefix_shells.push(shell_j);
+                }
+            }
+            (Some(prefix_ret), Some(prefix_shells))
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
     V4AuditResponse {
         token_index,
         retained: retained_token,
@@ -702,8 +736,8 @@ pub fn open_v4_packed(
         output_text: None,
         prefix_embedding_rows: prefix_embeddings.as_ref().map(|(rows, _)| rows.clone()),
         prefix_embedding_proofs: prefix_embeddings.map(|(_, proofs)| proofs),
-        prefix_retained: None,
-        prefix_shell_openings: None,
+        prefix_retained: dp_retained,
+        prefix_shell_openings: dp_shells,
     }
 }
 
@@ -865,6 +899,7 @@ pub fn open_v4(
     tail: Option<&TailParams>,
     layer_filter: Option<&[usize]>,
     embedding_lookup: Option<&dyn EmbeddingLookup>,
+    deep_prefix: bool,
 ) -> V4AuditResponse {
     let mut response = open_v4_structural(state, token_index);
     let mut shell = compute_shell_opening(
@@ -903,6 +938,40 @@ pub fn open_v4(
         }
         response.prefix_embedding_rows = Some(rows);
         response.prefix_embedding_proofs = Some(proofs);
+    }
+
+    // Deep prefix: full retained state + shell openings for prefix tokens.
+    if deep_prefix {
+        if let (Some(lookup), Some(b)) = (embedding_lookup, bridge) {
+            let i = token_index as usize;
+            let mut prefix_ret = Vec::with_capacity(i);
+            let mut prefix_shells = Vec::with_capacity(i);
+            for j in 0..i {
+                let retained_j = &state.all_retained[j];
+                let tid_j = state.token_ids[j];
+                if let Some((emb_row, _emb_proof)) = lookup.embedding_row_and_proof(tid_j) {
+                    let bridge_j = BridgeParams {
+                        rmsnorm_attn_weights: b.rmsnorm_attn_weights,
+                        rmsnorm_ffn_weights: b.rmsnorm_ffn_weights,
+                        rmsnorm_eps: b.rmsnorm_eps,
+                        initial_residual: &emb_row,
+                        embedding_proof: None, // prefix tokens don't carry individual proofs in shell
+                    };
+                    let mut shell_j = compute_shell_opening(
+                        retained_j, weights, cfg, weight_scales,
+                        Some(&bridge_j), layer_filter,
+                    );
+                    shell_j.final_residual = state.final_residuals
+                        .as_ref()
+                        .and_then(|frs| frs.get(j))
+                        .cloned();
+                    prefix_ret.push(retained_j.clone());
+                    prefix_shells.push(shell_j);
+                }
+            }
+            response.prefix_retained = Some(prefix_ret);
+            response.prefix_shell_openings = Some(prefix_shells);
+        }
     }
 
     response

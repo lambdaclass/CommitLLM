@@ -424,6 +424,8 @@ struct MinimalBatchStateHandle {
     provider: Option<Arc<verilm_keygen::SafetensorsWeightProvider>>,
     /// Whether to include rich prefix (embedding rows + proofs) in audit openings.
     rich_prefix: bool,
+    /// Whether to include full retained state + shell openings for prefix tokens (deep audit).
+    deep_prefix: bool,
 }
 
 #[pymethods]
@@ -519,7 +521,7 @@ impl MinimalBatchStateHandle {
         Ok(verilm_prover::open_v4(
             &self.inner, token_index, provider.as_ref(), provider.config(),
             provider.weight_scales(), bridge.as_ref(), tail.as_ref(), layer_filter,
-            emb_lookup,
+            emb_lookup, self.deep_prefix,
         ))
     }
 }
@@ -629,6 +631,7 @@ fn commit_minimal_from_captures(
         commitment,
         provider: weight_provider.map(|wp| Arc::clone(&wp.inner)),
         rich_prefix: false,
+        deep_prefix: false,
     })
 }
 
@@ -644,6 +647,7 @@ struct PackedBatchStateHandle {
     commitment: BatchCommitment,
     provider: Option<Arc<verilm_keygen::SafetensorsWeightProvider>>,
     rich_prefix: bool,
+    deep_prefix: bool,
 }
 
 #[pymethods]
@@ -733,7 +737,7 @@ impl PackedBatchStateHandle {
         Ok(verilm_prover::open_v4_packed(
             &self.inner, token_index, provider.as_ref(), provider.config(),
             provider.weight_scales(), bridge.as_ref(), tail.as_ref(), layer_filter,
-            emb_lookup,
+            emb_lookup, self.deep_prefix,
         ))
     }
 }
@@ -842,6 +846,7 @@ fn commit_minimal_packed(
         commitment,
         provider: weight_provider.map(|wp| Arc::clone(&wp.inner)),
         rich_prefix: false,
+        deep_prefix: false,
     })
 }
 

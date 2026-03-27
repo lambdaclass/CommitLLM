@@ -467,6 +467,48 @@ pub fn verify_v4_full(
                 }
             }
 
+            // Deep prefix: verify prefix_retained[j] hashes to prefix_leaf_hashes[j],
+            // then run shell Freivalds+bridge on each prefix token.
+            if let (Some(ref prefix_ret), Some(ref prefix_shells)) = (
+                &response.prefix_retained,
+                &response.prefix_shell_openings,
+            ) {
+                if prefix_ret.len() != response.prefix_leaf_hashes.len()
+                    || prefix_shells.len() != response.prefix_leaf_hashes.len()
+                {
+                    checks_run += 1;
+                    failures.push(format!(
+                        "deep prefix count mismatch: {} retained, {} shells, {} leaf_hashes",
+                        prefix_ret.len(), prefix_shells.len(), response.prefix_leaf_hashes.len()
+                    ));
+                } else {
+                    for (j, ((ret_j, shell_j), &expected_hash)) in prefix_ret.iter()
+                        .zip(prefix_shells.iter())
+                        .zip(response.prefix_leaf_hashes.iter())
+                        .enumerate()
+                    {
+                        // 1. Hash consistency: retained state must match committed leaf.
+                        checks_run += 1;
+                        let fr_ref = shell_j.final_residual.as_deref();
+                        let hash_j = verilm_core::merkle::hash_retained_with_residual(ret_j, fr_ref);
+                        if hash_j != expected_hash {
+                            failures.push(format!(
+                                "prefix token {}: retained hash mismatch (deep audit)",
+                                j
+                            ));
+                            continue;
+                        }
+
+                        // 2. Shell Freivalds + bridge verification (same as challenged token).
+                        let (c, f, _) = verify_shell_opening(key, ret_j, shell_j);
+                        checks_run += c;
+                        for failure in f {
+                            failures.push(format!("prefix token {}: {}", j, failure));
+                        }
+                    }
+                }
+            }
+
             // Prompt/generation boundary consistency: if we know n_prompt_tokens and
             // the challenged token is within the prompt range, verify the embedding
             // proof binds the correct token_id (already done above). Additionally,
