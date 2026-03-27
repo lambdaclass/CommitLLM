@@ -8,7 +8,7 @@
 use std::time::{Duration, Instant};
 
 use verilm_core::constants::MatrixType;
-use verilm_core::types::{AuditChallenge, AuditTier, CommitmentVersion, DeploymentManifest, V4AuditResponse, VerifierKey};
+use verilm_core::types::{AuditChallenge, AuditTier, CommitmentVersion, DeploymentManifest, InputSpec, V4AuditResponse, VerifierKey};
 use verilm_core::{freivalds, merkle};
 
 pub use verilm_core::requantize;
@@ -18,6 +18,27 @@ pub use verilm_core::types::ShellWeights;
 pub enum Verdict {
     Pass,
     Fail,
+}
+
+/// Tokenizer abstraction for canonical request→token reconstruction.
+///
+/// Implementors (typically Python-side with HuggingFace tokenizers) provide
+/// a tokenization function that the verifier calls to reconstruct prompt
+/// token IDs from raw prompt bytes and the committed `InputSpec`.
+///
+/// The verifier uses this to independently derive the expected token chain,
+/// closing the gap between "caller supplies token IDs" and "verifier
+/// reconstructs them from the raw request."
+pub trait PromptTokenizer {
+    /// Tokenize raw prompt bytes according to the given `InputSpec`.
+    ///
+    /// Returns the full list of prompt token IDs (including the first token
+    /// that will be consumed as embedding input). The `InputSpec` provides
+    /// the tokenizer_hash (identifies which vocabulary), bos_eos_policy,
+    /// truncation_policy, and special_token_policy that govern preprocessing.
+    ///
+    /// Errors should be returned as `Err(description)`.
+    fn tokenize(&self, prompt: &[u8], input_spec: &InputSpec) -> Result<Vec<u32>, String>;
 }
 
 /// Verify that a batch commitment's manifest hash matches the expected deployment manifest.
@@ -270,20 +291,75 @@ impl std::fmt::Display for V4VerifyReport {
 /// 2. Shell opening: Freivalds on each matmul (W_o, W_g, W_u, W_d, optionally QKV)
 /// 3. Bridge consistency: verifier derives intermediate i8 values from i32 accumulators
 /// 4. Retained-state binding: shell openings must be consistent with committed `a`
-/// 5. Input tokenization: if `expected_prompt_token_ids` is provided, verifies
-///    the prompt token chain matches the externally-tokenized result.
-/// 6. Output policy: min_tokens and ignore_eos enforcement when manifest is present.
+/// 5. Input tokenization: when a `PromptTokenizer` is provided, the verifier
+///    reconstructs prompt token IDs from raw prompt bytes + `InputSpec` and
+///    checks them against the committed chain. Alternatively, pass
+///    pre-tokenized IDs via `expected_prompt_token_ids`.
+/// 6. Output policy: min_tokens, ignore_eos, and eos_policy enforcement.
 pub fn verify_v4(
     key: &VerifierKey,
     response: &V4AuditResponse,
     expected_prompt_token_ids: Option<&[u32]>,
 ) -> V4VerifyReport {
+    let no_tok: Option<&dyn PromptTokenizer> = None;
+    verify_v4_full(key, response, expected_prompt_token_ids, no_tok)
+}
+
+/// Full verification with optional canonical tokenizer for request→token reconstruction.
+///
+/// When `tokenizer` is `Some`, the verifier reconstructs prompt token IDs from
+/// `response.prompt` + the manifest's `InputSpec`, then checks them against
+/// the committed chain. This is the canonical path — the verifier independently
+/// derives the expected tokens rather than trusting caller-supplied IDs.
+///
+/// `expected_prompt_token_ids` is a fallback: used only when no tokenizer is
+/// provided or when the response lacks the fields needed for reconstruction.
+pub fn verify_v4_full(
+    key: &VerifierKey,
+    response: &V4AuditResponse,
+    expected_prompt_token_ids: Option<&[u32]>,
+    tokenizer: Option<&dyn PromptTokenizer>,
+) -> V4VerifyReport {
     let start = Instant::now();
     let (mut checks_run, mut failures) = verify_v4_structural(response);
 
-    // Input tokenization verification: if the caller provides expected prompt
-    // token IDs (from an external tokenizer), verify they match the committed chain.
-    if let Some(expected_tids) = expected_prompt_token_ids {
+    // Input tokenization verification: canonical reconstruction when possible.
+    //
+    // Priority:
+    // 1. tokenizer + prompt bytes + manifest → reconstruct and verify
+    // 2. caller-supplied expected_prompt_token_ids → verify directly
+    // 3. neither → skip (no tokenization check)
+    let reconstructed_tids: Option<Vec<u32>>;
+    let tids_to_check: Option<&[u32]> = if let Some(tok) = tokenizer {
+        // Attempt canonical reconstruction from raw prompt + InputSpec.
+        match (&response.prompt, &response.manifest) {
+            (Some(prompt_bytes), Some(manifest)) => {
+                let input_spec = InputSpec::from(manifest);
+                match tok.tokenize(prompt_bytes, &input_spec) {
+                    Ok(tids) => {
+                        reconstructed_tids = Some(tids);
+                        reconstructed_tids.as_deref()
+                    }
+                    Err(e) => {
+                        failures.push(format!("tokenizer reconstruction failed: {}", e));
+                        None
+                    }
+                }
+            }
+            (None, _) => {
+                // No prompt bytes → can't reconstruct. Fall back to caller-supplied.
+                expected_prompt_token_ids
+            }
+            (_, None) => {
+                // No manifest → can't get InputSpec. Fall back to caller-supplied.
+                expected_prompt_token_ids
+            }
+        }
+    } else {
+        expected_prompt_token_ids
+    };
+
+    if let Some(expected_tids) = tids_to_check {
         checks_run += 1;
         let tok_failures = verify_input_tokenization(response, expected_tids);
         failures.extend(tok_failures);
@@ -509,6 +585,32 @@ pub fn verify_v4(
                     failures.push(
                         "output_spec requires min_tokens or ignore_eos but eos_token_id is missing".into()
                     );
+                }
+
+                // eos_policy enforcement.
+                //
+                // "stop": generation terminates when EOS is produced. If the
+                // challenged token is EOS, it must be the last committed token
+                // (no tokens after EOS). Conversely, if there are tokens after
+                // the last generated position, none of the intermediate tokens
+                // should be EOS (the prover continued past an EOS).
+                if output_spec.eos_policy == "stop" {
+                    if let Some(eos_id) = output_spec.eos_token_id {
+                        checks_run += 1;
+                        let is_last_token = response.token_index == response.commitment.n_tokens.saturating_sub(1);
+                        if response.token_id == eos_id && !is_last_token {
+                            failures.push(format!(
+                                "eos_policy='stop' but EOS token ({}) at index {} is not the last token (n_tokens={})",
+                                eos_id, response.token_index, response.commitment.n_tokens
+                            ));
+                        }
+                    }
+                } else if output_spec.eos_policy != "sample" {
+                    // Only "stop" and "sample" are recognized. Reject unknown policies.
+                    failures.push(format!(
+                        "unknown eos_policy='{}' (expected 'stop' or 'sample')",
+                        output_spec.eos_policy
+                    ));
                 }
 
                 Some(verilm_core::sampling::DecodeParams {

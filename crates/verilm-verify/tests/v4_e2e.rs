@@ -9,7 +9,8 @@ use verilm_core::constants::{MatrixType, ModelConfig};
 use verilm_core::types::{BridgeParams, DeploymentManifest, RetainedLayerState, RetainedTokenState, ShellWeights};
 use verilm_prover::{commit_minimal, open_v4, open_v4_structural, FullBindingParams};
 use verilm_test_vectors::{forward_pass, generate_key, generate_model, LayerWeights};
-use verilm_verify::{verify_v4, verify_v4_with_weights, Verdict};
+use verilm_core::types::InputSpec;
+use verilm_verify::{verify_v4, verify_v4_full, verify_v4_with_weights, PromptTokenizer, Verdict};
 
 /// Adapter: exposes toy model LayerWeights as ShellWeights.
 struct ToyWeights<'a>(&'a [LayerWeights]);
@@ -2398,4 +2399,222 @@ fn v4_output_policy_fails_closed_without_eos_token_id() {
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report.failures.iter().any(|f| f.contains("eos_token_id is missing")),
         "should fail-closed without eos_token_id, failures: {:?}", report.failures);
+}
+
+// ---------------------------------------------------------------------------
+// eos_policy enforcement
+// ---------------------------------------------------------------------------
+
+#[test]
+fn v4_eos_policy_stop_allows_eos_as_last_token() {
+    // eos_policy="stop", EOS is the last committed token → pass.
+    let (cfg, model, key, _lm_head, input, _token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let eos_id = 42u32;
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.eos_token_id = Some(eos_id);
+    // eos_policy is already "stop" from make_manifest
+
+    // Single token committed, token_index=0, n_tokens=1 → it IS the last token.
+    let params = FullBindingParams {
+        token_ids: &[eos_id],
+        prompt: b"eos last",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    attach_toy_logits(&mut response, &_lm_head, &cfg);
+
+    let report = verify_v4(&key, &response, None);
+    // May fail on lm_head (token_id forced to eos_id) but should NOT fail on eos_policy.
+    assert!(!report.failures.iter().any(|f| f.contains("eos_policy")),
+        "eos_policy should not fail when EOS is last token, failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_eos_policy_stop_rejects_eos_mid_sequence() {
+    // eos_policy="stop", EOS at index 0 but n_tokens=2 → generation continued past EOS.
+    let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
+    let input2: Vec<i8> = (0..cfg.hidden_dim).map(|i| ((i * 3 + 50) % 256) as i8).collect();
+    let traces0 = forward_pass(&cfg, &model, &input);
+    let traces1 = forward_pass(&cfg, &model, &input2);
+    let retained0 = retained_from_traces(&traces0);
+    let retained1 = retained_from_traces(&traces1);
+
+    let eos_id = token_id; // Make the first token be EOS
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.eos_token_id = Some(eos_id);
+
+    // Two tokens committed: [eos_id, something]. Opening token 0 → EOS but not last.
+    let params = FullBindingParams {
+        token_ids: &[eos_id, 99],
+        prompt: b"eos mid",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained0, retained1], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    attach_toy_logits(&mut response, &_lm_head, &cfg);
+
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("eos_policy")),
+        "should reject EOS mid-sequence with stop policy, failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_unknown_eos_policy_rejected() {
+    // eos_policy="custom_thing" → rejected as unknown.
+    let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.eos_policy = "custom_thing".into();
+
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"unknown policy",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    attach_toy_logits(&mut response, &_lm_head, &cfg);
+
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("unknown eos_policy")),
+        "should reject unknown eos_policy, failures: {:?}", report.failures);
+}
+
+// ---------------------------------------------------------------------------
+// PromptTokenizer trait: canonical reconstruction via verify_v4_full
+// ---------------------------------------------------------------------------
+
+/// Test tokenizer that returns fixed token IDs based on prompt content.
+struct FixedTokenizer {
+    token_ids: Vec<u32>,
+}
+
+impl PromptTokenizer for FixedTokenizer {
+    fn tokenize(&self, _prompt: &[u8], _input_spec: &InputSpec) -> Result<Vec<u32>, String> {
+        Ok(self.token_ids.clone())
+    }
+}
+
+#[test]
+fn v4_tokenizer_trait_reconstruction_pass() {
+    // verify_v4_full with a PromptTokenizer that returns the correct token IDs.
+    let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"tokenizer test",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(2),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    attach_toy_logits(&mut response, &_lm_head, &cfg);
+
+    // Tokenizer returns [100, token_id]: first is embedding input, second in chain.
+    let tokenizer = FixedTokenizer { token_ids: vec![100, token_id] };
+    let report = verify_v4_full(&key, &response, None, Some(&tokenizer as &dyn PromptTokenizer));
+    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_tokenizer_trait_reconstruction_mismatch() {
+    // verify_v4_full with a PromptTokenizer that returns wrong token IDs.
+    let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"tokenizer mismatch",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(2),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    attach_toy_logits(&mut response, &_lm_head, &cfg);
+
+    // Tokenizer returns wrong second token.
+    let tokenizer = FixedTokenizer { token_ids: vec![100, token_id + 1] };
+    let report = verify_v4_full(&key, &response, None, Some(&tokenizer as &dyn PromptTokenizer));
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("prompt token mismatch")),
+        "should detect mismatch from reconstructed tokens, failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_tokenizer_trait_error_reported() {
+    // Tokenizer returns an error → should appear in failures.
+    let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"tokenizer error",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    attach_toy_logits(&mut response, &_lm_head, &cfg);
+
+    struct FailingTokenizer;
+    impl PromptTokenizer for FailingTokenizer {
+        fn tokenize(&self, _: &[u8], _: &InputSpec) -> Result<Vec<u32>, String> {
+            Err("tokenizer not available".into())
+        }
+    }
+
+    let tokenizer = FailingTokenizer;
+    let report = verify_v4_full(&key, &response, None, Some(&tokenizer as &dyn PromptTokenizer));
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("tokenizer reconstruction failed")),
+        "should report tokenizer error, failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_tokenizer_fallback_to_caller_supplied() {
+    // No manifest in response → tokenizer can't reconstruct → falls back to caller-supplied IDs.
+    let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"no manifest",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+        n_prompt_tokens: Some(2),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    attach_toy_logits(&mut response, &_lm_head, &cfg);
+
+    // Tokenizer provided but no manifest → falls back to caller-supplied IDs.
+    let tokenizer = FixedTokenizer { token_ids: vec![999, 888] }; // would mismatch
+    let correct_ids = vec![100u32, token_id];
+    let report = verify_v4_full(&key, &response, Some(&correct_ids), Some(&tokenizer as &dyn PromptTokenizer));
+    assert_eq!(report.verdict, Verdict::Pass, "should fall back to caller-supplied IDs, failures: {:?}", report.failures);
 }
