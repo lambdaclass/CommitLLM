@@ -427,45 +427,6 @@ pub fn hash_weights(
     hasher.finalize().into()
 }
 
-/// Compute the KV provenance chain hash for a token.
-///
-/// Chain: `H("vi-kv-v1" || prev_kv_hash || requantize(k_t) || requantize(v_t) || token_index_le32)`
-///
-/// This binds each token's K/V projections into a running chain, so that
-/// under partial opening the verifier can detect fabricated KV cache entries
-/// for consecutive opened tokens.
-///
-/// For token 0, `prev_kv_hash` is the genesis zero hash `[0u8; 32]`.
-/// The hash covers all layers' K and V (concatenated in layer order).
-///
-/// Accepts any type that derefs to `[i8]` (`Vec<i8>`, `&[i8]`, etc.).
-pub fn kv_chain_hash<K: AsRef<[i8]>, V: AsRef<[i8]>>(
-    prev_kv_hash: &[u8; 32],
-    k_i8_per_layer: &[K],
-    v_i8_per_layer: &[V],
-    token_index: u32,
-) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"vi-kv-v1");
-    hasher.update(prev_kv_hash);
-    for k in k_i8_per_layer {
-        let k = k.as_ref();
-        // Safety: i8 and u8 have identical layout
-        let bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(k.as_ptr() as *const u8, k.len())
-        };
-        hasher.update(bytes);
-    }
-    for v in v_i8_per_layer {
-        let v = v.as_ref();
-        let bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len())
-        };
-        hasher.update(bytes);
-    }
-    hasher.update(token_index.to_le_bytes());
-    hasher.finalize().into()
-}
 
 /// SHA-256 of a sampling seed (for seed commitment).
 pub fn hash_seed(seed: &[u8; 32]) -> [u8; 32] {

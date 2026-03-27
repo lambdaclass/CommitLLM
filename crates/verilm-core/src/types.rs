@@ -416,6 +416,12 @@ pub struct VerifierKey {
     /// RMSNorm epsilon (e.g. 1e-5 for Llama-family models).
     pub rmsnorm_eps: f64,
 
+    /// RoPE configuration hash. When present, cross-checked against the
+    /// manifest's `rope_config_hash` to ensure the verifier key was
+    /// generated for the same positional encoding configuration.
+    #[serde(default)]
+    pub rope_config_hash: Option<[u8; 32]>,
+
     /// Merkle root over embedding table rows.
     /// Each leaf = `hash_embedding_row(row_f32)`. Verifier checks prover's
     /// `initial_residual` against this root via `ShellTokenOpening.embedding_proof`.
@@ -915,12 +921,6 @@ pub struct BatchCommitment {
     /// tokens are determined by the tokenizer vs. by sampling.
     #[serde(default)]
     pub n_prompt_tokens: Option<u32>,
-    /// Root of a Merkle tree over per-token KV chain hashes.
-    /// Binds each token's K/V projections into a running provenance chain,
-    /// preventing KV cache fabrication under partial opening.
-    /// `None` for commitments that predate KV provenance chaining.
-    #[serde(default)]
-    pub kv_chain_root: Option<[u8; 32]>,
 }
 
 

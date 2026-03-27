@@ -1927,6 +1927,92 @@ fn v4_manifest_rejects_missing_spec_hashes() {
 }
 
 // ---------------------------------------------------------------------------
+// Spec-vs-key consistency: rmsnorm_eps, rope_config_hash, sampler_version
+// ---------------------------------------------------------------------------
+
+#[test]
+fn v4_rmsnorm_eps_mismatch_detected() {
+    // Manifest commits rmsnorm_eps=1e-6, key has rmsnorm_eps=1e-5 → mismatch.
+    let mut m = make_manifest(0.0, 0, 1.0);
+    m.rmsnorm_eps = Some(1e-6); // key will have 1e-5
+
+    let report = verify_with_manifest(m);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("rmsnorm_eps mismatch")),
+        "expected rmsnorm_eps mismatch, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_rmsnorm_eps_matching_passes() {
+    // Manifest commits rmsnorm_eps=1e-5, key has rmsnorm_eps=1e-5 → pass.
+    let mut m = make_manifest(0.0, 0, 1.0);
+    m.rmsnorm_eps = Some(1e-5);
+
+    let report = verify_with_manifest(m);
+    assert_eq!(report.verdict, Verdict::Pass,
+        "matching rmsnorm_eps should pass: {:?}", report.failures);
+}
+
+#[test]
+fn v4_rope_config_hash_mismatch_detected() {
+    // Key has rope_config_hash X, manifest has Y → mismatch.
+    let cfg = ModelConfig::toy();
+    let toy = verilm_test_vectors::generate_model_with_head(&cfg, 54321);
+    let mut key = verilm_test_vectors::generate_key(&cfg, &toy.layers, [2u8; 32]);
+    key.lm_head = Some(toy.lm_head.clone());
+    key.rope_config_hash = Some([1u8; 32]);
+
+    let input: Vec<i8> = (0..cfg.hidden_dim).map(|i| (i * 3 % 256) as i8).collect();
+    let traces = forward_pass(&cfg, &toy.layers, &input);
+    let final_hidden = verilm_core::requantize(&traces.last().unwrap().ffn_out);
+    let logits = verilm_core::sampling::recompute_logits(
+        &toy.lm_head, &final_hidden, cfg.vocab_size, cfg.hidden_dim,
+    );
+    let token_id = logits.iter().enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .unwrap().0 as u32;
+
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.rope_config_hash = Some([2u8; 32]); // different from key's [1u8; 32]
+
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"rope mismatch",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained_from_traces(&traces)], &params, None);
+    let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None, None, None, false);
+
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("rope_config_hash mismatch")),
+        "expected rope_config_hash mismatch, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_sampler_version_unknown_rejected() {
+    let mut m = make_manifest(0.0, 0, 1.0);
+    m.sampler_version = Some("unknown-sampler-v99".into());
+
+    let report = verify_with_manifest(m);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("unsupported sampler_version")),
+        "expected sampler_version rejection, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_sampler_version_canonical_passes() {
+    let mut m = make_manifest(0.0, 0, 1.0);
+    m.sampler_version = Some("chacha20-vi-sample-v1".into());
+
+    let report = verify_with_manifest(m);
+    assert_eq!(report.verdict, Verdict::Pass,
+        "canonical sampler_version should pass: {:?}", report.failures);
+}
+
+// ---------------------------------------------------------------------------
 // Request → token verification
 // ---------------------------------------------------------------------------
 

@@ -561,6 +561,28 @@ pub fn verify_v4_full(
                         failures.push("model_spec_hash mismatch".into()),
                     _ => {}
                 }
+
+                // Cross-check: manifest rmsnorm_eps must agree with verifier key.
+                if let Some(manifest_eps) = model_spec.rmsnorm_eps {
+                    checks_run += 1;
+                    if (manifest_eps - key.rmsnorm_eps).abs() > f64::EPSILON {
+                        failures.push(format!(
+                            "rmsnorm_eps mismatch: manifest={} key={}",
+                            manifest_eps, key.rmsnorm_eps
+                        ));
+                    }
+                }
+
+                // Cross-check: manifest rope_config_hash must agree with verifier key.
+                if let (Some(manifest_rope), Some(key_rope)) =
+                    (model_spec.rope_config_hash, key.rope_config_hash)
+                {
+                    checks_run += 1;
+                    if manifest_rope != key_rope {
+                        failures.push("rope_config_hash mismatch: manifest != key".into());
+                    }
+                }
+
                 match response.commitment.decode_spec_hash {
                     None => failures.push("commitment missing decode_spec_hash".into()),
                     Some(committed) if h_dec != committed =>
@@ -583,6 +605,19 @@ pub fn verify_v4_full(
                         if computed != committed_hash {
                             failures.push("manifest hash does not match commitment".into());
                         }
+                    }
+                }
+
+                // Reject unknown sampler versions: fail-closed.
+                checks_run += 1;
+                match decode_spec.sampler_version.as_deref() {
+                    Some("chacha20-vi-sample-v1") | None => {} // supported
+                    Some(other) => {
+                        failures.push(format!(
+                            "unsupported sampler_version='{}' \
+                             (expected 'chacha20-vi-sample-v1' or absent)",
+                            other
+                        ));
                     }
                 }
 

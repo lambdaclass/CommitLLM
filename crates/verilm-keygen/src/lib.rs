@@ -526,6 +526,7 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         rmsnorm_attn_weights,
         rmsnorm_ffn_weights,
         rmsnorm_eps: 1e-5,
+        rope_config_hash: None,
         embedding_merkle_root,
         final_norm_weights,
     })

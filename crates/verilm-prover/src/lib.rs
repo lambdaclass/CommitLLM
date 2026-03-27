@@ -195,7 +195,7 @@ pub fn commit_minimal(
         version: CommitmentVersion::V4,
         prompt_hash: Some(merkle::hash_prompt(params.prompt)),
         seed_commitment: Some(merkle::hash_seed(&params.sampling_seed)),
-        kv_chain_root: None,
+
         n_prompt_tokens: params.n_prompt_tokens,
     };
 
@@ -550,7 +550,7 @@ pub fn commit_minimal_packed(
         version: CommitmentVersion::V4,
         prompt_hash: Some(merkle::hash_prompt(params.prompt)),
         seed_commitment: Some(merkle::hash_seed(&params.sampling_seed)),
-        kv_chain_root: None,
+
         n_prompt_tokens: params.n_prompt_tokens,
     };
 
@@ -631,7 +631,7 @@ pub fn open_v4_packed(
         version: CommitmentVersion::V4,
         prompt_hash: Some(state.prompt_hash),
         seed_commitment: Some(state.seed_commitment),
-        kv_chain_root: None,
+
         n_prompt_tokens: state.n_prompt_tokens,
     };
 
@@ -996,7 +996,7 @@ pub fn open_v4_structural(state: &MinimalBatchState, token_index: u32) -> V4Audi
         version: CommitmentVersion::V4,
         prompt_hash: Some(state.prompt_hash),
         seed_commitment: Some(state.seed_commitment),
-        kv_chain_root: None,
+
         n_prompt_tokens: state.n_prompt_tokens,
     };
 
@@ -1119,7 +1119,6 @@ mod tests {
         assert_eq!(commitment.n_tokens, 3);
         assert!(commitment.prompt_hash.is_some());
         assert!(commitment.seed_commitment.is_some());
-        assert!(commitment.kv_chain_root.is_none());
         assert_eq!(state.token_ids, vec![100, 200, 300]);
         assert_eq!(state.all_retained.len(), 3);
 
