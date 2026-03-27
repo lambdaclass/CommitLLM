@@ -560,11 +560,14 @@ class VerifiedInferenceServer:
         if _chat_timers:
             _ct_manifest = time.monotonic()
 
+        n_prompt_tokens = len(prompt_token_ids)
+
         use_packed = os.environ.get("VERILM_PACKED_COMMIT", "1") == "1"
         commit_fn = self._commit_minimal_packed if use_packed else self._commit_minimal
         state = commit_fn(
             o_inputs, scales, n_fwd, n_layers, fwd_batch_sizes,
             all_token_ids, prompt, seed, manifest, final_residuals_raw,
+            n_prompt_tokens,
         )
 
         if _chat_timers:
@@ -620,7 +623,7 @@ class VerifiedInferenceServer:
 
     def _commit_minimal(self, o_inputs, scales, n_fwd, n_layers,
                          fwd_batch_sizes, all_token_ids, prompt, seed, manifest,
-                         final_residuals_raw=None):
+                         final_residuals_raw=None, n_prompt_tokens=None):
         """V4 retained-state commitment path (no _int_mm, no full traces).
 
         Args:
@@ -663,11 +666,12 @@ class VerifiedInferenceServer:
             manifest=manifest,
             weight_provider=self._weight_provider,
             final_residuals=final_residuals,
+            n_prompt_tokens=n_prompt_tokens,
         )
 
     def _commit_minimal_packed(self, o_inputs, scales, n_fwd, n_layers,
                                fwd_batch_sizes, all_token_ids, prompt, seed, manifest,
-                               final_residuals_raw=None):
+                               final_residuals_raw=None, n_prompt_tokens=None):
         """Packed V4 commit: passes contiguous buffers to Rust, avoiding
         per-entry Python→Rust crossing and intermediate Vec allocations.
 
@@ -736,6 +740,7 @@ class VerifiedInferenceServer:
             weight_provider=self._weight_provider,
             packed_final_res=packed_fr,
             final_res_dim=fr_dim,
+            n_prompt_tokens=n_prompt_tokens,
         )
 
         if timers:

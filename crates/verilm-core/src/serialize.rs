@@ -179,11 +179,14 @@ mod tests {
                 version: CommitmentVersion::V4,
                 prompt_hash: None,
                 seed_commitment: None,
+                n_prompt_tokens: None,
                 kv_chain_root: None,
             },
             revealed_seed: [0xff; 32],
             shell_opening: Some(shell),
             manifest: None,
+            prompt: None,
+            n_prompt_tokens: None,
         };
 
         let binary = serialize_v4_audit(&resp);

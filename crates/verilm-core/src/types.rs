@@ -671,6 +671,16 @@ pub struct V4AuditResponse {
     /// decode parameters for sampling replay.
     #[serde(default)]
     pub manifest: Option<DeploymentManifest>,
+    /// Raw prompt bytes for prompt hash verification.
+    /// The verifier checks `hash_prompt(prompt) == commitment.prompt_hash`.
+    #[serde(default)]
+    pub prompt: Option<Vec<u8>>,
+    /// Number of prompt tokens (full count including the first token used as
+    /// embedding input). Prompt tokens occupy positions 0..n_prompt_tokens-1
+    /// in the full token sequence; generated tokens start at n_prompt_tokens-1
+    /// in the committed token_ids array (which omits the first token).
+    #[serde(default)]
+    pub n_prompt_tokens: Option<u32>,
 }
 
 // ===========================================================================
@@ -852,6 +862,11 @@ pub struct BatchCommitment {
     /// Prevents re-rolling, cherry-picking, and biased sampling.
     #[serde(default)]
     pub seed_commitment: Option<[u8; 32]>,
+    /// Number of prompt tokens (including the first token consumed as embedding
+    /// input). Binds the prompt/generation boundary so the verifier knows which
+    /// tokens are determined by the tokenizer vs. by sampling.
+    #[serde(default)]
+    pub n_prompt_tokens: Option<u32>,
     /// Root of a Merkle tree over per-token KV chain hashes.
     /// Binds each token's K/V projections into a running provenance chain,
     /// preventing KV cache fabrication under partial opening.

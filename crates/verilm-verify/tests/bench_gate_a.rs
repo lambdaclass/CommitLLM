@@ -198,6 +198,7 @@ fn bench_gate_a() {
             prompt: b"bench gate a",
             sampling_seed: [1u8; 32],
             manifest: None,
+            n_prompt_tokens: None,
         };
         let (_c, s) = commit_minimal(retained_all.clone(), &params, None);
         commit_times.push(start.elapsed());
@@ -245,6 +246,7 @@ fn bench_gate_a() {
         prompt: b"bench full bridge",
         sampling_seed: [7u8; 32],
         manifest: None,
+        n_prompt_tokens: None,
     };
     let (_fb_commitment, fb_state) = commit_minimal(vec![fb_retained], &fb_params, None);
 

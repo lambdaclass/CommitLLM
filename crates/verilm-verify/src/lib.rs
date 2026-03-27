@@ -57,6 +57,70 @@ pub fn verify_manifest_specs(
     }
 }
 
+/// Verify that externally-computed prompt token IDs match the committed token chain.
+///
+/// The caller (typically Python with a HuggingFace tokenizer) tokenizes the raw
+/// prompt using the committed InputSpec (tokenizer, chat template, BOS/EOS policy)
+/// and passes the resulting token IDs here. This function checks:
+///
+/// 1. `expected_prompt_token_ids.len()` matches `response.n_prompt_tokens`
+/// 2. The prompt portion of `prefix_token_ids` matches `expected[1..]`
+///    (first token is consumed as embedding input, not in the committed array)
+///
+/// Returns failure descriptions (empty = pass).
+pub fn verify_input_tokenization(
+    response: &V4AuditResponse,
+    expected_prompt_token_ids: &[u32],
+) -> Vec<String> {
+    let mut failures = Vec::new();
+
+    // Check prompt token count matches.
+    if let Some(committed_npt) = response.n_prompt_tokens {
+        if expected_prompt_token_ids.len() as u32 != committed_npt {
+            failures.push(format!(
+                "tokenization produced {} prompt tokens but commitment has n_prompt_tokens={}",
+                expected_prompt_token_ids.len(), committed_npt
+            ));
+            return failures;
+        }
+    }
+
+    // The committed token_ids array omits the first token (used as embedding input).
+    // prefix_token_ids[0..n_prompt-1] are the remaining prompt tokens.
+    // After that come generated tokens.
+    if expected_prompt_token_ids.is_empty() {
+        return failures;
+    }
+
+    let n_prompt_in_chain = expected_prompt_token_ids.len() - 1; // first consumed as embedding
+
+    // Collect all chain token IDs: prefix_token_ids + [token_id]
+    let all_chain: Vec<u32> = response.prefix_token_ids.iter()
+        .copied()
+        .chain(std::iter::once(response.token_id))
+        .collect();
+
+    if n_prompt_in_chain > all_chain.len() {
+        failures.push(format!(
+            "prompt has {} tokens in chain but response only has {} total chain entries",
+            n_prompt_in_chain, all_chain.len()
+        ));
+        return failures;
+    }
+
+    // Check each prompt token (after the first) against the chain.
+    for (i, &expected_tid) in expected_prompt_token_ids[1..].iter().enumerate() {
+        if all_chain[i] != expected_tid {
+            failures.push(format!(
+                "prompt token mismatch at position {}: expected {} but chain has {}",
+                i + 1, expected_tid, all_chain[i]
+            ));
+        }
+    }
+
+    failures
+}
+
 /// Result of verifying a weight-chain hash against an expected value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WeightHashResult {
@@ -803,10 +867,35 @@ fn verify_v4_structural(
         }
     }
 
-    // 3. Prompt hash must be present
+    // 3. Prompt hash binding: verify hash(prompt) == commitment.prompt_hash
     checks_run += 1;
-    if response.commitment.prompt_hash.is_none() {
-        failures.push("V4 commitment missing prompt_hash".into());
+    match (&response.prompt, response.commitment.prompt_hash) {
+        (Some(prompt), Some(committed_hash)) => {
+            let computed = merkle::hash_prompt(prompt);
+            if computed != committed_hash {
+                failures.push("prompt_hash mismatch: hash(prompt) != commitment.prompt_hash".into());
+            }
+        }
+        (None, Some(_)) => {
+            // Prompt not in response but hash is committed — can't verify binding.
+            // Accept for backward compatibility (legacy responses without prompt field).
+        }
+        (_, None) => {
+            failures.push("V4 commitment missing prompt_hash".into());
+        }
+    }
+
+    // 3b. Prompt token count binding
+    if let (Some(committed_npt), Some(response_npt)) =
+        (response.commitment.n_prompt_tokens, response.n_prompt_tokens)
+    {
+        checks_run += 1;
+        if committed_npt != response_npt {
+            failures.push(format!(
+                "n_prompt_tokens mismatch: commitment={} response={}",
+                committed_npt, response_npt
+            ));
+        }
     }
 
     // 4. Challenged token retained leaf Merkle proof.

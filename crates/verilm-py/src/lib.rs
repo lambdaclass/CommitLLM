@@ -9,7 +9,7 @@ use pyo3::types::{IntoPyDict, PyBytes, PyDict, PyList};
 
 use verilm_core::types::{
     AuditTier, BatchCommitment,
-    DeploymentManifest, VerifierKey,
+    DeploymentManifest, V4AuditResponse, VerifierKey,
 };
 use verilm_prover::FullBindingParams;
 
@@ -471,6 +471,7 @@ impl MinimalBatchStateHandle {
     manifest = None,
     weight_provider = None,
     final_residuals = None,
+    n_prompt_tokens = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn commit_minimal_from_captures(
@@ -484,6 +485,7 @@ fn commit_minimal_from_captures(
     manifest: Option<&Bound<'_, PyDict>>,
     weight_provider: Option<&WeightProvider>,
     final_residuals: Option<&Bound<'_, PyList>>,
+    n_prompt_tokens: Option<u32>,
 ) -> PyResult<MinimalBatchStateHandle> {
     let scales = extract_f32_vec(scales)?;
     let n_entries = o_proj_inputs.len();
@@ -541,6 +543,7 @@ fn commit_minimal_from_captures(
             prompt: &prompt,
             sampling_seed: seed,
             manifest: manifest_obj.as_ref(),
+            n_prompt_tokens,
         },
         final_res,
     );
@@ -683,6 +686,7 @@ impl PackedBatchStateHandle {
     weight_provider = None,
     packed_final_res = None,
     final_res_dim = 0,
+    n_prompt_tokens = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn commit_minimal_packed(
@@ -698,6 +702,7 @@ fn commit_minimal_packed(
     weight_provider: Option<&WeightProvider>,
     packed_final_res: Option<&Bound<'_, PyAny>>,
     final_res_dim: usize,
+    n_prompt_tokens: Option<u32>,
 ) -> PyResult<PackedBatchStateHandle> {
     // Extract packed_a via buffer protocol (one copy into Rust Vec<u8>).
     let a_bytes: Vec<u8> = if let Ok(b) = packed_a.cast::<PyBytes>() {
@@ -741,6 +746,7 @@ fn commit_minimal_packed(
             prompt: &prompt,
             sampling_seed: seed,
             manifest: manifest_obj.as_ref(),
+            n_prompt_tokens,
         },
         fr_bytes,
         final_res_dim,
@@ -833,6 +839,34 @@ fn verify_v4_binary<'py>(
     result.set_item("checks_passed", report.checks_passed)?;
     result.set_item("failures", &report.failures)?;
     result.set_item("duration_us", report.duration.as_micros() as u64)?;
+    Ok(result)
+}
+
+/// Verify that externally-computed prompt token IDs match the committed token chain.
+///
+/// The caller tokenizes the raw prompt using the committed InputSpec and passes
+/// the resulting token IDs. Returns a dict with `passed` (bool) and `failures` (list[str]).
+///
+/// Args:
+///     audit_json: str — JSON-serialized V4AuditResponse.
+///     expected_prompt_token_ids: list[int] — token IDs from external tokenizer.
+///
+/// Returns:
+///     dict with `passed` (bool), `failures` (list[str])
+#[pyfunction]
+fn verify_input_tokenization<'py>(
+    py: Python<'py>,
+    audit_json: &str,
+    expected_prompt_token_ids: Vec<u32>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let response: V4AuditResponse = serde_json::from_str(audit_json)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize V4AuditResponse: {}", e)))?;
+
+    let failures = verilm_verify::verify_input_tokenization(&response, &expected_prompt_token_ids);
+
+    let result = PyDict::new(py);
+    result.set_item("passed", failures.is_empty())?;
+    result.set_item("failures", &failures)?;
     Ok(result)
 }
 
@@ -1055,5 +1089,6 @@ fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(commit_minimal_packed, m)?)?;
     m.add_class::<PackedBatchStateHandle>()?;
     m.add_class::<CaptureHook>()?;
+    m.add_function(wrap_pyfunction!(verify_input_tokenization, m)?)?;
     Ok(())
 }

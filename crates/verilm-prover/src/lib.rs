@@ -21,6 +21,10 @@ pub struct FullBindingParams<'a> {
     /// Optional deployment manifest. When provided, its hash is bound into
     /// the commitment alongside the other V3 fields.
     pub manifest: Option<&'a DeploymentManifest>,
+    /// Number of prompt tokens (full count including the first token that is
+    /// consumed as embedding input and not included in `token_ids`).
+    /// `None` for legacy callers that don't track the prompt/generation boundary.
+    pub n_prompt_tokens: Option<u32>,
 }
 
 // ===========================================================================
@@ -50,6 +54,10 @@ pub struct MinimalBatchState {
     /// Per-token captured final residual (pre-final-norm) from GPU inference.
     /// Used at audit time for exact LM-head verification.
     pub final_residuals: Option<Vec<Vec<f32>>>,
+    /// Raw prompt bytes, stored for inclusion in audit responses.
+    pub prompt: Vec<u8>,
+    /// Number of prompt tokens (full count including first).
+    pub n_prompt_tokens: Option<u32>,
 }
 
 /// Build retained state from minimal captures (no i32 accumulators).
@@ -184,6 +192,7 @@ pub fn commit_minimal(
         prompt_hash: Some(merkle::hash_prompt(params.prompt)),
         seed_commitment: Some(merkle::hash_seed(&params.sampling_seed)),
         kv_chain_root: None,
+        n_prompt_tokens: params.n_prompt_tokens,
     };
 
     let state = MinimalBatchState {
@@ -202,6 +211,8 @@ pub fn commit_minimal(
         io_hashes: io_leaves,
         manifest: params.manifest.cloned(),
         final_residuals,
+        prompt: params.prompt.to_vec(),
+        n_prompt_tokens: params.n_prompt_tokens,
     };
 
     if let (Some(t0), Some(t_leaf), Some(t_io_chain), Some(t_trees)) =
@@ -302,6 +313,10 @@ pub struct PackedBatchState {
     /// Layout: token-major, each entry is `final_res_dim` f32 values.
     pub packed_final_res: Option<Vec<u8>>,
     pub final_res_dim: usize,
+    /// Raw prompt bytes.
+    pub prompt: Vec<u8>,
+    /// Number of prompt tokens (full count including first).
+    pub n_prompt_tokens: Option<u32>,
 }
 
 impl PackedBatchState {
@@ -474,6 +489,8 @@ pub fn commit_minimal_packed(
         manifest: None,
         packed_final_res,
         final_res_dim,
+        prompt: Vec::new(),
+        n_prompt_tokens: None,
     };
 
     let t0 = if timers { Some(std::time::Instant::now()) } else { None };
@@ -529,6 +546,7 @@ pub fn commit_minimal_packed(
         prompt_hash: Some(merkle::hash_prompt(params.prompt)),
         seed_commitment: Some(merkle::hash_seed(&params.sampling_seed)),
         kv_chain_root: None,
+        n_prompt_tokens: params.n_prompt_tokens,
     };
 
     // Reconstitute final state with real trees.
@@ -554,6 +572,8 @@ pub fn commit_minimal_packed(
         manifest: params.manifest.cloned(),
         packed_final_res: state.packed_final_res,
         final_res_dim,
+        prompt: params.prompt.to_vec(),
+        n_prompt_tokens: params.n_prompt_tokens,
     };
 
     if let (Some(t0), Some(t_leaf), Some(t_io_chain), Some(t_trees)) =
@@ -601,6 +621,7 @@ pub fn open_v4_packed(
         prompt_hash: Some(state.prompt_hash),
         seed_commitment: Some(state.seed_commitment),
         kv_chain_root: None,
+        n_prompt_tokens: state.n_prompt_tokens,
     };
 
     // Prefix leaf hashes: hash from packed buffers (no materialization).
@@ -652,6 +673,8 @@ pub fn open_v4_packed(
         revealed_seed: state.revealed_seed,
         shell_opening: Some(shell),
         manifest: state.manifest.clone(),
+        prompt: Some(state.prompt.clone()),
+        n_prompt_tokens: state.n_prompt_tokens,
     }
 }
 
@@ -859,6 +882,7 @@ pub fn open_v4_structural(state: &MinimalBatchState, token_index: u32) -> V4Audi
         prompt_hash: Some(state.prompt_hash),
         seed_commitment: Some(state.seed_commitment),
         kv_chain_root: None,
+        n_prompt_tokens: state.n_prompt_tokens,
     };
 
     let mut prefix_leaf_hashes = Vec::with_capacity(i);
@@ -891,6 +915,8 @@ pub fn open_v4_structural(state: &MinimalBatchState, token_index: u32) -> V4Audi
         revealed_seed: state.revealed_seed,
         shell_opening: None,
         manifest: state.manifest.clone(),
+        prompt: Some(state.prompt.clone()),
+        n_prompt_tokens: state.n_prompt_tokens,
     }
 }
 
@@ -964,6 +990,7 @@ mod tests {
             prompt: b"test prompt",
             sampling_seed: [42u8; 32],
             manifest: None,
+            n_prompt_tokens: None,
         };
 
         let (commitment, state) = commit_minimal(retained, &params, None);
@@ -993,6 +1020,7 @@ mod tests {
             prompt: b"p",
             sampling_seed: [0u8; 32],
             manifest: None,
+            n_prompt_tokens: None,
         };
 
         let (_, state) = commit_minimal(retained.clone(), &params, None);
@@ -1019,6 +1047,7 @@ mod tests {
             prompt: b"hello",
             sampling_seed: [7u8; 32],
             manifest: None,
+            n_prompt_tokens: None,
         };
 
         let retained1 = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
@@ -1043,6 +1072,7 @@ mod tests {
             prompt: b"test",
             sampling_seed: [5u8; 32],
             manifest: None,
+            n_prompt_tokens: None,
         };
 
         let (commitment, state) = commit_minimal(retained, &params, None);
@@ -1093,6 +1123,7 @@ mod tests {
             prompt: b"p",
             sampling_seed: [0u8; 32],
             manifest: None,
+            n_prompt_tokens: None,
         };
 
         let (_, state) = commit_minimal(retained, &params, None);
@@ -1149,6 +1180,7 @@ mod tests {
             prompt: b"test prompt",
             sampling_seed: [42u8; 32],
             manifest: None,
+            n_prompt_tokens: None,
         };
         let (commit_old, state_old) = commit_minimal(retained, &params, None);
 
@@ -1201,6 +1233,7 @@ mod tests {
             prompt: b"batched",
             sampling_seed: [7u8; 32],
             manifest: None,
+            n_prompt_tokens: None,
         };
         let (commit_old, state_old) = commit_minimal(retained, &params, None);
 
@@ -1230,6 +1263,7 @@ mod tests {
             prompt: b"p",
             sampling_seed: [0u8; 32],
             manifest: None,
+            n_prompt_tokens: None,
         };
         let (packed_a, packed_scales) = make_packed_data(n_layers, n_tokens, hidden, &fwd_batch_sizes);
         let (_, packed_state) = commit_minimal_packed(
@@ -1260,6 +1294,7 @@ mod tests {
             prompt: b"p",
             sampling_seed: [0u8; 32],
             manifest: None,
+            n_prompt_tokens: None,
         };
 
         let (_, state_old) = commit_minimal(retained.clone(), &params, None);
@@ -1303,6 +1338,7 @@ mod tests {
             prompt: b"fr",
             sampling_seed: [0u8; 32],
             manifest: None,
+            n_prompt_tokens: None,
         };
         let (commit_old, _) = commit_minimal(retained, &params, final_residuals);
 
@@ -1377,6 +1413,7 @@ mod tests {
             prompt: b"s",
             sampling_seed: [0u8; 32],
             manifest: None,
+            n_prompt_tokens: None,
         };
         let (_, packed_state) = commit_minimal_packed(
             packed_a, packed_scales, n_layers, hidden, vec![1], &params, None, 0,
