@@ -10,7 +10,7 @@ The narrow core canonical sampled path already exists in the live server. At thi
 
 The following blockers are already closed and are therefore omitted from the remaining checklist: sync-equivalence between `global` and `event` modes, capture reliability for EOS/counter/prefix-caching edge cases, the deterministic capture-mismatch investigation, prompt-hash binding in the canonical verifier path, and prompt/generation-boundary count binding in the commitment/opening path.
 
-1. [ ] Add verifier-side checks for the full committed input/model surface, done when the canonical verifier explicitly checks the committed input/model semantics instead of only checking hash digests.
+1. [x] Add verifier-side checks for the full committed input/model surface, done when the canonical verifier explicitly checks the committed input/model semantics instead of only checking hash digests. Closed: architecture fields (n_layers, hidden_dim, vocab_size, embedding_merkle_root) committed in ModelSpec and cross-checked against verifier key.
 2. [ ] Use verifier-secret randomness in deep-audit batching, done when any deep-audit batching or compression uses verifier-only randomness that the prover cannot predict before commitment.
 3. [ ] Benchmark exact deep-audit open cost, verifier cost, and payload cost, done when the chosen exact-prefix procedure has real benchmark numbers attached to it.
 4. [ ] Bind truncation and padding policy in the input spec, done when truncation side, truncation method, and padding semantics are committed and verified.
@@ -23,7 +23,7 @@ The following blockers are already closed and are therefore omitted from the rem
 11. [ ] Bind tie-breaking rules in the decode spec, done when any ambiguity in equal-logit or equal-probability selection is committed explicitly.
 12. [ ] Bind transcript-randomness derivation in the decode spec, done when the decode spec commits exactly how per-request and per-token randomness are derived.
 13. [x] Add sampled end-to-end tests through the live HTTP/server path, done when honest sampled pass, wrong seed, wrong manifest, wrong sampled token, and cross-request splice failures are all covered by tests.
-14. [ ] Add sampler drift protection, done when version-locked conformance tests catch silent changes in sampler behavior across dependency or implementation updates.
+14. [x] Add sampler drift protection, done when version-locked conformance tests catch silent changes in sampler behavior across dependency or implementation updates. Closed: golden vectors pin derive_token_seed (7 SHA-256 vectors) and sample() (7 pipeline configs + greedy) at exact byte/token level.
 15. [ ] Make sampled decoding the default verified-serving mode, done when verified production mode defaults to the canonical sampled path and greedy remains the explicit `temperature=0` special case.
 16. [ ] Remove or clearly demote transitional V4 framing, done when docs, code comments, and tests no longer present transitional V4 semantics as the long-term target.
 17. [ ] Keep only irreducible retained state long term, done when the retained-state schema excludes derivable intermediates and preserves only what the verifier cannot reconstruct.
@@ -38,9 +38,9 @@ The following blockers are already closed and are therefore omitted from the rem
 26. [ ] Define a verification failure taxonomy, done when cryptographic failures, semantic failures, operational/configuration failures, and approximate/statistical outcomes are explicitly classified and reported differently.
 27. [ ] Add structured audit-failure reporting, done when verifier output identifies the failed check and the relevant token/layer/proof component in a stable machine-consumable form.
 28. [ ] Define partial-audit semantics, done when routine-audit and deep-audit outcomes are reported distinctly and partial statistical coverage cannot be mistaken for full exact success.
-29. [ ] Add golden/conformance vectors, done when fixed receipts, fixed audit responses, and fixed verifier outputs exist for future consumers.
-30. [ ] Write the challenge protocol specification, done when the timing and derivation of token, layer, and prefix challenges and the exact prover/verifier flow are specified precisely.
-31. [ ] Add cross-version tests for the binary format, done when backward rejection, forward rejection, and decoder compatibility are all tested against golden payloads.
+29. [x] Add golden/conformance vectors, done when fixed receipts, fixed audit responses, and fixed verifier outputs exist for future consumers. Closed: golden_conformance.rs pins challenge derivation (4 vectors), manifest/model-spec hashes, and e2e commit→open→verify with exact roots, verdict, and checks_run.
+30. [x] Write the challenge protocol specification, done when the timing and derivation of token, layer, and prefix challenges and the exact prover/verifier flow are specified precisely. Closed: docs/challenge-protocol.md specifies token derivation, layer derivation (routine/full), sampling seed, block coefficients, domain separators, binary format, and golden vector pointers.
+31. [x] Add cross-version tests for the binary format, done when backward rejection, forward rejection, and decoder compatibility are all tested against golden payloads. Closed: golden_conformance.rs tests V4 audit roundtrip, unknown magic rejection, truncated payload rejection, cross-format rejection (key↔audit), version field preservation, and key roundtrip.
 32. [ ] Rewrite the verifier from scratch against the frozen final spec, done when a new minimal linear verifier consumes the canonical receipt/audit format, passes the golden vectors, and replaces transitional branches in the trusted verification path.
 33. [ ] Add at least one independent non-Rust verifier consumer, done when some non-Rust implementation can consume the golden vectors and reproduce expected verification results.
 34. [ ] Add startup self-checks for the live verified server, done when startup fails closed on model-identity mismatch, bad capture settings, or unsupported verified-mode configuration.

@@ -8,6 +8,7 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 
 - Four-spec commitment wiring for `input_spec_hash`, `model_spec_hash`, `decode_spec_hash`, and `output_spec_hash`, with verifier-side recomputation and composed manifest checking.
 - Canonical commitment of the full four-spec surface, including chat template, BOS/EOS preprocessing, special-token handling, system-prompt semantics, public model identity `R_W`, adapter identity, RoPE configuration, RMSNorm epsilon, sampler identity, decode knobs, and output stopping rules.
+- Explicit model-surface commitments for `n_layers`, `hidden_dim`, `vocab_size`, and `embedding_merkle_root`, with verifier-side cross-checks against the verifier key/config.
 - LM-head Freivalds as an explicit eighth matrix family, including verifier-secret key material and canonical verifier checks.
 - Exact logits replay after LM-head binding so verified token selection still depends on the committed logits path.
 - Exact final-token verification boundary from the captured pre-final-norm residual, with fail-closed behavior when the boundary state is missing.
@@ -22,6 +23,10 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 - End-to-end HTTP coverage for `/chat` and `/audit`, including greedy and sampled JSON audit verification, binary audit verification, routine-tier coverage, and HTTP error-path coverage.
 - Tokenizer identity commitment based on canonicalized `tokenizer.json` content via `backend_tokenizer.to_str()`, with deterministic JSON normalization and legacy vocab-only fallback.
 - Explicit `weight_hash` / `R_W` cross-checking in the canonical verifier path, in addition to model-spec hash binding.
+- Version-locked sampler conformance vectors: golden `derive_token_seed` SHA-256 vectors and golden `sample()` token outputs for temperature, top-k, top-p, combined filtering, and greedy modes. Any silent drift in the `chacha20-vi-sample-v1` pipeline breaks these tests.
+- Golden conformance vectors for challenge derivation (`build_audit_challenge` token index and layer indices for 4 seed/token/layer configs), manifest hashing (pinned `hash_manifest` and `hash_model_spec` digests), and end-to-end verification (pinned merkle root, IO root, verdict, and checks_run for deterministic commit→open→verify).
+- Challenge protocol specification (`docs/challenge-protocol.md`): exact derivation of token index, layer depth (routine/full), sampling seed, Freivalds block coefficients, all domain separators, and binary wire format.
+- Cross-version binary format tests: V4 audit response roundtrip through serialize/deserialize, unknown magic rejection, truncated payload rejection, cross-format rejection (key bytes to audit deserializer), version field preservation, and verifier key roundtrip.
 
 ### Changed
 
@@ -33,6 +38,7 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 - Output-policy enforcement now covers `eos_policy`, `min_tokens`, `ignore_eos`, stop conditions, special-token stripping, detokenization policy, cleanup behavior, and fail-closed handling for unsupported or unknown policy values.
 - Input-policy replay is fail-closed for unknown `bos_eos_policy`, `special_token_policy`, `truncation_policy`, and `detokenization_policy`.
 - The verifier now cross-checks committed model-spec values against verifier-key values for `rmsnorm_eps`, `rope_config_hash`, and `weight_hash`.
+- The verifier now also cross-checks committed model geometry and embedding commitment values against the verifier key/config: `n_layers`, `hidden_dim`, `vocab_size`, and `embedding_merkle_root`.
 - Decode-spec handling is fail-closed for unsupported sampler versions and unsupported non-default decode features; only the canonical sampler version is accepted and supported decode features are replayed.
 - Audit retrieval now preserves claimed output text end to end so detokenization checks can run in the canonical verifier flow.
 - Bridge documentation and call sites now explicitly treat `bridge_residual_rmsnorm()` as the canonical production W8A8 bridge, while `bridge_requantize()` is demoted to toy-model and last-layer fallback use only.

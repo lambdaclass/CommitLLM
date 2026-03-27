@@ -239,6 +239,92 @@ fn categorical_sample(probs: &[f64], rng: &mut ChaCha20Rng) -> u32 {
 mod tests {
     use super::*;
 
+    // -----------------------------------------------------------------------
+    // Golden conformance vectors: version-locked sampler drift protection.
+    //
+    // These tests pin the exact byte/token output of the canonical sampler
+    // "chacha20-vi-sample-v1". Any change to derive_token_seed, the
+    // sampling pipeline (temperature, top-k, softmax, top-p, renormalize,
+    // ChaCha20 categorical selection), or their dependencies will break
+    // these tests. That is the point: silent drift is a protocol violation.
+    // -----------------------------------------------------------------------
+
+    /// Golden vectors for derive_token_seed: exact SHA-256 output.
+    #[test]
+    fn golden_derive_token_seed() {
+        let cases: &[([u8; 32], u32, &str)] = &[
+            ([0x00; 32], 0,          "2dba785c6ff986561c1966229452bd4adfd9d7a1390b3736ac6154afcc191cc5"),
+            ([0x00; 32], 1,          "e8093d5a84a7e30367f5d0bd5ebd3e2a4a4d525f45da7bccd21456b3e423553b"),
+            ([0xff; 32], 0,          "2734bdc41f86e9153cd1e2ea9e2a0433443cf29f801044a835ac57062debc175"),
+            ([0x2a; 32], 0,          "b7d4026903b15e8da93f6e52a2880b38757e6de73269f37a6eec9fc89a590ceb"),
+            ([0x2a; 32], 1,          "4a761e9037c976a07d30a1abe31546954ad4eb11f8d5cb65395a148826d0f53e"),
+            ([0x2a; 32], 99,         "0164293884811dcff10ac68fc6000051355a45fa3eb7d42f2bae6e357d7ec0b8"),
+            ([0x07; 32], u32::MAX,   "6f454c93853bb2484b73f4c9430a4662512636adb69fbbbcd1bd70cf47da6d71"),
+        ];
+        for (batch_seed, idx, expected_hex) in cases {
+            let result = derive_token_seed(batch_seed, *idx);
+            let got_hex: String = result.iter().map(|b| format!("{:02x}", b)).collect();
+            assert_eq!(
+                got_hex, *expected_hex,
+                "derive_token_seed([0x{:02x};32], {}) drifted", batch_seed[0], idx
+            );
+        }
+    }
+
+    /// Golden vectors for sample(): exact token output for each pipeline configuration.
+    ///
+    /// Each row: (name, logits, temperature, top_k, top_p, batch_seed, token_index, expected_token)
+    #[test]
+    fn golden_sample_conformance() {
+        let cases: &[(&str, &[f32], f32, u32, f32, [u8; 32], u32, u32)] = &[
+            // Basic temperature=1.0, no filtering
+            ("temp1_basic",     &[1.0, 2.0, 3.0, 4.0],                     1.0, 0, 1.0, [0x2a; 32], 0, 1),
+            // Lower temperature concentrates distribution
+            ("temp05_basic",    &[1.0, 2.0, 3.0, 4.0],                     0.5, 0, 1.0, [0x2a; 32], 0, 2),
+            // Top-k=2 restricts to top 2 logits
+            ("topk2",           &[1.0, 2.0, 3.0, 4.0],                     1.0, 2, 1.0, [0x2a; 32], 0, 2),
+            // Top-p=0.5 with dominant token
+            ("topp05",          &[1.0, 1.0, 1.0, 10.0],                    1.0, 0, 0.5, [0x2a; 32], 0, 3),
+            // Combined top-k=3 + top-p=0.9
+            ("topk3_topp09",    &[2.0, 4.0, 6.0, 8.0, 1.0],               1.0, 3, 0.9, [0x07; 32], 5, 2),
+            // 8-wide vocab with temperature=0.8
+            ("wide8_temp08",    &[0.5, 1.5, 3.0, 0.1, 2.0, 4.0, 0.3, 1.0], 0.8, 0, 1.0, [0x63; 32], 10, 5),
+            // Same logits, different seed → different token
+            ("temp1_zeroseed",  &[1.0, 2.0, 3.0, 4.0],                     1.0, 0, 1.0, [0x00; 32], 0, 3),
+        ];
+        for &(name, logits, temp, top_k, top_p, batch_seed, idx, expected) in cases {
+            let seed = derive_token_seed(&batch_seed, idx);
+            let params = DecodeParams { temperature: temp, top_k, top_p };
+            let got = sample(logits, &params, &seed);
+            assert_eq!(
+                got, expected,
+                "sampler drift in '{}': expected token {} got {}", name, expected, got
+            );
+        }
+    }
+
+    /// Greedy mode is not affected by seed — verify with golden vectors.
+    #[test]
+    fn golden_greedy_deterministic() {
+        let cases: &[(&[f32], u32)] = &[
+            (&[1.0, 5.0, 3.0, 2.0], 1),
+            (&[5.0, 3.0, 5.0, 2.0], 0),  // tie → lowest index
+            (&[0.0, 0.0, 0.0, 1.0], 3),
+            (&[-1.0, -2.0, -0.5, -3.0], 2),  // all negative → least negative
+        ];
+        let params = DecodeParams { temperature: 0.0, top_k: 0, top_p: 1.0 };
+        for (logits, expected) in cases {
+            for seed_byte in [0x00, 0x2a, 0xff] {
+                let seed = [seed_byte; 32];
+                let got = sample(logits, &params, &seed);
+                assert_eq!(
+                    got, *expected,
+                    "greedy drift: logits={:?} expected {} got {}", logits, expected, got
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_greedy_returns_argmax() {
         let logits = vec![1.0, 5.0, 3.0, 2.0];
