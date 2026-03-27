@@ -690,6 +690,11 @@ pub struct V4AuditResponse {
     /// in the committed token_ids array (which omits the first token).
     #[serde(default)]
     pub n_prompt_tokens: Option<u32>,
+    /// Claimed output text for detokenization verification.
+    /// The verifier decodes the committed token IDs and compares against this text
+    /// under the committed detokenization_policy.
+    #[serde(default)]
+    pub output_text: Option<String>,
 }
 
 // ===========================================================================

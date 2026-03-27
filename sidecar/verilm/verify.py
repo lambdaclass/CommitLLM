@@ -127,7 +127,10 @@ def make_tokenizer_fn(
             # We set add_special=False to avoid double-adding.
             add_special = not bool(chat_template)
         else:
-            add_special = True
+            raise RuntimeError(
+                f"unknown bos_eos_policy='{bos_eos}' "
+                f"(expected 'none', 'add_bos', 'add_bos_eos', 'add_eos', or absent)"
+            )
 
         # 6. Apply special_token_policy.
         special_policy = input_spec.get("special_token_policy")
@@ -135,6 +138,11 @@ def make_tokenizer_fn(
             # Strip known special tokens from the text before encoding.
             for tok_str in tokenizer.all_special_tokens:
                 text = text.replace(tok_str, "")
+        elif special_policy not in ("encode", "pass", None):
+            raise RuntimeError(
+                f"unknown special_token_policy='{special_policy}' "
+                f"(expected 'strip', 'encode', 'pass', or absent)"
+            )
 
         # 7. Tokenize.
         token_ids = tokenizer.encode(text, add_special_tokens=add_special)
@@ -151,7 +159,16 @@ def make_tokenizer_fn(
                     f"prompt has {len(token_ids)} tokens but max_model_len={max_model_len} "
                     f"and truncation_policy='error'"
                 )
-            # else: no truncation (unknown policy = pass through)
+            else:
+                raise RuntimeError(
+                    f"unknown truncation_policy='{trunc_policy}' "
+                    f"(expected 'left', 'right', 'error', or absent)"
+                )
+        elif trunc_policy not in ("left", "right", "error", None):
+            raise RuntimeError(
+                f"unknown truncation_policy='{trunc_policy}' "
+                f"(expected 'left', 'right', 'error', or absent)"
+            )
 
         return token_ids
 
@@ -177,7 +194,7 @@ def verify_detokenization(
             - "default": decode with tokenizer defaults
             - "clean_spaces": decode with clean_up_tokenization_spaces=True
             - "raw": decode without cleanup
-            - None: skip policy enforcement, just compare decode output
+            - None: use tokenizer defaults (same as "default")
 
     Returns:
         List of failure descriptions (empty = pass).
@@ -192,9 +209,13 @@ def verify_detokenization(
             skip_special_tokens=False,
             clean_up_tokenization_spaces=False,
         )
-    else:
-        # "default" or None: use tokenizer's default decode behavior.
+    elif detokenization_policy in ("default", None):
         decoded = tokenizer.decode(token_ids, skip_special_tokens=True)
+    else:
+        raise RuntimeError(
+            f"unknown detokenization_policy='{detokenization_policy}' "
+            f"(expected 'default', 'clean_spaces', 'raw', or absent)"
+        )
 
     if decoded != output_text:
         failures.append(
@@ -203,6 +224,60 @@ def verify_detokenization(
         )
 
     return failures
+
+
+def make_detokenizer_fn(
+    tokenizer: Any,
+) -> Callable[[List[int], Optional[str]], str]:
+    """Build a detokenizer callback for verilm_rs.verify_v4().
+
+    The returned callable has signature:
+        fn(token_ids: list[int], policy: str|None) -> str
+
+    It decodes token IDs back to text under the committed detokenization
+    policy, suitable for the `detokenizer_fn` parameter of
+    `verilm_rs.verify_v4()` and `verilm_rs.verify_v4_binary()`.
+
+    Args:
+        tokenizer: A HuggingFace PreTrainedTokenizer (or compatible).
+
+    Returns:
+        A callable suitable for the `detokenizer_fn` parameter.
+
+    Example:
+        from transformers import AutoTokenizer
+        from verilm.verify import make_tokenizer_fn, make_detokenizer_fn
+        import verilm_rs
+
+        tok = AutoTokenizer.from_pretrained("neuralmagic/Qwen2.5-7B-Instruct-quantized.w8a8")
+        tokenizer_fn = make_tokenizer_fn(tok, system_prompt="You are a helpful assistant.")
+        detokenizer_fn = make_detokenizer_fn(tok)
+
+        result = verilm_rs.verify_v4(
+            audit_json, key_json,
+            tokenizer_fn=tokenizer_fn,
+            detokenizer_fn=detokenizer_fn,
+        )
+    """
+
+    def _detokenize(token_ids: List[int], policy: Optional[str]) -> str:
+        if policy == "clean_spaces":
+            return tokenizer.decode(token_ids, clean_up_tokenization_spaces=True)
+        elif policy == "raw":
+            return tokenizer.decode(
+                token_ids,
+                skip_special_tokens=False,
+                clean_up_tokenization_spaces=False,
+            )
+        elif policy in ("default", None):
+            return tokenizer.decode(token_ids, skip_special_tokens=True)
+        else:
+            raise RuntimeError(
+                f"unknown detokenization_policy='{policy}' "
+                f"(expected 'default', 'clean_spaces', 'raw', or absent)"
+            )
+
+    return _detokenize
 
 
 def _compute_tokenizer_hash(tokenizer: Any) -> str:

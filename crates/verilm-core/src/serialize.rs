@@ -187,6 +187,7 @@ mod tests {
             manifest: None,
             prompt: None,
             n_prompt_tokens: Some(1),
+            output_text: None,
         };
 
         let binary = serialize_v4_audit(&resp);

@@ -52,6 +52,30 @@ impl verilm_verify::PromptTokenizer for PyCallableTokenizer<'_> {
     }
 }
 
+/// Wraps a Python callable as a `Detokenizer` for verify_v4_full.
+///
+/// The Python callable signature is:
+///   `fn(token_ids: list[int], policy: str|None) -> str`
+struct PyCallableDetokenizer<'py> {
+    callback: Bound<'py, PyAny>,
+}
+
+impl verilm_verify::Detokenizer for PyCallableDetokenizer<'_> {
+    fn decode(&self, token_ids: &[u32], policy: Option<&str>) -> Result<String, String> {
+        let py = self.callback.py();
+        let ids_list = PyList::new(py, token_ids)
+            .map_err(|e| e.to_string())?;
+        let policy_obj: Bound<'_, PyAny> = match policy {
+            Some(p) => p.into_pyobject(py).map_err(|e| e.to_string())?.into_any(),
+            None => py.None().into_bound(py),
+        };
+        let result = self.callback.call1((ids_list, policy_obj))
+            .map_err(|e| format!("Python detokenizer callback failed: {}", e))?;
+        result.extract::<String>()
+            .map_err(|e| format!("detokenizer callback did not return str: {}", e))
+    }
+}
+
 /// Read raw bytes from a Python buffer protocol object (numpy arrays, CPU tensors).
 /// Returns None if the object doesn't support the buffer protocol.
 /// Avoids the Python-side `.tobytes()` allocation + copy.
@@ -843,20 +867,21 @@ fn generate_key(model_dir: String, seed: Vec<u8>) -> PyResult<String> {
 ///     dict with `passed` (bool), `checks_run` (int), `checks_passed` (int),
 ///     `failures` (list of str), `duration_us` (int).
 #[pyfunction]
-#[pyo3(signature = (audit_json, key_json, expected_prompt_token_ids=None, tokenizer_fn=None))]
+#[pyo3(signature = (audit_json, key_json, expected_prompt_token_ids=None, tokenizer_fn=None, detokenizer_fn=None))]
 fn verify_v4<'py>(
     py: Python<'py>,
     audit_json: &str,
     key_json: &str,
     expected_prompt_token_ids: Option<Vec<u32>>,
     tokenizer_fn: Option<Bound<'py, PyAny>>,
+    detokenizer_fn: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let response: verilm_core::types::V4AuditResponse = serde_json::from_str(audit_json)
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize V4AuditResponse: {}", e)))?;
     let key: VerifierKey = serde_json::from_str(key_json)
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize VerifierKey: {}", e)))?;
 
-    let report = run_verify(&key, &response, expected_prompt_token_ids.as_deref(), tokenizer_fn);
+    let report = run_verify(&key, &response, expected_prompt_token_ids.as_deref(), tokenizer_fn, detokenizer_fn);
 
     let result = PyDict::new(py);
     result.set_item("passed", report.verdict == verilm_verify::Verdict::Pass)?;
@@ -874,21 +899,23 @@ fn verify_v4<'py>(
 ///     key_json: str — JSON-serialized VerifierKey.
 ///     expected_prompt_token_ids: Optional[list[int]] — caller-supplied prompt token IDs.
 ///     tokenizer_fn: Optional[Callable[[bytes, dict], list[int]]] — tokenizer callback.
+///     detokenizer_fn: Optional[Callable[[list[int], str|None], str]] — detokenizer callback.
 #[pyfunction]
-#[pyo3(signature = (audit_binary, key_json, expected_prompt_token_ids=None, tokenizer_fn=None))]
+#[pyo3(signature = (audit_binary, key_json, expected_prompt_token_ids=None, tokenizer_fn=None, detokenizer_fn=None))]
 fn verify_v4_binary<'py>(
     py: Python<'py>,
     audit_binary: &[u8],
     key_json: &str,
     expected_prompt_token_ids: Option<Vec<u32>>,
     tokenizer_fn: Option<Bound<'py, PyAny>>,
+    detokenizer_fn: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let response = verilm_core::serialize::deserialize_v4_audit(audit_binary)
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize V4 binary: {}", e)))?;
     let key: VerifierKey = serde_json::from_str(key_json)
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize VerifierKey: {}", e)))?;
 
-    let report = run_verify(&key, &response, expected_prompt_token_ids.as_deref(), tokenizer_fn);
+    let report = run_verify(&key, &response, expected_prompt_token_ids.as_deref(), tokenizer_fn, detokenizer_fn);
 
     let result = PyDict::new(py);
     result.set_item("passed", report.verdict == verilm_verify::Verdict::Pass)?;
@@ -905,17 +932,15 @@ fn run_verify(
     response: &V4AuditResponse,
     expected_prompt_token_ids: Option<&[u32]>,
     tokenizer_fn: Option<Bound<'_, PyAny>>,
+    detokenizer_fn: Option<Bound<'_, PyAny>>,
 ) -> verilm_verify::V4VerifyReport {
-    match tokenizer_fn {
-        Some(cb) => {
-            let tok = PyCallableTokenizer { callback: cb };
-            verilm_verify::verify_v4_full(
-                key, response, expected_prompt_token_ids,
-                Some(&tok as &dyn verilm_verify::PromptTokenizer),
-            )
-        }
-        None => verilm_verify::verify_v4(key, response, expected_prompt_token_ids),
-    }
+    let tok_wrapper = tokenizer_fn.map(|cb| PyCallableTokenizer { callback: cb });
+    let detok_wrapper = detokenizer_fn.map(|cb| PyCallableDetokenizer { callback: cb });
+    let tok_ref: Option<&dyn verilm_verify::PromptTokenizer> =
+        tok_wrapper.as_ref().map(|t| t as &dyn verilm_verify::PromptTokenizer);
+    let detok_ref: Option<&dyn verilm_verify::Detokenizer> =
+        detok_wrapper.as_ref().map(|d| d as &dyn verilm_verify::Detokenizer);
+    verilm_verify::verify_v4_full(key, response, expected_prompt_token_ids, tok_ref, detok_ref)
 }
 
 /// Verify that externally-computed prompt token IDs match the committed token chain.

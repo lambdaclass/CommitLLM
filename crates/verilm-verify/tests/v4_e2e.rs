@@ -10,7 +10,7 @@ use verilm_core::types::{BridgeParams, DeploymentManifest, RetainedLayerState, R
 use verilm_prover::{commit_minimal, open_v4, open_v4_structural, FullBindingParams};
 use verilm_test_vectors::{forward_pass, generate_key, generate_model, LayerWeights};
 use verilm_core::types::InputSpec;
-use verilm_verify::{verify_v4, verify_v4_full, verify_v4_with_weights, PromptTokenizer, Verdict};
+use verilm_verify::{verify_v4, verify_v4_full, verify_v4_with_weights, Detokenizer, PromptTokenizer, Verdict};
 
 /// Adapter: exposes toy model LayerWeights as ShellWeights.
 struct ToyWeights<'a>(&'a [LayerWeights]);
@@ -2530,7 +2530,7 @@ fn v4_tokenizer_trait_reconstruction_pass() {
 
     // Tokenizer returns [100, token_id]: first is embedding input, second in chain.
     let tokenizer = FixedTokenizer { token_ids: vec![100, token_id] };
-    let report = verify_v4_full(&key, &response, None, Some(&tokenizer as &dyn PromptTokenizer));
+    let report = verify_v4_full(&key, &response, None, Some(&tokenizer as &dyn PromptTokenizer), None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
 }
 
@@ -2555,7 +2555,7 @@ fn v4_tokenizer_trait_reconstruction_mismatch() {
 
     // Tokenizer returns wrong second token.
     let tokenizer = FixedTokenizer { token_ids: vec![100, token_id + 1] };
-    let report = verify_v4_full(&key, &response, None, Some(&tokenizer as &dyn PromptTokenizer));
+    let report = verify_v4_full(&key, &response, None, Some(&tokenizer as &dyn PromptTokenizer), None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report.failures.iter().any(|f| f.contains("prompt token mismatch")),
         "should detect mismatch from reconstructed tokens, failures: {:?}", report.failures);
@@ -2588,7 +2588,7 @@ fn v4_tokenizer_trait_error_reported() {
     }
 
     let tokenizer = FailingTokenizer;
-    let report = verify_v4_full(&key, &response, None, Some(&tokenizer as &dyn PromptTokenizer));
+    let report = verify_v4_full(&key, &response, None, Some(&tokenizer as &dyn PromptTokenizer), None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report.failures.iter().any(|f| f.contains("tokenizer reconstruction failed")),
         "should report tokenizer error, failures: {:?}", report.failures);
@@ -2615,6 +2615,151 @@ fn v4_tokenizer_fallback_to_caller_supplied() {
     // Tokenizer provided but no manifest → falls back to caller-supplied IDs.
     let tokenizer = FixedTokenizer { token_ids: vec![999, 888] }; // would mismatch
     let correct_ids = vec![100u32, token_id];
-    let report = verify_v4_full(&key, &response, Some(&correct_ids), Some(&tokenizer as &dyn PromptTokenizer));
+    let report = verify_v4_full(&key, &response, Some(&correct_ids), Some(&tokenizer as &dyn PromptTokenizer), None);
     assert_eq!(report.verdict, Verdict::Pass, "should fall back to caller-supplied IDs, failures: {:?}", report.failures);
+}
+
+// ---------------------------------------------------------------------------
+// Detokenizer trait: output text verification via verify_v4_full
+// ---------------------------------------------------------------------------
+
+/// Test detokenizer that returns a fixed string regardless of token IDs.
+struct FixedDetokenizer {
+    text: String,
+}
+
+impl Detokenizer for FixedDetokenizer {
+    fn decode(&self, _token_ids: &[u32], _policy: Option<&str>) -> Result<String, String> {
+        Ok(self.text.clone())
+    }
+}
+
+struct FailingDetokenizer;
+
+impl Detokenizer for FailingDetokenizer {
+    fn decode(&self, _token_ids: &[u32], _policy: Option<&str>) -> Result<String, String> {
+        Err("detokenizer exploded".into())
+    }
+}
+
+#[test]
+fn v4_detokenization_pass_last_token() {
+    // When challenged token is the last token and detokenizer output matches
+    // the claimed output_text, verification should pass.
+    let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.detokenization_policy = Some("default".into());
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"detok test",
+        sampling_seed: [8u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    attach_toy_logits(&mut response, &_lm_head, &cfg);
+    response.output_text = Some("hello world".into());
+
+    let detok = FixedDetokenizer { text: "hello world".into() };
+    let report = verify_v4_full(
+        &key, &response, None, None,
+        Some(&detok as &dyn Detokenizer),
+    );
+    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+}
+
+#[test]
+fn v4_detokenization_mismatch_detected() {
+    // When the detokenizer output doesn't match claimed output_text, fail.
+    let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.detokenization_policy = Some("default".into());
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"detok test",
+        sampling_seed: [9u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    attach_toy_logits(&mut response, &_lm_head, &cfg);
+    response.output_text = Some("claimed text".into());
+
+    let detok = FixedDetokenizer { text: "actual decoded text".into() };
+    let report = verify_v4_full(
+        &key, &response, None, None,
+        Some(&detok as &dyn Detokenizer),
+    );
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("detokenization mismatch")),
+        "expected detokenization mismatch, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_detokenization_error_reported() {
+    // When the detokenizer callback errors, the failure is reported.
+    let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.detokenization_policy = Some("default".into());
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"detok test",
+        sampling_seed: [10u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    attach_toy_logits(&mut response, &_lm_head, &cfg);
+    response.output_text = Some("some text".into());
+
+    let detok = FailingDetokenizer;
+    let report = verify_v4_full(
+        &key, &response, None, None,
+        Some(&detok as &dyn Detokenizer),
+    );
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("detokenization failed")),
+        "expected detokenization failure, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_detokenization_skipped_without_output_text() {
+    // When output_text is None, detokenization check is skipped (no failure).
+    let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"detok test",
+        sampling_seed: [11u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    attach_toy_logits(&mut response, &_lm_head, &cfg);
+    // response.output_text is already None (default)
+
+    let detok = FixedDetokenizer { text: "anything".into() };
+    let report = verify_v4_full(
+        &key, &response, None, None,
+        Some(&detok as &dyn Detokenizer),
+    );
+    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+    assert!(!report.failures.iter().any(|f| f.contains("detokenization")),
+        "should not have any detokenization failures");
 }

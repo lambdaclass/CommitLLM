@@ -678,6 +678,7 @@ pub fn open_v4_packed(
         manifest: state.manifest.clone(),
         prompt: Some(state.prompt.clone()),
         n_prompt_tokens: state.n_prompt_tokens,
+        output_text: None,
     }
 }
 
@@ -920,6 +921,7 @@ pub fn open_v4_structural(state: &MinimalBatchState, token_index: u32) -> V4Audi
         manifest: state.manifest.clone(),
         prompt: Some(state.prompt.clone()),
         n_prompt_tokens: state.n_prompt_tokens,
+        output_text: None,
     }
 }
 

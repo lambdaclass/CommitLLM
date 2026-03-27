@@ -8,7 +8,7 @@
 use std::time::{Duration, Instant};
 
 use verilm_core::constants::MatrixType;
-use verilm_core::types::{AuditChallenge, AuditTier, CommitmentVersion, DeploymentManifest, InputSpec, V4AuditResponse, VerifierKey};
+use verilm_core::types::{AuditChallenge, AuditTier, CommitmentVersion, DeploymentManifest, InputSpec, OutputSpec, V4AuditResponse, VerifierKey};
 use verilm_core::{freivalds, merkle};
 
 pub use verilm_core::requantize;
@@ -39,6 +39,22 @@ pub trait PromptTokenizer {
     ///
     /// Errors should be returned as `Err(description)`.
     fn tokenize(&self, prompt: &[u8], input_spec: &InputSpec) -> Result<Vec<u32>, String>;
+}
+
+/// Detokenizer abstraction for canonical output text verification.
+///
+/// Implementors (typically Python-side with HuggingFace tokenizers) decode
+/// token IDs back to text under a committed detokenization policy. The
+/// verifier uses this to check that the prover's claimed output text
+/// matches what the token IDs actually decode to.
+pub trait Detokenizer {
+    /// Decode token IDs to text under the given detokenization policy.
+    ///
+    /// `policy` is the committed `detokenization_policy` from the OutputSpec
+    /// (e.g. "default", "clean_spaces", "raw", or None).
+    ///
+    /// Returns the decoded text, or `Err(description)` on failure.
+    fn decode(&self, token_ids: &[u32], policy: Option<&str>) -> Result<String, String>;
 }
 
 /// Verify that a batch commitment's manifest hash matches the expected deployment manifest.
@@ -302,15 +318,20 @@ pub fn verify_v4(
     expected_prompt_token_ids: Option<&[u32]>,
 ) -> V4VerifyReport {
     let no_tok: Option<&dyn PromptTokenizer> = None;
-    verify_v4_full(key, response, expected_prompt_token_ids, no_tok)
+    let no_detok: Option<&dyn Detokenizer> = None;
+    verify_v4_full(key, response, expected_prompt_token_ids, no_tok, no_detok)
 }
 
-/// Full verification with optional canonical tokenizer for request→token reconstruction.
+/// Full verification with optional canonical tokenizer and detokenizer.
 ///
 /// When `tokenizer` is `Some`, the verifier reconstructs prompt token IDs from
 /// `response.prompt` + the manifest's `InputSpec`, then checks them against
 /// the committed chain. This is the canonical path — the verifier independently
 /// derives the expected tokens rather than trusting caller-supplied IDs.
+///
+/// When `detokenizer` is `Some` and `response.output_text` is present, the
+/// verifier decodes the committed generation token IDs and compares against
+/// the claimed output text under the committed `detokenization_policy`.
 ///
 /// `expected_prompt_token_ids` is a fallback: used only when no tokenizer is
 /// provided or when the response lacks the fields needed for reconstruction.
@@ -319,6 +340,7 @@ pub fn verify_v4_full(
     response: &V4AuditResponse,
     expected_prompt_token_ids: Option<&[u32]>,
     tokenizer: Option<&dyn PromptTokenizer>,
+    detokenizer: Option<&dyn Detokenizer>,
 ) -> V4VerifyReport {
     let start = Instant::now();
     let (mut checks_run, mut failures) = verify_v4_structural(response);
@@ -713,6 +735,56 @@ pub fn verify_v4_full(
         }
         None => {
             failures.push("V4 audit response missing shell_opening".into());
+        }
+    }
+
+    // Detokenization verification: check claimed output text matches decoded tokens.
+    //
+    // When the response carries output_text, a detokenizer is provided, and the
+    // manifest specifies a detokenization_policy, decode the generation token IDs
+    // and compare. Full-generation check when challenged token is last; otherwise
+    // prefix check up to the challenged position.
+    if let (Some(ref claimed_text), Some(detok)) = (&response.output_text, detokenizer) {
+        let detok_policy = response.manifest.as_ref()
+            .map(|m| OutputSpec::from(m))
+            .and_then(|os| os.detokenization_policy);
+
+        // Collect generation token IDs: prefix after prompt boundary + challenged token.
+        let gen_start = response.n_prompt_tokens
+            .unwrap_or(1)
+            .saturating_sub(1) as usize;
+        let mut gen_token_ids: Vec<u32> = response.prefix_token_ids
+            .get(gen_start..)
+            .unwrap_or(&[])
+            .to_vec();
+        gen_token_ids.push(response.token_id);
+
+        let is_last_token = response.token_index == response.commitment.n_tokens.saturating_sub(1);
+
+        checks_run += 1;
+        match detok.decode(&gen_token_ids, detok_policy.as_deref()) {
+            Ok(decoded) => {
+                if is_last_token {
+                    // Full generation — exact match required.
+                    if decoded != *claimed_text {
+                        failures.push(format!(
+                            "detokenization mismatch (policy={:?}): decoded={:?} vs claimed={:?}",
+                            detok_policy, decoded, claimed_text
+                        ));
+                    }
+                } else {
+                    // Partial generation — decoded must be a prefix of the claimed text.
+                    if !claimed_text.starts_with(&decoded) {
+                        failures.push(format!(
+                            "detokenization prefix mismatch (policy={:?}): decoded={:?} is not a prefix of claimed={:?}",
+                            detok_policy, decoded, claimed_text
+                        ));
+                    }
+                }
+            }
+            Err(e) => {
+                failures.push(format!("detokenization failed: {}", e));
+            }
         }
     }
 
