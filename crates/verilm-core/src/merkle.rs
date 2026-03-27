@@ -129,27 +129,6 @@ pub fn hash_leaf(data: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Compute the Merkle leaf hash for a token trace (legacy, bincode-based).
-///
-/// If `final_hidden` is `Some`, the hash covers both the serialized layers
-/// and the final hidden state, binding the logit computation to the commitment.
-/// If `None`, falls back to hashing only the serialized layers (backward compat).
-pub fn trace_leaf_hash(serialized_layers: &[u8], final_hidden: Option<&[i8]>) -> [u8; 32] {
-    match final_hidden {
-        None => hash_leaf(serialized_layers),
-        Some(fh) => {
-            let mut hasher = Sha256::new();
-            hasher.update(serialized_layers);
-            // Domain separator to prevent collisions with the layers-only hash.
-            hasher.update(b"final_hidden");
-            for &b in fh {
-                hasher.update([b as u8]);
-            }
-            hasher.finalize().into()
-        }
-    }
-}
-
 /// Compute the Merkle leaf hash for a token's minimal retained state.
 ///
 /// Hashes only the non-replayable attention boundary (`a`, `scale_a`)
@@ -258,64 +237,137 @@ pub fn hash_embedding_row(row: &[f32]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Compute a deployment manifest hash: SHA-256 over all manifest fields in canonical order.
-///
-/// The hash covers (with domain separator `b"vi-manifest-v1"`):
-///   1. `tokenizer_hash` (32 bytes)
-///   2. `temperature` as little-endian f32 (4 bytes)
-///   3. `top_k` as little-endian u32 (4 bytes)
-///   4. `top_p` as little-endian f32 (4 bytes)
-///   5. `eos_policy` as UTF-8 bytes
-pub fn hash_manifest(manifest: &crate::types::DeploymentManifest) -> [u8; 32] {
+// ---------------------------------------------------------------------------
+// Four-spec hashing (paper §3)
+// ---------------------------------------------------------------------------
+
+/// Hash an `InputSpec`: tokenizer, system prompt, chat template, preprocessing policies.
+pub fn hash_input_spec(spec: &crate::types::InputSpec) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"vi-manifest-v3");
-    hasher.update(manifest.tokenizer_hash);
-    hasher.update(manifest.temperature.to_le_bytes());
-    hasher.update(manifest.top_k.to_le_bytes());
-    hasher.update(manifest.top_p.to_le_bytes());
-    hasher.update(manifest.eos_policy.as_bytes());
-    // R_W: weight root binds the commitment to a specific quantized checkpoint.
-    if let Some(wh) = manifest.weight_hash {
-        hasher.update(b"\x01"); // presence tag
-        hasher.update(wh);
-    } else {
-        hasher.update(b"\x00");
+    hasher.update(b"vi-input-v1");
+    hasher.update(spec.tokenizer_hash);
+    hash_optional_32(&mut hasher, spec.system_prompt_hash.as_ref());
+    hash_optional_32(&mut hasher, spec.chat_template_hash.as_ref());
+    hash_optional_string(&mut hasher, spec.bos_eos_policy.as_deref());
+    hash_optional_string(&mut hasher, spec.truncation_policy.as_deref());
+    hash_optional_string(&mut hasher, spec.special_token_policy.as_deref());
+    hasher.finalize().into()
+}
+
+/// Hash a `ModelSpec`: weight identity, quantization, architecture knobs.
+pub fn hash_model_spec(spec: &crate::types::ModelSpec) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"vi-model-v1");
+    hash_optional_32(&mut hasher, spec.weight_hash.as_ref());
+    hash_optional_32(&mut hasher, spec.quant_hash.as_ref());
+    hash_optional_32(&mut hasher, spec.rope_config_hash.as_ref());
+    match spec.rmsnorm_eps {
+        Some(eps) => {
+            hasher.update(b"\x01");
+            hasher.update(eps.to_le_bytes());
+        }
+        None => hasher.update(b"\x00"),
     }
-    // Quantization scheme hash.
-    if let Some(qh) = manifest.quant_hash {
-        hasher.update(b"\x01");
-        hasher.update(qh);
-    } else {
-        hasher.update(b"\x00");
-    }
-    // System prompt hash.
-    if let Some(sph) = manifest.system_prompt_hash {
-        hasher.update(b"\x01");
-        hasher.update(sph);
-    } else {
-        hasher.update(b"\x00");
-    }
-    // Logit-modifying parameters.
-    hasher.update(manifest.repetition_penalty.to_le_bytes());
-    hasher.update(manifest.frequency_penalty.to_le_bytes());
-    hasher.update(manifest.presence_penalty.to_le_bytes());
-    // Logit bias: length-prefixed sorted pairs.
-    hasher.update((manifest.logit_bias.len() as u32).to_le_bytes());
-    for &(token_id, bias) in &manifest.logit_bias {
+    hash_optional_32(&mut hasher, spec.adapter_hash.as_ref());
+    hasher.finalize().into()
+}
+
+/// Hash a `DecodeSpec`: sampling algorithm and parameters.
+pub fn hash_decode_spec(spec: &crate::types::DecodeSpec) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"vi-decode-v1");
+    hasher.update(spec.temperature.to_le_bytes());
+    hasher.update(spec.top_k.to_le_bytes());
+    hasher.update(spec.top_p.to_le_bytes());
+    hasher.update(spec.repetition_penalty.to_le_bytes());
+    hasher.update(spec.frequency_penalty.to_le_bytes());
+    hasher.update(spec.presence_penalty.to_le_bytes());
+    hasher.update((spec.logit_bias.len() as u32).to_le_bytes());
+    for &(token_id, bias) in &spec.logit_bias {
         hasher.update(token_id.to_le_bytes());
         hasher.update(bias.to_le_bytes());
     }
-    // Guided decoding constraint.
-    hasher.update((manifest.guided_decoding.len() as u32).to_le_bytes());
-    hasher.update(manifest.guided_decoding.as_bytes());
-    // Output-level parameters.
-    hasher.update((manifest.stop_sequences.len() as u32).to_le_bytes());
-    for s in &manifest.stop_sequences {
+    hasher.update((spec.guided_decoding.len() as u32).to_le_bytes());
+    hasher.update(spec.guided_decoding.as_bytes());
+    match &spec.sampler_version {
+        Some(sv) => {
+            hasher.update(b"\x01");
+            hasher.update((sv.len() as u32).to_le_bytes());
+            hasher.update(sv.as_bytes());
+        }
+        None => hasher.update(b"\x00"),
+    }
+    hasher.finalize().into()
+}
+
+/// Hash an `OutputSpec`: termination and post-processing rules.
+pub fn hash_output_spec(spec: &crate::types::OutputSpec) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"vi-output-v1");
+    hasher.update(spec.eos_policy.as_bytes());
+    hasher.update((spec.stop_sequences.len() as u32).to_le_bytes());
+    for s in &spec.stop_sequences {
         hasher.update((s.len() as u32).to_le_bytes());
         hasher.update(s.as_bytes());
     }
-    hasher.update(manifest.max_tokens.to_le_bytes());
+    hasher.update(spec.max_tokens.to_le_bytes());
+    hasher.update(spec.min_tokens.to_le_bytes());
+    hasher.update([spec.ignore_eos as u8]);
+    hash_optional_string(&mut hasher, spec.detokenization_policy.as_deref());
     hasher.finalize().into()
+}
+
+/// Compose four spec hashes into the manifest commitment:
+///
+///   M = H("vi-manifest-v4" || H_input || H_model || H_decode || H_output)
+pub fn hash_manifest_composed(
+    h_input: [u8; 32],
+    h_model: [u8; 32],
+    h_decode: [u8; 32],
+    h_output: [u8; 32],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"vi-manifest-v4");
+    hasher.update(h_input);
+    hasher.update(h_model);
+    hasher.update(h_decode);
+    hasher.update(h_output);
+    hasher.finalize().into()
+}
+
+/// Compute the manifest hash from a `DeploymentManifest` via the four-spec split.
+///
+/// This is the canonical path: splits the flat manifest into four specs,
+/// hashes each independently, and composes them into M.
+pub fn hash_manifest(manifest: &crate::types::DeploymentManifest) -> [u8; 32] {
+    let (input, model, decode, output) = manifest.split();
+    hash_manifest_composed(
+        hash_input_spec(&input),
+        hash_model_spec(&model),
+        hash_decode_spec(&decode),
+        hash_output_spec(&output),
+    )
+}
+
+fn hash_optional_32(hasher: &mut Sha256, opt: Option<&[u8; 32]>) {
+    match opt {
+        Some(h) => {
+            hasher.update(b"\x01");
+            hasher.update(h);
+        }
+        None => hasher.update(b"\x00"),
+    }
+}
+
+fn hash_optional_string(hasher: &mut Sha256, opt: Option<&str>) {
+    match opt {
+        Some(s) => {
+            hasher.update(b"\x01");
+            hasher.update((s.len() as u32).to_le_bytes());
+            hasher.update(s.as_bytes());
+        }
+        None => hasher.update(b"\x00"),
+    }
 }
 
 /// Compute a weight-chain hash: SHA-256 over all INT8 weights in canonical order.
@@ -586,5 +638,180 @@ mod tests {
         };
         let leaf_hash2 = hash_retained_state_direct(&state2);
         assert_ne!(io, io_hash_v4(leaf_hash2, 42, prev));
+    }
+
+    #[test]
+    fn test_four_spec_hash_deterministic() {
+        use crate::types::{InputSpec, ModelSpec, DecodeSpec, OutputSpec};
+
+        let input = InputSpec {
+            tokenizer_hash: [1u8; 32],
+            system_prompt_hash: Some([2u8; 32]),
+            chat_template_hash: None,
+            bos_eos_policy: None,
+            truncation_policy: None,
+            special_token_policy: None,
+        };
+        let model = ModelSpec {
+            weight_hash: Some([3u8; 32]),
+            quant_hash: None,
+            rope_config_hash: None,
+            rmsnorm_eps: Some(1e-5),
+            adapter_hash: None,
+        };
+        let decode = DecodeSpec {
+            temperature: 0.7,
+            top_k: 50,
+            top_p: 0.9,
+            repetition_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            logit_bias: vec![],
+            guided_decoding: String::new(),
+            sampler_version: None,
+        };
+        let output = OutputSpec {
+            eos_policy: "stop".into(),
+            stop_sequences: vec![],
+            max_tokens: 100,
+            min_tokens: 0,
+            ignore_eos: false,
+            detokenization_policy: None,
+        };
+
+        let h1 = hash_manifest_composed(
+            hash_input_spec(&input),
+            hash_model_spec(&model),
+            hash_decode_spec(&decode),
+            hash_output_spec(&output),
+        );
+        let h2 = hash_manifest_composed(
+            hash_input_spec(&input),
+            hash_model_spec(&model),
+            hash_decode_spec(&decode),
+            hash_output_spec(&output),
+        );
+        assert_eq!(h1, h2, "same specs must produce same manifest hash");
+    }
+
+    #[test]
+    fn test_four_spec_hash_differs_per_spec() {
+        use crate::types::{InputSpec, ModelSpec, DecodeSpec, OutputSpec};
+
+        let input = InputSpec {
+            tokenizer_hash: [1u8; 32],
+            system_prompt_hash: None,
+            chat_template_hash: None,
+            bos_eos_policy: None,
+            truncation_policy: None,
+            special_token_policy: None,
+        };
+        let model = ModelSpec {
+            weight_hash: None,
+            quant_hash: None,
+            rope_config_hash: None,
+            rmsnorm_eps: None,
+            adapter_hash: None,
+        };
+        let decode = DecodeSpec {
+            temperature: 0.0,
+            top_k: 0,
+            top_p: 1.0,
+            repetition_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            logit_bias: vec![],
+            guided_decoding: String::new(),
+            sampler_version: None,
+        };
+        let output = OutputSpec {
+            eos_policy: "stop".into(),
+            stop_sequences: vec![],
+            max_tokens: 0,
+            min_tokens: 0,
+            ignore_eos: false,
+            detokenization_policy: None,
+        };
+
+        let base = hash_manifest_composed(
+            hash_input_spec(&input),
+            hash_model_spec(&model),
+            hash_decode_spec(&decode),
+            hash_output_spec(&output),
+        );
+
+        // Change only input spec.
+        let input2 = InputSpec {
+            tokenizer_hash: [2u8; 32],
+            ..input.clone()
+        };
+        let changed_input = hash_manifest_composed(
+            hash_input_spec(&input2),
+            hash_model_spec(&model),
+            hash_decode_spec(&decode),
+            hash_output_spec(&output),
+        );
+        assert_ne!(base, changed_input, "different input spec must change M");
+
+        // Change only decode spec.
+        let decode2 = DecodeSpec {
+            temperature: 0.5,
+            ..decode.clone()
+        };
+        let changed_decode = hash_manifest_composed(
+            hash_input_spec(&input),
+            hash_model_spec(&model),
+            hash_decode_spec(&decode2),
+            hash_output_spec(&output),
+        );
+        assert_ne!(base, changed_decode, "different decode spec must change M");
+    }
+
+    #[test]
+    fn test_manifest_split_round_trips_hash() {
+        use crate::types::DeploymentManifest;
+
+        let manifest = DeploymentManifest {
+            tokenizer_hash: [42u8; 32],
+            temperature: 0.7,
+            top_k: 50,
+            top_p: 0.9,
+            eos_policy: "stop".into(),
+            weight_hash: Some([99u8; 32]),
+            quant_hash: None,
+            system_prompt_hash: Some([77u8; 32]),
+            repetition_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            logit_bias: vec![(5, 1.0)],
+            guided_decoding: String::new(),
+            stop_sequences: vec!["<|end|>".into()],
+            max_tokens: 256,
+            chat_template_hash: Some([55u8; 32]),
+            rope_config_hash: None,
+            rmsnorm_eps: Some(1e-5),
+            sampler_version: Some("chacha20-vi-sample-v1".into()),
+            bos_eos_policy: None,
+            truncation_policy: None,
+            special_token_policy: None,
+            adapter_hash: None,
+            min_tokens: 0,
+            ignore_eos: false,
+            detokenization_policy: None,
+        };
+
+        // hash_manifest splits internally, so this tests the round-trip.
+        let h1 = hash_manifest(&manifest);
+
+        // Manually split and compose.
+        let (input, model, decode, output) = manifest.split();
+        let h2 = hash_manifest_composed(
+            hash_input_spec(&input),
+            hash_model_spec(&model),
+            hash_decode_spec(&decode),
+            hash_output_spec(&output),
+        );
+
+        assert_eq!(h1, h2, "hash_manifest must equal manual split+compose");
     }
 }

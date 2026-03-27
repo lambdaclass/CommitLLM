@@ -36,6 +36,10 @@ pub struct MinimalBatchState {
     pub io_tree: merkle::MerkleTree,
     pub all_retained: Vec<RetainedTokenState>,
     pub manifest_hash: Option<[u8; 32]>,
+    pub input_spec_hash: Option<[u8; 32]>,
+    pub model_spec_hash: Option<[u8; 32]>,
+    pub decode_spec_hash: Option<[u8; 32]>,
+    pub output_spec_hash: Option<[u8; 32]>,
     pub token_ids: Vec<u32>,
     pub prompt_hash: [u8; 32],
     pub seed_commitment: [u8; 32],
@@ -149,7 +153,21 @@ pub fn commit_minimal(
 
     let trace_tree = merkle::build_tree(&trace_leaves);
     let io_tree = merkle::build_tree(&io_leaves);
-    let manifest_hash = params.manifest.map(|m| merkle::hash_manifest(m));
+
+    // Compute four-spec hashes and composed manifest hash.
+    let (manifest_hash, input_spec_hash, model_spec_hash, decode_spec_hash, output_spec_hash) =
+        match params.manifest {
+            Some(m) => {
+                let (input, model, decode, output) = m.split();
+                let h_in = merkle::hash_input_spec(&input);
+                let h_mod = merkle::hash_model_spec(&model);
+                let h_dec = merkle::hash_decode_spec(&decode);
+                let h_out = merkle::hash_output_spec(&output);
+                let m_hash = merkle::hash_manifest_composed(h_in, h_mod, h_dec, h_out);
+                (Some(m_hash), Some(h_in), Some(h_mod), Some(h_dec), Some(h_out))
+            }
+            None => (None, None, None, None, None),
+        };
 
     let t_trees = if timers { Some(std::time::Instant::now()) } else { None };
 
@@ -158,10 +176,14 @@ pub fn commit_minimal(
         io_root: io_tree.root,
         n_tokens: n_tokens as u32,
         manifest_hash,
+        input_spec_hash,
+        model_spec_hash,
+        decode_spec_hash,
+        output_spec_hash,
         version: CommitmentVersion::V4,
         prompt_hash: Some(merkle::hash_prompt(params.prompt)),
         seed_commitment: Some(merkle::hash_seed(&params.sampling_seed)),
-        kv_chain_root: None, // prefix binding via retained Merkle tree, not separate KV root
+        kv_chain_root: None,
     };
 
     let state = MinimalBatchState {
@@ -169,6 +191,10 @@ pub fn commit_minimal(
         io_tree,
         all_retained,
         manifest_hash,
+        input_spec_hash,
+        model_spec_hash,
+        decode_spec_hash,
+        output_spec_hash,
         token_ids: params.token_ids.to_vec(),
         prompt_hash: merkle::hash_prompt(params.prompt),
         seed_commitment: merkle::hash_seed(&params.sampling_seed),
@@ -262,6 +288,10 @@ pub struct PackedBatchState {
     pub token_index: TokenIndex,
     // ── binding data (same as MinimalBatchState) ──
     pub manifest_hash: Option<[u8; 32]>,
+    pub input_spec_hash: Option<[u8; 32]>,
+    pub model_spec_hash: Option<[u8; 32]>,
+    pub decode_spec_hash: Option<[u8; 32]>,
+    pub output_spec_hash: Option<[u8; 32]>,
     pub token_ids: Vec<u32>,
     pub prompt_hash: [u8; 32],
     pub seed_commitment: [u8; 32],
@@ -432,6 +462,10 @@ pub fn commit_minimal_packed(
         fwd_batch_sizes: fwd_batch_sizes.clone(),
         token_index: idx,
         manifest_hash: None,
+        input_spec_hash: None,
+        model_spec_hash: None,
+        decode_spec_hash: None,
+        output_spec_hash: None,
         token_ids: Vec::new(),
         prompt_hash: [0u8; 32],
         seed_commitment: [0u8; 32],
@@ -465,7 +499,20 @@ pub fn commit_minimal_packed(
 
     let trace_tree = merkle::build_tree(&trace_leaves);
     let io_tree = merkle::build_tree(&io_leaves);
-    let manifest_hash = params.manifest.map(|m| merkle::hash_manifest(m));
+
+    let (manifest_hash, input_spec_hash, model_spec_hash, decode_spec_hash, output_spec_hash) =
+        match params.manifest {
+            Some(m) => {
+                let (input, model, decode, output) = m.split();
+                let h_in = merkle::hash_input_spec(&input);
+                let h_mod = merkle::hash_model_spec(&model);
+                let h_dec = merkle::hash_decode_spec(&decode);
+                let h_out = merkle::hash_output_spec(&output);
+                let m_hash = merkle::hash_manifest_composed(h_in, h_mod, h_dec, h_out);
+                (Some(m_hash), Some(h_in), Some(h_mod), Some(h_dec), Some(h_out))
+            }
+            None => (None, None, None, None, None),
+        };
 
     let t_trees = if timers { Some(std::time::Instant::now()) } else { None };
 
@@ -474,6 +521,10 @@ pub fn commit_minimal_packed(
         io_root: io_tree.root,
         n_tokens: n_tokens as u32,
         manifest_hash,
+        input_spec_hash,
+        model_spec_hash,
+        decode_spec_hash,
+        output_spec_hash,
         version: CommitmentVersion::V4,
         prompt_hash: Some(merkle::hash_prompt(params.prompt)),
         seed_commitment: Some(merkle::hash_seed(&params.sampling_seed)),
@@ -491,6 +542,10 @@ pub fn commit_minimal_packed(
         fwd_batch_sizes,
         token_index: state.token_index,
         manifest_hash,
+        input_spec_hash,
+        model_spec_hash,
+        decode_spec_hash,
+        output_spec_hash,
         token_ids: params.token_ids.to_vec(),
         prompt_hash: merkle::hash_prompt(params.prompt),
         seed_commitment: merkle::hash_seed(&params.sampling_seed),
@@ -538,6 +593,10 @@ pub fn open_v4_packed(
         io_root: state.io_tree.root,
         n_tokens: state.n_tokens() as u32,
         manifest_hash: state.manifest_hash,
+        input_spec_hash: state.input_spec_hash,
+        model_spec_hash: state.model_spec_hash,
+        decode_spec_hash: state.decode_spec_hash,
+        output_spec_hash: state.output_spec_hash,
         version: CommitmentVersion::V4,
         prompt_hash: Some(state.prompt_hash),
         seed_commitment: Some(state.seed_commitment),
@@ -792,6 +851,10 @@ pub fn open_v4_structural(state: &MinimalBatchState, token_index: u32) -> V4Audi
         io_root: state.io_tree.root,
         n_tokens: state.all_retained.len() as u32,
         manifest_hash: state.manifest_hash,
+        input_spec_hash: state.input_spec_hash,
+        model_spec_hash: state.model_spec_hash,
+        decode_spec_hash: state.decode_spec_hash,
+        output_spec_hash: state.output_spec_hash,
         version: CommitmentVersion::V4,
         prompt_hash: Some(state.prompt_hash),
         seed_commitment: Some(state.seed_commitment),

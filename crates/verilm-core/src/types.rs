@@ -90,17 +90,236 @@ pub struct DeploymentManifest {
     /// Maximum tokens to generate. 0 = no explicit limit.
     #[serde(default)]
     pub max_tokens: u32,
+
+    // --- Four-spec fields (flow through to InputSpec/ModelSpec/DecodeSpec) ---
+
+    /// SHA-256 of the chat template (Jinja2 or equivalent).
+    #[serde(default)]
+    pub chat_template_hash: Option<[u8; 32]>,
+    /// SHA-256 of RoPE / positional encoding configuration.
+    #[serde(default)]
+    pub rope_config_hash: Option<[u8; 32]>,
+    /// RMSNorm epsilon from model config (e.g. 1e-5 for Llama).
+    #[serde(default)]
+    pub rmsnorm_eps: Option<f64>,
+    /// Canonical sampler version identifier (e.g. "chacha20-vi-sample-v1").
+    #[serde(default)]
+    pub sampler_version: Option<String>,
+
+    // --- Fields that flow through to InputSpec ---
+
+    /// BOS/EOS preprocessing policy (e.g. "add_bos", "none").
+    #[serde(default)]
+    pub bos_eos_policy: Option<String>,
+    /// Truncation policy (e.g. "left", "right", "error").
+    #[serde(default)]
+    pub truncation_policy: Option<String>,
+    /// Special-token handling policy (e.g. "encode", "strip", "pass").
+    #[serde(default)]
+    pub special_token_policy: Option<String>,
+
+    // --- Fields that flow through to ModelSpec ---
+
+    /// Hash of adapter / LoRA / merged-checkpoint identity.
+    #[serde(default)]
+    pub adapter_hash: Option<[u8; 32]>,
+
+    // --- Fields that flow through to OutputSpec ---
+
+    /// Minimum tokens before EOS is allowed. 0 = no minimum.
+    #[serde(default)]
+    pub min_tokens: u32,
+    /// Whether to ignore EOS tokens during generation.
+    #[serde(default)]
+    pub ignore_eos: bool,
+    /// Detokenization policy (e.g. "default", "strip_special", "raw").
+    #[serde(default)]
+    pub detokenization_policy: Option<String>,
 }
 
 fn default_repetition_penalty() -> f32 { 1.0 }
 
 impl DeploymentManifest {
-    /// Return default (disabled) values for all logit-modifying and output parameters.
-    /// Use struct update syntax: `DeploymentManifest { temperature: 0.5, ..DeploymentManifest::disabled_extras() }`
-    /// is NOT possible since the struct is not Default. Instead, use these constants directly.
     pub const DISABLED_REPETITION_PENALTY: f32 = 1.0;
     pub const DISABLED_FREQUENCY_PENALTY: f32 = 0.0;
     pub const DISABLED_PRESENCE_PENALTY: f32 = 0.0;
+
+    /// Split the flat manifest into the four protocol specs.
+    pub fn split(&self) -> (InputSpec, ModelSpec, DecodeSpec, OutputSpec) {
+        (
+            InputSpec::from(self),
+            ModelSpec::from(self),
+            DecodeSpec::from(self),
+            OutputSpec::from(self),
+        )
+    }
+}
+
+// ===========================================================================
+// Four-spec commitment types (paper §3: M = H(H_input || H_model || H_decode || H_output))
+// ===========================================================================
+
+/// Preprocessing semantics: tokenizer, chat template, system prompt.
+///
+/// Binds the input pipeline so that the verifier can confirm the prover
+/// used the expected tokenizer and prompt preprocessing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputSpec {
+    /// SHA-256 of the tokenizer vocabulary/config files.
+    pub tokenizer_hash: [u8; 32],
+    /// SHA-256 of the system prompt prepended to user input.
+    #[serde(default)]
+    pub system_prompt_hash: Option<[u8; 32]>,
+    /// SHA-256 of the chat template (Jinja2 or equivalent).
+    #[serde(default)]
+    pub chat_template_hash: Option<[u8; 32]>,
+    /// BOS/EOS preprocessing policy (e.g. "add_bos", "none").
+    /// Controls whether BOS/EOS tokens are prepended/appended to the input.
+    #[serde(default)]
+    pub bos_eos_policy: Option<String>,
+    /// Truncation policy (e.g. "left", "right", "error").
+    /// Controls behavior when input exceeds the model's context window.
+    #[serde(default)]
+    pub truncation_policy: Option<String>,
+    /// Special-token handling policy (e.g. "encode", "strip", "pass").
+    /// Controls how special tokens in user input are processed.
+    #[serde(default)]
+    pub special_token_policy: Option<String>,
+}
+
+impl From<&DeploymentManifest> for InputSpec {
+    fn from(m: &DeploymentManifest) -> Self {
+        InputSpec {
+            tokenizer_hash: m.tokenizer_hash,
+            system_prompt_hash: m.system_prompt_hash,
+            chat_template_hash: m.chat_template_hash,
+            bos_eos_policy: m.bos_eos_policy.clone(),
+            truncation_policy: m.truncation_policy.clone(),
+            special_token_policy: m.special_token_policy.clone(),
+        }
+    }
+}
+
+/// Model identity and architecture configuration.
+///
+/// Binds the checkpoint, quantization scheme, and architecture-affecting
+/// knobs so the verifier can confirm the prover used the correct model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelSpec {
+    /// Merkle root over all INT8 weight matrices (R_W).
+    #[serde(default)]
+    pub weight_hash: Option<[u8; 32]>,
+    /// Hash of the quantization scheme (e.g. W8A8, Q8_0).
+    #[serde(default)]
+    pub quant_hash: Option<[u8; 32]>,
+    /// Hash of RoPE / positional encoding configuration.
+    #[serde(default)]
+    pub rope_config_hash: Option<[u8; 32]>,
+    /// RMSNorm epsilon (architecture constant, e.g. 1e-5 for Llama).
+    #[serde(default)]
+    pub rmsnorm_eps: Option<f64>,
+    /// Hash of adapter / LoRA / merged-checkpoint identity.
+    #[serde(default)]
+    pub adapter_hash: Option<[u8; 32]>,
+}
+
+impl From<&DeploymentManifest> for ModelSpec {
+    fn from(m: &DeploymentManifest) -> Self {
+        ModelSpec {
+            weight_hash: m.weight_hash,
+            quant_hash: m.quant_hash,
+            rope_config_hash: m.rope_config_hash,
+            rmsnorm_eps: m.rmsnorm_eps,
+            adapter_hash: m.adapter_hash,
+        }
+    }
+}
+
+/// Decode policy: sampling algorithm and parameters.
+///
+/// Binds the entire sampling pipeline so the verifier can exactly
+/// replay token selection from verified logits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecodeSpec {
+    /// Sampling temperature (0.0 = greedy).
+    pub temperature: f32,
+    /// Top-k sampling parameter (0 = disabled).
+    pub top_k: u32,
+    /// Top-p (nucleus) sampling parameter (1.0 = disabled).
+    pub top_p: f32,
+    /// Repetition penalty: multiplicative factor on logits of previously generated tokens.
+    #[serde(default = "default_repetition_penalty")]
+    pub repetition_penalty: f32,
+    /// Frequency penalty: additive penalty proportional to token frequency.
+    #[serde(default)]
+    pub frequency_penalty: f32,
+    /// Presence penalty: additive penalty for any token that appeared.
+    #[serde(default)]
+    pub presence_penalty: f32,
+    /// Logit bias: (token_id, additive_bias) pairs, sorted by token_id.
+    #[serde(default)]
+    pub logit_bias: Vec<(u32, f32)>,
+    /// Guided decoding grammar/schema identifier.
+    #[serde(default)]
+    pub guided_decoding: String,
+    /// Canonical sampler version identifier (e.g. "chacha20-v1").
+    #[serde(default)]
+    pub sampler_version: Option<String>,
+}
+
+impl From<&DeploymentManifest> for DecodeSpec {
+    fn from(m: &DeploymentManifest) -> Self {
+        DecodeSpec {
+            temperature: m.temperature,
+            top_k: m.top_k,
+            top_p: m.top_p,
+            repetition_penalty: m.repetition_penalty,
+            frequency_penalty: m.frequency_penalty,
+            presence_penalty: m.presence_penalty,
+            logit_bias: m.logit_bias.clone(),
+            guided_decoding: m.guided_decoding.clone(),
+            sampler_version: m.sampler_version.clone(),
+        }
+    }
+}
+
+/// Output policy: termination and post-processing rules.
+///
+/// Binds the output pipeline so the verifier can confirm generation
+/// termination conditions and text post-processing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputSpec {
+    /// EOS/stop policy identifier (e.g. "stop", "sample").
+    pub eos_policy: String,
+    /// Stop sequences that terminate generation.
+    #[serde(default)]
+    pub stop_sequences: Vec<String>,
+    /// Maximum tokens to generate. 0 = no explicit limit.
+    #[serde(default)]
+    pub max_tokens: u32,
+    /// Minimum tokens before EOS is allowed. 0 = no minimum.
+    #[serde(default)]
+    pub min_tokens: u32,
+    /// Whether to ignore EOS tokens during generation.
+    #[serde(default)]
+    pub ignore_eos: bool,
+    /// Detokenization policy (e.g. "default", "strip_special", "raw").
+    /// Controls how token IDs are converted to final output text.
+    #[serde(default)]
+    pub detokenization_policy: Option<String>,
+}
+
+impl From<&DeploymentManifest> for OutputSpec {
+    fn from(m: &DeploymentManifest) -> Self {
+        OutputSpec {
+            eos_policy: m.eos_policy.clone(),
+            stop_sequences: m.stop_sequences.clone(),
+            max_tokens: m.max_tokens,
+            min_tokens: m.min_tokens,
+            ignore_eos: m.ignore_eos,
+            detokenization_policy: m.detokenization_policy.clone(),
+        }
+    }
 }
 
 /// VERIFIER-SECRET material. Must never be sent to the prover.
@@ -603,11 +822,23 @@ pub struct BatchCommitment {
     /// commitment, enabling cross-token chain verification.
     pub io_root: [u8; 32],
     pub n_tokens: u32,
-    /// Hash of the deployment manifest (Level B). Binds configuration to commitment.
+    /// Four-spec manifest hash: M = H("vi-manifest-v4" || H_input || H_model || H_decode || H_output).
+    /// Binds preprocessing, model identity, decode policy, and output policy to the commitment.
     #[serde(default)]
     pub manifest_hash: Option<[u8; 32]>,
+    /// H(InputSpec): tokenizer, chat template, system prompt, preprocessing policy.
+    #[serde(default)]
+    pub input_spec_hash: Option<[u8; 32]>,
+    /// H(ModelSpec): R_W, quantization, RoPE, RMSNorm eps, adapter identity.
+    #[serde(default)]
+    pub model_spec_hash: Option<[u8; 32]>,
+    /// H(DecodeSpec): temperature, top-k/p, penalties, sampler version.
+    #[serde(default)]
+    pub decode_spec_hash: Option<[u8; 32]>,
+    /// H(OutputSpec): EOS policy, stop sequences, max/min tokens, detokenization.
+    #[serde(default)]
+    pub output_spec_hash: Option<[u8; 32]>,
     /// Protocol version for the IO hash format.
-    /// V1 = legacy (no token-ID binding), V2 = token-ID bound, V3 = transcript-chained.
     #[serde(default)]
     pub version: CommitmentVersion,
     /// SHA-256 of the canonicalized prompt / request input.

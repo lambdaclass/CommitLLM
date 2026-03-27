@@ -175,6 +175,65 @@ fn extract_manifest(d: &Bound<'_, PyDict>) -> PyResult<DeploymentManifest> {
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or(0),
+        chat_template_hash: d.get_item("chat_template_hash")?
+            .and_then(|v| {
+                // Python may pass None for absent hash.
+                if v.is_none() { return None; }
+                Some(v)
+            })
+            .map(|v| {
+                let hex_str: String = v.extract()?;
+                decode_hex32(&hex_str, "chat_template_hash")
+            })
+            .transpose()?,
+        rope_config_hash: d.get_item("rope_config_hash")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| {
+                let hex_str: String = v.extract()?;
+                decode_hex32(&hex_str, "rope_config_hash")
+            })
+            .transpose()?,
+        rmsnorm_eps: d.get_item("rmsnorm_eps")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract::<f64>())
+            .transpose()?,
+        sampler_version: d.get_item("sampler_version")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract::<String>())
+            .transpose()?,
+        bos_eos_policy: d.get_item("bos_eos_policy")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract::<String>())
+            .transpose()?,
+        truncation_policy: d.get_item("truncation_policy")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract::<String>())
+            .transpose()?,
+        special_token_policy: d.get_item("special_token_policy")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract::<String>())
+            .transpose()?,
+        adapter_hash: d.get_item("adapter_hash")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| {
+                let hex_str: String = v.extract()?;
+                decode_hex32(&hex_str, "adapter_hash")
+            })
+            .transpose()?,
+        min_tokens: d.get_item("min_tokens")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or(0),
+        ignore_eos: d.get_item("ignore_eos")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or(false),
+        detokenization_policy: d.get_item("detokenization_policy")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract::<String>())
+            .transpose()?,
     })
 }
 

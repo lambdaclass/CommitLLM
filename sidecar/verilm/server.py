@@ -87,10 +87,15 @@ class VerifiedInferenceServer:
 
         # Manifest hashes.
         self._tokenizer_hash = self._compute_tokenizer_hash(llm)
+        self._chat_template_hash = self._compute_chat_template_hash(llm)
         self._model_dir = self._resolve_model_dir(llm)
         self._weight_hash = self._compute_weight_hash_rw(llm)
         self._quant_hash = self._compute_quant_hash(model)
+        self._rope_config_hash = self._compute_rope_config_hash(model)
+        self._rmsnorm_eps = self._extract_rmsnorm_eps(model)
         self._system_prompt_hash = hashlib.sha256(b"").hexdigest()  # Default: empty prompt
+        self._bos_eos_policy = self._extract_bos_eos_policy(llm)
+        self._special_token_policy = "encode"  # Default: encode special tokens
 
         self.buf = get_capture_buffer()
 
@@ -179,6 +184,71 @@ class VerifiedInferenceServer:
             return snapshot_download(model_id)
         except Exception:
             return None
+
+    def _compute_chat_template_hash(self, llm) -> Optional[str]:
+        """SHA-256 of the chat template string, if present."""
+        try:
+            tokenizer = llm.get_tokenizer()
+            template = getattr(tokenizer, "chat_template", None)
+            if template is None:
+                return None
+            return hashlib.sha256(template.encode()).hexdigest()
+        except Exception as e:
+            logger.warning("Could not hash chat template: %s", e)
+            return None
+
+    def _compute_rope_config_hash(self, model) -> Optional[str]:
+        """SHA-256 of RoPE configuration (theta + scaling), if present."""
+        try:
+            cfg = getattr(model, "config", None)
+            if cfg is None:
+                return None
+            rope_theta = getattr(cfg, "rope_theta", None)
+            rope_scaling = getattr(cfg, "rope_scaling", None)
+            if rope_theta is None and rope_scaling is None:
+                return None
+            rope_dict = {
+                "rope_theta": rope_theta,
+                "rope_scaling": rope_scaling,
+            }
+            return hashlib.sha256(
+                json.dumps(rope_dict, sort_keys=True, default=str).encode()
+            ).hexdigest()
+        except Exception as e:
+            logger.warning("Could not hash RoPE config: %s", e)
+            return None
+
+    @staticmethod
+    def _extract_rmsnorm_eps(model) -> Optional[float]:
+        """Extract RMSNorm epsilon from model config."""
+        try:
+            cfg = getattr(model, "config", None)
+            if cfg is None:
+                return None
+            return getattr(cfg, "rms_norm_eps", None)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _extract_bos_eos_policy(llm) -> str:
+        """Derive BOS/EOS policy from tokenizer config.
+
+        Checks whether the tokenizer adds BOS/EOS tokens automatically.
+        Returns a canonical string like 'add_bos', 'add_bos_eos', or 'none'.
+        """
+        try:
+            tokenizer = llm.get_tokenizer()
+            add_bos = getattr(tokenizer, "add_bos_token", False)
+            add_eos = getattr(tokenizer, "add_eos_token", False)
+            if add_bos and add_eos:
+                return "add_bos_eos"
+            elif add_bos:
+                return "add_bos"
+            elif add_eos:
+                return "add_eos"
+            return "none"
+        except Exception:
+            return "none"
 
     def _compute_quant_hash(self, model) -> str:
         """SHA-256 of quantization config, if present."""
@@ -380,6 +450,21 @@ class VerifiedInferenceServer:
             "guided_decoding": "",
             "stop_sequences": [],
             "max_tokens": max_tokens,
+            # Four-spec fields.
+            "chat_template_hash": self._chat_template_hash,
+            "rope_config_hash": self._rope_config_hash,
+            "rmsnorm_eps": self._rmsnorm_eps,
+            "sampler_version": "chacha20-vi-sample-v1",
+            # InputSpec fields.
+            "bos_eos_policy": self._bos_eos_policy,
+            "truncation_policy": "error",  # reject if input exceeds context window
+            "special_token_policy": self._special_token_policy,
+            # ModelSpec fields.
+            "adapter_hash": None,  # no adapter/LoRA by default
+            # OutputSpec fields.
+            "min_tokens": 0,
+            "ignore_eos": False,
+            "detokenization_policy": "default",
         }
 
         if _chat_timers:

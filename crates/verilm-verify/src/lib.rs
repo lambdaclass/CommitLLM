@@ -34,6 +34,29 @@ pub fn verify_manifest(
     }
 }
 
+/// Verify a commitment's manifest hash from four individual specs.
+///
+/// M = H("vi-manifest-v4" || H_input || H_model || H_decode || H_output)
+pub fn verify_manifest_specs(
+    commitment: &verilm_core::types::BatchCommitment,
+    input: &verilm_core::types::InputSpec,
+    model: &verilm_core::types::ModelSpec,
+    decode: &verilm_core::types::DecodeSpec,
+    output: &verilm_core::types::OutputSpec,
+) -> Vec<String> {
+    let computed = merkle::hash_manifest_composed(
+        merkle::hash_input_spec(input),
+        merkle::hash_model_spec(model),
+        merkle::hash_decode_spec(decode),
+        merkle::hash_output_spec(output),
+    );
+    match commitment.manifest_hash {
+        None => vec!["commitment missing manifest_hash".into()],
+        Some(h) if h != computed => vec!["manifest_hash mismatch".into()],
+        Some(_) => Vec::new(),
+    }
+}
+
 /// Result of verifying a weight-chain hash against an expected value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WeightHashResult {
@@ -233,75 +256,114 @@ pub fn verify_v4(
             checks_run += c;
             failures.extend(f);
 
-            // Manifest binding: if response carries manifest, verify hash matches commitment.
+            // Four-spec manifest binding: split the manifest, verify each spec hash
+            // individually against the commitment, then verify the composed M.
             let decode_params = if let Some(ref manifest) = response.manifest {
-                if let Some(ref committed_hash) = response.commitment.manifest_hash {
-                    checks_run += 1;
-                    let computed = merkle::hash_manifest(manifest);
-                    if computed != *committed_hash {
-                        failures.push("manifest hash does not match commitment".into());
+                let (input_spec, model_spec, decode_spec, output_spec) = manifest.split();
+                let h_in = merkle::hash_input_spec(&input_spec);
+                let h_mod = merkle::hash_model_spec(&model_spec);
+                let h_dec = merkle::hash_decode_spec(&decode_spec);
+                let h_out = merkle::hash_output_spec(&output_spec);
+
+                // Fail-closed: all four spec hashes MUST be present in the commitment.
+                checks_run += 4;
+                match response.commitment.input_spec_hash {
+                    None => failures.push("commitment missing input_spec_hash".into()),
+                    Some(committed) if h_in != committed =>
+                        failures.push("input_spec_hash mismatch".into()),
+                    _ => {}
+                }
+                match response.commitment.model_spec_hash {
+                    None => failures.push("commitment missing model_spec_hash".into()),
+                    Some(committed) if h_mod != committed =>
+                        failures.push("model_spec_hash mismatch".into()),
+                    _ => {}
+                }
+                match response.commitment.decode_spec_hash {
+                    None => failures.push("commitment missing decode_spec_hash".into()),
+                    Some(committed) if h_dec != committed =>
+                        failures.push("decode_spec_hash mismatch".into()),
+                    _ => {}
+                }
+                match response.commitment.output_spec_hash {
+                    None => failures.push("commitment missing output_spec_hash".into()),
+                    Some(committed) if h_out != committed =>
+                        failures.push("output_spec_hash mismatch".into()),
+                    _ => {}
+                }
+
+                // Verify composed manifest hash: M = H(H_input || H_model || H_decode || H_output).
+                checks_run += 1;
+                match response.commitment.manifest_hash {
+                    None => failures.push("commitment missing manifest_hash".into()),
+                    Some(committed_hash) => {
+                        let computed = merkle::hash_manifest_composed(h_in, h_mod, h_dec, h_out);
+                        if computed != committed_hash {
+                            failures.push("manifest hash does not match commitment".into());
+                        }
                     }
                 }
 
-                // Reject logit-modifying parameters the canonical sampler doesn't support.
-                // These are bound in the manifest hash, so a prover can't hide them.
-                // But the verifier can't replay sampling correctly if they're enabled.
+                // Reject decode parameters the canonical sampler doesn't support.
+                // These are bound in the spec hash, so a prover can't hide them.
                 checks_run += 1;
-                if manifest.repetition_penalty != 1.0 {
+                if decode_spec.repetition_penalty != 1.0 {
                     failures.push(format!(
                         "unsupported repetition_penalty={} (canonical sampler requires 1.0)",
-                        manifest.repetition_penalty
+                        decode_spec.repetition_penalty
                     ));
                 }
-                if manifest.frequency_penalty != 0.0 {
+                if decode_spec.frequency_penalty != 0.0 {
                     failures.push(format!(
                         "unsupported frequency_penalty={} (canonical sampler requires 0.0)",
-                        manifest.frequency_penalty
+                        decode_spec.frequency_penalty
                     ));
                 }
-                if manifest.presence_penalty != 0.0 {
+                if decode_spec.presence_penalty != 0.0 {
                     failures.push(format!(
                         "unsupported presence_penalty={} (canonical sampler requires 0.0)",
-                        manifest.presence_penalty
+                        decode_spec.presence_penalty
                     ));
                 }
-                if !manifest.logit_bias.is_empty() {
+                if !decode_spec.logit_bias.is_empty() {
                     failures.push(format!(
                         "unsupported logit_bias ({} entries, canonical sampler requires empty)",
-                        manifest.logit_bias.len()
+                        decode_spec.logit_bias.len()
                     ));
                 }
-                if !manifest.guided_decoding.is_empty() {
+                if !decode_spec.guided_decoding.is_empty() {
                     failures.push(format!(
                         "unsupported guided_decoding='{}' (canonical sampler requires empty)",
-                        manifest.guided_decoding
+                        decode_spec.guided_decoding
                     ));
                 }
-                if !manifest.stop_sequences.is_empty() {
+
+                // Output spec checks.
+                if !output_spec.stop_sequences.is_empty() {
                     failures.push(format!(
                         "unsupported stop_sequences ({} entries, canonical sampler requires empty)",
-                        manifest.stop_sequences.len()
+                        output_spec.stop_sequences.len()
                     ));
                 }
-                if manifest.max_tokens > 0 {
-                    if response.token_index >= manifest.max_tokens {
+                if output_spec.max_tokens > 0 {
+                    if response.token_index >= output_spec.max_tokens {
                         failures.push(format!(
-                            "token_index {} exceeds manifest max_tokens {}",
-                            response.token_index, manifest.max_tokens
+                            "token_index {} exceeds output_spec max_tokens {}",
+                            response.token_index, output_spec.max_tokens
                         ));
                     }
-                    if response.commitment.n_tokens > manifest.max_tokens {
+                    if response.commitment.n_tokens > output_spec.max_tokens {
                         failures.push(format!(
-                            "committed n_tokens {} exceeds manifest max_tokens {}",
-                            response.commitment.n_tokens, manifest.max_tokens
+                            "committed n_tokens {} exceeds output_spec max_tokens {}",
+                            response.commitment.n_tokens, output_spec.max_tokens
                         ));
                     }
                 }
 
                 Some(verilm_core::sampling::DecodeParams {
-                    temperature: manifest.temperature,
-                    top_k: manifest.top_k,
-                    top_p: manifest.top_p,
+                    temperature: decode_spec.temperature,
+                    top_k: decode_spec.top_k,
+                    top_p: decode_spec.top_p,
                 })
             } else {
                 None

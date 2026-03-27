@@ -1235,6 +1235,17 @@ fn make_manifest(temperature: f32, top_k: u32, top_p: f32) -> DeploymentManifest
         guided_decoding: String::new(),
         stop_sequences: vec![],
         max_tokens: 0,
+        chat_template_hash: None,
+        rope_config_hash: None,
+        rmsnorm_eps: None,
+        sampler_version: None,
+        bos_eos_policy: None,
+        truncation_policy: None,
+        special_token_policy: None,
+        adapter_hash: None,
+        min_tokens: 0,
+        ignore_eos: false,
+        detokenization_policy: None,
     }
 }
 
@@ -1830,6 +1841,46 @@ fn v4_manifest_accepts_all_defaults() {
     let report = verify_with_manifest(m);
     assert_eq!(report.verdict, Verdict::Pass,
         "canonical defaults should pass, failures: {:?}", report.failures);
+}
+
+// ---------------------------------------------------------------------------
+// Four-spec fail-closed: verifier rejects if spec hashes are missing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn v4_manifest_rejects_missing_spec_hashes() {
+    // Verify that the verifier fails when commitment spec hashes are absent.
+    let (cfg, model, key, _lm_head, input, token_id) = setup_lm_head();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"missing spec hashes",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None);
+    attach_toy_logits(&mut response, &_lm_head, &cfg);
+
+    // Wipe all four spec hashes from the commitment — verifier should fail-closed.
+    response.commitment.input_spec_hash = None;
+    response.commitment.model_spec_hash = None;
+    response.commitment.decode_spec_hash = None;
+    response.commitment.output_spec_hash = None;
+
+    let report = verify_v4(&key, &response);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("missing input_spec_hash")),
+        "should fail on missing input_spec_hash, failures: {:?}", report.failures);
+    assert!(report.failures.iter().any(|f| f.contains("missing model_spec_hash")),
+        "should fail on missing model_spec_hash, failures: {:?}", report.failures);
+    assert!(report.failures.iter().any(|f| f.contains("missing decode_spec_hash")),
+        "should fail on missing decode_spec_hash, failures: {:?}", report.failures);
+    assert!(report.failures.iter().any(|f| f.contains("missing output_spec_hash")),
+        "should fail on missing output_spec_hash, failures: {:?}", report.failures);
 }
 
 // ---------------------------------------------------------------------------
