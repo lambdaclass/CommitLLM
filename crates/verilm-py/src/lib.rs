@@ -422,6 +422,8 @@ struct MinimalBatchStateHandle {
     commitment: BatchCommitment,
     /// Shared weight provider for shell opening computation at audit time.
     provider: Option<Arc<verilm_keygen::SafetensorsWeightProvider>>,
+    /// Whether to include rich prefix (embedding rows + proofs) in audit openings.
+    rich_prefix: bool,
 }
 
 #[pymethods]
@@ -512,9 +514,12 @@ impl MinimalBatchStateHandle {
             }
         });
         let tail = provider.tail_params();
+        let emb_lookup: Option<&dyn verilm_core::types::EmbeddingLookup> =
+            if self.rich_prefix { Some(provider.as_ref()) } else { None };
         Ok(verilm_prover::open_v4(
             &self.inner, token_index, provider.as_ref(), provider.config(),
             provider.weight_scales(), bridge.as_ref(), tail.as_ref(), layer_filter,
+            emb_lookup,
         ))
     }
 }
@@ -623,6 +628,7 @@ fn commit_minimal_from_captures(
         inner,
         commitment,
         provider: weight_provider.map(|wp| Arc::clone(&wp.inner)),
+        rich_prefix: false,
     })
 }
 
@@ -637,6 +643,7 @@ struct PackedBatchStateHandle {
     inner: verilm_prover::PackedBatchState,
     commitment: BatchCommitment,
     provider: Option<Arc<verilm_keygen::SafetensorsWeightProvider>>,
+    rich_prefix: bool,
 }
 
 #[pymethods]
@@ -721,9 +728,12 @@ impl PackedBatchStateHandle {
             }
         });
         let tail = provider.tail_params();
+        let emb_lookup: Option<&dyn verilm_core::types::EmbeddingLookup> =
+            if self.rich_prefix { Some(provider.as_ref()) } else { None };
         Ok(verilm_prover::open_v4_packed(
             &self.inner, token_index, provider.as_ref(), provider.config(),
             provider.weight_scales(), bridge.as_ref(), tail.as_ref(), layer_filter,
+            emb_lookup,
         ))
     }
 }
@@ -831,6 +841,7 @@ fn commit_minimal_packed(
         inner,
         commitment,
         provider: weight_provider.map(|wp| Arc::clone(&wp.inner)),
+        rich_prefix: false,
     })
 }
 

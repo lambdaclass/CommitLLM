@@ -13,6 +13,8 @@ use verilm_core::types::{
     V4AuditResponse,
 };
 
+pub use verilm_core::types::EmbeddingLookup;
+
 /// Binding parameters for commit (token IDs, prompt, seed, manifest).
 pub struct FullBindingParams<'a> {
     pub token_ids: &'a [u32],
@@ -598,6 +600,10 @@ pub fn commit_minimal_packed(
 }
 
 /// V4 audit from packed state: structural proofs + shell opening.
+///
+/// When `embedding_lookup` is provided, the prover includes embedding rows
+/// and Merkle proofs for all prefix tokens (rich prefix mode). This enables
+/// the verifier to check embedding binding on every prefix token.
 pub fn open_v4_packed(
     state: &PackedBatchState,
     token_index: u32,
@@ -607,6 +613,7 @@ pub fn open_v4_packed(
     bridge: Option<&BridgeParams>,
     tail: Option<&TailParams>,
     layer_filter: Option<&[usize]>,
+    embedding_lookup: Option<&dyn EmbeddingLookup>,
 ) -> V4AuditResponse {
     let i = token_index as usize;
     assert!(i < state.n_tokens(), "token_index out of range");
@@ -662,6 +669,20 @@ pub fn open_v4_packed(
         shell.logits_i32 = Some(logits);
     }
 
+    // Rich prefix: load embedding rows + proofs for prefix tokens.
+    let prefix_embeddings: Option<(Vec<Vec<f32>>, Vec<merkle::MerkleProof>)> =
+        embedding_lookup.map(|lookup| {
+            let mut rows = Vec::with_capacity(i);
+            let mut proofs = Vec::with_capacity(i);
+            for j in 0..i {
+                if let Some((row, proof)) = lookup.embedding_row_and_proof(prefix_token_ids[j]) {
+                    rows.push(row);
+                    proofs.push(proof.unwrap_or(merkle::MerkleProof { leaf_index: 0, siblings: vec![] }));
+                }
+            }
+            (rows, proofs)
+        });
+
     V4AuditResponse {
         token_index,
         retained: retained_token,
@@ -679,6 +700,10 @@ pub fn open_v4_packed(
         prompt: Some(state.prompt.clone()),
         n_prompt_tokens: state.n_prompt_tokens,
         output_text: None,
+        prefix_embedding_rows: prefix_embeddings.as_ref().map(|(rows, _)| rows.clone()),
+        prefix_embedding_proofs: prefix_embeddings.map(|(_, proofs)| proofs),
+        prefix_retained: None,
+        prefix_shell_openings: None,
     }
 }
 
@@ -839,6 +864,7 @@ pub fn open_v4(
     bridge: Option<&BridgeParams>,
     tail: Option<&TailParams>,
     layer_filter: Option<&[usize]>,
+    embedding_lookup: Option<&dyn EmbeddingLookup>,
 ) -> V4AuditResponse {
     let mut response = open_v4_structural(state, token_index);
     let mut shell = compute_shell_opening(
@@ -863,6 +889,22 @@ pub fn open_v4(
     }
 
     response.shell_opening = Some(shell);
+
+    // Rich prefix: load embedding rows + proofs for prefix tokens.
+    if let Some(lookup) = embedding_lookup {
+        let i = token_index as usize;
+        let mut rows = Vec::with_capacity(i);
+        let mut proofs = Vec::with_capacity(i);
+        for j in 0..i {
+            if let Some((row, proof)) = lookup.embedding_row_and_proof(response.prefix_token_ids[j]) {
+                rows.push(row);
+                proofs.push(proof.unwrap_or(merkle::MerkleProof { leaf_index: 0, siblings: vec![] }));
+            }
+        }
+        response.prefix_embedding_rows = Some(rows);
+        response.prefix_embedding_proofs = Some(proofs);
+    }
+
     response
 }
 
@@ -922,6 +964,10 @@ pub fn open_v4_structural(state: &MinimalBatchState, token_index: u32) -> V4Audi
         prompt: Some(state.prompt.clone()),
         n_prompt_tokens: state.n_prompt_tokens,
         output_text: None,
+        prefix_embedding_rows: None,
+        prefix_embedding_proofs: None,
+        prefix_retained: None,
+        prefix_shell_openings: None,
     }
 }
 

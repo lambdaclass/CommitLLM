@@ -188,6 +188,10 @@ mod tests {
             prompt: None,
             n_prompt_tokens: Some(1),
             output_text: None,
+            prefix_embedding_rows: None,
+            prefix_embedding_proofs: None,
+            prefix_retained: None,
+            prefix_shell_openings: None,
         };
 
         let binary = serialize_v4_audit(&resp);

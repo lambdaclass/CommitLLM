@@ -426,6 +426,47 @@ pub fn verify_v4_full(
                 );
             }
 
+            // Rich prefix: verify embedding binding for all prefix tokens.
+            //
+            // When the response carries prefix_embedding_rows + proofs, verify each
+            // one against the key's embedding Merkle root. This closes the
+            // "embedding cross-check for prefix tokens" gap.
+            if let (Some(ref emb_root), Some(ref prefix_rows), Some(ref prefix_proofs)) = (
+                &key.embedding_merkle_root,
+                &response.prefix_embedding_rows,
+                &response.prefix_embedding_proofs,
+            ) {
+                if prefix_rows.len() != response.prefix_token_ids.len()
+                    || prefix_proofs.len() != response.prefix_token_ids.len()
+                {
+                    checks_run += 1;
+                    failures.push(format!(
+                        "prefix embedding count mismatch: {} rows, {} proofs, {} token_ids",
+                        prefix_rows.len(), prefix_proofs.len(), response.prefix_token_ids.len()
+                    ));
+                } else {
+                    for (j, ((row, proof), &tid)) in prefix_rows.iter()
+                        .zip(prefix_proofs.iter())
+                        .zip(response.prefix_token_ids.iter())
+                        .enumerate()
+                    {
+                        checks_run += 1;
+                        let leaf = verilm_core::merkle::hash_embedding_row(row);
+                        if proof.leaf_index != tid {
+                            failures.push(format!(
+                                "prefix token {}: embedding proof leaf_index {} != token_id {}",
+                                j, proof.leaf_index, tid
+                            ));
+                        } else if !verilm_core::merkle::verify(emb_root, &leaf, proof) {
+                            failures.push(format!(
+                                "prefix token {}: embedding Merkle proof verification failed",
+                                j
+                            ));
+                        }
+                    }
+                }
+            }
+
             // Prompt/generation boundary consistency: if we know n_prompt_tokens and
             // the challenged token is within the prompt range, verify the embedding
             // proof binds the correct token_id (already done above). Additionally,

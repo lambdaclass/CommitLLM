@@ -607,6 +607,17 @@ pub struct ShellTokenOpening {
 
 /// Parameters for the full bridge computation (dequant → residual → RMSNorm → quantize).
 ///
+/// Embedding table lookup for rich prefix opening.
+///
+/// When provided to the prover's `open_v4`, it loads embedding rows and Merkle
+/// proofs for each prefix token, enabling embedding binding verification
+/// on prefix tokens (not just the challenged token).
+pub trait EmbeddingLookup {
+    /// Load the embedding row for the given token ID and its Merkle proof.
+    /// Returns `None` if embedding data is unavailable for this token.
+    fn embedding_row_and_proof(&self, token_id: u32) -> Option<(Vec<f32>, Option<crate::merkle::MerkleProof>)>;
+}
+
 /// Contains the RMSNorm weights and initial residual needed for
 /// paper-correct bridge verification. Weight scales are passed separately
 /// (they're also used by the simplified bridge path).
@@ -695,6 +706,29 @@ pub struct V4AuditResponse {
     /// under the committed detokenization_policy.
     #[serde(default)]
     pub output_text: Option<String>,
+    // ──── Rich prefix mode (optional) ────
+    //
+    // When present, the verifier can check embedding binding and (optionally)
+    // full shell replay for prefix tokens, not just the challenged token.
+    // These fields are populated when the audit challenge requests rich_prefix.
+    /// Embedding rows for prefix tokens — `embedding[token_id]` as f32 for each
+    /// prefix position. The verifier checks each row against the committed
+    /// embedding Merkle root via the corresponding proof.
+    #[serde(default)]
+    pub prefix_embedding_rows: Option<Vec<Vec<f32>>>,
+    /// Merkle proofs binding each prefix embedding row to the embedding table.
+    #[serde(default)]
+    pub prefix_embedding_proofs: Option<Vec<MerkleProof>>,
+    /// Full `RetainedTokenState` for prefix tokens (deep audit).
+    /// When present, the verifier can run shell replay + Freivalds on prefix tokens.
+    /// Each entry must hash to the corresponding `prefix_leaf_hashes[j]`.
+    #[serde(default)]
+    pub prefix_retained: Option<Vec<RetainedTokenState>>,
+    /// Shell openings for prefix tokens (deep audit).
+    /// When present alongside `prefix_retained`, enables Freivalds checks
+    /// on prefix tokens. Each entry includes matmul accumulators per layer.
+    #[serde(default)]
+    pub prefix_shell_openings: Option<Vec<ShellTokenOpening>>,
 }
 
 // ===========================================================================

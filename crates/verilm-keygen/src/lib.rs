@@ -810,3 +810,11 @@ impl ShellWeights for SafetensorsWeightProvider {
         &self.weights[layer][mt_idx]
     }
 }
+
+impl verilm_core::types::EmbeddingLookup for SafetensorsWeightProvider {
+    fn embedding_row_and_proof(&self, token_id: u32) -> Option<(Vec<f32>, Option<verilm_core::merkle::MerkleProof>)> {
+        let row = self.load_embedding_row(token_id as usize).ok()?;
+        let proof = self.embedding_proof(token_id as usize);
+        Some((row, proof))
+    }
+}
