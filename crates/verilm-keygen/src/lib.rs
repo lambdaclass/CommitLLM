@@ -529,6 +529,9 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         rope_config_hash: None,
         embedding_merkle_root,
         final_norm_weights,
+        quant_family: None,
+        scale_derivation: None,
+        quant_block_size: None,
     })
 }
 

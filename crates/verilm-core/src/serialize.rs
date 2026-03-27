@@ -99,6 +99,9 @@ mod tests {
             rope_config_hash: None,
             embedding_merkle_root: None,
             final_norm_weights: None,
+            quant_family: None,
+            scale_derivation: None,
+            quant_block_size: None,
         };
         let data = serialize_key(&key);
         let key2 = deserialize_key(&data).unwrap();

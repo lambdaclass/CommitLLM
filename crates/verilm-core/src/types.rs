@@ -558,6 +558,19 @@ pub struct VerifierKey {
     /// last transformer layer and before lm_head. Length = `hidden_dim`.
     /// `None` for toy model (simplified bridge uses clamp-requantize).
     pub final_norm_weights: Option<Vec<f32>>,
+
+    /// Quantization family label (e.g. "W8A8", "Q8_0", "AWQ", "GPTQ").
+    /// Cross-checked against the manifest's `quant_family` when both are present.
+    #[serde(default)]
+    pub quant_family: Option<String>,
+    /// Scale derivation method (e.g. "absmax", "zeropoint", "group_absmax").
+    /// Cross-checked against the manifest's `scale_derivation` when both are present.
+    #[serde(default)]
+    pub scale_derivation: Option<String>,
+    /// Block size for blockwise quantization schemes (e.g. 32 for Q8_0).
+    /// Cross-checked against the manifest's `quant_block_size` when both are present.
+    #[serde(default)]
+    pub quant_block_size: Option<u32>,
 }
 
 impl VerifierKey {

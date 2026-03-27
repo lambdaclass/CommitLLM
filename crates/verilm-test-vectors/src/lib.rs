@@ -371,6 +371,9 @@ pub fn generate_key(cfg: &ModelConfig, model: &[LayerWeights], seed: [u8; 32]) -
         rope_config_hash: None,
         embedding_merkle_root: None,
         final_norm_weights: None,
+        quant_family: None,
+        scale_derivation: None,
+        quant_block_size: None,
     }
 }
 

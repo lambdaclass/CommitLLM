@@ -598,6 +598,42 @@ pub fn verify_v4_full(
                     }
                 }
 
+                // Cross-check: quant_family
+                if let (Some(ref manifest_qf), Some(ref key_qf)) =
+                    (&model_spec.quant_family, &key.quant_family)
+                {
+                    checks_run += 1;
+                    if manifest_qf != key_qf {
+                        failures.push(format!(
+                            "quant_family mismatch: manifest='{}' key='{}'", manifest_qf, key_qf
+                        ));
+                    }
+                }
+
+                // Cross-check: scale_derivation
+                if let (Some(ref manifest_sd), Some(ref key_sd)) =
+                    (&model_spec.scale_derivation, &key.scale_derivation)
+                {
+                    checks_run += 1;
+                    if manifest_sd != key_sd {
+                        failures.push(format!(
+                            "scale_derivation mismatch: manifest='{}' key='{}'", manifest_sd, key_sd
+                        ));
+                    }
+                }
+
+                // Cross-check: quant_block_size
+                if let (Some(manifest_bs), Some(key_bs)) =
+                    (model_spec.quant_block_size, key.quant_block_size)
+                {
+                    checks_run += 1;
+                    if manifest_bs != key_bs {
+                        failures.push(format!(
+                            "quant_block_size mismatch: manifest={} key={}", manifest_bs, key_bs
+                        ));
+                    }
+                }
+
                 // Cross-check: kv_dim
                 if let Some(v) = model_spec.kv_dim {
                     checks_run += 1;

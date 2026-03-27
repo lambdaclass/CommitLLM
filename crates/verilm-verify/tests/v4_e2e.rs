@@ -1698,6 +1698,96 @@ fn v4_decode_mode_greedy_consistent_pass() {
 }
 
 // ---------------------------------------------------------------------------
+// Quantization cross-checks (#5-7: quant_family, scale_derivation, quant_block_size)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn v4_manifest_quant_family_mismatch_rejected() {
+    let (_cfg, _model, mut key, mut manifest, _) = setup_manifest_crosscheck();
+    key.quant_family = Some("W8A8".into());
+    manifest.quant_family = Some("GPTQ".into());
+    let params = FullBindingParams {
+        token_ids: &[42], prompt: b"quant crosscheck",
+        sampling_seed: [7u8; 32], manifest: Some(&manifest), n_prompt_tokens: Some(1),
+    };
+    let input: Vec<i8> = (0.._cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&_cfg, &_model, &input);
+    let retained = retained_from_traces(&traces);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    response.manifest = Some(manifest);
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("quant_family mismatch")),
+        "expected quant_family mismatch, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_scale_derivation_mismatch_rejected() {
+    let (_cfg, _model, mut key, mut manifest, _) = setup_manifest_crosscheck();
+    key.scale_derivation = Some("absmax".into());
+    manifest.scale_derivation = Some("zeropoint".into());
+    let params = FullBindingParams {
+        token_ids: &[42], prompt: b"quant crosscheck",
+        sampling_seed: [7u8; 32], manifest: Some(&manifest), n_prompt_tokens: Some(1),
+    };
+    let input: Vec<i8> = (0.._cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&_cfg, &_model, &input);
+    let retained = retained_from_traces(&traces);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    response.manifest = Some(manifest);
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("scale_derivation mismatch")),
+        "expected scale_derivation mismatch, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_quant_block_size_mismatch_rejected() {
+    let (_cfg, _model, mut key, mut manifest, _) = setup_manifest_crosscheck();
+    key.quant_block_size = Some(32);
+    manifest.quant_block_size = Some(128);
+    let params = FullBindingParams {
+        token_ids: &[42], prompt: b"quant crosscheck",
+        sampling_seed: [7u8; 32], manifest: Some(&manifest), n_prompt_tokens: Some(1),
+    };
+    let input: Vec<i8> = (0.._cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&_cfg, &_model, &input);
+    let retained = retained_from_traces(&traces);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    response.manifest = Some(manifest);
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("quant_block_size mismatch")),
+        "expected quant_block_size mismatch, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_quant_fields_consistent_pass() {
+    let (_cfg, _model, mut key, mut manifest, _) = setup_manifest_crosscheck();
+    // Both sides agree on quant identity.
+    key.quant_family = Some("W8A8".into());
+    key.scale_derivation = Some("absmax".into());
+    key.quant_block_size = Some(32);
+    manifest.quant_family = Some("W8A8".into());
+    manifest.scale_derivation = Some("absmax".into());
+    manifest.quant_block_size = Some(32);
+    let params = FullBindingParams {
+        token_ids: &[42], prompt: b"quant crosscheck",
+        sampling_seed: [7u8; 32], manifest: Some(&manifest), n_prompt_tokens: Some(1),
+    };
+    let input: Vec<i8> = (0.._cfg.hidden_dim as i8).collect();
+    let traces = forward_pass(&_cfg, &_model, &input);
+    let retained = retained_from_traces(&traces);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+}
+
+// ---------------------------------------------------------------------------
 // Extended architecture cross-checks (#8: kv_dim, ffn_dim, d_head, n_q/kv_heads, rope_theta)
 // ---------------------------------------------------------------------------
 
