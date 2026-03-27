@@ -873,4 +873,90 @@ mod tests {
 
         assert_eq!(h1, h2, "hash_manifest must equal manual split+compose");
     }
+
+    #[test]
+    fn test_quant_family_changes_model_spec_hash() {
+        use crate::types::ModelSpec;
+
+        let base = ModelSpec {
+            weight_hash: None, quant_hash: None, rope_config_hash: None,
+            rmsnorm_eps: None, adapter_hash: None,
+            n_layers: None, hidden_dim: None, vocab_size: None,
+            embedding_merkle_root: None,
+            quant_family: None, scale_derivation: None, quant_block_size: None,
+            kv_dim: None, ffn_dim: None, d_head: None,
+            n_q_heads: None, n_kv_heads: None, rope_theta: None,
+        };
+        let with_family = ModelSpec {
+            quant_family: Some("W8A8".into()),
+            ..base.clone()
+        };
+        let h_base = hash_model_spec(&base);
+        let h_with = hash_model_spec(&with_family);
+        assert_ne!(h_base, h_with, "quant_family must affect model spec hash");
+
+        // Different family values must differ.
+        let other_family = ModelSpec {
+            quant_family: Some("GPTQ".into()),
+            ..base.clone()
+        };
+        assert_ne!(h_with, hash_model_spec(&other_family),
+            "different quant_family values must produce different hashes");
+    }
+
+    #[test]
+    fn test_scale_derivation_changes_model_spec_hash() {
+        use crate::types::ModelSpec;
+
+        let base = ModelSpec {
+            weight_hash: None, quant_hash: None, rope_config_hash: None,
+            rmsnorm_eps: None, adapter_hash: None,
+            n_layers: None, hidden_dim: None, vocab_size: None,
+            embedding_merkle_root: None,
+            quant_family: None, scale_derivation: None, quant_block_size: None,
+            kv_dim: None, ffn_dim: None, d_head: None,
+            n_q_heads: None, n_kv_heads: None, rope_theta: None,
+        };
+        let with_sd = ModelSpec {
+            scale_derivation: Some("absmax".into()),
+            ..base.clone()
+        };
+        assert_ne!(hash_model_spec(&base), hash_model_spec(&with_sd),
+            "scale_derivation must affect model spec hash");
+
+        let other_sd = ModelSpec {
+            scale_derivation: Some("zeropoint".into()),
+            ..base.clone()
+        };
+        assert_ne!(hash_model_spec(&with_sd), hash_model_spec(&other_sd),
+            "different scale_derivation values must produce different hashes");
+    }
+
+    #[test]
+    fn test_quant_block_size_changes_model_spec_hash() {
+        use crate::types::ModelSpec;
+
+        let base = ModelSpec {
+            weight_hash: None, quant_hash: None, rope_config_hash: None,
+            rmsnorm_eps: None, adapter_hash: None,
+            n_layers: None, hidden_dim: None, vocab_size: None,
+            embedding_merkle_root: None,
+            quant_family: None, scale_derivation: None, quant_block_size: None,
+            kv_dim: None, ffn_dim: None, d_head: None,
+            n_q_heads: None, n_kv_heads: None, rope_theta: None,
+        };
+        let with_bs = ModelSpec {
+            quant_block_size: Some(32),
+            ..base.clone()
+        };
+        assert_ne!(hash_model_spec(&base), hash_model_spec(&with_bs),
+            "quant_block_size must affect model spec hash");
+
+        let other_bs = ModelSpec {
+            quant_block_size: Some(128),
+            ..base.clone()
+        };
+        assert_ne!(hash_model_spec(&with_bs), hash_model_spec(&other_bs),
+            "different quant_block_size values must produce different hashes");
+    }
 }
