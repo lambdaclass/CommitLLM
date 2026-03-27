@@ -4,7 +4,7 @@ Verification helpers for the VeriLM protocol.
 Provides a tokenizer callback factory for canonical request→token
 reconstruction inside verify_v4(). The callback replays the full
 committed InputSpec: chat template, system prompt, BOS/EOS policy,
-truncation, and special-token handling.
+truncation, padding, and special-token handling.
 """
 
 import hashlib
@@ -168,6 +168,14 @@ def make_tokenizer_fn(
             raise RuntimeError(
                 f"unknown truncation_policy='{trunc_policy}' "
                 f"(expected 'left', 'right', 'error', or absent)"
+            )
+
+        # 9. Fail-closed on unknown padding_policy.
+        pad_policy = input_spec.get("padding_policy")
+        if pad_policy not in ("left", "right", "none", None):
+            raise RuntimeError(
+                f"unknown padding_policy='{pad_policy}' "
+                f"(expected 'left', 'right', 'none', or absent)"
             )
 
         return token_ids

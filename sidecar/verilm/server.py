@@ -97,6 +97,7 @@ class VerifiedInferenceServer:
         self._bos_eos_policy = self._extract_bos_eos_policy(llm)
         self._truncation_policy = self._extract_truncation_policy(llm)
         self._special_token_policy = self._extract_special_token_policy(llm)
+        self._padding_policy = self._extract_padding_policy(llm)
         self._detokenization_policy = self._extract_detokenization_policy(llm)
         self._adapter_hash = self._compute_adapter_hash(model)
         self._eos_token_id = self._extract_eos_token_id(llm)
@@ -283,6 +284,24 @@ class VerifiedInferenceServer:
             return "error"
         except Exception:
             return "error"
+
+    @staticmethod
+    def _extract_padding_policy(llm) -> str:
+        """Derive padding policy from tokenizer config.
+
+        Inspects the tokenizer's padding_side attribute.
+        vLLM default is no padding (individual sequences are not padded).
+        """
+        try:
+            tokenizer = llm.get_tokenizer()
+            padding_side = getattr(tokenizer, "padding_side", None)
+            if padding_side == "left":
+                return "left"
+            elif padding_side == "right":
+                return "right"
+            return "none"
+        except Exception:
+            return "none"
 
     @staticmethod
     def _extract_special_token_policy(llm) -> str:
@@ -576,6 +595,9 @@ class VerifiedInferenceServer:
             "bos_eos_policy": self._bos_eos_policy,
             "truncation_policy": self._truncation_policy,
             "special_token_policy": self._special_token_policy,
+            "padding_policy": self._padding_policy,
+            # DecodeSpec fields.
+            "decode_mode": "greedy" if temperature == 0.0 else "sampled",
             # ModelSpec fields.
             "adapter_hash": self._adapter_hash,
             # OutputSpec fields.
