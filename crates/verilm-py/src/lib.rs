@@ -1,30 +1,7 @@
 //! PyO3 bridge: expose the Rust commitment engine to Python.
 //!
-//! This replaces the HTTP path for Python → Rust communication.
 //! The Python `verilm` package captures data, then calls these functions
-//! to build commitments and generate proofs directly in-process.
-//!
-//! Usage from Python:
-//! ```python
-//! import verilm_rs
-//!
-//! # Build traces from captured data
-//! traces = [...]  # list of list of LayerTrace dicts
-//!
-//! # Commit
-//! state = verilm_rs.commit(
-//!     traces=traces,
-//!     token_ids=[42, 99],
-//!     prompt=b"Hello",
-//!     sampling_seed=bytes(32),
-//!     manifest={"tokenizer_hash": "aa" * 32, "temperature": 0.0, ...},
-//! )
-//! commitment_json = state.commitment_json()
-//!
-//! # Open for audit
-//! proof_json = state.open([0, 1])
-//! proof_bytes = state.open_compact([0, 1])  # binary + zstd
-//! ```
+//! to build V4 retained-state commitments and generate proofs in-process.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;

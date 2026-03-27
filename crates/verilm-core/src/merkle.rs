@@ -150,54 +150,6 @@ pub fn trace_leaf_hash(serialized_layers: &[u8], final_hidden: Option<&[i8]>) ->
     }
 }
 
-/// Compute the Merkle leaf hash for a token trace by hashing fields directly.
-///
-/// Hashes each `LayerTrace` field in canonical order without intermediate
-/// serialization. KV cache fields (`kv_cache_k`, `kv_cache_v`) are **excluded**:
-/// KV is committed separately via the KV chain tree and per-token KV Merkle roots.
-///
-/// This replaces `bincode::serialize(layers) → trace_leaf_hash(bytes)`:
-/// - No intermediate allocation (fields are fed directly to SHA-256)
-/// - O(computation_data) instead of O(computation_data + KV_prefix²)
-/// - Architecturally correct: trace tree commits computation, KV tree commits provenance
-pub fn hash_trace_direct(layers: &[crate::types::LayerTrace], final_hidden: Option<&[i8]>) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"vi-trace-v2");
-
-    for lt in layers {
-        hash_i8_into(&mut hasher, &lt.x_attn);
-        hash_i32_into(&mut hasher, &lt.q);
-        hash_i32_into(&mut hasher, &lt.k);
-        hash_i32_into(&mut hasher, &lt.v);
-        hash_i8_into(&mut hasher, &lt.a);
-        hash_i32_into(&mut hasher, &lt.attn_out);
-        hash_i8_into(&mut hasher, &lt.x_ffn);
-        hash_i32_into(&mut hasher, &lt.g);
-        hash_i32_into(&mut hasher, &lt.u);
-        hash_i8_into(&mut hasher, &lt.h);
-        hash_i32_into(&mut hasher, &lt.ffn_out);
-        // kv_cache_k, kv_cache_v: excluded — committed in KV chain tree
-        hash_opt_f32_into(&mut hasher, lt.scale_x_attn);
-        hash_opt_f32_into(&mut hasher, lt.scale_a);
-        hash_opt_f32_into(&mut hasher, lt.scale_x_ffn);
-        hash_opt_f32_into(&mut hasher, lt.scale_h);
-        match &lt.residual {
-            Some(res) => {
-                hasher.update([1u8]);
-                hash_f32_into(&mut hasher, res);
-            }
-            None => hasher.update([0u8]),
-        }
-    }
-
-    if let Some(fh) = final_hidden {
-        hasher.update(b"final_hidden");
-        hash_i8_into(&mut hasher, fh);
-    }
-
-    hasher.finalize().into()
-}
-
 /// Compute the Merkle leaf hash for a token's minimal retained state.
 ///
 /// Hashes only the non-replayable attention boundary (`a`, `scale_a`)
@@ -275,28 +227,12 @@ fn hash_i8_into(hasher: &mut Sha256, data: &[i8]) {
     hasher.update(bytes);
 }
 
-fn hash_i32_into(hasher: &mut Sha256, data: &[i32]) {
-    // SAFETY: i32 is 4 bytes; reinterpret as native-endian byte slice.
-    let bytes: &[u8] =
-        unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
-    hasher.update(bytes);
-}
-
 fn hash_f32_into(hasher: &mut Sha256, data: &[f32]) {
     let bytes: &[u8] =
         unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
     hasher.update(bytes);
 }
 
-fn hash_opt_f32_into(hasher: &mut Sha256, val: Option<f32>) {
-    match val {
-        Some(v) => {
-            hasher.update([1u8]);
-            hasher.update(v.to_le_bytes());
-        }
-        None => hasher.update([0u8]),
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct MerkleTree {
