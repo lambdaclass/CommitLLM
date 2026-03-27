@@ -141,9 +141,20 @@ class VerifiedInferenceServer:
             logger.info("WeightProvider R_W bound: %s", provider_rw)
 
     def _compute_tokenizer_hash(self, llm) -> str:
-        """SHA-256 of tokenizer vocab, used in manifest."""
+        """SHA-256 of full tokenizer identity (vocab + normalizer + pre-tokenizer + added tokens).
+
+        Hashes the canonical tokenizer.json representation via backend_tokenizer.to_str(),
+        normalized through json.loads/json.dumps(sort_keys=True) for cross-platform determinism.
+        This binds the complete tokenizer semantics — not just the vocabulary mapping.
+        """
         try:
             tokenizer = llm.get_tokenizer()
+            backend = getattr(tokenizer, "backend_tokenizer", None)
+            if backend is not None:
+                raw = backend.to_str()
+                canonical = json.dumps(json.loads(raw), sort_keys=True, ensure_ascii=True)
+                return hashlib.sha256(canonical.encode()).hexdigest()
+            # Fallback for tokenizers without a backend (rare/legacy).
             vocab = tokenizer.get_vocab()
             vocab_str = json.dumps(vocab, sort_keys=True)
             return hashlib.sha256(vocab_str.encode()).hexdigest()

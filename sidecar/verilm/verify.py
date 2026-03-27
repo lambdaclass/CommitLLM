@@ -281,13 +281,26 @@ def make_detokenizer_fn(
 
 
 def _compute_tokenizer_hash(tokenizer: Any) -> str:
-    """Compute SHA-256 hash of tokenizer vocabulary.
+    """Compute SHA-256 of full tokenizer identity.
 
-    Mirrors server._compute_tokenizer_hash: json.dumps(vocab, sort_keys=True).
+    Hashes the canonical tokenizer.json representation (vocab, normalizer,
+    pre-tokenizer, decoder, added tokens, model config) via the backend
+    tokenizer's serialization, normalized for determinism.
+
+    This binds the complete tokenizer semantics — not just the vocabulary.
     """
     import json
 
     try:
+        # Full tokenizer config: vocab + normalizer + pre-tokenizer + decoder + added tokens.
+        # backend_tokenizer.to_str() returns the canonical tokenizer.json content.
+        backend = getattr(tokenizer, "backend_tokenizer", None)
+        if backend is not None:
+            raw = backend.to_str()
+            # Normalize JSON for cross-platform/cross-version determinism.
+            canonical = json.dumps(json.loads(raw), sort_keys=True, ensure_ascii=True)
+            return hashlib.sha256(canonical.encode()).hexdigest()
+        # Fallback for tokenizers without a backend (rare/legacy).
         vocab = tokenizer.get_vocab()
         vocab_str = json.dumps(vocab, sort_keys=True)
         return hashlib.sha256(vocab_str.encode()).hexdigest()

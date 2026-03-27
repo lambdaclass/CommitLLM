@@ -36,7 +36,9 @@ pub trait ShellWeights {
 /// system-prompt injection attacks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentManifest {
-    /// SHA-256 of the tokenizer vocabulary/config files.
+    /// SHA-256 of the full tokenizer identity (vocab + normalizer +
+    /// pre-tokenizer + decoder + added tokens). Computed from the
+    /// canonical tokenizer.json representation, normalized for determinism.
     pub tokenizer_hash: [u8; 32],
     /// Sampling temperature (0.0 = greedy).
     pub temperature: f32,
@@ -169,7 +171,9 @@ impl DeploymentManifest {
 /// used the expected tokenizer and prompt preprocessing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputSpec {
-    /// SHA-256 of the tokenizer vocabulary/config files.
+    /// SHA-256 of the full tokenizer identity (vocab + normalizer +
+    /// pre-tokenizer + decoder + added tokens). Computed from the
+    /// canonical tokenizer.json representation, normalized for determinism.
     pub tokenizer_hash: [u8; 32],
     /// SHA-256 of the system prompt prepended to user input.
     #[serde(default)]
