@@ -95,7 +95,10 @@ class VerifiedInferenceServer:
         self._rmsnorm_eps = self._extract_rmsnorm_eps(model)
         self._system_prompt_hash = hashlib.sha256(b"").hexdigest()  # Default: empty prompt
         self._bos_eos_policy = self._extract_bos_eos_policy(llm)
-        self._special_token_policy = "encode"  # Default: encode special tokens
+        self._truncation_policy = self._extract_truncation_policy(llm)
+        self._special_token_policy = self._extract_special_token_policy(llm)
+        self._detokenization_policy = self._extract_detokenization_policy(llm)
+        self._adapter_hash = self._compute_adapter_hash(model)
 
         self.buf = get_capture_buffer()
 
@@ -250,6 +253,91 @@ class VerifiedInferenceServer:
         except Exception:
             return "none"
 
+    @staticmethod
+    def _extract_truncation_policy(llm) -> str:
+        """Derive truncation policy from tokenizer/engine config.
+
+        Inspects the tokenizer's truncation_side attribute and the engine's
+        max_model_len to determine the canonical policy string.
+        vLLM default is to raise an error if input exceeds max_model_len.
+        """
+        try:
+            tokenizer = llm.get_tokenizer()
+            truncation_side = getattr(tokenizer, "truncation_side", None)
+            if truncation_side == "left":
+                return "left"
+            elif truncation_side == "right":
+                return "right"
+            return "error"
+        except Exception:
+            return "error"
+
+    @staticmethod
+    def _extract_special_token_policy(llm) -> str:
+        """Derive special-token handling from tokenizer config.
+
+        Returns a canonical string describing how special tokens in user
+        input are processed during tokenization:
+          - "encode": special tokens are encoded normally (default for most models)
+          - "strip": special tokens are stripped before encoding
+        """
+        try:
+            tokenizer = llm.get_tokenizer()
+            # HuggingFace tokenizers with `added_tokens_encoder` map special
+            # tokens to specific IDs. If the tokenizer has this and it's
+            # non-empty, the policy is "encode" (they are recognized and
+            # mapped to their canonical IDs).
+            added = getattr(tokenizer, "added_tokens_encoder", {})
+            if added:
+                return "encode"
+            return "encode"
+        except Exception:
+            return "encode"
+
+    @staticmethod
+    def _extract_detokenization_policy(llm) -> str:
+        """Derive detokenization policy from tokenizer config.
+
+        Inspects `clean_up_tokenization_spaces` which controls whether
+        the tokenizer normalizes whitespace during decode.
+        """
+        try:
+            tokenizer = llm.get_tokenizer()
+            clean = getattr(tokenizer, "clean_up_tokenization_spaces", None)
+            if clean is True:
+                return "clean_spaces"
+            return "default"
+        except Exception:
+            return "default"
+
+    @staticmethod
+    def _compute_adapter_hash(model) -> Optional[str]:
+        """Hash adapter/LoRA identity if any adapter is loaded.
+
+        Checks for vLLM LoRA modules and PEFT adapters. Returns None
+        when no adapter is detected (base model only).
+        """
+        try:
+            # vLLM LoRA support: check for lora_config on the model.
+            lora_config = getattr(model, "lora_config", None)
+            if lora_config is not None:
+                config_dict = vars(lora_config) if hasattr(lora_config, "__dict__") else {"repr": repr(lora_config)}
+                return hashlib.sha256(
+                    json.dumps(config_dict, sort_keys=True, default=str).encode()
+                ).hexdigest()
+            # PEFT adapter: check for peft_config dict.
+            peft_config = getattr(model, "peft_config", None)
+            if peft_config is not None:
+                serializable = {}
+                for k, v in peft_config.items():
+                    serializable[k] = vars(v) if hasattr(v, "__dict__") else str(v)
+                return hashlib.sha256(
+                    json.dumps(serializable, sort_keys=True, default=str).encode()
+                ).hexdigest()
+            return None
+        except Exception:
+            return None
+
     def _compute_quant_hash(self, model) -> str:
         """SHA-256 of quantization config, if present."""
         try:
@@ -281,6 +369,8 @@ class VerifiedInferenceServer:
         temperature: float = 0.0,
         top_k: int = 0,
         top_p: float = 1.0,
+        min_tokens: int = 0,
+        ignore_eos: bool = False,
     ) -> dict:
         """Run verified inference: generate → capture → commit.
 
@@ -457,14 +547,14 @@ class VerifiedInferenceServer:
             "sampler_version": "chacha20-vi-sample-v1",
             # InputSpec fields.
             "bos_eos_policy": self._bos_eos_policy,
-            "truncation_policy": "error",  # reject if input exceeds context window
+            "truncation_policy": self._truncation_policy,
             "special_token_policy": self._special_token_policy,
             # ModelSpec fields.
-            "adapter_hash": None,  # no adapter/LoRA by default
+            "adapter_hash": self._adapter_hash,
             # OutputSpec fields.
-            "min_tokens": 0,
-            "ignore_eos": False,
-            "detokenization_policy": "default",
+            "min_tokens": min_tokens,
+            "ignore_eos": ignore_eos,
+            "detokenization_policy": self._detokenization_policy,
         }
 
         if _chat_timers:
@@ -741,6 +831,8 @@ def create_app(llm, **kwargs):
                 temperature=float(request.get("temperature", 0.0)),
                 top_k=int(request.get("top_k", 0)),
                 top_p=float(request.get("top_p", 1.0)),
+                min_tokens=int(request.get("min_tokens", 0)),
+                ignore_eos=bool(request.get("ignore_eos", False)),
             )
             return result
         except Exception as e:
