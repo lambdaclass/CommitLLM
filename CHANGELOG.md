@@ -9,7 +9,7 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 - Four-spec commitment wiring for `input_spec_hash`, `model_spec_hash`, `decode_spec_hash`, and `output_spec_hash`, with verifier-side recomputation and composed manifest checking.
 - Canonical commitment of the full four-spec surface, including chat template, BOS/EOS preprocessing, special-token handling, system-prompt semantics, public model identity `R_W`, adapter identity, RoPE configuration, RMSNorm epsilon, sampler identity, decode knobs, and output stopping rules.
 - Explicit model-surface commitments for `n_layers`, `hidden_dim`, `vocab_size`, and `embedding_merkle_root`, with verifier-side cross-checks against the verifier key/config.
-- `padding_policy` field in InputSpec and DeploymentManifest, hashed in `hash_input_spec()`, parsed in the Python bridge. Completes truncation/padding binding (roadmap #4).
+- `padding_policy` field in InputSpec and DeploymentManifest, hashed in `hash_input_spec()`, populated by the live server manifest path, and enforced fail-closed in the Python verifier path. Completes truncation/padding binding (roadmap #4).
 - `decode_mode` field in DecodeSpec and DeploymentManifest, hashed in `hash_decode_spec()`, with verifier cross-check against temperature: greedy requires temp=0, sampled requires temp>0, unknown modes fail closed. Tests cover all mismatch and pass cases (roadmap #9).
 - LM-head Freivalds as an explicit eighth matrix family, including verifier-secret key material and canonical verifier checks.
 - Exact logits replay after LM-head binding so verified token selection still depends on the committed logits path.
