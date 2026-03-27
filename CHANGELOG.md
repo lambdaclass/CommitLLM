@@ -30,6 +30,7 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 
 ### Changed
 
+- Verified serving mode now defaults to sampled decoding (temperature=1.0). Greedy decoding remains available as the explicit `temperature=0` special case. Server API, HTTP endpoint, sampler hook, and Modal endpoint all updated.
 - Terminology and documentation framing now consistently describe Freivalds checks as information-theoretically sound / statistically sound rather than cryptographic.
 - Runtime-populated input, decode, and output policy fields now flow into the committed four-spec surface instead of relying on static defaults.
 - The live canonical sampled path is replayable end to end under the committed decode spec instead of depending on incidental stock serving behavior.

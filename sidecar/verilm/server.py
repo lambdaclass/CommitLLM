@@ -393,7 +393,7 @@ class VerifiedInferenceServer:
         self,
         prompt: str,
         max_tokens: int = 4,
-        temperature: float = 0.0,
+        temperature: float = 1.0,
         top_k: int = 0,
         top_p: float = 1.0,
         min_tokens: int = 0,
@@ -401,11 +401,11 @@ class VerifiedInferenceServer:
     ) -> dict:
         """Run verified inference: generate → capture → commit.
 
-        Supports both greedy (temperature=0) and sampled decoding.
-        Sampled decoding uses a canonical ChaCha20-based sampler injected
-        as a vLLM logits processor, ensuring exact reproducibility by the
-        verifier. vLLM's own sampling knobs are neutralized — the
-        canonical processor is the sole policy owner.
+        Defaults to sampled decoding (temperature=1.0) with the canonical
+        ChaCha20-based sampler injected as a vLLM logits processor,
+        ensuring exact reproducibility by the verifier. Greedy decoding
+        is available via temperature=0. vLLM's own sampling knobs are
+        neutralized — the canonical processor is the sole policy owner.
         """
         import verilm_rs
         from vllm import SamplingParams
@@ -863,7 +863,7 @@ def create_app(llm, **kwargs):
             result = server.chat(
                 prompt=request.get("prompt", ""),
                 max_tokens=request.get("n_tokens", 4),
-                temperature=float(request.get("temperature", 0.0)),
+                temperature=float(request.get("temperature", 1.0)),
                 top_k=int(request.get("top_k", 0)),
                 top_p=float(request.get("top_p", 1.0)),
                 min_tokens=int(request.get("min_tokens", 0)),

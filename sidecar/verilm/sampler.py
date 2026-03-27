@@ -48,7 +48,7 @@ class CanonicalSamplerHook:
         self._handle = None
         self._active = False
         self._batch_seed: bytes = b""
-        self._temperature: float = 0.0
+        self._temperature: float = 1.0
         self._top_k: int = 0
         self._top_p: float = 1.0
         self._call_count: int = 0
