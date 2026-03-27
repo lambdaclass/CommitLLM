@@ -9,9 +9,48 @@ use pyo3::types::{IntoPyDict, PyBytes, PyDict, PyList};
 
 use verilm_core::types::{
     AuditTier, BatchCommitment,
-    DeploymentManifest, V4AuditResponse, VerifierKey,
+    DeploymentManifest, InputSpec, V4AuditResponse, VerifierKey,
 };
 use verilm_prover::FullBindingParams;
+
+/// Wraps a Python callable as a `PromptTokenizer` for verify_v4_full.
+///
+/// The Python callable signature is:
+///   `fn(prompt: bytes, input_spec: dict) -> list[int]`
+///
+/// The input_spec dict contains: tokenizer_hash (hex), system_prompt_hash (hex|None),
+/// chat_template_hash (hex|None), bos_eos_policy (str|None), truncation_policy (str|None),
+/// special_token_policy (str|None).
+struct PyCallableTokenizer<'py> {
+    callback: Bound<'py, PyAny>,
+}
+
+impl verilm_verify::PromptTokenizer for PyCallableTokenizer<'_> {
+    fn tokenize(&self, prompt: &[u8], input_spec: &InputSpec) -> Result<Vec<u32>, String> {
+        let py = self.callback.py();
+        let prompt_bytes = PyBytes::new(py, prompt);
+        let spec_dict = PyDict::new(py);
+        spec_dict.set_item("tokenizer_hash", hex::encode(input_spec.tokenizer_hash))
+            .map_err(|e| e.to_string())?;
+        spec_dict.set_item("system_prompt_hash",
+            input_spec.system_prompt_hash.map(hex::encode))
+            .map_err(|e| e.to_string())?;
+        spec_dict.set_item("chat_template_hash",
+            input_spec.chat_template_hash.map(hex::encode))
+            .map_err(|e| e.to_string())?;
+        spec_dict.set_item("bos_eos_policy", &input_spec.bos_eos_policy)
+            .map_err(|e| e.to_string())?;
+        spec_dict.set_item("truncation_policy", &input_spec.truncation_policy)
+            .map_err(|e| e.to_string())?;
+        spec_dict.set_item("special_token_policy", &input_spec.special_token_policy)
+            .map_err(|e| e.to_string())?;
+
+        let result = self.callback.call1((prompt_bytes, spec_dict))
+            .map_err(|e| format!("Python tokenizer callback failed: {}", e))?;
+        result.extract::<Vec<u32>>()
+            .map_err(|e| format!("tokenizer callback did not return list[int]: {}", e))
+    }
+}
 
 /// Read raw bytes from a Python buffer protocol object (numpy arrays, CPU tensors).
 /// Returns None if the object doesn't support the buffer protocol.
@@ -793,22 +832,31 @@ fn generate_key(model_dir: String, seed: Vec<u8>) -> PyResult<String> {
 /// Args:
 ///     audit_json: str — JSON-serialized V4AuditResponse.
 ///     key_json: str — JSON-serialized VerifierKey.
+///     expected_prompt_token_ids: Optional[list[int]] — caller-supplied prompt token IDs.
+///     tokenizer_fn: Optional[Callable[[bytes, dict], list[int]]] — tokenizer callback.
+///         When provided, the verifier calls `tokenizer_fn(prompt_bytes, input_spec_dict)`
+///         to reconstruct prompt token IDs from raw bytes + the committed InputSpec.
+///         This is the canonical path (verifier derives tokens, not the caller).
+///         Falls back to `expected_prompt_token_ids` when the response lacks prompt/manifest.
 ///
 /// Returns:
 ///     dict with `passed` (bool), `checks_run` (int), `checks_passed` (int),
 ///     `failures` (list of str), `duration_us` (int).
 #[pyfunction]
+#[pyo3(signature = (audit_json, key_json, expected_prompt_token_ids=None, tokenizer_fn=None))]
 fn verify_v4<'py>(
     py: Python<'py>,
     audit_json: &str,
     key_json: &str,
+    expected_prompt_token_ids: Option<Vec<u32>>,
+    tokenizer_fn: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let response: verilm_core::types::V4AuditResponse = serde_json::from_str(audit_json)
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize V4AuditResponse: {}", e)))?;
     let key: VerifierKey = serde_json::from_str(key_json)
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize VerifierKey: {}", e)))?;
 
-    let report = verilm_verify::verify_v4(&key, &response, None);
+    let report = run_verify(&key, &response, expected_prompt_token_ids.as_deref(), tokenizer_fn);
 
     let result = PyDict::new(py);
     result.set_item("passed", report.verdict == verilm_verify::Verdict::Pass)?;
@@ -824,18 +872,23 @@ fn verify_v4<'py>(
 /// Args:
 ///     audit_binary: bytes — binary V4AuditResponse (from audit_v4_binary).
 ///     key_json: str — JSON-serialized VerifierKey.
+///     expected_prompt_token_ids: Optional[list[int]] — caller-supplied prompt token IDs.
+///     tokenizer_fn: Optional[Callable[[bytes, dict], list[int]]] — tokenizer callback.
 #[pyfunction]
+#[pyo3(signature = (audit_binary, key_json, expected_prompt_token_ids=None, tokenizer_fn=None))]
 fn verify_v4_binary<'py>(
     py: Python<'py>,
     audit_binary: &[u8],
     key_json: &str,
+    expected_prompt_token_ids: Option<Vec<u32>>,
+    tokenizer_fn: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let response = verilm_core::serialize::deserialize_v4_audit(audit_binary)
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize V4 binary: {}", e)))?;
     let key: VerifierKey = serde_json::from_str(key_json)
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize VerifierKey: {}", e)))?;
 
-    let report = verilm_verify::verify_v4(&key, &response, None);
+    let report = run_verify(&key, &response, expected_prompt_token_ids.as_deref(), tokenizer_fn);
 
     let result = PyDict::new(py);
     result.set_item("passed", report.verdict == verilm_verify::Verdict::Pass)?;
@@ -844,6 +897,25 @@ fn verify_v4_binary<'py>(
     result.set_item("failures", &report.failures)?;
     result.set_item("duration_us", report.duration.as_micros() as u64)?;
     Ok(result)
+}
+
+/// Shared verification logic: dispatches to verify_v4 or verify_v4_full.
+fn run_verify(
+    key: &VerifierKey,
+    response: &V4AuditResponse,
+    expected_prompt_token_ids: Option<&[u32]>,
+    tokenizer_fn: Option<Bound<'_, PyAny>>,
+) -> verilm_verify::V4VerifyReport {
+    match tokenizer_fn {
+        Some(cb) => {
+            let tok = PyCallableTokenizer { callback: cb };
+            verilm_verify::verify_v4_full(
+                key, response, expected_prompt_token_ids,
+                Some(&tok as &dyn verilm_verify::PromptTokenizer),
+            )
+        }
+        None => verilm_verify::verify_v4(key, response, expected_prompt_token_ids),
+    }
 }
 
 /// Verify that externally-computed prompt token IDs match the committed token chain.
