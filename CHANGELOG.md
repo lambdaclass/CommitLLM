@@ -26,7 +26,7 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 - Version-locked sampler conformance vectors: golden `derive_token_seed` SHA-256 vectors and golden `sample()` token outputs for temperature, top-k, top-p, combined filtering, and greedy modes. Any silent drift in the `chacha20-vi-sample-v1` pipeline breaks these tests.
 - Golden conformance vectors for challenge derivation (`build_audit_challenge` token index and layer indices for 4 seed/token/layer configs), manifest hashing (pinned `hash_manifest` and `hash_model_spec` digests), and end-to-end verification (pinned merkle root, IO root, verdict, and checks_run for deterministic commit→open→verify).
 - Challenge protocol specification (`docs/challenge-protocol.md`): exact derivation of token index, layer depth (routine/full), sampling seed, Freivalds block coefficients, all domain separators, and binary wire format.
-- Cross-version binary format tests: V4 audit response roundtrip through serialize/deserialize, unknown magic rejection, truncated payload rejection, cross-format rejection (key bytes to audit deserializer), version field preservation, and verifier key roundtrip.
+- Binary format robustness tests: V4 audit response roundtrip through serialize/deserialize, unknown magic rejection, truncated payload rejection, cross-format rejection (key bytes to audit deserializer), version field preservation, and verifier key roundtrip. (Not yet a full cross-version compatibility matrix with frozen binary fixtures.)
 
 ### Changed
 
