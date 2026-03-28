@@ -262,7 +262,7 @@ def _run_e2e():
     # Use a short-answer prompt with high max_tokens to trigger early EOS.
     print("\n7. EOS trailing forward pass trim (final_residual regression)...")
     eos_prompt = "What is 2+2? Answer with just the number."
-    eos_result = server.chat(prompt=eos_prompt, max_tokens=256)
+    eos_result = server.chat(prompt=eos_prompt, max_tokens=256, temperature=0.0)
     eos_n = eos_result["n_tokens"]
     assert_true(eos_n < 256, f"EOS before max_tokens ({eos_n} < 256)")
     assert_true(eos_result.get("commitment") is not None, "EOS trim: commit succeeded")
