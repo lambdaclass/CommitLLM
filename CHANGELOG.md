@@ -48,6 +48,10 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 - Audit retrieval now preserves claimed output text end to end so detokenization checks can run in the canonical verifier flow.
 - Bridge documentation and call sites now explicitly treat `bridge_residual_rmsnorm()` as the canonical production W8A8 bridge, while `bridge_requantize()` is demoted to toy-model and last-layer fallback use only.
 - The roadmap and protocol framing now treat the kept canonical protocol as structurally complete, with remaining work focused on hardening, conformance, benchmarks, and documentation.
+- Removed transitional V4 framing: "dropped in V5" comments and "transitional replay scales" qualifiers replaced with canonical bridge replay scale framing. V4 is the kept protocol, not a stepping stone.
+- `RetainedLayerState` documentation now explicitly classifies fields as irreducible (`a`, `scale_a`) vs derivable-with-weight-access (`scale_x_attn`, `scale_x_ffn`, `scale_h`), with derivation paths documented.
+- Binary (bincode+zstd with VV4A magic) is now explicitly framed as the sole normative wire format for receipts and audits. JSON verification path demoted to debug/development convenience.
+- Audit-time weight loading confirmed bound to `R_W`: server validates WeightProvider hash against manifest at startup, verifier cross-checks manifest weight_hash against key weight_hash.
 
 ### Removed
 

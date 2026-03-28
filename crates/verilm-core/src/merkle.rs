@@ -143,8 +143,8 @@ pub fn hash_retained_state_direct(state: &crate::types::RetainedTokenState) -> [
     for ls in &state.layers {
         hash_i8_into(&mut hasher, &ls.a);
         hasher.update(ls.scale_a.to_le_bytes());
-        // Transitional replay scales (dropped in V5 once audit-time
-        // scale derivation is proven to match runtime quantization).
+        // Bridge replay scales: needed for exact RMSNorm bridge replay
+        // at audit time under W8A8 quantization.
         hasher.update(ls.scale_x_attn.to_le_bytes());
         hasher.update(ls.scale_x_ffn.to_le_bytes());
         hasher.update(ls.scale_h.to_le_bytes());

@@ -667,23 +667,38 @@ pub struct LayerTrace {
 
 /// Minimal per-layer state retained for online commitment.
 ///
-/// Only the attention boundary (non-replayable) and the dynamic
-/// quantization scales needed for exact audit replay.
+/// Per-layer retained state for online commitment and audit replay.
+///
+/// **Irreducible fields** (`a`, `scale_a`): depend on the full KV prefix
+/// via softmax(QK^T/√d)V and cannot be reconstructed from single-token
+/// local state + public weights alone.
+///
+/// **Bridge replay scales** (`scale_x_attn`, `scale_x_ffn`, `scale_h`):
+/// theoretically derivable from public weights + the irreducible `a`, but
+/// retained because the key-only verifier path has no weight access.
+/// Once the verifier gains weight access (#32), these can be derived at
+/// audit time and dropped from the retained schema.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RetainedLayerState {
-    /// Post-attention INT8 output fed into W_o. This is the ONLY
-    /// non-derivable intermediate: it comes from softmax(QK^T/√d)V
-    /// which depends on the full KV prefix and cannot be replayed
-    /// from single-token local state + public weights alone.
+    // --- Irreducible: depends on full KV prefix, not replayable ---
+
+    /// Post-attention INT8 output fed into W_o. Comes from
+    /// softmax(QK^T/√d)V which depends on the full KV prefix.
     pub a: Vec<i8>,
     /// Per-tensor activation scale for `a` (W_o projection input).
+    /// Paired with the non-derivable `a` vector.
     pub scale_a: f32,
+
+    // --- Bridge replay scales: derivable with weight access ---
+
     /// Per-tensor activation scale for QKV projection input.
-    /// Needed for exact RMSNorm bridge replay at audit time.
+    /// Derivable from: RMSNorm_attn(residual) where residual is replayable.
     pub scale_x_attn: f32,
     /// Per-tensor activation scale for gate_up projection input.
+    /// Derivable from: RMSNorm_ffn(residual + dequant(W_o @ a)).
     pub scale_x_ffn: f32,
     /// Per-tensor activation scale for down projection input.
+    /// Derivable from: SiLU(dequant(W_g @ x_ffn)) * dequant(W_u @ x_ffn).
     pub scale_h: f32,
 }
 
@@ -1004,7 +1019,7 @@ pub struct Q8LayerTrace {
 pub enum CommitmentVersion {
     /// V4: Retained-state commitment. Trace tree leaf is
     /// `hash_retained_state_direct(retained)` over per-layer `a_i8 + scale_a`
-    /// plus transitional replay scales.
+    /// plus bridge replay scales for exact audit-time RMSNorm replay.
     /// IO leaf chains the retained leaf hash (not ad hoc features):
     /// `H("vi-io-v4" || leaf_hash_t || token_id || prev_io_hash)`.
     /// Prefix binding via retained Merkle tree — auditor opens prior leaves.

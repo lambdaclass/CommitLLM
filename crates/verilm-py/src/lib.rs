@@ -938,7 +938,11 @@ fn generate_key(model_dir: String, seed: Vec<u8>) -> PyResult<String> {
         .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
 }
 
-/// Verify a V4 audit response against a verifier key (key-only Freivalds).
+/// Verify a V4 audit response from JSON (debug/convenience path).
+///
+/// The canonical production path is [`verify_v4_binary`] which consumes
+/// the normative bincode+zstd wire format. This JSON entry point exists
+/// for debugging and development.
 ///
 /// Args:
 ///     audit_json: str — JSON-serialized V4AuditResponse.
@@ -979,7 +983,7 @@ fn verify_v4<'py>(
     Ok(result)
 }
 
-/// Verify a V4 audit response from binary (bincode+zstd) format.
+/// Verify a V4 audit response from binary (bincode+zstd) format — canonical production path.
 ///
 /// Args:
 ///     audit_binary: bytes — binary V4AuditResponse (from audit_v4_binary).

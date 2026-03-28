@@ -1,5 +1,10 @@
 //! Binary serialization for verifier keys and V4 audit responses.
 //!
+//! This is the **normative** receipt/audit representation. The binary
+//! format (magic + bincode + zstd) is the canonical wire format for
+//! production use. JSON serialization via serde derives exists for
+//! debugging and development only — it is not a production path.
+//!
 //! Uses bincode for simplicity. The format is versioned so we can
 //! change it later without breaking existing files.
 //!
