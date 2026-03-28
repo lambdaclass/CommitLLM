@@ -138,6 +138,14 @@ def _run_e2e():
     assert_true(report_full["passed"], f"full verify passed ({report_full['checks_passed']}/{report_full['checks_run']} checks)")
     if not report_full["passed"]:
         print(f"  failures: {report_full['failures']}")
+    # Coverage semantics (#12): full audit must report "full" coverage.
+    cov_full = report_full.get("coverage", {})
+    assert_true(cov_full.get("level") == "full", f"full audit coverage: {cov_full}")
+    print(f"  coverage: {cov_full}")
+    # Classified failures (#11): empty on pass, but field must exist.
+    cf_full = report_full.get("classified_failures", None)
+    assert_true(cf_full is not None, "classified_failures field present")
+    assert_true(len(cf_full) == 0, f"no classified failures on pass (got {len(cf_full)})")
 
     # ── Step 4a: Audit (routine tier — contiguous prefix) ──
     # Need a fresh chat since audit consumes state
@@ -182,6 +190,14 @@ def _run_e2e():
     )
     if not report_routine["passed"]:
         print(f"  failures: {report_routine['failures']}")
+    # Coverage semantics (#12): routine audit must report "routine" coverage.
+    cov_routine = report_routine.get("coverage", {})
+    assert_true(cov_routine.get("level") == "routine", f"routine audit coverage: {cov_routine}")
+    assert_true(
+        cov_routine.get("layers_checked", 0) < cov_routine.get("layers_total", 0),
+        f"routine layers_checked < layers_total: {cov_routine}"
+    )
+    print(f"  coverage: {cov_routine}")
 
     # ── Step 5: Binary wire format ──
     print("\n5. Binary wire format (bincode+zstd)...")
@@ -213,6 +229,10 @@ def _run_e2e():
     )
     if not report_binary["passed"]:
         print(f"  failures: {report_binary['failures']}")
+    # Coverage + classified_failures must be present on binary path too.
+    cov_binary = report_binary.get("coverage", {})
+    assert_true(cov_binary.get("level") == "full", f"binary audit coverage: {cov_binary}")
+    assert_true(report_binary.get("classified_failures") is not None, "binary path has classified_failures")
 
     # ── Step 6: Verify that tampering is detected ──
     print("\n6. Tamper detection...")
@@ -226,6 +246,13 @@ def _run_e2e():
     assert_true(not report_tampered["passed"], "tampered audit correctly rejected")
     if report_tampered["failures"]:
         print(f"  detected: {report_tampered['failures'][0][:80]}...")
+    # Classified failures (#11): tamper should produce structured failure codes.
+    cf_tampered = report_tampered.get("classified_failures", [])
+    assert_true(len(cf_tampered) > 0, "tamper produces classified_failures")
+    for cf in cf_tampered:
+        assert_true("code" in cf and "category" in cf and "message" in cf,
+            f"classified_failure has code/category/message: {cf}")
+    print(f"  classified: {[c['code'] for c in cf_tampered]}")
 
     # ── Step 7: EOS trailing forward pass trim regression ──
     # When EOS fires before max_tokens, vLLM dispatches one extra decode step.
