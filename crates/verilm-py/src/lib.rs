@@ -226,6 +226,16 @@ fn extract_manifest(d: &Bound<'_, PyDict>) -> PyResult<DeploymentManifest> {
             sorted.sort_by_key(|&(tid, _)| tid);
             sorted
         },
+        bad_word_ids: {
+            let bw: Vec<u32> = d.get_item("bad_word_ids")?
+                .map(|v| v.extract())
+                .transpose()?
+                .unwrap_or_default();
+            let mut sorted = bw;
+            sorted.sort();
+            sorted.dedup();
+            sorted
+        },
         guided_decoding: d.get_item("guided_decoding")?
             .map(|v| v.extract())
             .transpose()?

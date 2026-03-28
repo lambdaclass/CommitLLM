@@ -1266,6 +1266,7 @@ fn make_manifest(temperature: f32, top_k: u32, top_p: f32) -> DeploymentManifest
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
         logit_bias: vec![],
+        bad_word_ids: vec![],
         guided_decoding: String::new(),
         stop_sequences: vec![],
         max_tokens: 0,
@@ -2277,6 +2278,16 @@ fn v4_manifest_rejects_logit_bias() {
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report.failures.iter().any(|f| f.contains("logit_bias")),
         "expected logit_bias rejection, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_manifest_rejects_bad_word_ids() {
+    let mut m = make_manifest(0.0, 0, 1.0);
+    m.bad_word_ids = vec![42, 100, 200];
+    let report = verify_with_manifest(m);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f| f.contains("bad_word_ids")),
+        "expected bad_word_ids rejection, got: {:?}", report.failures);
 }
 
 #[test]

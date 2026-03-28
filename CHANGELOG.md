@@ -52,6 +52,7 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 - `RetainedLayerState` documentation now explicitly classifies fields as irreducible (`a`, `scale_a`) vs derivable-with-weight-access (`scale_x_attn`, `scale_x_ffn`, `scale_h`), with derivation paths documented.
 - Binary (bincode+zstd with VV4A magic) is now explicitly framed as the sole normative wire format for receipts and audits. JSON verification path demoted to debug/development convenience.
 - Audit-time weight loading confirmed bound to `R_W`: server validates WeightProvider hash against manifest at startup, verifier cross-checks manifest weight_hash against key weight_hash.
+- `bad_word_ids` field added to DecodeSpec and DeploymentManifest, hashed in `hash_decode_spec()`, fail-closed in verifier (non-empty rejected), parsed in Python bridge, set to empty in live server. Completes decode-surface logit modification binding (roadmap #10).
 
 ### Removed
 

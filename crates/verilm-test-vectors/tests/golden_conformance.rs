@@ -122,6 +122,7 @@ fn golden_manifest() -> DeploymentManifest {
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
         logit_bias: vec![],
+        bad_word_ids: vec![],
         guided_decoding: String::new(),
         stop_sequences: vec![],
         max_tokens: 256,
@@ -161,7 +162,7 @@ fn golden_manifest_hash() {
     let h = verilm_core::merkle::hash_manifest(&manifest);
     assert_eq!(
         hex::encode(h),
-        "35809d758dcfd9ea40f6d14212c376d9724f74b2a6912546f4a9e9d14a0cf152",
+        "79b3b497b0fbe9224b099a0c07b2cf181c68c701187c2fd231d34579c0670f1b",
         "manifest hash drifted — was the four-spec hash format changed?"
     );
 }

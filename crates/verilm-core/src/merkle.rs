@@ -301,6 +301,10 @@ pub fn hash_decode_spec(spec: &crate::types::DecodeSpec) -> [u8; 32] {
         hasher.update(token_id.to_le_bytes());
         hasher.update(bias.to_le_bytes());
     }
+    hasher.update((spec.bad_word_ids.len() as u32).to_le_bytes());
+    for &token_id in &spec.bad_word_ids {
+        hasher.update(token_id.to_le_bytes());
+    }
     hasher.update((spec.guided_decoding.len() as u32).to_le_bytes());
     hasher.update(spec.guided_decoding.as_bytes());
     match &spec.sampler_version {
@@ -692,6 +696,7 @@ mod tests {
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
             logit_bias: vec![],
+            bad_word_ids: vec![],
             guided_decoding: String::new(),
             sampler_version: None,
             decode_mode: None,
@@ -762,6 +767,7 @@ mod tests {
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
             logit_bias: vec![],
+            bad_word_ids: vec![],
             guided_decoding: String::new(),
             sampler_version: None,
             decode_mode: None,
@@ -827,6 +833,7 @@ mod tests {
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
             logit_bias: vec![(5, 1.0)],
+            bad_word_ids: vec![],
             guided_decoding: String::new(),
             stop_sequences: vec!["<|end|>".into()],
             max_tokens: 256,

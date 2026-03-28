@@ -79,6 +79,10 @@ pub struct DeploymentManifest {
     /// Empty = disabled.
     #[serde(default)]
     pub logit_bias: Vec<(u32, f32)>,
+    /// Bad-word token IDs: tokens that must never be sampled, sorted.
+    /// Empty = disabled.
+    #[serde(default)]
+    pub bad_word_ids: Vec<u32>,
     /// Guided decoding grammar/schema identifier. Empty = disabled.
     /// When non-empty, constrains sampling to tokens valid under this grammar.
     #[serde(default)]
@@ -386,6 +390,9 @@ pub struct DecodeSpec {
     /// Logit bias: (token_id, additive_bias) pairs, sorted by token_id.
     #[serde(default)]
     pub logit_bias: Vec<(u32, f32)>,
+    /// Bad-word token IDs: tokens that must never be sampled, sorted.
+    #[serde(default)]
+    pub bad_word_ids: Vec<u32>,
     /// Guided decoding grammar/schema identifier.
     #[serde(default)]
     pub guided_decoding: String,
@@ -407,6 +414,7 @@ impl From<&DeploymentManifest> for DecodeSpec {
             frequency_penalty: m.frequency_penalty,
             presence_penalty: m.presence_penalty,
             logit_bias: m.logit_bias.clone(),
+            bad_word_ids: m.bad_word_ids.clone(),
             guided_decoding: m.guided_decoding.clone(),
             sampler_version: m.sampler_version.clone(),
             decode_mode: m.decode_mode.clone(),

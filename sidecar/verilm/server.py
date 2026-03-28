@@ -699,6 +699,7 @@ class VerifiedInferenceServer:
             "frequency_penalty": 0.0,
             "presence_penalty": 0.0,
             "logit_bias": [],
+            "bad_word_ids": [],
             "guided_decoding": "",
             "stop_sequences": [],
             "max_tokens": max_tokens,

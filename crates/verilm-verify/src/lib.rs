@@ -788,6 +788,12 @@ pub fn verify_v4_full(
                         decode_spec.logit_bias.len()
                     ));
                 }
+                if !decode_spec.bad_word_ids.is_empty() {
+                    failures.push(format!(
+                        "unsupported bad_word_ids ({} entries, canonical sampler requires empty)",
+                        decode_spec.bad_word_ids.len()
+                    ));
+                }
                 if !decode_spec.guided_decoding.is_empty() {
                     failures.push(format!(
                         "unsupported guided_decoding='{}' (canonical sampler requires empty)",
