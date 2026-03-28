@@ -2,6 +2,26 @@
 
 This changelog tracks the kept canonical VeriLM protocol and its major implementation milestones.
 
+## 2026-03-28
+
+### Fixed
+
+- Keygen `rmsnorm_eps` split-brain: key generation and `SafetensorsWeightProvider` both now read `rms_norm_eps` from the model's `config.json` instead of hardcoding `1e-5`. Fixes bridge replay divergence on models like Qwen that use `1e-6`.
+- Keygen `rope_theta` now sourced from `config.json` instead of a heuristic based on `hidden_dim`. Fixes mismatch on models with non-standard `rope_theta` values.
+- Keygen `vocab_size` early detection from `lm_head.weight` tensor shape in `detect_config()`, before `r` vector generation. Fixes panic when `vocab_size` was 0 at LmHead Freivalds setup.
+- Verifier `n_tokens` generation-length semantics: `n_generated = n_tokens - (n_prompt - 1)`, accounting for the committed token_ids array omitting the first embedding token. Fixes off-by-one that allowed `n_tokens_inflate` to pass.
+- Verifier LM-head token replay now skipped for prompt-side tokens (where `token_index < gen_start`). Prompt tokens are chosen by the tokenizer, not by argmax/sampling over logits. Fixes false rejection on multi-token audits where the challenged position is inside the prompt.
+
+### Changed
+
+- Adversarial tamper test (`test_adversarial.py`) hardened:
+  - Baselines restored to strict assertions (224/224 checks pass on real W8A8 GPU).
+  - Splice tests now use different prompts and audit at generated-token indices past the prompt boundary. Token splice requires verified token divergence before asserting rejection.
+  - `final_residual_shift` accepts `merkle` as a valid rejection reason (stronger than a custom "final" reason since it proves retained-leaf hash binding).
+  - Multi-token prefix baseline audits at a generated token index, avoiding prompt-side token replay.
+  - Freivalds diagnostic script (`diag_freivalds.py`) added for targeted GPU-side failure classification.
+- Adversarial test result: 35 scenarios pass; token splice is conditionally tested only when divergent token_ids are confirmed (not an unresolved protocol gap).
+
 ## 2026-03-27
 
 ### Added

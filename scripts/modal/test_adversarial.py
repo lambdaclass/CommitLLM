@@ -409,7 +409,9 @@ def _run_test():
     # ════════════════════════════════════════════════════════════
     print("\n═══ Cross-request splice ═══")
 
-    # Generate a second baseline with a DIFFERENT prompt
+    # Generate a second baseline with a DIFFERENT prompt.
+    # To guarantee token divergence, use prompts with very different answers
+    # and audit several positions past the prompt boundary.
     PROMPT_B = "What is the largest planet in the solar system?"
     resp_b = http.post("/chat", json={
         "prompt": PROMPT_B, "n_tokens": MAX_TOKENS, "temperature": 0.0,
@@ -417,38 +419,49 @@ def _run_test():
     assert resp_b.status_code == 200
     chat_b = resp_b.json()
     n_gen_b = chat_b["n_tokens"]
-    # Audit at a generated token (past prompt boundary)
-    n_prompt_b = chat_b.get("n_prompt_tokens", 1)
-    gen_tok_b = max(n_prompt_b, 1)  # first generated token index in committed array
+
+    # To find actual generated-token indices, do an initial audit at index 0
+    # and read n_prompt_tokens from the audit response (not /chat, which may
+    # not return it). Then audit well past the prompt boundary.
+    def _get_gen_start(request_id):
+        """Audit at index 0 to discover n_prompt_tokens from the response."""
+        r = http.post("/audit", json={
+            "request_id": request_id, "token_index": 0,
+            "layer_indices": [0], "tier": "full", "binary": False,
+        })
+        if r.status_code == 200:
+            npt = r.json().get("n_prompt_tokens")
+            if npt is not None:
+                return max(npt - 1, 0)  # gen_start in committed array
+        return 0
+
+    gen_start_a = _get_gen_start(chat["request_id"])
+    gen_start_b = _get_gen_start(chat_b["request_id"])
+    # Audit 3 positions past prompt boundary for content divergence
+    splice_idx_a = min(gen_start_a + 3, chat["n_tokens"] - 1)
+    splice_idx_b = min(gen_start_b + 3, n_gen_b - 1)
+    print(f"  gen_start: A={gen_start_a}, B={gen_start_b}; auditing at A[{splice_idx_a}], B[{splice_idx_b}]")
+
     resp_ab = http.post("/audit", json={
-        "request_id": chat_b["request_id"],
-        "token_index": gen_tok_b,
-        "layer_indices": list(range(n_layers)),
-        "tier": "full",
-        "binary": False,
+        "request_id": chat_b["request_id"], "token_index": splice_idx_b,
+        "layer_indices": list(range(n_layers)), "tier": "full", "binary": False,
     })
     assert resp_ab.status_code == 200
     audit_b = resp_ab.json()
     audit_b_json = json.dumps(audit_b)
     report_b = verilm_rs.verify_v4(audit_b_json, key_json)
-    print(f"  splice baseline B (prompt_b, tok={gen_tok_b}): "
+    print(f"  splice baseline B (prompt_b, tok={splice_idx_b}): "
           f"{report_b['checks_passed']}/{report_b['checks_run']} checks passed")
 
-    # Also get a generated-token audit for the original prompt
-    n_prompt_a = chat.get("n_prompt_tokens", 1)
-    gen_tok_a = max(n_prompt_a, 1)
     resp_ga = http.post("/audit", json={
-        "request_id": chat["request_id"],
-        "token_index": gen_tok_a,
-        "layer_indices": list(range(n_layers)),
-        "tier": "full",
-        "binary": False,
+        "request_id": chat["request_id"], "token_index": splice_idx_a,
+        "layer_indices": list(range(n_layers)), "tier": "full", "binary": False,
     })
     assert resp_ga.status_code == 200
     audit_a_gen = resp_ga.json()
     audit_a_gen_json = json.dumps(audit_a_gen)
     report_a_gen = verilm_rs.verify_v4(audit_a_gen_json, key_json)
-    print(f"  splice baseline A (prompt_a, tok={gen_tok_a}): "
+    print(f"  splice baseline A (prompt_a, tok={splice_idx_a}): "
           f"{report_a_gen['checks_passed']}/{report_a_gen['checks_run']} checks passed")
 
     # 25. Splice shell_opening from request B into request A's generated-token audit
@@ -463,20 +476,22 @@ def _run_test():
         d["retained"] = other["retained"]
     tamper_test("cross_request_retained_splice", audit_a_gen_json, splice_retained, "merkle")
 
-    # 27. Splice token_id from request B into request A (different token selection)
-    # Must verify the tokens actually differ; if they match at this index, scan
-    # for a generated index where they diverge.
+    # 27. Splice token_id: must use indices where token_ids actually differ.
+    # Scan from splice_idx upward if needed to find divergent tokens.
     tid_a = audit_a_gen["token_id"]
     tid_b = audit_b["token_id"]
     splice_a_json = audit_a_gen_json
     splice_b_json = audit_b_json
     found_divergent = tid_a != tid_b
-    if not found_divergent:
-        print(f"  token_id match at gen_tok ({tid_a}=={tid_b}), scanning for divergent index...")
-        gen_start_a = max(chat.get("n_prompt_tokens", 1) - 1, 0)
-        gen_start_b = max(chat_b.get("n_prompt_tokens", 1) - 1, 0)
+    if found_divergent:
+        print(f"  token_ids diverge at initial index: A={tid_a} vs B={tid_b}")
+    else:
+        print(f"  token_id match ({tid_a}=={tid_b}), scanning for divergent index...")
         max_scan = min(chat["n_tokens"], n_gen_b)
-        for i in range(max(gen_start_a, gen_start_b) + 1, max_scan):
+        gen_floor = max(gen_start_a, gen_start_b)
+        for i in range(gen_floor, max_scan):
+            if i == splice_idx_a:
+                continue  # already checked
             ra = http.post("/audit", json={
                 "request_id": chat["request_id"], "token_index": i,
                 "layer_indices": list(range(n_layers)), "tier": "full", "binary": False,
@@ -495,7 +510,7 @@ def _run_test():
                     found_divergent = True
                     break
         if not found_divergent:
-            print("  SKIP [cross_request_token_splice]: no divergent token_id found across all generated indices")
+            print("  WARNING: no divergent token_id found — token splice test inconclusive")
 
     def splice_token_id(d):
         other = json.loads(splice_b_json)
@@ -503,7 +518,8 @@ def _run_test():
     if found_divergent:
         tamper_test("cross_request_token_splice", splice_a_json, splice_token_id, "io")
     else:
-        print("  SKIP [cross_request_token_splice]: tokens identical at all scanned indices")
+        # Don't count as pass or fail — this is a coverage gap in this run
+        print("  SKIP [cross_request_token_splice]: could not construct divergent test case")
 
     # ════════════════════════════════════════════════════════════
     # Layer swap — put data from one layer into another layer's slot
