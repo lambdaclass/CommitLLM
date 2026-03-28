@@ -14,3 +14,4 @@ serde_json = "1"
 verilm-test-vectors = { path = "../verilm-test-vectors" }
 verilm-prover = { path = "../verilm-prover" }
 zstd = "0.13"
+hex = "0.4"
