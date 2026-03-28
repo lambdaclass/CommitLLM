@@ -17,7 +17,7 @@ The following blockers are already closed and are therefore omitted from the rem
 5. [x] Build a tamper corpus for every verifier boundary, done when shell openings, retained-state leaves, IO chain, embedding proofs, manifest/spec fields, prompt hashes, seed commitments, LM-head/final-token checks, decode replay, stop policy, prefix openings, and malformed binary payloads all have adversarial cases.
 6. [x] Add cross-proof attacks to the tamper corpus, done when receipt/proof components from different responses can be mixed in tests and are rejected.
 7. [x] Add splice attacks to the tamper corpus, done when prefix, transcript, or request-chain splices are tested and rejected.
-8. [ ] Add boundary-condition fuzzing, done when EOS-shortened requests, long/short prompt-output combinations, weird challenge tiers, malformed serialization, and unknown versions are fuzzed and fail correctly.
+8. [x] Add boundary-condition fuzzing, done when EOS-shortened requests, long/short prompt-output combinations, weird challenge tiers, malformed serialization, and unknown versions are fuzzed and fail correctly.
 9. [x] Require adversarial tests to fail for the right reason, done when hardening tests assert stable, specific verifier failure reasons instead of generic failure.
 10. [x] Define a verification failure taxonomy, done when cryptographic failures, semantic failures, operational/configuration failures, and approximate/statistical outcomes are explicitly classified and reported differently.
 11. [x] Add structured audit-failure reporting, done when verifier output identifies the failed check and the relevant token/layer/proof component in a stable machine-consumable form.

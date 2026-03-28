@@ -922,6 +922,7 @@ dependencies = [
  "verilm-core",
  "verilm-prover",
  "verilm-test-vectors",
+ "zstd",
 ]
 
 [[package]]
