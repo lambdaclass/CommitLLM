@@ -1150,12 +1150,12 @@ pub fn verify_v4_full(
                     let n_prompt = response.commitment.n_prompt_tokens.unwrap_or(0);
                     let n_generated = response.commitment.n_tokens
                         .saturating_sub(n_prompt.saturating_sub(1));
-                    if response.token_index >= output_spec.max_tokens {
+                    if response.token_index >= response.commitment.n_tokens {
                         failures.push(vfail(
                             FailureCode::ExceedsMaxTokens,
                             format!(
-                                "token_index {} exceeds output_spec max_tokens {}",
-                                response.token_index, output_spec.max_tokens
+                                "token_index {} exceeds committed n_tokens {}",
+                                response.token_index, response.commitment.n_tokens
                             ),
                         ));
                     }

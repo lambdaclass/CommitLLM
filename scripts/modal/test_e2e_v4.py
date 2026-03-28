@@ -99,8 +99,8 @@ def _run_e2e():
     seed = hashlib.sha256(PROMPT.encode()).digest()
     key_json = verilm_rs.generate_key(model_dir, seed)
     key = json.loads(key_json)
-    assert_true(len(key.get("weight_hashes", [])) == n_layers, f"key has {n_layers} layer hashes")
-    print(f"  key layers: {len(key.get('weight_hashes', []))}")
+    assert_true(key.get("weight_hash") is not None, "key has weight_hash")
+    print(f"  weight_hash: {key.get('weight_hash', '')[:16]}...")
 
     # ── Step 3a: Audit (full tier — all layers) ──
     print("\n3a. Audit (full tier — all layers, token 0)...")
@@ -239,8 +239,9 @@ def _run_e2e():
     tampered = json.loads(audit_full_json)
     if tampered.get("shell_opening") and tampered["shell_opening"].get("layers"):
         layer0 = tampered["shell_opening"]["layers"][0]
-        if "x_attn" in layer0 and layer0["x_attn"]:
-            layer0["x_attn"][0] ^= 0x7F
+        # ShellLayerOpening has attn_out (Vec<i32>), not x_attn
+        if "attn_out" in layer0 and layer0["attn_out"]:
+            layer0["attn_out"][0] ^= 0x7FFFFFFF
     tampered_json = json.dumps(tampered)
     report_tampered = verilm_rs.verify_v4(tampered_json, key_json)
     assert_true(not report_tampered["passed"], "tampered audit correctly rejected")
