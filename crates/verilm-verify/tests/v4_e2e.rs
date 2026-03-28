@@ -191,7 +191,7 @@ fn v4_tampered_io_chain_detected() {
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.contains("prev_io_hash") || f.contains("IO chain")),
+        report.failures.iter().any(|f| f.message.contains("prev_io_hash") || f.message.contains("IO chain")),
         "expected IO chain failure, got: {:?}",
         report.failures
     );
@@ -218,7 +218,7 @@ fn v4_wrong_seed_detected() {
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.contains("seed")),
+        report.failures.iter().any(|f| f.message.contains("seed")),
         "expected seed failure, got: {:?}",
         report.failures
     );
@@ -248,7 +248,7 @@ fn v4_wrong_shell_opening_detected() {
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.contains("Freivalds")),
+        report.failures.iter().any(|f| f.message.contains("Freivalds")),
         "expected Freivalds failure on shell opening, got: {:?}",
         report.failures
     );
@@ -275,7 +275,7 @@ fn v4_missing_shell_opening_detected() {
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.contains("shell_opening")),
+        report.failures.iter().any(|f| f.message.contains("shell_opening")),
         "expected missing shell_opening failure, got: {:?}",
         report.failures
     );
@@ -362,7 +362,7 @@ fn v4_weights_wrong_weights_detected() {
     let report = verify_v4_with_weights(&key, &response, &ToyWeights(&wrong_model));
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.contains("Freivalds")),
+        report.failures.iter().any(|f| f.message.contains("Freivalds")),
         "expected Freivalds weight-binding failure, got: {:?}",
         report.failures
     );
@@ -487,7 +487,7 @@ fn v4_scale_mismatch_detected() {
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "scale mismatch should cause failure");
     assert!(
-        report.failures.iter().any(|f| f.contains("Freivalds")),
+        report.failures.iter().any(|f| f.message.contains("Freivalds")),
         "expected Freivalds failure from scale mismatch, got: {:?}",
         report.failures
     );
@@ -762,7 +762,7 @@ fn v4_full_bridge_wrong_residual_detected() {
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "wrong residual should be detected");
     assert!(
-        report.failures.iter().any(|f| f.contains("embedding Merkle proof")),
+        report.failures.iter().any(|f| f.message.contains("embedding Merkle proof")),
         "expected embedding proof failure from tampered residual, got: {:?}",
         report.failures
     );
@@ -915,7 +915,7 @@ fn v4_embedding_proof_tampered_residual_detected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "tampered residual should be caught");
-    assert!(report.failures.iter().any(|f| f.contains("embedding Merkle proof")),
+    assert!(report.failures.iter().any(|f| f.message.contains("embedding Merkle proof")),
         "should fail on embedding proof, failures: {:?}", report.failures);
 }
 
@@ -952,7 +952,7 @@ fn v4_embedding_proof_missing_when_root_present() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "missing proof should be caught");
-    assert!(report.failures.iter().any(|f| f.contains("missing embedding_proof")),
+    assert!(report.failures.iter().any(|f| f.message.contains("missing embedding_proof")),
         "should fail on missing proof, failures: {:?}", report.failures);
 }
 
@@ -991,7 +991,7 @@ fn v4_embedding_proof_wrong_token_id_detected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "wrong token_id should be caught");
-    assert!(report.failures.iter().any(|f| f.contains("leaf_index") && f.contains("token_id")),
+    assert!(report.failures.iter().any(|f| f.message.contains("leaf_index") && f.message.contains("token_id")),
         "should fail on token_id mismatch, failures: {:?}", report.failures);
 }
 
@@ -1023,7 +1023,7 @@ fn v4_downgrade_omit_initial_residual_detected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "omitted initial_residual should be caught");
-    assert!(report.failures.iter().any(|f| f.contains("initial_residual")),
+    assert!(report.failures.iter().any(|f| f.message.contains("initial_residual")),
         "should fail on missing initial_residual, failures: {:?}", report.failures);
 }
 
@@ -1059,7 +1059,7 @@ fn v4_unbound_initial_residual_rejected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "unbound initial_residual should be rejected");
-    assert!(report.failures.iter().any(|f| f.contains("embedding_merkle_root")),
+    assert!(report.failures.iter().any(|f| f.message.contains("embedding_merkle_root")),
         "should fail on missing embedding root, failures: {:?}", report.failures);
 }
 
@@ -1142,7 +1142,7 @@ fn v4_lm_head_wrong_token_detected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "wrong token should be detected");
-    assert!(report.failures.iter().any(|f| f.contains("lm_head")),
+    assert!(report.failures.iter().any(|f| f.message.contains("lm_head")),
         "should fail on lm_head check, failures: {:?}", report.failures);
 }
 
@@ -1244,7 +1244,7 @@ fn v4_lm_head_freivalds_catches_tampered_logits() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "tampered logits should be caught");
-    assert!(report.failures.iter().any(|f| f.contains("Freivalds")),
+    assert!(report.failures.iter().any(|f| f.message.contains("Freivalds")),
         "should fail on Freivalds check, got: {:?}", report.failures);
 }
 
@@ -1409,7 +1409,7 @@ fn v4_manifest_wrong_sampled_token_detected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("lm_head")),
+    assert!(report.failures.iter().any(|f| f.message.contains("lm_head")),
         "should fail on lm_head sampling check, failures: {:?}", report.failures);
 }
 
@@ -1436,7 +1436,7 @@ fn v4_manifest_hash_mismatch_detected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("manifest hash")),
+    assert!(report.failures.iter().any(|f| f.message.contains("manifest hash")),
         "should fail on manifest hash, failures: {:?}", report.failures);
 }
 
@@ -1494,7 +1494,7 @@ fn v4_manifest_n_layers_mismatch_rejected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("n_layers mismatch")),
+    assert!(report.failures.iter().any(|f| f.message.contains("n_layers mismatch")),
         "expected n_layers mismatch, got: {:?}", report.failures);
 }
 
@@ -1518,7 +1518,7 @@ fn v4_manifest_hidden_dim_mismatch_rejected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("hidden_dim mismatch")),
+    assert!(report.failures.iter().any(|f| f.message.contains("hidden_dim mismatch")),
         "expected hidden_dim mismatch, got: {:?}", report.failures);
 }
 
@@ -1542,7 +1542,7 @@ fn v4_manifest_vocab_size_mismatch_rejected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("vocab_size mismatch")),
+    assert!(report.failures.iter().any(|f| f.message.contains("vocab_size mismatch")),
         "expected vocab_size mismatch, got: {:?}", report.failures);
 }
 
@@ -1568,7 +1568,7 @@ fn v4_manifest_embedding_root_mismatch_rejected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("embedding_merkle_root mismatch")),
+    assert!(report.failures.iter().any(|f| f.message.contains("embedding_merkle_root mismatch")),
         "expected embedding_merkle_root mismatch, got: {:?}", report.failures);
 }
 
@@ -1623,7 +1623,7 @@ fn v4_decode_mode_greedy_with_nonzero_temp_rejected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("decode_mode='greedy'")),
+    assert!(report.failures.iter().any(|f| f.message.contains("decode_mode='greedy'")),
         "expected decode_mode/temperature mismatch, got: {:?}", report.failures);
 }
 
@@ -1648,7 +1648,7 @@ fn v4_decode_mode_sampled_with_zero_temp_rejected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("decode_mode='sampled'")),
+    assert!(report.failures.iter().any(|f| f.message.contains("decode_mode='sampled'")),
         "expected decode_mode/temperature mismatch, got: {:?}", report.failures);
 }
 
@@ -1672,7 +1672,7 @@ fn v4_decode_mode_unknown_rejected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("unsupported decode_mode")),
+    assert!(report.failures.iter().any(|f| f.message.contains("unsupported decode_mode")),
         "expected unsupported decode_mode, got: {:?}", report.failures);
 }
 
@@ -1719,7 +1719,7 @@ fn v4_manifest_quant_family_mismatch_rejected() {
     response.manifest = Some(manifest);
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("quant_family mismatch")),
+    assert!(report.failures.iter().any(|f| f.message.contains("quant_family mismatch")),
         "expected quant_family mismatch, got: {:?}", report.failures);
 }
 
@@ -1740,7 +1740,7 @@ fn v4_manifest_scale_derivation_mismatch_rejected() {
     response.manifest = Some(manifest);
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("scale_derivation mismatch")),
+    assert!(report.failures.iter().any(|f| f.message.contains("scale_derivation mismatch")),
         "expected scale_derivation mismatch, got: {:?}", report.failures);
 }
 
@@ -1761,7 +1761,7 @@ fn v4_manifest_quant_block_size_mismatch_rejected() {
     response.manifest = Some(manifest);
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("quant_block_size mismatch")),
+    assert!(report.failures.iter().any(|f| f.message.contains("quant_block_size mismatch")),
         "expected quant_block_size mismatch, got: {:?}", report.failures);
 }
 
@@ -1808,7 +1808,7 @@ fn v4_manifest_kv_dim_mismatch_rejected() {
     response.manifest = Some(manifest);
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("kv_dim mismatch")),
+    assert!(report.failures.iter().any(|f| f.message.contains("kv_dim mismatch")),
         "expected kv_dim mismatch, got: {:?}", report.failures);
 }
 
@@ -1828,7 +1828,7 @@ fn v4_manifest_ffn_dim_mismatch_rejected() {
     response.manifest = Some(manifest);
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("ffn_dim mismatch")),
+    assert!(report.failures.iter().any(|f| f.message.contains("ffn_dim mismatch")),
         "expected ffn_dim mismatch, got: {:?}", report.failures);
 }
 
@@ -1848,7 +1848,7 @@ fn v4_manifest_d_head_mismatch_rejected() {
     response.manifest = Some(manifest);
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("d_head mismatch")),
+    assert!(report.failures.iter().any(|f| f.message.contains("d_head mismatch")),
         "expected d_head mismatch, got: {:?}", report.failures);
 }
 
@@ -1868,7 +1868,7 @@ fn v4_manifest_n_q_heads_mismatch_rejected() {
     response.manifest = Some(manifest);
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("n_q_heads mismatch")),
+    assert!(report.failures.iter().any(|f| f.message.contains("n_q_heads mismatch")),
         "expected n_q_heads mismatch, got: {:?}", report.failures);
 }
 
@@ -1888,7 +1888,7 @@ fn v4_manifest_n_kv_heads_mismatch_rejected() {
     response.manifest = Some(manifest);
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("n_kv_heads mismatch")),
+    assert!(report.failures.iter().any(|f| f.message.contains("n_kv_heads mismatch")),
         "expected n_kv_heads mismatch, got: {:?}", report.failures);
 }
 
@@ -1908,7 +1908,7 @@ fn v4_manifest_rope_theta_mismatch_rejected() {
     response.manifest = Some(manifest);
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("rope_theta mismatch")),
+    assert!(report.failures.iter().any(|f| f.message.contains("rope_theta mismatch")),
         "expected rope_theta mismatch, got: {:?}", report.failures);
 }
 
@@ -2070,7 +2070,7 @@ fn v4_captured_final_residual_wrong_token_detected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "wrong token should be detected");
-    assert!(report.failures.iter().any(|f| f.contains("lm_head")),
+    assert!(report.failures.iter().any(|f| f.message.contains("lm_head")),
         "should fail on lm_head check, failures: {:?}", report.failures);
 }
 
@@ -2107,7 +2107,7 @@ fn v4_captured_final_residual_tampered_residual_detected() {
     // Tampered residual → different final_hidden → different argmax → lm_head mismatch.
     assert_eq!(report.verdict, Verdict::Fail,
         "tampered residual should be detected, failures: {:?}", report.failures);
-    assert!(report.failures.iter().any(|f| f.contains("lm_head")),
+    assert!(report.failures.iter().any(|f| f.message.contains("lm_head")),
         "should fail on lm_head check, failures: {:?}", report.failures);
 }
 
@@ -2134,7 +2134,7 @@ fn v4_final_residual_fail_closed_missing() {
     assert_eq!(report.verdict, Verdict::Fail,
         "should fail when final_residual missing but key requires it, failures: {:?}",
         report.failures);
-    assert!(report.failures.iter().any(|f| f.contains("final_residual")),
+    assert!(report.failures.iter().any(|f| f.message.contains("final_residual")),
         "should mention final_residual in failure, failures: {:?}", report.failures);
 }
 
@@ -2164,7 +2164,7 @@ fn v4_lm_head_fail_closed_missing_logits() {
     assert_eq!(report.verdict, Verdict::Fail,
         "should fail when logits_i32 missing but key has LmHead Freivalds, failures: {:?}",
         report.failures);
-    assert!(report.failures.iter().any(|f| f.contains("logits_i32")),
+    assert!(report.failures.iter().any(|f| f.message.contains("logits_i32")),
         "should mention logits_i32 in failure, failures: {:?}", report.failures);
 }
 
@@ -2199,7 +2199,7 @@ fn v4_final_residual_commitment_binding() {
     assert_eq!(report.verdict, Verdict::Fail,
         "post-commitment swap of final_residual must be detected, failures: {:?}",
         report.failures);
-    assert!(report.failures.iter().any(|f| f.contains("Merkle proof failed")),
+    assert!(report.failures.iter().any(|f| f.message.contains("Merkle proof failed")),
         "should fail on Merkle proof, failures: {:?}", report.failures);
 }
 
@@ -2246,7 +2246,7 @@ fn v4_manifest_rejects_repetition_penalty() {
     m.repetition_penalty = 1.2;
     let report = verify_with_manifest(m);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("repetition_penalty")),
+    assert!(report.failures.iter().any(|f| f.message.contains("repetition_penalty")),
         "expected repetition_penalty rejection, got: {:?}", report.failures);
 }
 
@@ -2256,7 +2256,7 @@ fn v4_manifest_rejects_frequency_penalty() {
     m.frequency_penalty = 0.5;
     let report = verify_with_manifest(m);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("frequency_penalty")),
+    assert!(report.failures.iter().any(|f| f.message.contains("frequency_penalty")),
         "expected frequency_penalty rejection, got: {:?}", report.failures);
 }
 
@@ -2266,7 +2266,7 @@ fn v4_manifest_rejects_presence_penalty() {
     m.presence_penalty = 0.3;
     let report = verify_with_manifest(m);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("presence_penalty")),
+    assert!(report.failures.iter().any(|f| f.message.contains("presence_penalty")),
         "expected presence_penalty rejection, got: {:?}", report.failures);
 }
 
@@ -2276,7 +2276,7 @@ fn v4_manifest_rejects_logit_bias() {
     m.logit_bias = vec![(42, 5.0), (100, -10.0)];
     let report = verify_with_manifest(m);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("logit_bias")),
+    assert!(report.failures.iter().any(|f| f.message.contains("logit_bias")),
         "expected logit_bias rejection, got: {:?}", report.failures);
 }
 
@@ -2286,7 +2286,7 @@ fn v4_manifest_rejects_bad_word_ids() {
     m.bad_word_ids = vec![42, 100, 200];
     let report = verify_with_manifest(m);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("bad_word_ids")),
+    assert!(report.failures.iter().any(|f| f.message.contains("bad_word_ids")),
         "expected bad_word_ids rejection, got: {:?}", report.failures);
 }
 
@@ -2296,7 +2296,7 @@ fn v4_manifest_rejects_guided_decoding() {
     m.guided_decoding = "json_schema".into();
     let report = verify_with_manifest(m);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("guided_decoding")),
+    assert!(report.failures.iter().any(|f| f.message.contains("guided_decoding")),
         "expected guided_decoding rejection, got: {:?}", report.failures);
 }
 
@@ -2306,7 +2306,7 @@ fn v4_manifest_rejects_stop_sequences() {
     m.stop_sequences = vec!["<|end|>".into(), "STOP".into()];
     let report = verify_with_manifest(m);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("stop_sequences")),
+    assert!(report.failures.iter().any(|f| f.message.contains("stop_sequences")),
         "expected stop_sequences rejection, got: {:?}", report.failures);
 }
 
@@ -2350,7 +2350,7 @@ fn v4_manifest_rejects_exceeded_max_tokens() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("max_tokens")),
+    assert!(report.failures.iter().any(|f| f.message.contains("max_tokens")),
         "expected max_tokens rejection, got: {:?}", report.failures);
 }
 
@@ -2395,7 +2395,7 @@ fn v4_manifest_rejects_overlong_transcript() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("generated") && f.contains("max_tokens")),
+    assert!(report.failures.iter().any(|f| f.message.contains("generated") && f.message.contains("max_tokens")),
         "expected generation-length max_tokens rejection, got: {:?}", report.failures);
 }
 
@@ -2449,13 +2449,13 @@ fn v4_manifest_rejects_missing_spec_hashes() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("missing input_spec_hash")),
+    assert!(report.failures.iter().any(|f| f.message.contains("missing input_spec_hash")),
         "should fail on missing input_spec_hash, failures: {:?}", report.failures);
-    assert!(report.failures.iter().any(|f| f.contains("missing model_spec_hash")),
+    assert!(report.failures.iter().any(|f| f.message.contains("missing model_spec_hash")),
         "should fail on missing model_spec_hash, failures: {:?}", report.failures);
-    assert!(report.failures.iter().any(|f| f.contains("missing decode_spec_hash")),
+    assert!(report.failures.iter().any(|f| f.message.contains("missing decode_spec_hash")),
         "should fail on missing decode_spec_hash, failures: {:?}", report.failures);
-    assert!(report.failures.iter().any(|f| f.contains("missing output_spec_hash")),
+    assert!(report.failures.iter().any(|f| f.message.contains("missing output_spec_hash")),
         "should fail on missing output_spec_hash, failures: {:?}", report.failures);
 }
 
@@ -2471,7 +2471,7 @@ fn v4_rmsnorm_eps_mismatch_detected() {
 
     let report = verify_with_manifest(m);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("rmsnorm_eps mismatch")),
+    assert!(report.failures.iter().any(|f| f.message.contains("rmsnorm_eps mismatch")),
         "expected rmsnorm_eps mismatch, got: {:?}", report.failures);
 }
 
@@ -2520,7 +2520,7 @@ fn v4_rope_config_hash_mismatch_detected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("rope_config_hash mismatch")),
+    assert!(report.failures.iter().any(|f| f.message.contains("rope_config_hash mismatch")),
         "expected rope_config_hash mismatch, got: {:?}", report.failures);
 }
 
@@ -2558,7 +2558,7 @@ fn v4_weight_hash_mismatch_detected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("weight_hash mismatch")),
+    assert!(report.failures.iter().any(|f| f.message.contains("weight_hash mismatch")),
         "expected weight_hash mismatch, got: {:?}", report.failures);
 }
 
@@ -2569,7 +2569,7 @@ fn v4_sampler_version_unknown_rejected() {
 
     let report = verify_with_manifest(m);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("unsupported sampler_version")),
+    assert!(report.failures.iter().any(|f| f.message.contains("unsupported sampler_version")),
         "expected sampler_version rejection, got: {:?}", report.failures);
 }
 
@@ -2610,7 +2610,7 @@ fn v4_prompt_hash_binding() {
 
     // Prompt hash should verify.
     let report = verify_v4(&key, &response, None);
-    assert!(!report.failures.iter().any(|f| f.contains("prompt_hash")),
+    assert!(!report.failures.iter().any(|f| f.message.contains("prompt_hash")),
         "prompt hash should verify, failures: {:?}", report.failures);
 }
 
@@ -2635,7 +2635,7 @@ fn v4_prompt_hash_tamper_detected() {
     response.prompt = Some(b"different prompt".to_vec());
 
     let report = verify_v4(&key, &response, None);
-    assert!(report.failures.iter().any(|f| f.contains("prompt_hash mismatch")),
+    assert!(report.failures.iter().any(|f| f.message.contains("prompt_hash mismatch")),
         "should detect prompt tampering, failures: {:?}", report.failures);
 }
 
@@ -2686,7 +2686,7 @@ fn v4_verify_input_tokenization_mismatch() {
     let wrong = vec![100, token_id + 1];
     let failures = verilm_verify::verify_input_tokenization(&response, &wrong);
     assert!(!failures.is_empty(), "should detect mismatch");
-    assert!(failures[0].contains("prompt token mismatch"), "failure: {}", failures[0]);
+    assert!(failures[0].message.contains("prompt token mismatch"), "failure: {}", failures[0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -2744,7 +2744,7 @@ fn v4_cross_request_splice_shell_opening() {
     assert_eq!(report.verdict, Verdict::Fail,
         "cross-request splice must be detected, got: {:?}", report.failures);
     // The retained leaf hash from B won't match A's Merkle tree
-    assert!(report.failures.iter().any(|f| f.contains("Merkle proof")),
+    assert!(report.failures.iter().any(|f| f.message.contains("Merkle proof")),
         "expected Merkle proof failure from spliced retained state, got: {:?}", report.failures);
 }
 
@@ -2798,10 +2798,10 @@ fn v4_cross_request_splice_with_manifest() {
     assert_eq!(report.verdict, Verdict::Fail,
         "cross-request splice with manifest must be detected, got: {:?}", report.failures);
     // Manifest from B doesn't match A's commitment hash.
-    assert!(report.failures.iter().any(|f| f.contains("manifest hash")),
+    assert!(report.failures.iter().any(|f| f.message.contains("manifest hash")),
         "expected manifest hash mismatch, got: {:?}", report.failures);
     // Retained state from B doesn't match A's Merkle tree.
-    assert!(report.failures.iter().any(|f| f.contains("Merkle proof")),
+    assert!(report.failures.iter().any(|f| f.message.contains("Merkle proof")),
         "expected Merkle proof failure, got: {:?}", report.failures);
 }
 
@@ -2856,7 +2856,7 @@ fn v4_cross_request_splice_token_id_swap() {
     assert_eq!(report.verdict, Verdict::Fail,
         "cross-request token splice must be detected, got: {:?}", report.failures);
     assert!(report.failures.iter().any(|f|
-        f.contains("Merkle proof") || f.contains("IO") || f.contains("chain")),
+        f.message.contains("Merkle proof") || f.message.contains("IO") || f.message.contains("chain")),
         "expected Merkle or IO chain failure, got: {:?}", report.failures);
 }
 
@@ -2909,7 +2909,7 @@ fn v4_integrated_tokenization_mismatch_detected() {
     let wrong = vec![100u32, token_id + 1];
     let report = verify_v4(&key, &response, Some(&wrong));
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("prompt token mismatch")),
+    assert!(report.failures.iter().any(|f| f.message.contains("prompt token mismatch")),
         "should detect mismatch, failures: {:?}", report.failures);
 }
 
@@ -2969,7 +2969,7 @@ fn v4_min_tokens_rejects_early_eos() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("min_tokens")),
+    assert!(report.failures.iter().any(|f| f.message.contains("min_tokens")),
         "should reject early EOS, failures: {:?}", report.failures);
 }
 
@@ -2997,7 +2997,7 @@ fn v4_min_tokens_rejects_short_generation() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("min_tokens")),
+    assert!(report.failures.iter().any(|f| f.message.contains("min_tokens")),
         "should reject short generation, failures: {:?}", report.failures);
 }
 
@@ -3026,7 +3026,7 @@ fn v4_ignore_eos_rejects_eos_token() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("ignore_eos")),
+    assert!(report.failures.iter().any(|f| f.message.contains("ignore_eos")),
         "should reject EOS when ignore_eos=true, failures: {:?}", report.failures);
 }
 
@@ -3054,7 +3054,7 @@ fn v4_output_policy_fails_closed_without_eos_token_id() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("eos_token_id is missing")),
+    assert!(report.failures.iter().any(|f| f.message.contains("eos_token_id is missing")),
         "should fail-closed without eos_token_id, failures: {:?}", report.failures);
 }
 
@@ -3088,7 +3088,7 @@ fn v4_eos_policy_stop_allows_eos_as_last_token() {
 
     let report = verify_v4(&key, &response, None);
     // May fail on lm_head (token_id forced to eos_id) but should NOT fail on eos_policy.
-    assert!(!report.failures.iter().any(|f| f.contains("eos_policy")),
+    assert!(!report.failures.iter().any(|f| f.message.contains("eos_policy")),
         "eos_policy should not fail when EOS is last token, failures: {:?}", report.failures);
 }
 
@@ -3120,7 +3120,7 @@ fn v4_eos_policy_stop_rejects_eos_mid_sequence() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("eos_policy")),
+    assert!(report.failures.iter().any(|f| f.message.contains("eos_policy")),
         "should reject EOS mid-sequence with stop policy, failures: {:?}", report.failures);
 }
 
@@ -3147,7 +3147,7 @@ fn v4_unknown_eos_policy_rejected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("unknown eos_policy")),
+    assert!(report.failures.iter().any(|f| f.message.contains("unknown eos_policy")),
         "should reject unknown eos_policy, failures: {:?}", report.failures);
 }
 
@@ -3214,7 +3214,7 @@ fn v4_tokenizer_trait_reconstruction_mismatch() {
     let tokenizer = FixedTokenizer { token_ids: vec![100, token_id + 1] };
     let report = verify_v4_full(&key, &response, None, Some(&tokenizer as &dyn PromptTokenizer), None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("prompt token mismatch")),
+    assert!(report.failures.iter().any(|f| f.message.contains("prompt token mismatch")),
         "should detect mismatch from reconstructed tokens, failures: {:?}", report.failures);
 }
 
@@ -3247,7 +3247,7 @@ fn v4_tokenizer_trait_error_reported() {
     let tokenizer = FailingTokenizer;
     let report = verify_v4_full(&key, &response, None, Some(&tokenizer as &dyn PromptTokenizer), None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("tokenizer reconstruction failed")),
+    assert!(report.failures.iter().any(|f| f.message.contains("tokenizer reconstruction failed")),
         "should report tokenizer error, failures: {:?}", report.failures);
 }
 
@@ -3356,7 +3356,7 @@ fn v4_detokenization_mismatch_detected() {
         Some(&detok as &dyn Detokenizer),
     );
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("detokenization mismatch")),
+    assert!(report.failures.iter().any(|f| f.message.contains("detokenization mismatch")),
         "expected detokenization mismatch, got: {:?}", report.failures);
 }
 
@@ -3387,7 +3387,7 @@ fn v4_detokenization_error_reported() {
         Some(&detok as &dyn Detokenizer),
     );
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("detokenization failed")),
+    assert!(report.failures.iter().any(|f| f.message.contains("detokenization failed")),
         "expected detokenization failure, got: {:?}", report.failures);
 }
 
@@ -3417,7 +3417,7 @@ fn v4_detokenization_fails_closed_without_output_text() {
         Some(&detok as &dyn Detokenizer),
     );
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("missing output_text")),
+    assert!(report.failures.iter().any(|f| f.message.contains("missing output_text")),
         "expected fail-closed for missing output_text, got: {:?}", report.failures);
 }
 
@@ -3603,7 +3603,7 @@ fn v4_rich_prefix_tampered_embedding_detected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "tampered prefix embedding should be caught");
-    assert!(report.failures.iter().any(|f| f.contains("prefix token 0") && f.contains("Merkle proof")),
+    assert!(report.failures.iter().any(|f| f.message.contains("prefix token 0") && f.message.contains("Merkle proof")),
         "should fail on prefix embedding Merkle proof, got: {:?}", report.failures);
 }
 
@@ -3776,7 +3776,7 @@ fn v4_deep_prefix_tampered_retained_detected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "tampered retained should be caught");
-    assert!(report.failures.iter().any(|f| f.contains("prefix token 0") && f.contains("retained hash")),
+    assert!(report.failures.iter().any(|f| f.message.contains("prefix token 0") && f.message.contains("retained hash")),
         "should fail on retained hash mismatch, got: {:?}", report.failures);
 }
 
@@ -3829,7 +3829,7 @@ fn v4_deep_prefix_tampered_shell_detected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "tampered shell accumulator should be caught");
-    assert!(report.failures.iter().any(|f| f.contains("prefix token 0") && f.contains("Freivalds")),
+    assert!(report.failures.iter().any(|f| f.message.contains("prefix token 0") && f.message.contains("Freivalds")),
         "should fail on Freivalds for prefix token, got: {:?}", report.failures);
 }
 
@@ -3934,6 +3934,6 @@ fn v4_deep_prefix_count_mismatch_rejected() {
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "count mismatch should be caught");
-    assert!(report.failures.iter().any(|f| f.contains("deep prefix count mismatch")),
+    assert!(report.failures.iter().any(|f| f.message.contains("deep prefix count mismatch")),
         "should fail on count mismatch, got: {:?}", report.failures);
 }

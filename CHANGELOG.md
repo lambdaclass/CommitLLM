@@ -14,7 +14,8 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 
 ### Added
 
-- Verification failure taxonomy: every verifier failure is now classified into one of six categories (`structural`, `cryptographic_binding`, `spec_mismatch`, `unsupported`, `semantic_violation`, `operational`). `V4VerifyReport` carries `classified_failures` alongside raw failure strings. Python bridge exposes `classified_failures` as a list of `{category, message}` dicts. Unit tests cover classification of all six categories.
+- Verification failure taxonomy: every verifier failure is classified into one of six categories (`structural`, `cryptographic_binding`, `spec_mismatch`, `unsupported`, `semantic_violation`, `operational`) via a stable `FailureCode` enum (~48 variants). Each `VerificationFailure` carries `code`, `category`, `message`, and optional `FailureContext` (token index, layer, matrix, field, spec, expected/actual values). Consumers match on codes — no message-text parsing needed. The substring-based `classify_failure()` classifier is removed.
+- Structured audit-failure reporting: `V4VerifyReport.failures` is now `Vec<VerificationFailure>` with stable codes and context. `failure_messages()` accessor provides backward-compatible `Vec<&str>`. Python bridge exposes `classified_failures` as `list[dict]` with `code`, `category`, `message`, and optional `context` fields.
 
 ### Changed
 

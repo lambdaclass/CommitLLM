@@ -988,8 +988,9 @@ fn verify_v4<'py>(
     result.set_item("passed", report.verdict == verilm_verify::Verdict::Pass)?;
     result.set_item("checks_run", report.checks_run)?;
     result.set_item("checks_passed", report.checks_passed)?;
-    result.set_item("failures", &report.failures)?;
-    result.set_item("classified_failures", classified_failures_to_py(py, &report.classified_failures)?)?;
+    let failure_msgs: Vec<&str> = report.failures.iter().map(|f| f.message.as_str()).collect();
+    result.set_item("failures", &failure_msgs)?;
+    result.set_item("classified_failures", classified_failures_to_py(py, &report.failures)?)?;
     result.set_item("duration_us", report.duration.as_micros() as u64)?;
     Ok(result)
 }
@@ -1023,8 +1024,9 @@ fn verify_v4_binary<'py>(
     result.set_item("passed", report.verdict == verilm_verify::Verdict::Pass)?;
     result.set_item("checks_run", report.checks_run)?;
     result.set_item("checks_passed", report.checks_passed)?;
-    result.set_item("failures", &report.failures)?;
-    result.set_item("classified_failures", classified_failures_to_py(py, &report.classified_failures)?)?;
+    let failure_msgs: Vec<&str> = report.failures.iter().map(|f| f.message.as_str()).collect();
+    result.set_item("failures", &failure_msgs)?;
+    result.set_item("classified_failures", classified_failures_to_py(py, &report.failures)?)?;
     result.set_item("duration_us", report.duration.as_micros() as u64)?;
     Ok(result)
 }
@@ -1036,8 +1038,19 @@ fn classified_failures_to_py<'py>(
 ) -> PyResult<Bound<'py, PyList>> {
     let items: Vec<Bound<'py, PyDict>> = failures.iter().map(|f| {
         let d = PyDict::new(py);
+        d.set_item("code", f.code.to_string()).unwrap();
         d.set_item("category", f.category.to_string()).unwrap();
         d.set_item("message", &f.message).unwrap();
+        // Context: only include non-None fields
+        let ctx = PyDict::new(py);
+        if let Some(ti) = f.context.token_index { ctx.set_item("token_index", ti).unwrap(); }
+        if let Some(l) = f.context.layer { ctx.set_item("layer", l).unwrap(); }
+        if let Some(ref m) = f.context.matrix { ctx.set_item("matrix", m).unwrap(); }
+        if let Some(ref fld) = f.context.field { ctx.set_item("field", fld).unwrap(); }
+        if let Some(ref s) = f.context.spec { ctx.set_item("spec", s).unwrap(); }
+        if let Some(ref e) = f.context.expected { ctx.set_item("expected", e).unwrap(); }
+        if let Some(ref a) = f.context.actual { ctx.set_item("actual", a).unwrap(); }
+        if ctx.len() > 0 { d.set_item("context", ctx).unwrap(); }
         d
     }).collect();
     Ok(PyList::new(py, items)?)
@@ -1084,7 +1097,8 @@ fn verify_input_tokenization<'py>(
 
     let result = PyDict::new(py);
     result.set_item("passed", failures.is_empty())?;
-    result.set_item("failures", &failures)?;
+    let failure_msgs: Vec<&str> = failures.iter().map(|f| f.message.as_str()).collect();
+    result.set_item("failures", &failure_msgs)?;
     Ok(result)
 }
 
