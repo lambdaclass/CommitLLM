@@ -991,6 +991,7 @@ fn verify_v4<'py>(
     let failure_msgs: Vec<&str> = report.failures.iter().map(|f| f.message.as_str()).collect();
     result.set_item("failures", &failure_msgs)?;
     result.set_item("classified_failures", classified_failures_to_py(py, &report.failures)?)?;
+    result.set_item("coverage", coverage_to_py(py, &report.coverage))?;
     result.set_item("duration_us", report.duration.as_micros() as u64)?;
     Ok(result)
 }
@@ -1027,6 +1028,7 @@ fn verify_v4_binary<'py>(
     let failure_msgs: Vec<&str> = report.failures.iter().map(|f| f.message.as_str()).collect();
     result.set_item("failures", &failure_msgs)?;
     result.set_item("classified_failures", classified_failures_to_py(py, &report.failures)?)?;
+    result.set_item("coverage", coverage_to_py(py, &report.coverage))?;
     result.set_item("duration_us", report.duration.as_micros() as u64)?;
     Ok(result)
 }
@@ -1054,6 +1056,26 @@ fn classified_failures_to_py<'py>(
         d
     }).collect();
     Ok(PyList::new(py, items)?)
+}
+
+/// Convert AuditCoverage to a Python dict.
+fn coverage_to_py<'py>(py: Python<'py>, coverage: &verilm_verify::AuditCoverage) -> Bound<'py, PyDict> {
+    let d = PyDict::new(py);
+    match coverage {
+        verilm_verify::AuditCoverage::Full { layers_checked } => {
+            d.set_item("level", "full").unwrap();
+            d.set_item("layers_checked", *layers_checked).unwrap();
+        }
+        verilm_verify::AuditCoverage::Routine { layers_checked, layers_total } => {
+            d.set_item("level", "routine").unwrap();
+            d.set_item("layers_checked", *layers_checked).unwrap();
+            d.set_item("layers_total", *layers_total).unwrap();
+        }
+        verilm_verify::AuditCoverage::Unknown => {
+            d.set_item("level", "unknown").unwrap();
+        }
+    }
+    d
 }
 
 /// Shared verification logic: dispatches to verify_v4 or verify_v4_full.

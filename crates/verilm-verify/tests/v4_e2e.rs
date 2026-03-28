@@ -3937,3 +3937,204 @@ fn v4_deep_prefix_count_mismatch_rejected() {
     assert!(report.failures.iter().any(|f| f.message.contains("deep prefix count mismatch")),
         "should fail on count mismatch, got: {:?}", report.failures);
 }
+
+// ===========================================================================
+// Partial-audit semantics (coverage reporting) — roadmap #12
+// ===========================================================================
+
+#[test]
+fn v4_full_audit_reports_full_coverage() {
+    let (cfg, model, key) = setup();
+    let input: Vec<i8> = (0..cfg.hidden_dim).map(|i| (i % 256) as i8).collect();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let params = FullBindingParams {
+        token_ids: &[42],
+        prompt: b"hello",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+    match &report.coverage {
+        verilm_verify::AuditCoverage::Full { layers_checked } => {
+            assert_eq!(*layers_checked, cfg.n_layers,
+                "full audit should check all {} layers", cfg.n_layers);
+        }
+        other => panic!("expected Full coverage, got {:?}", other),
+    }
+}
+
+#[test]
+fn v4_routine_audit_reports_routine_coverage() {
+    // Create a full-audit response, then trim it to a contiguous prefix to simulate routine audit.
+    let (cfg, model, key) = setup();
+    assert!(cfg.n_layers >= 2, "need at least 2 layers for routine-audit test");
+
+    let input: Vec<i8> = (0..cfg.hidden_dim).map(|i| (i % 256) as i8).collect();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let params = FullBindingParams {
+        token_ids: &[42],
+        prompt: b"hello",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+
+    // Trim shell to first layer only (routine-audit prefix).
+    let shell = response.shell_opening.as_mut().unwrap();
+    shell.layers.truncate(1);
+    shell.layer_indices = Some(vec![0]);
+
+    let report = verify_v4(&key, &response, None);
+    // Routine audit with only layer 0 will still pass the checks it runs.
+    match &report.coverage {
+        verilm_verify::AuditCoverage::Routine { layers_checked, layers_total } => {
+            assert_eq!(*layers_checked, 1);
+            assert_eq!(*layers_total, cfg.n_layers);
+        }
+        other => panic!("expected Routine coverage, got {:?}", other),
+    }
+}
+
+#[test]
+fn v4_non_contiguous_layer_indices_rejected() {
+    let (cfg, model, key) = setup();
+    assert!(cfg.n_layers >= 2, "need at least 2 layers");
+
+    let input: Vec<i8> = (0..cfg.hidden_dim).map(|i| (i % 256) as i8).collect();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let params = FullBindingParams {
+        token_ids: &[42],
+        prompt: b"hello",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+
+    // Keep 2 layers but claim non-contiguous indices [0, 2] (gap at 1).
+    let shell = response.shell_opening.as_mut().unwrap();
+    shell.layers.truncate(2);
+    shell.layer_indices = Some(vec![0, 2]);
+
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report.failures.iter().any(|f|
+        f.code == verilm_verify::FailureCode::NonContiguousLayerIndices),
+        "should reject non-contiguous layer_indices, got: {:?}", report.failures);
+}
+
+#[test]
+fn v4_no_shell_opening_reports_unknown_coverage() {
+    let (cfg, model, key) = setup();
+    let input: Vec<i8> = (0..cfg.hidden_dim).map(|i| (i % 256) as i8).collect();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let params = FullBindingParams {
+        token_ids: &[42],
+        prompt: b"hello",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+
+    // Remove shell opening entirely.
+    response.shell_opening = None;
+
+    let report = verify_v4(&key, &response, None);
+    // Should fail (missing shell) but report Unknown coverage.
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert_eq!(report.coverage, verilm_verify::AuditCoverage::Unknown);
+}
+
+#[test]
+fn v4_coverage_display_format() {
+    let full = verilm_verify::AuditCoverage::Full { layers_checked: 32 };
+    assert_eq!(format!("{}", full), "full (32/32 layers)");
+
+    let routine = verilm_verify::AuditCoverage::Routine { layers_checked: 4, layers_total: 32 };
+    assert_eq!(format!("{}", routine), "routine (4/32 layers)");
+
+    let unknown = verilm_verify::AuditCoverage::Unknown;
+    assert_eq!(format!("{}", unknown), "unknown");
+}
+
+#[test]
+fn v4_pass_display_includes_coverage() {
+    let (cfg, model, key) = setup();
+    let input: Vec<i8> = (0..cfg.hidden_dim).map(|i| (i % 256) as i8).collect();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let params = FullBindingParams {
+        token_ids: &[42],
+        prompt: b"hello",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+
+    let report = verify_v4(&key, &response, None);
+    let display = format!("{}", report);
+    assert!(display.contains("coverage: full"), "display should include coverage, got: {}", display);
+}
+
+#[test]
+fn v4_routine_audit_not_mistaken_for_full() {
+    // The critical semantic property: consumers can programmatically distinguish
+    // routine-audit from full-audit passes.
+    let (cfg, model, key) = setup();
+    assert!(cfg.n_layers >= 2);
+
+    let input: Vec<i8> = (0..cfg.hidden_dim).map(|i| (i % 256) as i8).collect();
+    let traces = forward_pass(&cfg, &model, &input);
+    let retained = retained_from_traces(&traces);
+
+    let params = FullBindingParams {
+        token_ids: &[42],
+        prompt: b"hello",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+
+    // Full audit
+    let response_full = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let report_full = verify_v4(&key, &response_full, None);
+
+    // Routine audit (trim to 1 layer)
+    let mut response_routine = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let shell = response_routine.shell_opening.as_mut().unwrap();
+    shell.layers.truncate(1);
+    shell.layer_indices = Some(vec![0]);
+    let report_routine = verify_v4(&key, &response_routine, None);
+
+    // Both may pass, but they MUST report different coverage levels.
+    assert_ne!(report_full.coverage, report_routine.coverage,
+        "full and routine audits must be distinguishable");
+
+    // Serialize coverage to JSON — consumer can parse level from the tag.
+    let full_json = serde_json::to_string(&report_full.coverage).unwrap();
+    let routine_json = serde_json::to_string(&report_routine.coverage).unwrap();
+    assert!(full_json.contains("\"full\""), "full JSON: {}", full_json);
+    assert!(routine_json.contains("\"routine\""), "routine JSON: {}", routine_json);
+}

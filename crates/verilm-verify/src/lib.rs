@@ -20,6 +20,35 @@ pub enum Verdict {
     Fail,
 }
 
+/// Audit coverage level, derived from the shell opening's layer indices.
+///
+/// Distinguishes full audits (all layers checked) from routine/partial audits
+/// (a contiguous prefix of layers). Consumers MUST NOT treat a routine-audit
+/// pass as equivalent to a full-audit pass — routine audits provide statistical
+/// detection, not exhaustive coverage.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "level", rename_all = "snake_case")]
+pub enum AuditCoverage {
+    /// All layers were opened and checked.
+    Full { layers_checked: usize },
+    /// A contiguous prefix of layers was opened (routine audit).
+    Routine { layers_checked: usize, layers_total: usize },
+    /// Coverage could not be determined (no shell opening present).
+    Unknown,
+}
+
+impl std::fmt::Display for AuditCoverage {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::Full { layers_checked } =>
+                write!(f, "full ({}/{} layers)", layers_checked, layers_checked),
+            Self::Routine { layers_checked, layers_total } =>
+                write!(f, "routine ({}/{} layers)", layers_checked, layers_total),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
 /// Classification of verification failures.
 ///
 /// Every failure the verifier emits belongs to exactly one category.
@@ -88,6 +117,7 @@ pub enum FailureCode {
     MissingEosTokenId,
     MissingQkv,
     ShellLayerCountMismatch,
+    NonContiguousLayerIndices,
     PrefixCountMismatch,
     UnboundInitialResidual,
 
@@ -144,7 +174,7 @@ impl FailureCode {
             | MissingInitialResidual | MissingEmbeddingProof | MissingLogits
             | MissingFinalHidden | MissingFinalResidual | MissingOutputText
             | MissingEosTokenId | MissingQkv | ShellLayerCountMismatch
-            | PrefixCountMismatch | UnboundInitialResidual
+            | NonContiguousLayerIndices | PrefixCountMismatch | UnboundInitialResidual
                 => FailureCategory::Structural,
 
             FreivaldsFailed | LmHeadFreivaldsFailed | MerkleProofFailed
@@ -465,6 +495,9 @@ pub struct V4VerifyReport {
     pub checks_passed: usize,
     /// Structured failures with stable codes, categories, messages, and context.
     pub failures: Vec<VerificationFailure>,
+    /// Audit coverage level: full (all layers), routine (prefix), or unknown.
+    /// Consumers MUST distinguish routine-audit passes from full-audit passes.
+    pub coverage: AuditCoverage,
     pub duration: Duration,
 }
 
@@ -480,18 +513,20 @@ impl std::fmt::Display for V4VerifyReport {
         match self.verdict {
             Verdict::Pass => write!(
                 f,
-                "V4 PASS: token {} — {}/{} checks ({:.1}ms)",
+                "V4 PASS: token {} — {}/{} checks, coverage: {} ({:.1}ms)",
                 self.token_index,
                 self.checks_passed,
                 self.checks_run,
+                self.coverage,
                 self.duration.as_secs_f64() * 1000.0
             ),
             Verdict::Fail => {
                 writeln!(
                     f,
-                    "V4 FAIL: token {} — {} failures",
+                    "V4 FAIL: token {} — {} failures, coverage: {}",
                     self.token_index,
-                    self.failures.len()
+                    self.failures.len(),
+                    self.coverage,
                 )?;
                 for fail in &self.failures {
                     writeln!(f, "  {}", fail)?;
@@ -1400,6 +1435,23 @@ pub fn verify_v4_full(
         }
     }
 
+    // Compute audit coverage from the shell opening's layer_indices.
+    let coverage = match &response.shell_opening {
+        Some(shell) => {
+            let layers_checked = shell.layer_indices.as_ref()
+                .map_or(shell.layers.len(), |v| v.len());
+            if layers_checked >= key.config.n_layers {
+                AuditCoverage::Full { layers_checked }
+            } else {
+                AuditCoverage::Routine {
+                    layers_checked,
+                    layers_total: key.config.n_layers,
+                }
+            }
+        }
+        None => AuditCoverage::Unknown,
+    };
+
     let duration = start.elapsed();
     let checks_passed = checks_run.saturating_sub(failures.len());
 
@@ -1409,6 +1461,7 @@ pub fn verify_v4_full(
         checks_run,
         checks_passed,
         failures,
+        coverage,
         duration,
     }
 }
@@ -1452,6 +1505,22 @@ fn verify_shell_opening(
             ),
         ));
         return (checks_run, failures, None);
+    }
+
+    // layer_indices must be a contiguous prefix 0..=L_max for the bridge chain.
+    // Non-contiguous indices would cause the residual chain to silently skip layers.
+    if let Some(indices) = &shell.layer_indices {
+        let is_contiguous = indices.iter().enumerate().all(|(i, &li)| li == i);
+        if !is_contiguous {
+            failures.push(vfail(
+                FailureCode::NonContiguousLayerIndices,
+                format!(
+                    "layer_indices must be a contiguous prefix 0..N, got {:?}",
+                    indices
+                ),
+            ));
+            return (checks_run, failures, None);
+        }
     }
 
     // Build a lookup: shell_idx for a given layer_idx (None if not opened).
@@ -1723,6 +1792,9 @@ pub fn verify_v4_with_weights(
     checks_run += c;
     failures.extend(f);
 
+    // Weight-backed verification always replays all layers.
+    let coverage = AuditCoverage::Full { layers_checked: key.config.n_layers };
+
     let duration = start.elapsed();
     let checks_passed = checks_run.saturating_sub(failures.len());
 
@@ -1732,6 +1804,7 @@ pub fn verify_v4_with_weights(
         checks_run,
         checks_passed,
         failures,
+        coverage,
         duration,
     }
 }
