@@ -20,7 +20,7 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
   - `final_residual_shift` accepts `merkle` as a valid rejection reason (stronger than a custom "final" reason since it proves retained-leaf hash binding).
   - Multi-token prefix baseline audits at a generated token index, avoiding prompt-side token replay.
   - Freivalds diagnostic script (`diag_freivalds.py`) added for targeted GPU-side failure classification.
-- Adversarial test result: 35 scenarios pass; token splice is conditionally tested only when divergent token_ids are confirmed (not an unresolved protocol gap).
+- Adversarial suite now achieves 36/36 on the real W8A8 Modal run. Token-splice construction fixed by reading `n_prompt_tokens` from the audit response and auditing past the prompt/template boundary where content tokens actually diverge.
 
 ## 2026-03-27
 
