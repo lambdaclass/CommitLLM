@@ -809,16 +809,20 @@ pub fn verify_v4_full(
                     ));
                 }
                 if output_spec.max_tokens > 0 {
+                    // n_tokens is transcript length (prompt + generated).
+                    // Generation length = n_tokens - n_prompt_tokens.
+                    let n_prompt = response.commitment.n_prompt_tokens.unwrap_or(0);
+                    let n_generated = response.commitment.n_tokens.saturating_sub(n_prompt);
                     if response.token_index >= output_spec.max_tokens {
                         failures.push(format!(
                             "token_index {} exceeds output_spec max_tokens {}",
                             response.token_index, output_spec.max_tokens
                         ));
                     }
-                    if response.commitment.n_tokens > output_spec.max_tokens {
+                    if n_generated > output_spec.max_tokens {
                         failures.push(format!(
-                            "committed n_tokens {} exceeds output_spec max_tokens {}",
-                            response.commitment.n_tokens, output_spec.max_tokens
+                            "generated {} tokens exceeds output_spec max_tokens {}",
+                            n_generated, output_spec.max_tokens
                         ));
                     }
                 }

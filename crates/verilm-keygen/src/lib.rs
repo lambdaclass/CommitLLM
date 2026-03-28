@@ -257,7 +257,25 @@ fn load_2d_row_f32(
     }
 }
 
-/// Detect model config by inspecting tensor shapes.
+/// Read rms_norm_eps and rope_theta from the model's config.json.
+fn read_model_config_json(dir: &Path) -> (f64, f64) {
+    let config_path = dir.join("config.json");
+    let Ok(data) = std::fs::read_to_string(&config_path) else {
+        return (1e-5, 10000.0);
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else {
+        return (1e-5, 10000.0);
+    };
+    let eps = v.get("rms_norm_eps")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1e-5);
+    let rope_theta = v.get("rope_theta")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(10000.0);
+    (eps, rope_theta)
+}
+
+/// Detect model config by inspecting tensor shapes and config.json.
 pub fn detect_config(dir: &Path) -> Result<ModelConfig> {
     let mapped = open_shards(dir)?;
     let parsed: Vec<_> = mapped
@@ -296,6 +314,12 @@ pub fn detect_config(dir: &Path) -> Result<ModelConfig> {
         bail!("no transformer layers found");
     }
 
+    // Detect vocab_size from lm_head shape (needed for r vector generation)
+    let vocab_size = match find_tensor_raw(&parsed, "lm_head.weight") {
+        Ok((_, lm_shape, _)) => lm_shape[0],
+        Err(_) => 0,
+    };
+
     // Derive head counts.
     let d_head = if hidden_dim % 128 == 0 && kv_dim % 128 == 0 {
         128
@@ -306,8 +330,8 @@ pub fn detect_config(dir: &Path) -> Result<ModelConfig> {
     let n_q_heads = hidden_dim / d_head;
     let n_kv_heads = kv_dim / d_head;
 
-    // Llama-3 family uses rope_theta=500000.0; smaller/toy models use 10000.0
-    let rope_theta = if hidden_dim >= 4096 { 500000.0 } else { 10000.0 };
+    // Read rope_theta from config.json (model-specific, cannot be guessed)
+    let (_, rope_theta) = read_model_config_json(dir);
 
     let config = ModelConfig {
         name: format!("detected-{}L-{}d", n_layers, hidden_dim),
@@ -318,7 +342,7 @@ pub fn detect_config(dir: &Path) -> Result<ModelConfig> {
         n_layers,
         n_q_heads,
         n_kv_heads,
-        vocab_size: 0,
+        vocab_size,
         rope_theta,
     };
 
@@ -344,6 +368,7 @@ fn gcd(a: usize, b: usize) -> usize {
 /// using absmax per-tensor quantization.
 pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
     let cfg = detect_config(dir)?;
+    let (rmsnorm_eps, _) = read_model_config_json(dir);
     let mapped = open_shards(dir)?;
     let parsed: Vec<_> = mapped
         .iter()
@@ -484,14 +509,6 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         }
     };
 
-    // Detect vocab_size from lm_head shape (more reliable than config.json).
-    let vocab_size = if lm_head.is_some() {
-        let (_, lm_shape, _) = find_tensor_raw(&parsed, "lm_head.weight")?;
-        lm_shape[0]
-    } else {
-        0
-    };
-
     // Load final RMSNorm weights (model.norm.weight).
     let final_norm_weights = match load_1d_f32(&parsed, "model.norm.weight") {
         Ok(w) => {
@@ -504,10 +521,7 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         }
     };
 
-    let mut config = cfg;
-    if vocab_size > 0 {
-        config.vocab_size = vocab_size;
-    }
+    let config = cfg;
 
     Ok(VerifierKey {
         version: 1,
@@ -525,7 +539,7 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         weight_hash: Some(weight_hash),
         rmsnorm_attn_weights,
         rmsnorm_ffn_weights,
-        rmsnorm_eps: 1e-5,
+        rmsnorm_eps: rmsnorm_eps,
         rope_config_hash: None,
         embedding_merkle_root,
         final_norm_weights,
@@ -728,7 +742,7 @@ impl SafetensorsWeightProvider {
             weight_hash,
             lm_head,
             final_norm_weights,
-            rmsnorm_eps_value: 1e-5, // Llama default; overridden if config has it
+            rmsnorm_eps_value: read_model_config_json(dir).0,
         })
     }
 
@@ -756,7 +770,7 @@ impl SafetensorsWeightProvider {
     }
 
     pub fn rmsnorm_eps(&self) -> f64 {
-        1e-5
+        self.rmsnorm_eps_value
     }
 
     /// Load a single embedding row (f32) for the given token ID.

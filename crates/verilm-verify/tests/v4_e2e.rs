@@ -2377,25 +2377,26 @@ fn v4_manifest_rejects_overlong_transcript() {
         .unwrap().0 as u32;
 
     let mut manifest = make_manifest(0.0, 0, 1.0);
-    manifest.max_tokens = 2; // allow indices 0,1
+    manifest.max_tokens = 2; // allow 2 generated tokens
 
     let params = FullBindingParams {
-        token_ids: &[token_id, token_id, token_id], // 3 tokens committed
+        // 1 prompt token + 3 generated = 4 total; n_generated=3 > max_tokens=2
+        token_ids: &[token_id, token_id, token_id, token_id],
         prompt: b"overlong transcript",
         sampling_seed: [7u8; 32],
         manifest: Some(&manifest),
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(
-        vec![retained.clone(), retained.clone(), retained], &params, None,
+        vec![retained.clone(), retained.clone(), retained.clone(), retained], &params, None,
     );
-    // Open token_index 0 — valid per-token, but transcript is overlong
+    // Open token_index 0 — valid per-token, but generation count exceeds max_tokens
     let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None, None, None, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.contains("committed n_tokens") && f.contains("max_tokens")),
-        "expected transcript-level max_tokens rejection, got: {:?}", report.failures);
+    assert!(report.failures.iter().any(|f| f.contains("generated") && f.contains("max_tokens")),
+        "expected generation-length max_tokens rejection, got: {:?}", report.failures);
 }
 
 #[test]
