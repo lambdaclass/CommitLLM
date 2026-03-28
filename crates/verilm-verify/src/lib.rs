@@ -20,6 +20,143 @@ pub enum Verdict {
     Fail,
 }
 
+/// Classification of verification failures.
+///
+/// Every failure the verifier emits belongs to exactly one category.
+/// Consumers can use this to route failures (e.g. cryptographic failures
+/// are non-negotiable rejects; configuration failures may be actionable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureCategory {
+    /// Payload could not be deserialized or is structurally invalid
+    /// (wrong commitment version, missing required fields).
+    Structural,
+    /// Cryptographic binding check failed: Merkle proof, hash chain,
+    /// Freivalds check, or commitment hash mismatch.
+    CryptographicBinding,
+    /// Committed spec/manifest value does not match the verifier key
+    /// or the committed values are internally inconsistent.
+    SpecMismatch,
+    /// A feature or value is not supported by the canonical verifier
+    /// and is rejected fail-closed (unknown sampler, unsupported decode
+    /// mode, unknown policy).
+    Unsupported,
+    /// Token selection, output policy, or generation-length constraint
+    /// violated (wrong argmax, exceeded max_tokens, EOS policy breach).
+    SemanticViolation,
+    /// Operational or configuration issue (tokenizer error, detokenizer
+    /// error, missing external dependency).
+    Operational,
+}
+
+impl std::fmt::Display for FailureCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::Structural => write!(f, "structural"),
+            Self::CryptographicBinding => write!(f, "cryptographic_binding"),
+            Self::SpecMismatch => write!(f, "spec_mismatch"),
+            Self::Unsupported => write!(f, "unsupported"),
+            Self::SemanticViolation => write!(f, "semantic_violation"),
+            Self::Operational => write!(f, "operational"),
+        }
+    }
+}
+
+/// A single classified verification failure.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VerificationFailure {
+    pub category: FailureCategory,
+    pub message: String,
+}
+
+impl std::fmt::Display for VerificationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "[{}] {}", self.category, self.message)
+    }
+}
+
+/// Classify a failure message into a [`FailureCategory`] based on its content.
+fn classify_failure(msg: &str) -> FailureCategory {
+    // Operational: external dependency failures (checked early to avoid
+    // "missing" in error details triggering the structural rule)
+    if msg.contains("tokenizer reconstruction failed")
+        || msg.contains("detokenization failed")
+        || msg.contains("detokenizer provided but")
+    {
+        return FailureCategory::Operational;
+    }
+
+    // Structural: deserialization, missing fields, wrong version
+    if msg.contains("missing") && !msg.contains("mismatch")
+        || msg.contains("did not provide")
+        || msg.starts_with("expected V4 commitment")
+        || msg.contains("shell_opening has") && msg.contains("layers but")
+        || msg.starts_with("V4 audit response missing")
+    {
+        return FailureCategory::Structural;
+    }
+
+    // Unsupported: fail-closed on unknown/unsupported values
+    if msg.starts_with("unsupported")
+        || msg.starts_with("unknown eos_policy")
+    {
+        return FailureCategory::Unsupported;
+    }
+
+    // Cryptographic binding: Freivalds, Merkle, hash chain, hash mismatch
+    if msg.contains("Freivalds")
+        || msg.contains("Merkle")
+        || msg.contains("IO chain")
+        || msg.contains("prev_io_hash")
+        || msg.contains("seed commitment mismatch")
+        || msg.contains("prompt_hash mismatch")
+        || msg.contains("manifest hash does not match")
+        || msg.contains("_spec_hash mismatch")
+        || msg.contains("retained leaf")
+        || msg.contains("retained hash mismatch")
+    {
+        return FailureCategory::CryptographicBinding;
+    }
+
+    // Spec mismatch: manifest vs key cross-checks
+    if msg.contains("mismatch: manifest")
+        || msg.contains("mismatch: manifest !=")
+        || (msg.contains("mismatch") && msg.contains("key"))
+    {
+        return FailureCategory::SpecMismatch;
+    }
+
+    // Semantic violation: token selection, output policy, generation length
+    if msg.contains("expected token_id")
+        || msg.contains("exceeds output_spec")
+        || msg.contains("exceeds max_tokens")
+        || msg.contains("min_tokens")
+        || msg.contains("EOS") || msg.contains("eos")
+        || msg.contains("ignore_eos")
+        || msg.contains("token_index")
+        || msg.contains("n_prompt_tokens")
+        || msg.contains("tokenization produced")
+        || msg.contains("prompt token mismatch")
+        || msg.contains("prompt has") && msg.contains("tokens in chain")
+        || msg.contains("detokenization")
+        || msg.contains("decode_mode")
+    {
+        return FailureCategory::SemanticViolation;
+    }
+
+    // Default: if nothing matched, treat as cryptographic binding
+    // (most failures in the verifier are binding checks)
+    FailureCategory::CryptographicBinding
+}
+
+/// Classify a list of failure strings into [`VerificationFailure`]s.
+fn classify_failures(failures: &[String]) -> Vec<VerificationFailure> {
+    failures.iter().map(|msg| VerificationFailure {
+        category: classify_failure(msg),
+        message: msg.clone(),
+    }).collect()
+}
+
 /// Tokenizer abstraction for canonical request→token reconstruction.
 ///
 /// Implementors (typically Python-side with HuggingFace tokenizers) provide
@@ -232,7 +369,10 @@ pub struct V4VerifyReport {
     pub token_index: u32,
     pub checks_run: usize,
     pub checks_passed: usize,
+    /// Human-readable failure messages (kept for backward compatibility).
     pub failures: Vec<String>,
+    /// Classified failures with category and message.
+    pub classified_failures: Vec<VerificationFailure>,
     pub duration: Duration,
 }
 
@@ -1078,11 +1218,14 @@ pub fn verify_v4_full(
     let duration = start.elapsed();
     let checks_passed = checks_run.saturating_sub(failures.len());
 
+    let classified_failures = classify_failures(&failures);
+
     V4VerifyReport {
         verdict: if failures.is_empty() { Verdict::Pass } else { Verdict::Fail },
         token_index: response.token_index,
         checks_run,
         checks_passed,
+        classified_failures,
         failures,
         duration,
     }
@@ -1382,11 +1525,14 @@ pub fn verify_v4_with_weights(
     let duration = start.elapsed();
     let checks_passed = checks_run.saturating_sub(failures.len());
 
+    let classified_failures = classify_failures(&failures);
+
     V4VerifyReport {
         verdict: if failures.is_empty() { Verdict::Pass } else { Verdict::Fail },
         token_index: response.token_index,
         checks_run,
         checks_passed,
+        classified_failures,
         failures,
         duration,
     }
@@ -1767,4 +1913,71 @@ fn replay_token_shell(
     }
 
     (checks_run, failures)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_structural() {
+        assert_eq!(classify_failure("expected V4 commitment version"), FailureCategory::Structural);
+        assert_eq!(classify_failure("V4 audit response missing shell_opening"), FailureCategory::Structural);
+        assert_eq!(classify_failure("lm_head: key requires logits_i32 but shell opening did not provide it"), FailureCategory::Structural);
+    }
+
+    #[test]
+    fn classify_cryptographic_binding() {
+        assert_eq!(classify_failure("Freivalds check failed on layer 0 Wo"), FailureCategory::CryptographicBinding);
+        assert_eq!(classify_failure("Merkle proof invalid for leaf 3"), FailureCategory::CryptographicBinding);
+        assert_eq!(classify_failure("IO chain mismatch at token 5"), FailureCategory::CryptographicBinding);
+        assert_eq!(classify_failure("seed commitment mismatch"), FailureCategory::CryptographicBinding);
+        assert_eq!(classify_failure("prompt_hash mismatch"), FailureCategory::CryptographicBinding);
+        assert_eq!(classify_failure("manifest hash does not match committed"), FailureCategory::CryptographicBinding);
+        assert_eq!(classify_failure("input_spec_hash mismatch"), FailureCategory::CryptographicBinding);
+        assert_eq!(classify_failure("retained leaf hash mismatch"), FailureCategory::CryptographicBinding);
+    }
+
+    #[test]
+    fn classify_spec_mismatch() {
+        assert_eq!(classify_failure("rmsnorm_eps mismatch: manifest=1e-5 key=1e-6"), FailureCategory::SpecMismatch);
+        assert_eq!(classify_failure("n_layers mismatch: manifest=32 key=24"), FailureCategory::SpecMismatch);
+        assert_eq!(classify_failure("hidden_dim mismatch: manifest=4096 key=2048"), FailureCategory::SpecMismatch);
+        assert_eq!(classify_failure("weight_hash mismatch: manifest != key"), FailureCategory::SpecMismatch);
+    }
+
+    #[test]
+    fn classify_unsupported() {
+        assert_eq!(classify_failure("unsupported sampler_version: foo-v2"), FailureCategory::Unsupported);
+        assert_eq!(classify_failure("unsupported decode feature: logit_bias"), FailureCategory::Unsupported);
+        assert_eq!(classify_failure("unknown eos_policy: lenient"), FailureCategory::Unsupported);
+    }
+
+    #[test]
+    fn classify_semantic_violation() {
+        assert_eq!(classify_failure("lm_head: expected token_id=42 but claimed token_id=99"), FailureCategory::SemanticViolation);
+        assert_eq!(classify_failure("n_tokens exceeds max_tokens"), FailureCategory::SemanticViolation);
+        assert_eq!(classify_failure("min_tokens not met: 3 < 10"), FailureCategory::SemanticViolation);
+        assert_eq!(classify_failure("EOS token emitted before min_tokens"), FailureCategory::SemanticViolation);
+        assert_eq!(classify_failure("decode_mode mismatch: greedy but temp>0"), FailureCategory::SemanticViolation);
+    }
+
+    #[test]
+    fn classify_operational() {
+        assert_eq!(classify_failure("tokenizer reconstruction failed: missing vocab"), FailureCategory::Operational);
+        assert_eq!(classify_failure("detokenization failed: invalid utf8"), FailureCategory::Operational);
+    }
+
+    #[test]
+    fn classify_failures_returns_paired_results() {
+        let msgs = vec![
+            "Freivalds check failed".to_string(),
+            "unsupported feature: x".to_string(),
+        ];
+        let classified = classify_failures(&msgs);
+        assert_eq!(classified.len(), 2);
+        assert_eq!(classified[0].category, FailureCategory::CryptographicBinding);
+        assert_eq!(classified[0].message, "Freivalds check failed");
+        assert_eq!(classified[1].category, FailureCategory::Unsupported);
+    }
 }

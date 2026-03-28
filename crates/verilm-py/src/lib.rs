@@ -989,6 +989,7 @@ fn verify_v4<'py>(
     result.set_item("checks_run", report.checks_run)?;
     result.set_item("checks_passed", report.checks_passed)?;
     result.set_item("failures", &report.failures)?;
+    result.set_item("classified_failures", classified_failures_to_py(py, &report.classified_failures)?)?;
     result.set_item("duration_us", report.duration.as_micros() as u64)?;
     Ok(result)
 }
@@ -1023,8 +1024,23 @@ fn verify_v4_binary<'py>(
     result.set_item("checks_run", report.checks_run)?;
     result.set_item("checks_passed", report.checks_passed)?;
     result.set_item("failures", &report.failures)?;
+    result.set_item("classified_failures", classified_failures_to_py(py, &report.classified_failures)?)?;
     result.set_item("duration_us", report.duration.as_micros() as u64)?;
     Ok(result)
+}
+
+/// Convert classified failures to a Python list of dicts.
+fn classified_failures_to_py<'py>(
+    py: Python<'py>,
+    failures: &[verilm_verify::VerificationFailure],
+) -> PyResult<Bound<'py, PyList>> {
+    let items: Vec<Bound<'py, PyDict>> = failures.iter().map(|f| {
+        let d = PyDict::new(py);
+        d.set_item("category", f.category.to_string()).unwrap();
+        d.set_item("message", &f.message).unwrap();
+        d
+    }).collect();
+    Ok(PyList::new(py, items)?)
 }
 
 /// Shared verification logic: dispatches to verify_v4 or verify_v4_full.

@@ -12,6 +12,10 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 - Verifier `n_tokens` generation-length semantics: `n_generated = n_tokens - (n_prompt - 1)`, accounting for the committed token_ids array omitting the first embedding token. Fixes off-by-one that allowed `n_tokens_inflate` to pass.
 - Verifier LM-head token replay now skipped for prompt-side tokens (where `token_index < gen_start`). Prompt tokens are chosen by the tokenizer, not by argmax/sampling over logits. Fixes false rejection on multi-token audits where the challenged position is inside the prompt.
 
+### Added
+
+- Verification failure taxonomy: every verifier failure is now classified into one of six categories (`structural`, `cryptographic_binding`, `spec_mismatch`, `unsupported`, `semantic_violation`, `operational`). `V4VerifyReport` carries `classified_failures` alongside raw failure strings. Python bridge exposes `classified_failures` as a list of `{category, message}` dicts. Unit tests cover classification of all six categories.
+
 ### Changed
 
 - Adversarial tamper test (`test_adversarial.py`) hardened:
