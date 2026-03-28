@@ -809,10 +809,13 @@ pub fn verify_v4_full(
                     ));
                 }
                 if output_spec.max_tokens > 0 {
-                    // n_tokens is transcript length (prompt + generated).
-                    // Generation length = n_tokens - n_prompt_tokens.
+                    // The committed token_ids array omits the first embedding token,
+                    // so positions 0..n_prompt-2 are prompt tokens and n_prompt-1..
+                    // are generated tokens. Thus:
+                    //   n_generated = n_tokens - (n_prompt - 1) = n_tokens - n_prompt + 1
                     let n_prompt = response.commitment.n_prompt_tokens.unwrap_or(0);
-                    let n_generated = response.commitment.n_tokens.saturating_sub(n_prompt);
+                    let n_generated = response.commitment.n_tokens
+                        .saturating_sub(n_prompt.saturating_sub(1));
                     if response.token_index >= output_spec.max_tokens {
                         failures.push(format!(
                             "token_index {} exceeds output_spec max_tokens {}",
@@ -963,7 +966,14 @@ pub fn verify_v4_full(
                         }
 
                         // Token replay: use the prover's (now Freivalds-verified) logits.
-                        if key.config.vocab_size > 0 {
+                        // Only replay for generated tokens — prompt-side tokens were
+                        // chosen by the tokenizer, not by argmax/sampling over logits.
+                        let gen_start = response.n_prompt_tokens
+                            .map(|npt| npt.saturating_sub(1))
+                            .unwrap_or(0);
+                        let is_generated = response.token_index >= gen_start;
+
+                        if key.config.vocab_size > 0 && is_generated {
                             checks_run += 1;
                             let logits: Vec<f32> = claimed_logits.iter().map(|&v| v as f32).collect();
 

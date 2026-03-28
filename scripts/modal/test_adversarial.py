@@ -135,12 +135,7 @@ def _run_test():
     honest_json = json.dumps(honest_audit)
 
     report = verilm_rs.verify_v4(honest_json, key_json)
-    baseline_failures = set()
-    if not report["passed"]:
-        print(f"  WARNING: honest greedy audit has {len(report['failures'])} failures:")
-        for f in report["failures"]:
-            print(f"    - {f}")
-            baseline_failures.add(f)
+    assert report["passed"], f"honest greedy audit must pass: {report['failures']}"
     print(f"  baseline: {report['checks_passed']}/{report['checks_run']} checks passed")
 
     # ── Baseline: honest sampled chat + full audit ──
@@ -162,12 +157,7 @@ def _run_test():
     sampled_audit = resp_sa.json()
     sampled_json = json.dumps(sampled_audit)
     report_s = verilm_rs.verify_v4(sampled_json, key_json)
-    if not report_s["passed"]:
-        print(f"  WARNING: honest sampled audit has {len(report_s['failures'])} failures:")
-        for f in report_s["failures"][:5]:
-            print(f"    - {f}")
-        if len(report_s["failures"]) > 5:
-            print(f"    ... and {len(report_s['failures']) - 5} more")
+    assert report_s["passed"], f"honest sampled audit must pass: {report_s['failures']}"
     print(f"  baseline: {report_s['checks_passed']}/{report_s['checks_run']} checks passed")
 
     # ── Tamper test harness ──
@@ -187,7 +177,13 @@ def _run_test():
             print(f"  {msg}")
             return
         tampered_json = json.dumps(tampered)
-        report = verilm_rs.verify_v4(tampered_json, key_json)
+        try:
+            report = verilm_rs.verify_v4(tampered_json, key_json)
+        except ValueError as e:
+            # Deserialization failure = tampered payload is structurally invalid,
+            # which counts as "rejected" (verifier refuses to accept it).
+            print(f"  OK [{name}]: rejected at deserialization ({e})")
+            return
 
         if report["passed"]:
             msg = f"FAIL [{name}]: tampered audit was NOT rejected"
@@ -264,7 +260,12 @@ def _run_test():
 
     # 8. a (attention INT8 output) — irreducible field
     def tamper_a(d):
-        d["retained"]["layers"][0]["a"][0] ^= 0xFF
+        v = d["retained"]["layers"][0]["a"][0]
+        # XOR and wrap back to signed i8 range (-128..127)
+        v = (v ^ 0x7F)
+        if v > 127:
+            v -= 256
+        d["retained"]["layers"][0]["a"][0] = v
     tamper_test("retained_a_flip", honest_json, tamper_a, "merkle")
 
     # 9. scale_a
@@ -398,30 +399,111 @@ def _run_test():
             fr[0] += 100.0
         else:
             raise KeyError("final_residual not present")
-    tamper_test("final_residual_shift", honest_json, tamper_final_residual, "final")
+    tamper_test("final_residual_shift", honest_json, tamper_final_residual, "merkle")
 
     # ════════════════════════════════════════════════════════════
     # Cross-request splice — use shell/retained from another request
+    # To actually test cross-request binding, we need two requests with
+    # different prompts audited at a generated token index, so the
+    # committed data is genuinely different.
     # ════════════════════════════════════════════════════════════
     print("\n═══ Cross-request splice ═══")
 
-    # 25. Splice shell_opening from sampled into greedy response
+    # Generate a second baseline with a DIFFERENT prompt
+    PROMPT_B = "What is the largest planet in the solar system?"
+    resp_b = http.post("/chat", json={
+        "prompt": PROMPT_B, "n_tokens": MAX_TOKENS, "temperature": 0.0,
+    })
+    assert resp_b.status_code == 200
+    chat_b = resp_b.json()
+    n_gen_b = chat_b["n_tokens"]
+    # Audit at a generated token (past prompt boundary)
+    n_prompt_b = chat_b.get("n_prompt_tokens", 1)
+    gen_tok_b = max(n_prompt_b, 1)  # first generated token index in committed array
+    resp_ab = http.post("/audit", json={
+        "request_id": chat_b["request_id"],
+        "token_index": gen_tok_b,
+        "layer_indices": list(range(n_layers)),
+        "tier": "full",
+        "binary": False,
+    })
+    assert resp_ab.status_code == 200
+    audit_b = resp_ab.json()
+    audit_b_json = json.dumps(audit_b)
+    report_b = verilm_rs.verify_v4(audit_b_json, key_json)
+    print(f"  splice baseline B (prompt_b, tok={gen_tok_b}): "
+          f"{report_b['checks_passed']}/{report_b['checks_run']} checks passed")
+
+    # Also get a generated-token audit for the original prompt
+    n_prompt_a = chat.get("n_prompt_tokens", 1)
+    gen_tok_a = max(n_prompt_a, 1)
+    resp_ga = http.post("/audit", json={
+        "request_id": chat["request_id"],
+        "token_index": gen_tok_a,
+        "layer_indices": list(range(n_layers)),
+        "tier": "full",
+        "binary": False,
+    })
+    assert resp_ga.status_code == 200
+    audit_a_gen = resp_ga.json()
+    audit_a_gen_json = json.dumps(audit_a_gen)
+    report_a_gen = verilm_rs.verify_v4(audit_a_gen_json, key_json)
+    print(f"  splice baseline A (prompt_a, tok={gen_tok_a}): "
+          f"{report_a_gen['checks_passed']}/{report_a_gen['checks_run']} checks passed")
+
+    # 25. Splice shell_opening from request B into request A's generated-token audit
     def splice_shell(d):
-        sampled = json.loads(sampled_json)
-        d["shell_opening"] = sampled["shell_opening"]
-    tamper_test("cross_request_shell_splice", honest_json, splice_shell, "freivalds")
+        other = json.loads(audit_b_json)
+        d["shell_opening"] = other["shell_opening"]
+    tamper_test("cross_request_shell_splice", audit_a_gen_json, splice_shell, "freivalds")
 
-    # 26. Splice retained state from sampled into greedy response
+    # 26. Splice retained state from request B into request A
     def splice_retained(d):
-        sampled = json.loads(sampled_json)
-        d["retained"] = sampled["retained"]
-    tamper_test("cross_request_retained_splice", honest_json, splice_retained, "merkle")
+        other = json.loads(audit_b_json)
+        d["retained"] = other["retained"]
+    tamper_test("cross_request_retained_splice", audit_a_gen_json, splice_retained, "merkle")
 
-    # 27. Splice token_id from sampled into greedy (different token selection)
+    # 27. Splice token_id from request B into request A (different token selection)
+    # Must verify the tokens actually differ; if they match at this index, scan
+    # for a generated index where they diverge.
+    tid_a = audit_a_gen["token_id"]
+    tid_b = audit_b["token_id"]
+    splice_a_json = audit_a_gen_json
+    splice_b_json = audit_b_json
+    found_divergent = tid_a != tid_b
+    if not found_divergent:
+        print(f"  token_id match at gen_tok ({tid_a}=={tid_b}), scanning for divergent index...")
+        gen_start_a = max(chat.get("n_prompt_tokens", 1) - 1, 0)
+        gen_start_b = max(chat_b.get("n_prompt_tokens", 1) - 1, 0)
+        max_scan = min(chat["n_tokens"], n_gen_b)
+        for i in range(max(gen_start_a, gen_start_b) + 1, max_scan):
+            ra = http.post("/audit", json={
+                "request_id": chat["request_id"], "token_index": i,
+                "layer_indices": list(range(n_layers)), "tier": "full", "binary": False,
+            })
+            rb = http.post("/audit", json={
+                "request_id": chat_b["request_id"], "token_index": i,
+                "layer_indices": list(range(n_layers)), "tier": "full", "binary": False,
+            })
+            if ra.status_code == 200 and rb.status_code == 200:
+                aa = ra.json()
+                ab = rb.json()
+                if aa["token_id"] != ab["token_id"]:
+                    splice_a_json = json.dumps(aa)
+                    splice_b_json = json.dumps(ab)
+                    print(f"  found divergent tokens at index {i}: {aa['token_id']} vs {ab['token_id']}")
+                    found_divergent = True
+                    break
+        if not found_divergent:
+            print("  SKIP [cross_request_token_splice]: no divergent token_id found across all generated indices")
+
     def splice_token_id(d):
-        sampled = json.loads(sampled_json)
-        d["token_id"] = sampled["token_id"]
-    tamper_test("cross_request_token_splice", honest_json, splice_token_id, "io")
+        other = json.loads(splice_b_json)
+        d["token_id"] = other["token_id"]
+    if found_divergent:
+        tamper_test("cross_request_token_splice", splice_a_json, splice_token_id, "io")
+    else:
+        print("  SKIP [cross_request_token_splice]: tokens identical at all scanned indices")
 
     # ════════════════════════════════════════════════════════════
     # Layer swap — put data from one layer into another layer's slot
@@ -449,7 +531,8 @@ def _run_test():
     # ════════════════════════════════════════════════════════════
     print("\n═══ Prefix tampering ═══")
 
-    # For prefix tests, audit a later token (token_index > 0) so prefix exists.
+    # For prefix tests, audit a later generated token (token_index > gen_start)
+    # so prefix exists and token replay is valid.
     print("  Getting multi-token audit for prefix tests...")
     resp_multi = http.post("/chat", json={
         "prompt": PROMPT, "n_tokens": MAX_TOKENS, "temperature": 0.0,
@@ -457,8 +540,11 @@ def _run_test():
     assert resp_multi.status_code == 200
     chat_multi = resp_multi.json()
     n_gen = chat_multi["n_tokens"]
-    # Pick token_index = min(3, n_gen-1) to have prefix tokens
-    tok_idx = min(3, n_gen - 1)
+    n_prompt_multi = chat_multi.get("n_prompt_tokens", 1)
+    # First generated token in committed array is at index n_prompt-1;
+    # pick a later one so there are prefix tokens before it.
+    gen_start_multi = max(n_prompt_multi - 1, 0)
+    tok_idx = min(gen_start_multi + 3, n_gen - 1)
     resp_audit_multi = http.post("/audit", json={
         "request_id": chat_multi["request_id"],
         "token_index": tok_idx,
@@ -568,7 +654,7 @@ def _run_test():
     }
 
 
-@app.function(image=image, gpu="A100-80GB", timeout=900)
+@app.function(image=image, gpu="A100-80GB", timeout=1800)
 def run_test():
     return _run_test()
 

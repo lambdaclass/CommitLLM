@@ -2380,7 +2380,7 @@ fn v4_manifest_rejects_overlong_transcript() {
     manifest.max_tokens = 2; // allow 2 generated tokens
 
     let params = FullBindingParams {
-        // 1 prompt token + 3 generated = 4 total; n_generated=3 > max_tokens=2
+        // 4 committed token_ids, n_prompt=1 → n_generated = 4 - (1-1) = 4 > max_tokens=2
         token_ids: &[token_id, token_id, token_id, token_id],
         prompt: b"overlong transcript",
         sampling_seed: [7u8; 32],
