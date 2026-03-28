@@ -885,3 +885,143 @@ fn unknown_sampler_version_rejected() {
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(has_code(&report, FailureCode::UnsupportedSamplerVersion));
 }
+
+// ===========================================================================
+// 15. Unknown protocol version in binary format
+// ===========================================================================
+
+#[test]
+fn binary_unknown_audit_magic_vv5a_rejected() {
+    // Future version magic "VV5A" must be rejected by the current deserializer.
+    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (_key, response) = make_valid_response(&cfg, &model, 1);
+    let mut binary = serialize::serialize_v4_audit(&response);
+    // Replace VV4A magic with VV5A.
+    binary[2] = b'5';
+    let result = serialize::deserialize_v4_audit(&binary);
+    assert!(result.is_err(), "VV5A magic should be rejected");
+    assert!(result.unwrap_err().contains("magic"), "error should mention magic");
+}
+
+#[test]
+fn binary_unknown_audit_magic_vv9z_rejected() {
+    // Arbitrary future magic.
+    let result = serialize::deserialize_v4_audit(b"VV9Z\x00\x01\x02\x03");
+    assert!(result.is_err());
+}
+
+#[test]
+fn binary_unknown_key_magic_rejected_as_audit() {
+    // VKEY bytes (valid key format) must not parse as an audit response.
+    let result = serialize::deserialize_v4_audit(b"VKEY\x00\x01\x02\x03\x04\x05");
+    assert!(result.is_err());
+}
+
+// ===========================================================================
+// 16. Long/short prompt-output boundary combinations
+// ===========================================================================
+
+#[test]
+fn long_prompt_short_output_pass() {
+    // Many prompt tokens (high n_prompt_tokens), minimal generation (1 token).
+    // Simulated: commit 5 tokens, declare 4 are prompt, 1 generated.
+    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let key = generate_key(&cfg, &model, [1u8; 32]);
+    let n_tokens = 5usize;
+    let n_prompt = 4u32; // 4 prompt tokens → 1 generated token
+
+    let inputs: Vec<Vec<i8>> = (0..n_tokens)
+        .map(|t| (0..cfg.hidden_dim).map(|i| ((i + t * 7) % 256) as i8).collect())
+        .collect();
+    let all_retained: Vec<RetainedTokenState> = inputs
+        .iter()
+        .map(|inp| retained_from_traces(&forward_pass(&cfg, &model, inp)))
+        .collect();
+    let token_ids: Vec<u32> = (0..n_tokens as u32).map(|i| 42 + i).collect();
+    let params = FullBindingParams {
+        token_ids: &token_ids,
+        prompt: b"this is a long prompt with many tokens for boundary testing",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+        n_prompt_tokens: Some(n_prompt),
+    };
+    let (_commitment, state) = commit_minimal(all_retained, &params, None);
+    // Open the last token (the single generated token).
+    let response = open_v4(&state, (n_tokens - 1) as u32, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Pass,
+        "long prompt + short output should pass, failures: {:?}", report.failures);
+    assert_eq!(response.commitment.n_prompt_tokens, Some(n_prompt));
+    assert_eq!(response.prefix_leaf_hashes.len(), n_tokens - 1);
+}
+
+#[test]
+fn short_prompt_long_output_pass() {
+    // Minimal prompt (1 token), many generated tokens.
+    // Simulated: commit 8 tokens, declare 1 is prompt, 7 generated.
+    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let key = generate_key(&cfg, &model, [1u8; 32]);
+    let n_tokens = 8usize;
+    let n_prompt = 1u32;
+
+    let inputs: Vec<Vec<i8>> = (0..n_tokens)
+        .map(|t| (0..cfg.hidden_dim).map(|i| ((i + t * 7) % 256) as i8).collect())
+        .collect();
+    let all_retained: Vec<RetainedTokenState> = inputs
+        .iter()
+        .map(|inp| retained_from_traces(&forward_pass(&cfg, &model, inp)))
+        .collect();
+    let token_ids: Vec<u32> = (0..n_tokens as u32).map(|i| 42 + i).collect();
+    let params = FullBindingParams {
+        token_ids: &token_ids,
+        prompt: b"hi",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+        n_prompt_tokens: Some(n_prompt),
+    };
+    let (_commitment, state) = commit_minimal(all_retained, &params, None);
+    // Open a token in the middle of the generated range.
+    let mid = (n_tokens / 2) as u32;
+    let response = open_v4(&state, mid, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+
+    let report = verify_v4(&key, &response, None);
+    assert_eq!(report.verdict, Verdict::Pass,
+        "short prompt + long output should pass, failures: {:?}", report.failures);
+    assert_eq!(response.commitment.n_prompt_tokens, Some(n_prompt));
+    assert_eq!(response.prefix_leaf_hashes.len(), mid as usize);
+}
+
+#[test]
+fn all_prompt_no_generation_boundary() {
+    // Edge: n_prompt_tokens == n_tokens + 1 (all tokens are prompt, zero generated).
+    // This is the maximum allowed by the bound check.
+    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let key = generate_key(&cfg, &model, [1u8; 32]);
+    let n_tokens = 3usize;
+    // n_prompt_tokens = n_tokens + 1 = 4 (the +1 is the embedding input token).
+    let n_prompt = (n_tokens as u32) + 1;
+
+    let inputs: Vec<Vec<i8>> = (0..n_tokens)
+        .map(|t| (0..cfg.hidden_dim).map(|i| ((i + t * 7) % 256) as i8).collect())
+        .collect();
+    let all_retained: Vec<RetainedTokenState> = inputs
+        .iter()
+        .map(|inp| retained_from_traces(&forward_pass(&cfg, &model, inp)))
+        .collect();
+    let token_ids: Vec<u32> = (0..n_tokens as u32).map(|i| 42 + i).collect();
+    let params = FullBindingParams {
+        token_ids: &token_ids,
+        prompt: b"all prompt tokens no generation",
+        sampling_seed: [7u8; 32],
+        manifest: None,
+        n_prompt_tokens: Some(n_prompt),
+    };
+    let (_commitment, state) = commit_minimal(all_retained, &params, None);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+
+    // Should pass structural checks — n_prompt_tokens == n_tokens + 1 is the allowed maximum.
+    let report = verify_v4(&key, &response, None);
+    assert!(!has_code(&report, FailureCode::NPromptTokensBound),
+        "n_prompt_tokens == n_tokens + 1 should be within bounds, got: {:?}", report.failures);
+}
