@@ -95,7 +95,14 @@ WORKLOADS = [
     },
 ]
 
-SEEDS = [42, 137, 2024]
+# Vary decode paths: different temperature/top_k combos exercise different
+# softmax distributions and thus different attention corridors.
+# The batch seed is generated fresh per request inside server.chat().
+DECODE_CONFIGS = [
+    {"name": "greedy", "temperature": 0.0},
+    {"name": "warm", "temperature": 0.8},
+    {"name": "top_k50", "temperature": 1.0, "top_k": 50},
+]
 
 
 def _run_model(model_id: str):
@@ -142,16 +149,13 @@ def _run_model(model_id: str):
     all_results = []
 
     for wl in WORKLOADS:
-        for seed_val in SEEDS:
-            label = f"{wl['name']}/seed={seed_val}"
+        for dc in DECODE_CONFIGS:
+            label = f"{wl['name']}/{dc['name']}"
             print(f"\n--- {label} (max_tokens={wl['max_tokens']}) ---")
 
-            params_kw = {"max_tokens": wl["max_tokens"]}
-            if seed_val != 42:
-                params_kw["temperature"] = 0.8
-                params_kw["seed"] = seed_val
-            else:
-                params_kw["temperature"] = 0.0
+            params_kw = {"max_tokens": wl["max_tokens"], "temperature": dc["temperature"]}
+            if "top_k" in dc:
+                params_kw["top_k"] = dc["top_k"]
 
             # Generate with capture
             chat_r = server.chat(prompt=wl["prompt"], **params_kw)
@@ -204,7 +208,7 @@ def _run_model(model_id: str):
                 result_entry = {
                     "model": model_id,
                     "workload": wl["name"],
-                    "seed": seed_val,
+                    "decode_config": dc["name"],
                     "max_tokens": wl["max_tokens"],
                     "n_tokens": n_tokens,
                     "token_position": pos,
@@ -309,6 +313,6 @@ def main():
         print(f"  Global max L-inf: {max_linf}")
         for r in results:
             print(
-                f"  {r['workload']:>10s}/seed={r['seed']:4d} pos={r['token_position']:4d}  "
+                f"  {r['workload']:>10s}/{r['decode_config']:<8s} pos={r['token_position']:4d}  "
                 f"L-inf={r['global_linf']:2d}"
             )
