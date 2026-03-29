@@ -161,6 +161,86 @@ def _extract_weight_scales(llm, n_layers, cfg):
     return scales
 
 
+def _diagnose_model_scales(llm, n_layers):
+    """Targeted diagnostic: verify scale formula and QKV layout.
+
+    Prints the exact values needed to identify whether the dequantization
+    is acc*sx*sw, acc*sx/sw, or something else, and whether the fused
+    QKV row layout is [Q|K|V] as assumed.
+    """
+    import torch
+    model = llm.llm_engine.model_executor.driver_worker.model_runner.model
+    layer0 = model.model.layers[0]
+    qkv = layer0.self_attn.qkv_proj
+
+    print(f"\n{'='*70}")
+    print("DIAGNOSTIC: Scale formula + QKV layout verification")
+    print(f"{'='*70}")
+
+    # 1. All scale-related attributes on qkv_proj
+    scale_attrs = [a for a in dir(qkv) if "scale" in a.lower()]
+    print(f"\n  qkv_proj scale attrs: {scale_attrs}")
+    for attr in scale_attrs:
+        val = getattr(qkv, attr, None)
+        if val is not None and hasattr(val, "shape"):
+            flat = val.detach().cpu().float().flatten()
+            print(f"    {attr}: shape={tuple(val.shape)}, dtype={val.dtype}, "
+                  f"[:8]={flat[:8].tolist()}")
+        elif val is not None:
+            print(f"    {attr}: {val}")
+
+    # 2. Weight shape and dtype
+    w = qkv.weight
+    ws = qkv.weight_scale.detach().cpu().float().flatten()
+    print(f"\n  weight: shape={tuple(w.shape)}, dtype={w.dtype}")
+    print(f"  weight_scale: shape={tuple(qkv.weight_scale.shape)}, len={len(ws)}")
+
+    # 3. Verify QKV layout: compute matmul oracle
+    # Take a known input, compute the fused QKV output in float, compare channels.
+    print(f"\n  --- QKV layout oracle ---")
+    x_probe = torch.ones(1, w.shape[1], dtype=torch.float32, device=w.device)
+    w_f32 = w.detach().float()
+    # Raw matmul: x @ W.T gives [1, out_features]
+    raw = (x_probe @ w_f32.T).squeeze(0)
+    # With scales: raw[j] * weight_scale[j] gives dequantized output
+    dequant_oracle = raw * ws.to(raw.device)
+    q_oracle = dequant_oracle[:qkv.weight.shape[0]]  # for debugging
+
+    # The Q portion should be first hidden_dim elements
+    # The K portion next kv_dim
+    # Verify by checking norms per section
+    from verilm import capture as cap
+    hidden_dim = cap._hidden_dim if hasattr(cap, '_hidden_dim') else 3584
+    kv_dim = cap._kv_dim if hasattr(cap, '_kv_dim') else 512
+    total_out = w.shape[0]
+    print(f"  total output features: {total_out} (expect {hidden_dim}+{kv_dim}+{kv_dim}={hidden_dim+2*kv_dim})")
+
+    # Print norm of each section to verify layout
+    sec_q = raw[:hidden_dim]
+    sec_k = raw[hidden_dim:hidden_dim+kv_dim]
+    sec_v = raw[hidden_dim+kv_dim:hidden_dim+2*kv_dim]
+    leftover = total_out - hidden_dim - 2*kv_dim
+    print(f"  section norms (raw): Q={sec_q.norm():.2f}, K={sec_k.norm():.2f}, V={sec_v.norm():.2f}")
+    if leftover > 0:
+        print(f"  WARNING: {leftover} leftover features beyond Q+K+V!")
+
+    # 4. Oracle: what the GPU should produce for x=ones with scale_x=1.0
+    # int8(ones) @ int8(W) gives raw accumulator, * scale * weight_scale gives float
+    print(f"\n  --- Dequant formula check (x=ones, scale_x=1.0) ---")
+    print(f"  raw_acc[:8] (sum of weight columns): {raw[:8].tolist()}")
+    print(f"  weight_scale[:8]: {ws[:8].tolist()}")
+    print(f"  acc*sw[:8]: {(raw[:8] * ws[:8].to(raw.device)).tolist()}")
+    print(f"  acc/sw[:8]: {(raw[:8] / ws[:8].to(raw.device)).tolist()}")
+
+    # 5. Check if there's an input_scale (static quantization)
+    if hasattr(qkv, "input_scale") and qkv.input_scale is not None:
+        print(f"\n  input_scale: {qkv.input_scale.detach().cpu().item()}")
+    else:
+        print(f"\n  input_scale: None (dynamic per-tensor)")
+
+    print(f"\n{'='*70}\n")
+
+
 def _measure_one(server, wl, dc, full_layers, key_json, model_id, corridor_mode, buf, scale_overrides_json):
     """Run one workload/decode_config and return results for all token positions."""
     import json
@@ -290,6 +370,9 @@ def _run_model(model_id: str):
     }
     weight_scales = _extract_weight_scales(llm, n_layers, cfg_dict)
     scale_overrides_json = json.dumps(weight_scales)
+
+    # ── Diagnostic: inspect model scale attributes ──
+    _diagnose_model_scales(llm, n_layers)
 
     all_results = []
 

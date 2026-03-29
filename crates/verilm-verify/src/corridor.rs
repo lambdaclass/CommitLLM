@@ -193,6 +193,15 @@ fn measure_roped(
             let replayed = verilm_core::attention::replay_attention_roped(
                 &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
             );
+            // Targeted diagnostic: layer 0 token 1 — claimed vs replayed
+            if layer_idx == 0 && j == 1 {
+                let n = 16;
+                eprintln!("[DIAG] layer=0 pos=1 scale_a={:.8} inv_scale={:.8}",
+                    rs.scale_a, if rs.scale_a.abs() > 1e-30 { 1.0 / rs.scale_a } else { 1.0 });
+                eprintln!("  claimed  a[..{}]: {:?}", n, &rs.a[..n]);
+                eprintln!("  replayed a[..{}]: {:?}", n, &replayed[..n]);
+                eprintln!("  q_roped[..8]: {:?}", &q_roped[..8]);
+            }
             all_stats.push(measure_attention_diff(&rs.a, &replayed, layer_idx, j)?);
         }
 
@@ -233,7 +242,25 @@ fn dequant_rope_qkv(
     position: usize,
     overrides: Option<&CorridorScaleOverrides>,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    // Targeted diagnostic: layer 0, position 1, first 8 channels.
+    // Prints multiple dequant formulas so one run identifies the right one.
+    let diag = layer_idx == 0 && position == 1 && overrides.is_some();
+
     let (q_f64, k_f64, v_f64) = if let Some(ovr) = overrides {
+        if diag {
+            let n = 8;
+            let sx = scale_x_attn as f64;
+            eprintln!("\n[DIAG] layer=0 pos=1 scale_x_attn={:.8}", scale_x_attn);
+            eprintln!("  q_acc[..{}]: {:?}", n, &q_acc[..n]);
+            eprintln!("  wq_scale[..{}]: {:?}", n, &ovr.wq[0][..n]);
+            eprintln!("  acc*sx*sw:  {:?}", (0..n).map(|i| q_acc[i] as f64 * sx * ovr.wq[0][i] as f64).collect::<Vec<_>>());
+            eprintln!("  acc*sx/sw:  {:?}", (0..n).map(|i| q_acc[i] as f64 * sx / ovr.wq[0][i] as f64).collect::<Vec<_>>());
+            eprintln!("  acc*sw:     {:?}", (0..n).map(|i| q_acc[i] as f64 * ovr.wq[0][i] as f64).collect::<Vec<_>>());
+            eprintln!("  acc/sw:     {:?}", (0..n).map(|i| q_acc[i] as f64 / ovr.wq[0][i] as f64).collect::<Vec<_>>());
+            eprintln!("  q_acc dims: {} (expect hidden_dim={})", q_acc.len(), key.config.hidden_dim);
+            eprintln!("  k_acc dims: {} (expect kv_dim={})", k_acc.len(), key.config.kv_dim);
+            eprintln!("  v_acc dims: {} (expect kv_dim={})", v_acc.len(), key.config.kv_dim);
+        }
         let q = verilm_core::rope::dequantize_acc_per_channel(
             q_acc, &ovr.wq[layer_idx], scale_x_attn,
         );
