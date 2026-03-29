@@ -10,16 +10,22 @@
 //!
 //! ```text
 //! verify_binary / verify_response
-//!   └─ run(Ctx) → V4VerifyReport
-//!        ├─ phase_structural  → StructuralState
-//!        ├─ phase_embedding
-//!        ├─ phase_specs       → SpecState
-//!        ├─ phase_output_policy
-//!        ├─ phase_bridge
-//!        ├─ phase_lm_head
+//!   └─ Ctx::new() → run(Ctx) → V4VerifyReport
+//!        ├─ phase_structural  → StructuralState { shell, coverage }
+//!        ├─ phase_embedding     (reads StructuralState)
+//!        ├─ phase_specs       → SpecState { decode_params, output_spec, input_spec, detok_policy }
+//!        ├─ phase_output_policy (reads SpecState.output_spec)
+//!        ├─ phase_bridge      → BridgeState { final_hidden }
+//!        │    └─ bridge_layers
+//!        │         ├─ check_qkv         (Wq/Wk/Wv Freivalds)
+//!        │         ├─ check_wo          (Wo Freivalds)
+//!        │         ├─ bridge_attn_to_ffn (residual + RMSNorm → x_ffn)
+//!        │         ├─ check_ffn         (Wg/Wu/Wd Freivalds + SiLU)
+//!        │         └─ bridge_ffn_to_next (residual → next x_attn)
+//!        ├─ phase_lm_head       (reads BridgeState + SpecState)
 //!        ├─ phase_deep_prefix
-//!        ├─ phase_tokenization
-//!        └─ phase_detokenization
+//!        ├─ phase_tokenization   (reads SpecState.input_spec)
+//!        └─ phase_detokenization (reads SpecState.detok_policy)
 //! ```
 
 use std::time::Instant;
@@ -61,17 +67,7 @@ pub fn verify_response(
     tokenizer: Option<&dyn PromptTokenizer>,
     detokenizer: Option<&dyn Detokenizer>,
 ) -> V4VerifyReport {
-    let n_prompt = r.commitment.n_prompt_tokens.or(r.n_prompt_tokens).unwrap_or(0);
-    run(&Ctx {
-        key,
-        r,
-        tokenizer,
-        detokenizer,
-        start: Instant::now(),
-        gen_start: n_prompt.saturating_sub(1),
-        is_last: r.token_index == r.commitment.n_tokens.saturating_sub(1),
-        n_prompt,
-    })
+    run(&Ctx::new(key, r, tokenizer, detokenizer))
 }
 
 // --- Orchestrator state
@@ -86,6 +82,27 @@ struct Ctx<'a> {
     gen_start: u32,
     is_last: bool,
     n_prompt: u32,
+}
+
+impl<'a> Ctx<'a> {
+    fn new(
+        key: &'a VerifierKey,
+        r: &'a V4AuditResponse,
+        tokenizer: Option<&'a dyn PromptTokenizer>,
+        detokenizer: Option<&'a dyn Detokenizer>,
+    ) -> Self {
+        let n_prompt = r.commitment.n_prompt_tokens.or(r.n_prompt_tokens).unwrap_or(0);
+        Self {
+            key,
+            r,
+            tokenizer,
+            detokenizer,
+            start: Instant::now(),
+            gen_start: n_prompt.saturating_sub(1),
+            is_last: r.token_index == r.commitment.n_tokens.saturating_sub(1),
+            n_prompt,
+        }
+    }
 }
 
 struct St {
@@ -122,6 +139,8 @@ struct StructuralState<'a> {
 struct SpecState {
     decode_params: Option<verilm_core::sampling::DecodeParams>,
     output_spec: Option<OutputSpec>,
+    input_spec: Option<InputSpec>,
+    detokenization_policy: Option<String>,
 }
 
 // --- Orchestrator
@@ -137,13 +156,13 @@ fn run(ctx: &Ctx) -> V4VerifyReport {
         if let Some(ref os) = specs.output_spec {
             phase_output_policy(ctx, os, &mut st);
         }
-        phase_bridge(ctx, shell, &mut st);
-        phase_lm_head(ctx, shell, &specs, &mut st);
+        let bridge = phase_bridge(ctx, shell, &mut st);
+        phase_lm_head(ctx, shell, &bridge, &specs, &mut st);
     }
 
     phase_deep_prefix(ctx, &mut st);
-    phase_tokenization(ctx, &mut st);
-    phase_detokenization(ctx, &mut st);
+    phase_tokenization(ctx, &specs, &mut st);
+    phase_detokenization(ctx, &specs, &mut st);
 
     finish(ctx, st, structural.coverage)
 }
@@ -507,6 +526,8 @@ fn phase_specs(ctx: &Ctx, st: &mut St) -> SpecState {
             return SpecState {
                 decode_params: None,
                 output_spec: None,
+                input_spec: None,
+                detokenization_policy: None,
             };
         }
     };
@@ -523,6 +544,8 @@ fn phase_specs(ctx: &Ctx, st: &mut St) -> SpecState {
     cross_check_model_vs_key(ctx, &model_spec, st);
     check_decode_features(&decode_spec, &output_spec, st);
 
+    let detokenization_policy = output_spec.detokenization_policy.clone();
+
     SpecState {
         decode_params: Some(verilm_core::sampling::DecodeParams {
             temperature: decode_spec.temperature,
@@ -530,6 +553,8 @@ fn phase_specs(ctx: &Ctx, st: &mut St) -> SpecState {
             top_p: decode_spec.top_p,
         }),
         output_spec: Some(output_spec),
+        input_spec: Some(input_spec),
+        detokenization_policy,
     }
 }
 
@@ -743,8 +768,33 @@ fn check_eos_policy(ctx: &Ctx, os: &OutputSpec, eos_id: u32, st: &mut St) {
 
 // --- Phase 5: Full bridge (Freivalds + residual chain)
 
-fn phase_bridge(ctx: &Ctx, shell: &ShellTokenOpening, st: &mut St) {
+struct BridgeState {
+    final_hidden: Option<Vec<i8>>,
+}
+
+fn phase_bridge(ctx: &Ctx, shell: &ShellTokenOpening, st: &mut St) -> BridgeState {
     bridge_layers(ctx.key, &ctx.r.retained, shell, st);
+
+    // Derive final_hidden from captured final_residual + final_norm.
+    // No shell-replay fallback in canonical path.
+    let final_hidden: Option<Vec<i8>> = match (&shell.final_residual, &ctx.key.final_norm_weights)
+    {
+        (Some(fr), Some(fnw)) => {
+            let res_f64: Vec<f64> = fr.iter().map(|&v| v as f64).collect();
+            let normed = verilm_core::rmsnorm::rmsnorm_f64_input(&res_f64, fnw, ctx.key.rmsnorm_eps);
+            Some(normed.iter().map(|&v| v.round().clamp(-128.0, 127.0) as i8).collect())
+        }
+        (None, Some(_)) if ctx.key.lm_head.is_some() => {
+            st.fail(
+                FailureCode::MissingFinalResidual,
+                "canonical: final_residual required for LM-head (no shell replay fallback)",
+            );
+            None
+        }
+        _ => None,
+    };
+
+    BridgeState { final_hidden }
 }
 
 /// Validate bridge shape: layer_indices contiguity and count match.
@@ -840,111 +890,134 @@ fn bridge_layers(
         };
         let sl = &shell.layers[si];
 
-        // QKV Freivalds (all required in canonical path)
-        for (mt, acc) in [
-            (MatrixType::Wq, &sl.q),
-            (MatrixType::Wk, &sl.k),
-            (MatrixType::Wv, &sl.v),
-        ] {
-            match acc {
-                Some(z) => verify_freivalds(key, st, layer_idx, mt, &x_attn, z),
-                None => st.fail_ctx(
-                    FailureCode::MissingQkv,
-                    format!("layer {} {:?}: QKV required in canonical path", layer_idx, mt),
-                    FailureContext {
-                        layer: Some(layer_idx),
-                        matrix: Some(format!("{:?}", mt)),
-                        ..Default::default()
-                    },
-                ),
-            }
-        }
-
-        // Wo @ a
-        verify_freivalds(key, st, layer_idx, MatrixType::Wo, &rs.a, &sl.attn_out);
-        // Post-attention bridge: dequant → residual += attn_out → RMSNorm_ffn → quantize
-        let x_ffn = verilm_core::rmsnorm::bridge_residual_rmsnorm(
-            &sl.attn_out,
-            key.weight_scale_for(layer_idx, MatrixType::Wo),
-            rs.scale_a,
-            &mut residual,
-            &key.rmsnorm_ffn_weights[layer_idx],
-            key.rmsnorm_eps,
-            rs.scale_x_ffn,
-        );
-        // Wg, Wu @ x_ffn
-        verify_freivalds(key, st, layer_idx, MatrixType::Wg, &x_ffn, &sl.g);
-        verify_freivalds(key, st, layer_idx, MatrixType::Wu, &x_ffn, &sl.u);
-        // SiLU gate → h
-        let h = verilm_core::silu::compute_h_scaled(
-            &sl.g,
-            &sl.u,
-            key.weight_scale_for(layer_idx, MatrixType::Wg),
-            key.weight_scale_for(layer_idx, MatrixType::Wu),
-            rs.scale_x_ffn,
-            rs.scale_h,
-        );
-        // Wd @ h
-        verify_freivalds(key, st, layer_idx, MatrixType::Wd, &h, &sl.ffn_out);
-
-        // Post-FFN bridge → x_attn for next layer
+        check_qkv(key, st, layer_idx, sl, &x_attn);
+        check_wo(key, st, layer_idx, &rs.a, &sl.attn_out);
+        let x_ffn = bridge_attn_to_ffn(key, layer_idx, rs, &sl.attn_out, &mut residual);
+        check_ffn(key, st, layer_idx, rs, sl, &x_ffn);
         let next_scale = retained
             .layers
             .get(layer_idx + 1)
             .map(|r| r.scale_x_attn)
             .unwrap_or(1.0);
+        x_attn = bridge_ffn_to_next(key, layer_idx, rs, &sl.ffn_out, &mut residual, next_scale);
+    }
+}
 
-        x_attn = if layer_idx + 1 < key.rmsnorm_attn_weights.len() {
-            verilm_core::rmsnorm::bridge_residual_rmsnorm(
-                &sl.ffn_out,
-                key.weight_scale_for(layer_idx, MatrixType::Wd),
-                rs.scale_h,
-                &mut residual,
-                &key.rmsnorm_attn_weights[layer_idx + 1],
-                key.rmsnorm_eps,
-                next_scale,
-            )
-        } else {
-            // Last layer: update residual, no next-layer RMSNorm
-            verilm_core::rmsnorm::dequant_add_residual(
-                &sl.ffn_out,
-                key.weight_scale_for(layer_idx, MatrixType::Wd),
-                rs.scale_h,
-                &mut residual,
-            );
-            Vec::new()
-        };
+fn check_qkv(
+    key: &VerifierKey,
+    st: &mut St,
+    layer_idx: usize,
+    sl: &verilm_core::types::ShellLayerOpening,
+    x_attn: &[i8],
+) {
+    for (mt, acc) in [
+        (MatrixType::Wq, &sl.q),
+        (MatrixType::Wk, &sl.k),
+        (MatrixType::Wv, &sl.v),
+    ] {
+        match acc {
+            Some(z) => verify_freivalds(key, st, layer_idx, mt, x_attn, z),
+            None => st.fail_ctx(
+                FailureCode::MissingQkv,
+                format!("layer {} {:?}: QKV required in canonical path", layer_idx, mt),
+                FailureContext {
+                    layer: Some(layer_idx),
+                    matrix: Some(format!("{:?}", mt)),
+                    ..Default::default()
+                },
+            ),
+        }
+    }
+}
+
+fn check_wo(
+    key: &VerifierKey,
+    st: &mut St,
+    layer_idx: usize,
+    a: &[i8],
+    attn_out: &[i32],
+) {
+    verify_freivalds(key, st, layer_idx, MatrixType::Wo, a, attn_out);
+}
+
+fn bridge_attn_to_ffn(
+    key: &VerifierKey,
+    layer_idx: usize,
+    rs: &verilm_core::types::RetainedLayerState,
+    attn_out: &[i32],
+    residual: &mut Vec<f64>,
+) -> Vec<i8> {
+    verilm_core::rmsnorm::bridge_residual_rmsnorm(
+        attn_out,
+        key.weight_scale_for(layer_idx, MatrixType::Wo),
+        rs.scale_a,
+        residual,
+        &key.rmsnorm_ffn_weights[layer_idx],
+        key.rmsnorm_eps,
+        rs.scale_x_ffn,
+    )
+}
+
+fn check_ffn(
+    key: &VerifierKey,
+    st: &mut St,
+    layer_idx: usize,
+    rs: &verilm_core::types::RetainedLayerState,
+    sl: &verilm_core::types::ShellLayerOpening,
+    x_ffn: &[i8],
+) {
+    verify_freivalds(key, st, layer_idx, MatrixType::Wg, x_ffn, &sl.g);
+    verify_freivalds(key, st, layer_idx, MatrixType::Wu, x_ffn, &sl.u);
+    let h = verilm_core::silu::compute_h_scaled(
+        &sl.g,
+        &sl.u,
+        key.weight_scale_for(layer_idx, MatrixType::Wg),
+        key.weight_scale_for(layer_idx, MatrixType::Wu),
+        rs.scale_x_ffn,
+        rs.scale_h,
+    );
+    verify_freivalds(key, st, layer_idx, MatrixType::Wd, &h, &sl.ffn_out);
+}
+
+fn bridge_ffn_to_next(
+    key: &VerifierKey,
+    layer_idx: usize,
+    rs: &verilm_core::types::RetainedLayerState,
+    ffn_out: &[i32],
+    residual: &mut Vec<f64>,
+    next_scale: f32,
+) -> Vec<i8> {
+    if layer_idx + 1 < key.rmsnorm_attn_weights.len() {
+        verilm_core::rmsnorm::bridge_residual_rmsnorm(
+            ffn_out,
+            key.weight_scale_for(layer_idx, MatrixType::Wd),
+            rs.scale_h,
+            residual,
+            &key.rmsnorm_attn_weights[layer_idx + 1],
+            key.rmsnorm_eps,
+            next_scale,
+        )
+    } else {
+        // Last layer: update residual, no next-layer RMSNorm
+        verilm_core::rmsnorm::dequant_add_residual(
+            ffn_out,
+            key.weight_scale_for(layer_idx, MatrixType::Wd),
+            rs.scale_h,
+            residual,
+        );
+        Vec::new()
     }
 }
 
 // --- Phase 6: LM-head + token replay
 
-fn phase_lm_head(ctx: &Ctx, shell: &ShellTokenOpening, specs: &SpecState, st: &mut St) {
-    // Derive final_hidden from captured final_residual + final_norm.
-    // No shell-replay fallback in canonical path.
-    let final_hidden: Option<Vec<i8>> = match (&shell.final_residual, &ctx.key.final_norm_weights)
-    {
-        (Some(fr), Some(fnw)) => {
-            let res_f64: Vec<f64> = fr.iter().map(|&v| v as f64).collect();
-            let normed = verilm_core::rmsnorm::rmsnorm_f64_input(&res_f64, fnw, ctx.key.rmsnorm_eps);
-            Some(normed.iter().map(|&v| v.round().clamp(-128.0, 127.0) as i8).collect())
-        }
-        (None, Some(_)) if ctx.key.lm_head.is_some() => {
-            st.fail(
-                FailureCode::MissingFinalResidual,
-                "canonical: final_residual required for LM-head (no shell replay fallback)",
-            );
-            None
-        }
-        _ => None,
-    };
-
+fn phase_lm_head(ctx: &Ctx, shell: &ShellTokenOpening, bridge: &BridgeState, specs: &SpecState, st: &mut St) {
     // LM-head Freivalds
     let r_lm = ctx.key.r_for(MatrixType::LmHead);
     if r_lm.is_empty() || ctx.key.v_lm_head.is_none() {
         return;
     }
-    match (&shell.logits_i32, &final_hidden) {
+    match (&shell.logits_i32, &bridge.final_hidden) {
         (Some(logits), Some(fh)) => {
             st.check();
             if !freivalds::check(ctx.key.v_lm_head.as_ref().unwrap(), fh, r_lm, logits) {
@@ -1052,18 +1125,21 @@ fn phase_deep_prefix(ctx: &Ctx, st: &mut St) {
 
 // --- Phase 8: Tokenization
 
-fn phase_tokenization(ctx: &Ctx, st: &mut St) {
+fn phase_tokenization(ctx: &Ctx, specs: &SpecState, st: &mut St) {
     let tok = match ctx.tokenizer {
         Some(t) => t,
         None => return,
     };
-    let (prompt, manifest) = match (&ctx.r.prompt, &ctx.r.manifest) {
-        (Some(p), Some(m)) => (p, m),
-        _ => return,
+    let prompt = match &ctx.r.prompt {
+        Some(p) => p,
+        None => return,
+    };
+    let input_spec = match &specs.input_spec {
+        Some(is) => is,
+        None => return,
     };
 
-    let input_spec = InputSpec::from(manifest);
-    match tok.tokenize(prompt, &input_spec) {
+    match tok.tokenize(prompt, input_spec) {
         Ok(tids) => {
             st.check();
             let tok_failures = crate::verify_input_tokenization(ctx.r, &tids);
@@ -1078,7 +1154,7 @@ fn phase_tokenization(ctx: &Ctx, st: &mut St) {
 
 // --- Phase 9: Detokenization
 
-fn phase_detokenization(ctx: &Ctx, st: &mut St) {
+fn phase_detokenization(ctx: &Ctx, specs: &SpecState, st: &mut St) {
     let detok = match ctx.detokenizer {
         Some(d) => d,
         None => return,
@@ -1096,12 +1172,7 @@ fn phase_detokenization(ctx: &Ctx, st: &mut St) {
         }
     };
 
-    let policy = ctx
-        .r
-        .manifest
-        .as_ref()
-        .map(|m| OutputSpec::from(m))
-        .and_then(|os| os.detokenization_policy);
+    let policy = specs.detokenization_policy.as_deref();
 
     let gen_start = ctx.gen_start as usize;
     let mut gen_tids: Vec<u32> = ctx
@@ -1112,7 +1183,7 @@ fn phase_detokenization(ctx: &Ctx, st: &mut St) {
         .to_vec();
     gen_tids.push(ctx.r.token_id);
 
-    match detok.decode(&gen_tids, policy.as_deref()) {
+    match detok.decode(&gen_tids, policy) {
         Ok(decoded) => {
             if ctx.is_last {
                 if decoded != *claimed {
