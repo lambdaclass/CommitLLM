@@ -10,19 +10,22 @@ The kept canonical sampled path already exists in the live server. At this point
 
 Current release critical path:
 1. freeze the canonical verifier and key-provenance story
-2. finish fail-closed prover/live-server hardening
-3. lock the benchmark protocol and measure the kept path
+2. close the remaining attention story and measure the attention corridor
+3. finish fail-closed prover/live-server hardening
 4. clean the public product/docs surface for the first release
 5. only then expand ecosystem and integrations
 
 ## Verifier Finalization
 
 1. [ ] Rewrite the verifier from scratch against the frozen final spec, done when the canonical verifier is the frozen trusted path, the legacy verifier is no longer needed for rollback, and the remaining verifier contract is explicit in tests and GPU evidence. Partial: the canonical verifier is now the trusted public path; legacy-vs-canonical parity tests, canonical frozen pass/reject fixtures, and full verifier-suite coverage (`canonical`, `v4_e2e`, `boundary_fuzz`, `cross_version`, `golden_conformance`, `hardening_gate`) exist; external challenge-response matching now lives in the client-side wrapper rather than inside the canonical trust boundary; phase-level tests cover all 9 phases (structural, embedding, specs, output policy, bridge, LM-head, deep prefix, tokenization, detokenization) plus Ctx::new() unit tests; token-0 attention replay closes the single-token computation gap; deep-prefix attention replay verifies multi-token attention in the toy/reference path. Remaining: fresh real-GPU confirmation on the current canonical code path through `scripts/modal/test_e2e_v4.py` and `scripts/modal/test_adversarial.py`.
+73. [ ] Add explicit routine-audit known-gap tests for attention substitution, done when maintained tests construct a self-consistent fake-`a` path for `token_index > 0` and show that routine/non-deep-prefix audits still pass, so the approximate boundary is documented explicitly and cannot be accidentally overstated.
+71. [ ] Make deep-prefix attention replay RoPE-aware for production models, done when the deep-prefix attention replay path dequantizes Q/K accumulators using weight and activation scales, applies RoPE at each position via `verilm_core::rope::apply_rope_{q,k}`, requantizes, and replays attention in the correct post-RoPE space. Current state: toy-model replay (raw requantize, no RoPE) is implemented and tested; production models with RoPE still use the approximate path.
+74. [ ] Replay attention for the opened token in deep-prefix audits, done when deep-prefix mode replays `QKV -> a` for the main opened token as well as prefix tokens, using the already co-opened prefix KV cache on the kept RoPE-aware path.
+75. [ ] Add explicit GPU smoke tests for the current attention-replay coverage, done when maintained GPU tests exercise token-0 attention replay and the kept deep-prefix attention path on the current canonical verifier.
 66. [ ] Define verifier-key distribution and pinning, done when clients have one canonical procedure for trusted key provenance, key hash/version pinning, historical key lookup, and fail-closed handling of unknown verifier keys.
 6. [ ] Handle verifier-key rotation explicitly, done when key versions are tracked and old receipts remain auditable with the correct historical key.
 5. [ ] Use verifier-secret randomness in deep-audit batching, done when any deep-audit batching or compression uses verifier-only randomness that the prover cannot predict before commitment.
 7. [ ] Run an explicit hidden-trust-assumptions review, done when exact, approximate, statistical, fail-closed, and out-of-scope trust assumptions are enumerated and checked against the code and claims.
-71. [ ] Make deep-prefix attention replay RoPE-aware for production models, done when the deep-prefix attention replay path dequantizes Q/K accumulators using weight and activation scales, applies RoPE at each position via `verilm_core::rope::apply_rope_{q,k}`, requantizes, and replays attention in the correct post-RoPE space. Current state: toy-model replay (raw requantize, no RoPE) is implemented and tested; production models with RoPE still use the approximate path.
 72. [ ] Add bounded KV-cache commitment for arbitrary-token attention replay, done when the protocol supports committed/openable prior-token KV data so that any single token's attention can be replayed in routine audits, not just token 0 or deep-prefix co-opened tokens. This is a protocol extension requiring new wire format fields and prover-side KV provenance.
 65. [ ] Remove the legacy verifier after a soak period, done when `verify_v4_legacy` and any rollback-only verifier scaffolding are deleted and the canonical verifier is the only maintained trusted verification path.
 3. [ ] Add at least one independent non-Rust verifier consumer, done when some non-Rust implementation can consume the golden vectors and reproduce expected verification results.
@@ -40,6 +43,7 @@ Current release critical path:
 ## Benchmarks / Performance
 
 16. [ ] Define a stable benchmark protocol, done when workload corpus, model/settings, warmup policy, hardware class, remote environment, and reporting format are fixed for milestone comparisons.
+28. [ ] Measure the attention corridor empirically, done when the FP16/BF16-versus-replay disagreement envelope is measured on real workloads and turned into an evidence-based acceptance threshold.
 17. [ ] Record benchmark baselines before and after each runtime-affecting milestone, done when every change to the live sampler, final-token boundary, deep-audit path, sync/capture behavior, or retained-state layout has a before/after benchmark entry.
 18. [ ] Run periodic remote-GPU benchmark checkpoints, done when milestone comparisons are repeated on the same representative remote GPU class rather than relying only on local numbers.
 19. [ ] Treat unexplained regressions as blockers, done when each regression is either explained or explicitly recorded as an accepted protocol-strengthening tradeoff before further work proceeds.
@@ -48,7 +52,6 @@ Current release critical path:
 26. [ ] Benchmark the canonical exact-prefix path, done when greedy cost, sampled cost, routine-versus-exact-prefix audit cost, exact-prefix premium, retained-state size, payload size, and verifier time are all measured on the reference environment.
 22. [ ] Inspect the binary payload by field, done when the receipt and audit format is measured field-by-field rather than only as a total size.
 27. [ ] Measure retained-state memory and audit bandwidth, done when per-token storage cost and audit-transfer cost are quantified for the target deployments.
-28. [ ] Measure the attention corridor empirically, done when the FP16/BF16-versus-replay disagreement envelope is measured on real workloads and turned into an evidence-based acceptance threshold.
 29. [ ] Measure real audit-window storage costs, done when RAM, NVMe, and network storage costs for realistic retention windows are quantified.
 30. [ ] Calibrate routine-audit detection probabilities, done when routine-audit sampling rates are tied to measured or modeled detection probabilities rather than informal intuition.
 31. [ ] Benchmark batch verification, done when verifier throughput for batched audits is measured rather than assumed.
