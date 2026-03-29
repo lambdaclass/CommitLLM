@@ -2,6 +2,18 @@
 
 This changelog tracks the kept canonical VeriLM protocol and its major implementation milestones.
 
+## 2026-03-29
+
+### Added
+
+- Client-side verification wrapper (`verilm_verify::client`) for protocol-level checks that sit outside the canonical verifier's trust boundary. `verify_challenged_binary()` and `verify_challenged_response()` now bind an audit to the verifier-issued `AuditChallenge` by checking the challenged `token_index` and exact opened `layer_indices`, using stable `FailureCode` values (`ChallengeTokenMismatch`, `ChallengeLayerMismatch`) rather than message parsing. Tests cover pass, wrong token, wrong layers, canonical-failure propagation, combined failures, and the baseline no-wrapper path.
+
+### Changed
+
+- The canonical verifier is now the trusted public verification path. Public `verify_v4()` / `verify_v4_full()` entrypoints delegate to the canonical verifier; the old monolithic verifier remains only for differential testing and rollback during the freeze-out period.
+- The canonical verifier was cleaned up into a small explicit pipeline: `Ctx::new()` owns precomputed facts, `run()` is the orchestrator, typed phase state (`StructuralState`, `SpecState`, `BridgeState`) wires the phases together, and the bridge path is split into named subchecks instead of transitional branch soup. The trust boundary is now explicit: `canonical` verifies proof correctness, while `client` handles external challenge/receipt protocol checks.
+- Retained-state schema trimmed to irreducible fields only. `RetainedLayerState` now commits only `a` and `scale_a`; derivable replay scales (`scale_x_attn`, `scale_x_ffn`, `scale_h`) moved to `ShellLayerOpening`, the retained hash domain bumped to `vi-retained-v2`, prover-side `CapturedLayerScales` carries those values between commit and open, and frozen fixtures / SHA-256 pins were regenerated. Tampering any revealed replay scale is caught by the dependent bridge/Freivalds equations. This closes roadmap `#2`.
+
 ## 2026-03-28
 
 ### Fixed
