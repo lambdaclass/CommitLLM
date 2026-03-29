@@ -523,6 +523,7 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
 
     let config = cfg;
 
+    let rope_aware_replay = !quantization_scales.is_empty();
     Ok(VerifierKey {
         version: 1,
         config,
@@ -546,7 +547,7 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         quant_family: None,
         scale_derivation: None,
         quant_block_size: None,
-        rope_aware_replay: false,
+        rope_aware_replay,
     })
 }
 
