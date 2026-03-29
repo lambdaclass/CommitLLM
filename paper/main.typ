@@ -40,7 +40,7 @@
         VeriLM: A Commit-and-Audit Protocol for\ Open-Weight LLM Inference
       ]
       #v(0.8em)
-      #text(size: 10pt)[Federico Carrone, Diego Kingston, Mariano Nicolini, Pedro Fontana, Manuel Puebla \ LambdaClass]
+      #text(size: 10pt)[Federico Carrone, Diego Kingston, Mariano Nicolini, Pedro Fontana, Manuel Puebla, Mauro Toscano \ LambdaClass]
       #v(0.3em)
       #text(size: 9pt, style: "italic")[Preprint]
       #v(0.8em)
