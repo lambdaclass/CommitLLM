@@ -27,6 +27,7 @@ image = (
         "PATH": "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
         "VERILM_CAPTURE": "1",
+        "VERILM_PACKED_COMMIT": "0",  # Use unpacked path for x_attn capture
     })
     .pip_install("vllm>=0.8", "torch", "numpy", "fastapi", "maturin")
     .add_local_dir("sidecar", remote_path="/opt/verilm", copy=True)
@@ -105,11 +106,90 @@ DECODE_CONFIGS = [
 ]
 
 
+def _measure_one(server, wl, dc, full_layers, key_json, model_id, corridor_mode, buf):
+    """Run one workload/decode_config and return results for all token positions."""
+    import json
+
+    params_kw = {"max_tokens": wl["max_tokens"], "temperature": dc["temperature"]}
+    if "top_k" in dc:
+        params_kw["top_k"] = dc["top_k"]
+
+    results = []
+    chat_r = server.chat(prompt=wl["prompt"], **params_kw)
+    n_tokens = chat_r["n_tokens"]
+    request_id = chat_r["request_id"]
+
+    entry = server._audit_store.get(request_id)
+    if entry is None:
+        print(f"  WARN: no audit entry for {request_id}, skipping")
+        return results
+    entry["state"].deep_prefix = True
+
+    positions = sorted(set([
+        1,
+        max(1, n_tokens // 2),
+        max(1, n_tokens - 1),
+    ]))
+
+    for pos in positions:
+        if pos >= n_tokens:
+            continue
+        try:
+            audit_binary = server.audit(
+                request_id=request_id,
+                token_index=pos,
+                layer_indices=full_layers,
+                tier="full",
+                binary=True,
+            )
+        except KeyError:
+            chat_r2 = server.chat(prompt=wl["prompt"], **params_kw)
+            entry2 = server._audit_store.get(chat_r2["request_id"])
+            if entry2:
+                entry2["state"].deep_prefix = True
+            audit_binary = server.audit(
+                request_id=chat_r2["request_id"],
+                token_index=pos,
+                layer_indices=full_layers,
+                tier="full",
+                binary=True,
+            )
+
+        import verilm_rs
+        report_json = verilm_rs.measure_corridor(audit_binary, key_json)
+        report = json.loads(report_json)
+
+        result_entry = {
+            "model": model_id,
+            "corridor_mode": corridor_mode,
+            "workload": wl["name"],
+            "decode_config": dc["name"],
+            "max_tokens": wl["max_tokens"],
+            "n_tokens": n_tokens,
+            "token_position": pos,
+            "global_linf": report["global_linf"],
+            "n_measurements": len(report["measurements"]),
+            "per_layer_max_linf": report["per_layer_max_linf"],
+            "measurements": report["measurements"],
+        }
+        results.append(result_entry)
+
+        agg_eq = [m["frac_eq"] for m in report["measurements"]]
+        agg_le1 = [m["frac_le_1"] for m in report["measurements"]]
+        avg_eq = sum(agg_eq) / len(agg_eq) if agg_eq else 0
+        avg_le1 = sum(agg_le1) / len(agg_le1) if agg_le1 else 0
+        print(
+            f"  [{corridor_mode:>8}] pos={pos:4d}  L-inf={report['global_linf']:3d}  "
+            f"frac_eq={avg_eq:.4f}  frac≤1={avg_le1:.4f}"
+        )
+
+    return results
+
+
 def _run_model(model_id: str):
     import hashlib
     import json
     import os
-    import time
 
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
@@ -141,115 +221,56 @@ def _run_model(model_id: str):
     for _ in range(3):
         server.chat(prompt="Hello", max_tokens=8)
 
-    # Generate key
     key_seed = hashlib.sha256(model_id.encode()).digest()
     key_json = verilm_rs.generate_key(model_dir, key_seed)
     full_layers = list(range(n_layers))
 
     all_results = []
 
-    for wl in WORKLOADS:
-        for dc in DECODE_CONFIGS:
+    # ── Phase 1: Precision corridor (GPU x_attn → accurate QKV accumulators) ──
+    print(f"\n{'='*70}")
+    print("PHASE 1: Precision corridor (captured x_attn)")
+    print(f"{'='*70}")
+    buf._capture_x_attn = True
+    for wl in WORKLOADS[:3]:  # short, medium, long only
+        for dc in DECODE_CONFIGS[:1]:  # greedy only for precision
             label = f"{wl['name']}/{dc['name']}"
             print(f"\n--- {label} (max_tokens={wl['max_tokens']}) ---")
-
-            params_kw = {"max_tokens": wl["max_tokens"], "temperature": dc["temperature"]}
-            if "top_k" in dc:
-                params_kw["top_k"] = dc["top_k"]
-
-            # Generate with capture
-            chat_r = server.chat(prompt=wl["prompt"], **params_kw)
-            n_tokens = chat_r["n_tokens"]
-            request_id = chat_r["request_id"]
-            print(f"  Generated {n_tokens} tokens")
-
-            # Enable deep_prefix on the audit state
-            entry = server._audit_store.get(request_id)
-            if entry is None:
-                print(f"  WARN: no audit entry for {request_id}, skipping")
-                continue
-            entry["state"].deep_prefix = True
-
-            # Pick token positions: token 1, mid, last
-            positions = sorted(set([
-                1,
-                max(1, n_tokens // 2),
-                max(1, n_tokens - 1),
-            ]))
-
-            for pos in positions:
-                if pos >= n_tokens:
-                    continue
-                try:
-                    audit_binary = server.audit(
-                        request_id=request_id,
-                        token_index=pos,
-                        layer_indices=full_layers,
-                        tier="full",
-                        binary=True,
-                    )
-                except KeyError:
-                    # Re-generate for this position (audit store is single-use per token)
-                    chat_r2 = server.chat(prompt=wl["prompt"], **params_kw)
-                    entry2 = server._audit_store.get(chat_r2["request_id"])
-                    if entry2:
-                        entry2["state"].deep_prefix = True
-                    audit_binary = server.audit(
-                        request_id=chat_r2["request_id"],
-                        token_index=pos,
-                        layer_indices=full_layers,
-                        tier="full",
-                        binary=True,
-                    )
-
-                report_json = verilm_rs.measure_corridor(audit_binary, key_json)
-                report = json.loads(report_json)
-
-                result_entry = {
-                    "model": model_id,
-                    "workload": wl["name"],
-                    "decode_config": dc["name"],
-                    "max_tokens": wl["max_tokens"],
-                    "n_tokens": n_tokens,
-                    "token_position": pos,
-                    "global_linf": report["global_linf"],
-                    "n_measurements": len(report["measurements"]),
-                    "per_layer_max_linf": report["per_layer_max_linf"],
-                    "measurements": report["measurements"],
-                }
-                all_results.append(result_entry)
-
-                # Summary line
-                agg_frac_eq = []
-                agg_frac_le_1 = []
-                agg_frac_le_2 = []
-                for m in report["measurements"]:
-                    agg_frac_eq.append(m["frac_eq"])
-                    agg_frac_le_1.append(m["frac_le_1"])
-                    agg_frac_le_2.append(m["frac_le_2"])
-
-                avg_eq = sum(agg_frac_eq) / len(agg_frac_eq) if agg_frac_eq else 0
-                avg_le1 = sum(agg_frac_le_1) / len(agg_frac_le_1) if agg_frac_le_1 else 0
-                avg_le2 = sum(agg_frac_le_2) / len(agg_frac_le_2) if agg_frac_le_2 else 0
-
-                print(
-                    f"  pos={pos:4d}  L-inf={report['global_linf']:2d}  "
-                    f"frac_eq={avg_eq:.4f}  frac≤1={avg_le1:.4f}  frac≤2={avg_le2:.4f}"
-                )
-
-    # ── Per-layer detail table ──
-    print(f"\n{'='*70}")
-    print("Per-layer detail (last workload, last seed, last position):")
-    print(f"{'Layer':>6}  {'L-inf':>6}  {'mean':>7}  {'p95':>5}  {'frac_eq':>8}  {'frac≤1':>8}  {'frac≤2':>8}  Hist [0,1,2,3,4,5+]")
-    if all_results:
-        last = all_results[-1]
-        for m in last["measurements"]:
-            h = m["histogram"]
-            print(
-                f"  {m['layer']:4d}  {m['linf']:6d}  {m['mean_abs']:7.3f}  {m['p95_abs_diff']:5d}  "
-                f"{m['frac_eq']:8.4f}  {m['frac_le_1']:8.4f}  {m['frac_le_2']:8.4f}  "
-                f"{h}"
+            has_xa = hasattr(buf, '_capture_x_attn') and buf._capture_x_attn
+            print(f"  x_attn capture: {has_xa}")
+            results = _measure_one(
+                server, wl, dc, full_layers, key_json, model_id, "precision", buf,
             )
+            all_results.extend(results)
+
+    # ── Phase 2: Verifier replay corridor (bridge-derived QKV accumulators) ──
+    print(f"\n{'='*70}")
+    print("PHASE 2: Verifier replay corridor (bridge-derived)")
+    print(f"{'='*70}")
+    buf._capture_x_attn = False
+    for wl in WORKLOADS[:3]:  # short, medium, long
+        for dc in DECODE_CONFIGS[:1]:  # greedy only
+            label = f"{wl['name']}/{dc['name']}"
+            print(f"\n--- {label} (max_tokens={wl['max_tokens']}) ---")
+            results = _measure_one(
+                server, wl, dc, full_layers, key_json, model_id, "replay", buf,
+            )
+            all_results.extend(results)
+
+    # ── Summary ──
+    print(f"\n{'='*70}")
+    print("COMPARISON SUMMARY")
+    print(f"{'='*70}")
+    for mode in ["precision", "replay"]:
+        mode_results = [r for r in all_results if r["corridor_mode"] == mode]
+        if mode_results:
+            max_linf = max(r["global_linf"] for r in mode_results)
+            print(f"\n  {mode:>10} corridor: max L-inf = {max_linf}")
+            for r in mode_results:
+                print(
+                    f"    {r['workload']:>8s} pos={r['token_position']:4d}  "
+                    f"L-inf={r['global_linf']:3d}"
+                )
 
     # ── Save structured artifacts ──
     artifact_path = "/tmp/corridor_results.json"

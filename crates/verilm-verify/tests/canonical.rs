@@ -260,7 +260,7 @@ fn build_canonical_audit(
         manifest,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales]);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales], None);
     let response = open_v4(
         &state, 0, &ToyWeights(&model), &cfg, &ws,
         Some(&bridge), None, None, None, false,
@@ -305,7 +305,7 @@ fn build_canonical_audit_with_response(
         manifest,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales]);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales], None);
     let response = open_v4(
         &state, 0, &ToyWeights(&model), &cfg, &ws,
         Some(&bridge), None, None, None, false,
@@ -1501,7 +1501,7 @@ fn build_deep_prefix_audit() -> (
         manifest: Some(&manifest),
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
 
     // Open token 2 with deep_prefix=true
     let proof = verilm_core::merkle::prove(&tree, 30);
@@ -1640,7 +1640,7 @@ fn build_routine_audit_with_fake_a() -> (
         manifest: Some(&manifest),
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
 
     // Open token 1 as routine audit (NOT deep prefix)
     let proof = verilm_core::merkle::prove(&tree, 43);
@@ -1812,7 +1812,7 @@ fn build_deep_prefix_audit_fake_opened_a() -> (
         manifest: Some(&manifest),
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
 
     // Open token 2 with deep_prefix=true
     let proof = verilm_core::merkle::prove(&tree, 30);
@@ -1913,7 +1913,7 @@ fn build_deep_prefix_audit_roped() -> (
         manifest: Some(&manifest),
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
 
     let proof = verilm_core::merkle::prove(&tree, 30);
     let bridge = BridgeParams {
@@ -2023,7 +2023,7 @@ fn build_deep_prefix_audit_roped_fake_a() -> (
         manifest: Some(&manifest),
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
 
     let proof = verilm_core::merkle::prove(&tree, 30);
     let bridge = BridgeParams {

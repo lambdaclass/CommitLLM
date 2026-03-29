@@ -63,6 +63,10 @@ pub struct MinimalBatchState {
     /// Per-token, per-layer bridge replay scales captured from GPU inference.
     /// Not part of the committed state; used at audit time for shell opening.
     pub captured_scales: Vec<Vec<CapturedLayerScales>>,
+    /// Per-token, per-layer captured x_attn_i8 from GPU inference.
+    /// Measurement-only: not committed. Used for precision corridor measurement
+    /// (bypasses bridge re-derivation of x_attn for QKV accumulator computation).
+    pub captured_x_attn: Option<Vec<Vec<Vec<i8>>>>,
 }
 
 /// Per-layer bridge replay scales captured during inference.
@@ -81,6 +85,9 @@ pub struct CapturedLayerScales {
 pub struct MinimalCaptureEntry {
     /// Post-attention INT8 output (W_o input). Extracted from o_proj's x_i8.
     pub a_i8: Vec<i8>,
+    /// QKV projection input (x_attn_i8) captured from GPU.
+    /// Measurement-only: used for precision corridor (bypasses bridge re-derivation).
+    pub x_attn_i8: Option<Vec<i8>>,
     /// Activation scale for QKV projection input.
     pub scale_x_attn: f32,
     /// Activation scale for W_o projection input.
@@ -104,19 +111,27 @@ pub fn build_retained_from_captures(
     captures: &[MinimalCaptureEntry],
     n_layers: usize,
     fwd_batch_sizes: &[usize],
-) -> (Vec<RetainedTokenState>, Vec<Vec<CapturedLayerScales>>) {
+) -> (Vec<RetainedTokenState>, Vec<Vec<CapturedLayerScales>>, Option<Vec<Vec<Vec<i8>>>>) {
     let mut all_retained = Vec::new();
     let mut all_scales = Vec::new();
+    let has_x_attn = captures.first().map_or(false, |c| c.x_attn_i8.is_some());
+    let mut all_x_attn: Vec<Vec<Vec<i8>>> = Vec::new();
     let mut cap_idx = 0;
 
     for &batch_size in fwd_batch_sizes {
         for b in 0..batch_size {
             let mut layers = Vec::with_capacity(n_layers);
             let mut token_scales = Vec::with_capacity(n_layers);
+            let mut token_x_attn = if has_x_attn { Vec::with_capacity(n_layers) } else { Vec::new() };
             for l in 0..n_layers {
                 let entry = &captures[cap_idx + l];
                 let a_dim = entry.a_i8.len() / batch_size;
                 let a = entry.a_i8[b * a_dim..(b + 1) * a_dim].to_vec();
+
+                if let Some(ref xa) = entry.x_attn_i8 {
+                    let x_dim = xa.len() / batch_size;
+                    token_x_attn.push(xa[b * x_dim..(b + 1) * x_dim].to_vec());
+                }
 
                 layers.push(RetainedLayerState {
                     a,
@@ -131,11 +146,15 @@ pub fn build_retained_from_captures(
 
             all_retained.push(RetainedTokenState { layers });
             all_scales.push(token_scales);
+            if has_x_attn {
+                all_x_attn.push(token_x_attn);
+            }
         }
         cap_idx += n_layers;
     }
 
-    (all_retained, all_scales)
+    let x_attn_out = if has_x_attn { Some(all_x_attn) } else { None };
+    (all_retained, all_scales, x_attn_out)
 }
 
 /// V4 commit: retained-state commitment.
@@ -148,6 +167,7 @@ pub fn commit_minimal(
     params: &FullBindingParams,
     final_residuals: Option<Vec<Vec<f32>>>,
     captured_scales: Vec<Vec<CapturedLayerScales>>,
+    captured_x_attn: Option<Vec<Vec<Vec<i8>>>>,
 ) -> (BatchCommitment, MinimalBatchState) {
     let n_tokens = all_retained.len();
     assert_eq!(
@@ -240,6 +260,7 @@ pub fn commit_minimal(
         prompt: params.prompt.to_vec(),
         n_prompt_tokens: params.n_prompt_tokens,
         captured_scales,
+        captured_x_attn,
     };
 
     if let (Some(t0), Some(t_leaf), Some(t_io_chain), Some(t_trees)) =
@@ -690,7 +711,7 @@ pub fn open_v4_packed(
     let token_scales = state.extract_scales(i);
 
     let mut shell = compute_shell_opening(
-        &retained_token, weights, cfg, weight_scales, bridge, layer_filter, &token_scales,
+        &retained_token, weights, cfg, weight_scales, bridge, layer_filter, &token_scales, None,
     );
     shell.final_residual = state.extract_final_residual(i);
 
@@ -738,7 +759,7 @@ pub fn open_v4_packed(
                     };
                     let mut shell_j = compute_shell_opening(
                         &retained_j, weights, cfg, weight_scales,
-                        Some(&bridge_j), layer_filter, &scales_j,
+                        Some(&bridge_j), layer_filter, &scales_j, None,
                     );
                     shell_j.final_residual = state.extract_final_residual(j);
                     prefix_ret.push(retained_j);
@@ -802,6 +823,7 @@ pub fn compute_shell_opening(
     bridge: Option<&BridgeParams>,
     layer_filter: Option<&[usize]>,
     scales: &[CapturedLayerScales],
+    captured_x_attn: Option<&[Vec<i8>]>,
 ) -> ShellTokenOpening {
     // Determine how many layers to compute. For a contiguous prefix filter
     // 0..=L_max we iterate through L_max+1 layers (bridge is sequential).
@@ -833,8 +855,12 @@ pub fn compute_shell_opening(
     for (layer_idx, rs) in retained.layers.iter().enumerate().take(max_layer) {
         let a = &rs.a;
 
-        // QKV: when x_attn is known (full bridge: all layers; toy: layers > 0)
-        let (q, k, v) = if let Some(ref xa) = x_attn {
+        // QKV: use captured x_attn from GPU if available (precision corridor),
+        // otherwise fall back to bridge-derived x_attn.
+        let xa_for_qkv: Option<&[i8]> = captured_x_attn
+            .and_then(|cxa| cxa.get(layer_idx).map(|v| v.as_slice()))
+            .or(x_attn.as_deref());
+        let (q, k, v) = if let Some(xa) = xa_for_qkv {
             (
                 Some(matmul_i32(weights.weight(layer_idx, MatrixType::Wq), xa, cfg.hidden_dim, cfg.hidden_dim)),
                 Some(matmul_i32(weights.weight(layer_idx, MatrixType::Wk), xa, cfg.kv_dim, cfg.hidden_dim)),
@@ -952,9 +978,12 @@ pub fn open_v4(
     deep_prefix: bool,
 ) -> V4AuditResponse {
     let mut response = open_v4_structural(state, token_index);
+    let x_attn_opened = state.captured_x_attn.as_ref()
+        .and_then(|cxa| cxa.get(token_index as usize));
     let mut shell = compute_shell_opening(
         &state.all_retained[token_index as usize], weights, cfg, weight_scales, bridge,
         layer_filter, &state.captured_scales[token_index as usize],
+        x_attn_opened.map(|v| v.as_slice()),
     );
     // Attach captured final residual from GPU inference (if available).
     shell.final_residual = state.final_residuals
@@ -1007,9 +1036,12 @@ pub fn open_v4(
                         initial_residual: &emb_row,
                         embedding_proof: None, // prefix tokens don't carry individual proofs in shell
                     };
+                    let x_attn_j = state.captured_x_attn.as_ref()
+                        .and_then(|cxa| cxa.get(j));
                     let mut shell_j = compute_shell_opening(
                         retained_j, weights, cfg, weight_scales,
                         Some(&bridge_j), layer_filter, &state.captured_scales[j],
+                        x_attn_j.map(|v| v.as_slice()),
                     );
                     shell_j.final_residual = state.final_residuals
                         .as_ref()
@@ -1100,6 +1132,7 @@ mod tests {
             for l in 0..n_layers {
                 captures.push(MinimalCaptureEntry {
                     a_i8: vec![(t * n_layers + l) as i8; hidden],
+                    x_attn_i8: None,
                     scale_x_attn: 0.1 * (l + 1) as f32,
                     scale_a: 0.2 * (l + 1) as f32,
                     scale_x_ffn: 0.3 * (l + 1) as f32,
@@ -1116,7 +1149,7 @@ mod tests {
         let captures = make_minimal_captures(n_layers, 3, 8);
         let fwd_batch_sizes = vec![1, 1, 1];
 
-        let (retained, scales) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+        let (retained, scales, _) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
         assert_eq!(retained.len(), 3);
         assert_eq!(scales.len(), 3);
         assert_eq!(retained[0].layers.len(), n_layers);
@@ -1137,6 +1170,7 @@ mod tests {
         for l in 0..n_layers {
             captures.push(MinimalCaptureEntry {
                 a_i8: vec![(l + 1) as i8; 3 * hidden],
+                x_attn_i8: None,
                 scale_x_attn: 0.1,
                 scale_a: 0.2,
                 scale_x_ffn: 0.3,
@@ -1144,7 +1178,7 @@ mod tests {
             });
         }
         let fwd_batch_sizes = vec![3];
-        let (retained, _scales) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+        let (retained, _scales, _) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
         assert_eq!(retained.len(), 3);
         for t in 0..3 {
             assert_eq!(retained[t].layers.len(), n_layers);
@@ -1157,7 +1191,7 @@ mod tests {
         let n_layers = 2;
         let captures = make_minimal_captures(n_layers, 3, 8);
         let fwd_batch_sizes = vec![1, 1, 1];
-        let (retained, scales) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+        let (retained, scales, _) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
 
         let params = FullBindingParams {
             token_ids: &[100, 200, 300],
@@ -1167,7 +1201,7 @@ mod tests {
             n_prompt_tokens: Some(1),
         };
 
-        let (commitment, state) = commit_minimal(retained, &params, None, scales);
+        let (commitment, state) = commit_minimal(retained, &params, None, scales, None);
 
         assert_eq!(commitment.version, CommitmentVersion::V4);
         assert_eq!(commitment.n_tokens, 3);
@@ -1186,7 +1220,7 @@ mod tests {
         let n_layers = 1;
         let captures = make_minimal_captures(n_layers, 2, 4);
         let fwd_batch_sizes = vec![1, 1];
-        let (retained, scales) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+        let (retained, scales, _) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
 
         let params = FullBindingParams {
             token_ids: &[10, 20],
@@ -1196,7 +1230,7 @@ mod tests {
             n_prompt_tokens: Some(1),
         };
 
-        let (_, state) = commit_minimal(retained.clone(), &params, None, scales);
+        let (_, state) = commit_minimal(retained.clone(), &params, None, scales, None);
 
         // Verify IO chain uses leaf hashes, not ad hoc features.
         let leaf0 = merkle::hash_retained_state_direct(&retained[0]);
@@ -1224,11 +1258,11 @@ mod tests {
             n_prompt_tokens: Some(1),
         };
 
-        let (retained1, scales1) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
-        let (retained2, scales2) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+        let (retained1, scales1, _) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+        let (retained2, scales2, _) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
 
-        let (c1, _) = commit_minimal(retained1, &params, None, scales1);
-        let (c2, _) = commit_minimal(retained2, &params, None, scales2);
+        let (c1, _) = commit_minimal(retained1, &params, None, scales1, None);
+        let (c2, _) = commit_minimal(retained2, &params, None, scales2, None);
 
         assert_eq!(c1.merkle_root, c2.merkle_root);
         assert_eq!(c1.io_root, c2.io_root);
@@ -1239,7 +1273,7 @@ mod tests {
         let n_layers = 2;
         let captures = make_minimal_captures(n_layers, 4, 8);
         let fwd_batch_sizes = vec![1, 1, 1, 1];
-        let (retained, scales) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+        let (retained, scales, _) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
 
         let params = FullBindingParams {
             token_ids: &[10, 20, 30, 40],
@@ -1249,7 +1283,7 @@ mod tests {
             n_prompt_tokens: Some(1),
         };
 
-        let (commitment, state) = commit_minimal(retained, &params, None, scales);
+        let (commitment, state) = commit_minimal(retained, &params, None, scales, None);
 
         // Open token 2 — should include prefix tokens 0, 1.
         let response = open_v4_structural(&state, 2);
@@ -1291,7 +1325,7 @@ mod tests {
         let n_layers = 1;
         let captures = make_minimal_captures(n_layers, 2, 4);
         let fwd_batch_sizes = vec![1, 1];
-        let (retained, captured_scales) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+        let (retained, captured_scales, _) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
 
         let params = FullBindingParams {
             token_ids: &[1, 2],
@@ -1301,7 +1335,7 @@ mod tests {
             n_prompt_tokens: Some(1),
         };
 
-        let (_, state) = commit_minimal(retained, &params, None, captured_scales);
+        let (_, state) = commit_minimal(retained, &params, None, captured_scales, None);
         let response = open_v4_structural(&state, 0);
 
         assert_eq!(response.prefix_leaf_hashes.len(), 0);
@@ -1350,7 +1384,7 @@ mod tests {
 
         // Unpacked path.
         let captures = make_minimal_captures(n_layers, n_tokens, hidden);
-        let (retained, captured_scales) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+        let (retained, captured_scales, _) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
         let params = FullBindingParams {
             token_ids: &[100, 200, 300],
             prompt: b"test prompt",
@@ -1358,7 +1392,7 @@ mod tests {
             manifest: None,
             n_prompt_tokens: Some(1),
         };
-        let (commit_old, state_old) = commit_minimal(retained, &params, None, captured_scales);
+        let (commit_old, state_old) = commit_minimal(retained, &params, None, captured_scales, None);
 
         // Packed path.
         let (packed_a, packed_scales) = make_packed_data(n_layers, n_tokens, hidden, &fwd_batch_sizes);
@@ -1394,6 +1428,7 @@ mod tests {
                 }
                 captures.push(MinimalCaptureEntry {
                     a_i8,
+                    x_attn_i8: None,
                     scale_x_attn: 0.1 * (l + 1) as f32,
                     scale_a: 0.2 * (l + 1) as f32,
                     scale_x_ffn: 0.3 * (l + 1) as f32,
@@ -1402,7 +1437,7 @@ mod tests {
             }
             token_counter += batch_sz;
         }
-        let (retained, captured_scales) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+        let (retained, captured_scales, _) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
 
         let params = FullBindingParams {
             token_ids: &[10, 20, 30, 40, 50],
@@ -1411,7 +1446,7 @@ mod tests {
             manifest: None,
             n_prompt_tokens: Some(1),
         };
-        let (commit_old, state_old) = commit_minimal(retained, &params, None, captured_scales);
+        let (commit_old, state_old) = commit_minimal(retained, &params, None, captured_scales, None);
 
         // Packed path.
         let (packed_a, packed_scales) = make_packed_data(n_layers, n_tokens, hidden, &fwd_batch_sizes);
@@ -1432,7 +1467,7 @@ mod tests {
         let n_tokens = 3;
 
         let captures = make_minimal_captures(n_layers, n_tokens, hidden);
-        let (retained, _scales) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+        let (retained, _scales, _) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
 
         let params = FullBindingParams {
             token_ids: &[1, 2, 3],
@@ -1463,7 +1498,7 @@ mod tests {
         let n_tokens = 3;
 
         let captures = make_minimal_captures(n_layers, n_tokens, hidden);
-        let (retained, scales) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+        let (retained, scales, _) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
 
         let params = FullBindingParams {
             token_ids: &[10, 20, 30],
@@ -1473,7 +1508,7 @@ mod tests {
             n_prompt_tokens: Some(1),
         };
 
-        let (_, state_old) = commit_minimal(retained.clone(), &params, None, scales);
+        let (_, state_old) = commit_minimal(retained.clone(), &params, None, scales, None);
         let (packed_a, packed_scales) = make_packed_data(n_layers, n_tokens, hidden, &fwd_batch_sizes);
         let (_, packed_state) = commit_minimal_packed(
             packed_a, packed_scales, n_layers, hidden, fwd_batch_sizes, &params, None, 0,
@@ -1503,7 +1538,7 @@ mod tests {
 
         // Unpacked path with final residuals.
         let captures = make_minimal_captures(n_layers, n_tokens, hidden);
-        let (retained, scales) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+        let (retained, scales, _) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
         let final_residuals = Some(vec![
             vec![1.0f32, 2.0, 3.0, 4.0],
             vec![5.0f32, 6.0, 7.0, 8.0],
@@ -1516,7 +1551,7 @@ mod tests {
             manifest: None,
             n_prompt_tokens: Some(1),
         };
-        let (commit_old, _) = commit_minimal(retained, &params, final_residuals, scales);
+        let (commit_old, _) = commit_minimal(retained, &params, final_residuals, scales, None);
 
         // Packed path: pack final residuals as contiguous f32 bytes.
         let (packed_a, packed_scales) = make_packed_data(n_layers, n_tokens, hidden, &fwd_batch_sizes);

@@ -513,6 +513,16 @@ impl MinimalBatchStateHandle {
         self.deep_prefix
     }
 
+    /// Check if captured x_attn data is available for precision corridor.
+    fn has_captured_x_attn(&self) -> bool {
+        self.inner.captured_x_attn.is_some()
+    }
+
+    /// Clear captured x_attn data (switches audit to verifier-replay mode).
+    fn clear_captured_x_attn(&mut self) {
+        self.inner.captured_x_attn = None;
+    }
+
     fn commitment_json(&self) -> PyResult<String> {
         serde_json::to_string(&self.commitment)
             .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
@@ -633,6 +643,7 @@ impl MinimalBatchStateHandle {
     weight_provider = None,
     final_residuals = None,
     n_prompt_tokens = None,
+    x_attn_inputs = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn commit_minimal_from_captures(
@@ -647,6 +658,7 @@ fn commit_minimal_from_captures(
     weight_provider: Option<&WeightProvider>,
     final_residuals: Option<&Bound<'_, PyList>>,
     n_prompt_tokens: Option<u32>,
+    x_attn_inputs: Option<&Bound<'_, PyList>>,
 ) -> PyResult<MinimalBatchStateHandle> {
     let scales = extract_f32_vec(scales)?;
     let n_entries = o_proj_inputs.len();
@@ -663,8 +675,18 @@ fn commit_minimal_from_captures(
     for i in 0..n_entries {
         let a_i8 = extract_i8_vec(&o_proj_inputs.get_item(i)?)?;
         let base = i * 4;
+        let x_attn_i8 = if let Some(ref xa_list) = x_attn_inputs {
+            if i < xa_list.len() {
+                Some(extract_i8_vec(&xa_list.get_item(i)?)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         captures.push(verilm_prover::MinimalCaptureEntry {
             a_i8,
+            x_attn_i8,
             scale_x_attn: scales[base],
             scale_a: scales[base + 1],
             scale_x_ffn: scales[base + 2],
@@ -672,7 +694,7 @@ fn commit_minimal_from_captures(
         });
     }
 
-    let (all_retained, captured_scales) = verilm_prover::build_retained_from_captures(
+    let (all_retained, captured_scales, captured_x_attn) = verilm_prover::build_retained_from_captures(
         &captures,
         n_layers,
         &fwd_batch_sizes,
@@ -708,6 +730,7 @@ fn commit_minimal_from_captures(
         },
         final_res,
         captured_scales,
+        captured_x_attn,
     );
 
     Ok(MinimalBatchStateHandle {
@@ -1231,7 +1254,6 @@ fn canonical_sample(
 #[pyclass]
 struct CaptureHook {
     calls_per_fwd: usize,
-    o_proj_idx: usize,
     projs_per_layer: usize,
     call_counter: usize,
     minimal_call_count: usize,
@@ -1245,11 +1267,10 @@ impl CaptureHook {
     fn new(
         calls_per_fwd: usize,
         projs_per_layer: usize,
-        o_proj_idx: usize,
+        #[allow(unused)] o_proj_idx: usize,
     ) -> Self {
         CaptureHook {
             calls_per_fwd,
-            o_proj_idx,
             projs_per_layer,
             call_counter: 0,
             minimal_call_count: 0,
@@ -1258,19 +1279,17 @@ impl CaptureHook {
         }
     }
 
-    /// Record a scale capture. Returns true if this call is an o_proj call
-    /// (caller should do the D2H slab copy for `a`).
-    ///
-    /// scale_a must already be reduced to a scalar tensor (caller handles
-    /// the numel>1 check + .max() in Python — only hits during prefill).
-    fn record(&mut self, scale_a: Py<PyAny>) -> bool {
+    /// Record a scale capture. Returns the projection index within the layer
+    /// (0=qkv, 1=o_proj, 2=gate_up, 3=down). Caller uses this to decide
+    /// which input tensor to capture (o_proj for a_i8, qkv for x_attn_i8).
+    fn record(&mut self, scale_a: Py<PyAny>) -> i32 {
         let idx = self.call_counter % self.calls_per_fwd;
         let proj_idx = idx % self.projs_per_layer;
         self.call_counter += 1;
         self.scales.push(scale_a);
         self.minimal_call_count += 1;
         self.total_captured += 1;
-        proj_idx == self.o_proj_idx
+        proj_idx as i32
     }
 
     /// Drain accumulated scales. Returns (numpy_array, call_count).

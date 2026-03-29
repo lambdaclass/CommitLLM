@@ -89,7 +89,7 @@ fn make_valid_response(
     };
     let n_tok = all_retained.len();
     let all_scales = vec![unit_scales(cfg.n_layers); n_tok];
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
     // Open token 0 (has no prefix).
     let response = open_v4(&state, 0, &ToyWeights(model), cfg, &[], None, None, None, None, false);
     (key, response)
@@ -120,7 +120,7 @@ fn make_valid_response_at(
     };
     let n_tok = all_retained.len();
     let all_scales = vec![unit_scales(cfg.n_layers); n_tok];
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
     let response = open_v4(&state, token_index, &ToyWeights(model), cfg, &[], None, None, None, None, false);
     (key, response)
 }
@@ -961,7 +961,7 @@ fn long_prompt_short_output_pass() {
     };
     let n_tok = all_retained.len();
     let all_scales = vec![unit_scales(cfg.n_layers); n_tok];
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
     // Open the last token (the single generated token).
     let response = open_v4(&state, (n_tokens - 1) as u32, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
 
@@ -998,7 +998,7 @@ fn short_prompt_long_output_pass() {
     };
     let n_tok = all_retained.len();
     let all_scales = vec![unit_scales(cfg.n_layers); n_tok];
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
     // Open a token in the middle of the generated range.
     let mid = (n_tokens / 2) as u32;
     let response = open_v4(&state, mid, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
@@ -1037,7 +1037,7 @@ fn all_prompt_no_generation_boundary() {
     };
     let n_tok = all_retained.len();
     let all_scales = vec![unit_scales(cfg.n_layers); n_tok];
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
 
     // Should pass structural checks — n_prompt_tokens == n_tokens + 1 is the allowed maximum.

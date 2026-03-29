@@ -126,7 +126,7 @@ fn commit_toy(
 ) -> (verilm_core::types::BatchCommitment, verilm_prover::MinimalBatchState) {
     let n_tokens = all_retained.len();
     let scales = vec![unit_scales(n_layers); n_tokens];
-    commit_minimal(all_retained, params, final_residuals, scales)
+    commit_minimal(all_retained, params, final_residuals, scales, None)
 }
 
 // ---------------------------------------------------------------------------
@@ -485,7 +485,7 @@ fn v4_scale_aware_single_token_pass() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![rscales]);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![rscales], None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, None, None, None, None, false);
 
     let report = verify_v4(&key, &response, None);
@@ -511,7 +511,7 @@ fn v4_scale_aware_multi_token_pass() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
     let response = open_v4(&state, 2, &ToyWeights(&model), &cfg, &ws, None, None, None, None, false);
 
     let report = verify_v4(&key, &response, None);
@@ -535,7 +535,7 @@ fn v4_scale_mismatch_detected() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![rscales]);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![rscales], None);
 
     // Prover uses WRONG scales (all 1.0) while verifier has non-trivial scales.
     let wrong_ws: Vec<Vec<f32>> = (0..cfg.n_layers)
@@ -714,7 +714,7 @@ fn v4_full_bridge_single_token_pass() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales]);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales], None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None, None, false);
 
     let report = verify_v4(&key, &response, None);
@@ -762,7 +762,7 @@ fn v4_full_bridge_cross_layer_chain() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
 
     // Open token 2 (token_id=30) — its bridge must match
     let proof = verilm_core::merkle::prove(&tree, 30);
@@ -809,7 +809,7 @@ fn v4_full_bridge_wrong_residual_detected() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()]);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()], None);
     let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None, None, false);
 
     // Tamper: change initial_residual in the shell opening after prover built it.
@@ -862,7 +862,7 @@ fn v4_full_bridge_qkv_layer0() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()]);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()], None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None, None, false);
 
     // Verify shell has QKV at layer 0
@@ -931,7 +931,7 @@ fn v4_embedding_proof_pass() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()]);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()], None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None, None, false);
 
     let report = verify_v4(&key, &response, None);
@@ -973,7 +973,7 @@ fn v4_embedding_proof_tampered_residual_detected() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()]);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()], None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None, None, false);
 
     let report = verify_v4(&key, &response, None);
@@ -1010,7 +1010,7 @@ fn v4_embedding_proof_missing_when_root_present() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()]);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()], None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None, None, false);
 
     let report = verify_v4(&key, &response, None);
@@ -1049,7 +1049,7 @@ fn v4_embedding_proof_wrong_token_id_detected() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()]);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()], None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None, None, false);
 
     let report = verify_v4(&key, &response, None);
@@ -1081,7 +1081,7 @@ fn v4_downgrade_omit_initial_residual_detected() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()]);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()], None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, None, None, None, None, false);
 
     let report = verify_v4(&key, &response, None);
@@ -1117,7 +1117,7 @@ fn v4_unbound_initial_residual_rejected() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()]);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()], None);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None, None, false);
 
     let report = verify_v4(&key, &response, None);
@@ -3591,7 +3591,7 @@ fn v4_rich_prefix_embedding_pass() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
 
     // Open token 2 with full bridge + embedding_lookup for prefix
     let proof = verilm_core::merkle::prove(&lookup.tree, 30);
@@ -3652,7 +3652,7 @@ fn v4_rich_prefix_tampered_embedding_detected() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
 
     let proof = verilm_core::merkle::prove(&lookup.tree, 30);
     let bridge = BridgeParams {
@@ -3706,7 +3706,7 @@ fn v4_compact_prefix_still_works() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
 
     // Open token 2 with full bridge but NO embedding_lookup → compact prefix
     let proof = verilm_core::merkle::prove(&lookup.tree, 30);
@@ -3762,7 +3762,7 @@ fn v4_deep_prefix_pass() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
 
     let proof = verilm_core::merkle::prove(&lookup.tree, 30);
     let bridge = BridgeParams {
@@ -3825,7 +3825,7 @@ fn v4_deep_prefix_tampered_retained_detected() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
 
     let proof = verilm_core::merkle::prove(&lookup.tree, 30);
     let bridge = BridgeParams {
@@ -3878,7 +3878,7 @@ fn v4_deep_prefix_tampered_shell_detected() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
 
     let proof = verilm_core::merkle::prove(&lookup.tree, 30);
     let bridge = BridgeParams {
@@ -3931,7 +3931,7 @@ fn v4_deep_prefix_compact_mode_unaffected() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
 
     let proof = verilm_core::merkle::prove(&lookup.tree, 30);
     let bridge = BridgeParams {
@@ -3983,7 +3983,7 @@ fn v4_deep_prefix_count_mismatch_rejected() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
 
     let proof = verilm_core::merkle::prove(&lookup.tree, 30);
     let bridge = BridgeParams {

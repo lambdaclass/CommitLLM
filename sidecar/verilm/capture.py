@@ -55,6 +55,7 @@ CaptureTuple = Tuple[Optional[int], Optional[str], torch.Tensor, torch.Tensor, t
 
 PROJ_SEQUENCE = ("qkv_proj", "o_proj", "gate_up_proj", "down_proj")
 PROJS_PER_LAYER = len(PROJ_SEQUENCE)
+_QKV_PROJ_IDX = 0  # qkv_proj position in PROJ_SEQUENCE
 _O_PROJ_IDX = 1  # o_proj position in PROJ_SEQUENCE
 
 # Set by configure_layer_count() / configure_from_model() after model loading.
@@ -268,7 +269,9 @@ class CaptureBuffer:
 
         # Minimal-mode dedicated buffers: flat lists instead of tuples.
         self._minimal_o_inputs: List[torch.Tensor] = []
+        self._minimal_x_attn_inputs: List[torch.Tensor] = []
         self._minimal_call_count: int = 0
+        self._capture_x_attn: bool = False  # Enable for precision corridor
 
         # Scale references: GPU tensor refs collected during the wrapper
         # (plain list.append, near-zero overhead). At drain time, we stack
@@ -380,6 +383,7 @@ class CaptureBuffer:
         self._entries = []
         # Also clear minimal-mode buffers (pre-request reset).
         self._minimal_o_inputs = []
+        self._minimal_x_attn_inputs = []
         self._minimal_scales = []
         self._minimal_call_count = 0
         self._pinned_slab_idx = 0
@@ -393,7 +397,7 @@ class CaptureBuffer:
         return entries
 
     def drain_minimal(self):
-        """Drain minimal-mode buffers. Returns (o_inputs, scales, call_count).
+        """Drain minimal-mode buffers. Returns (o_inputs, scales, call_count, x_attn_inputs).
 
         o_inputs: list of CPU tensors, one per o_proj call (n_fwd * n_layers).
                   When pinned slab is active, these are views into contiguous
@@ -401,6 +405,8 @@ class CaptureBuffer:
         scales: numpy float32 array of pre-extracted scale values, one per
                 matmul call. Bulk-transferred from GPU in a single D2H copy.
         call_count: total matmul calls captured (= len(scales)).
+        x_attn_inputs: list of CPU tensors (one per qkv_proj call) if capture_x_attn
+                       is enabled, else empty list.
         """
         if self._transfers_pending:
             self.wait_for_transfers()
@@ -442,10 +448,13 @@ class CaptureBuffer:
                 import numpy as np
                 scales = np.array([], dtype=np.float32)
 
+        x_attn_inputs = self._minimal_x_attn_inputs
+
         self._minimal_o_inputs = []
+        self._minimal_x_attn_inputs = []
         self._minimal_scales = []
         self._minimal_call_count = 0
-        return o_inputs, scales, count
+        return o_inputs, scales, count, x_attn_inputs
 
     def init_pinned_slab(self, hidden_dim: int, capacity_rows: int = 32768):
         """Allocate a pinned CPU slab for o_proj D2H copies.
@@ -627,12 +636,14 @@ def _wrapped_cutlass_scaled_mm(
         buf = _capture_buffer
         if not buf.enabled:
             return output
-        is_o_proj = hook.record(scale_a)
-        if is_o_proj:
+        proj_idx = hook.record(scale_a)
+        if proj_idx == _O_PROJ_IDX:
             if buf._pinned_slab is not None:
                 buf._slab_copy_o_proj(a)
             else:
                 buf._minimal_o_inputs.append(buf.copy_to_cpu(a))
+        elif proj_idx == _QKV_PROJ_IDX and buf._capture_x_attn:
+            buf._minimal_x_attn_inputs.append(buf.copy_to_cpu(a))
         return output
 
     # ── Python fallback (full mode, or Rust hook unavailable) ──
@@ -660,6 +671,8 @@ def _wrapped_cutlass_scaled_mm(
             buf._slab_copy_o_proj(a)
         else:
             buf._minimal_o_inputs.append(buf.copy_to_cpu(a))
+    elif proj_idx == _QKV_PROJ_IDX and buf._capture_x_attn:
+        buf._minimal_x_attn_inputs.append(buf.copy_to_cpu(a))
 
     buf.total_captured += 1
     if buf.total_captured % _log_interval == 0:

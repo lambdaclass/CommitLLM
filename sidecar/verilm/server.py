@@ -610,7 +610,7 @@ class VerifiedInferenceServer:
         all_token_ids = prompt_token_ids + gen_token_ids
         expected_traces = len(all_token_ids) - 1
 
-        o_inputs, scales, call_count = self.buf.drain_minimal()
+        o_inputs, scales, call_count, x_attn_inputs = self.buf.drain_minimal()
 
         if _chat_timers:
             _ct_buf_drain = time.monotonic()
@@ -739,12 +739,19 @@ class VerifiedInferenceServer:
         n_prompt_tokens = len(prompt_token_ids)
 
         use_packed = os.environ.get("VERILM_PACKED_COMMIT", "1") == "1"
-        commit_fn = self._commit_minimal_packed if use_packed else self._commit_minimal
-        state = commit_fn(
-            o_inputs, scales, n_fwd, n_layers, fwd_batch_sizes,
-            all_token_ids, prompt, seed, manifest, final_residuals_raw,
-            n_prompt_tokens,
-        )
+        if use_packed:
+            state = self._commit_minimal_packed(
+                o_inputs, scales, n_fwd, n_layers, fwd_batch_sizes,
+                all_token_ids, prompt, seed, manifest, final_residuals_raw,
+                n_prompt_tokens,
+            )
+        else:
+            state = self._commit_minimal(
+                o_inputs, scales, n_fwd, n_layers, fwd_batch_sizes,
+                all_token_ids, prompt, seed, manifest, final_residuals_raw,
+                n_prompt_tokens,
+                x_attn_inputs=x_attn_inputs if x_attn_inputs else None,
+            )
 
         if _chat_timers:
             _ct_commit = time.monotonic()
@@ -799,7 +806,8 @@ class VerifiedInferenceServer:
 
     def _commit_minimal(self, o_inputs, scales, n_fwd, n_layers,
                          fwd_batch_sizes, all_token_ids, prompt, seed, manifest,
-                         final_residuals_raw=None, n_prompt_tokens=None):
+                         final_residuals_raw=None, n_prompt_tokens=None,
+                         x_attn_inputs=None):
         """V4 retained-state commitment path (no _int_mm, no full traces).
 
         Args:
@@ -807,10 +815,13 @@ class VerifiedInferenceServer:
             scales: numpy float32 array of pre-extracted scale values (one per
                     matmul call, n_fwd * n_layers * 4). Already bulk-transferred
                     from GPU at drain time.
+            x_attn_inputs: optional list of CPU tensors (one per qkv_proj call,
+                    n_fwd * n_layers). Used for precision corridor measurement.
         """
         import verilm_rs
 
         o_proj_inputs = [inp.numpy() for inp in o_inputs]
+        x_attn_np = [inp.numpy() for inp in x_attn_inputs] if x_attn_inputs else None
 
         # Organize per-token final residuals from per-forward-pass captures.
         # model.norm hook fires once per forward pass with shape (batch_sz, hidden_dim).
@@ -843,6 +854,7 @@ class VerifiedInferenceServer:
             weight_provider=self._weight_provider,
             final_residuals=final_residuals,
             n_prompt_tokens=n_prompt_tokens,
+            x_attn_inputs=x_attn_np,
         )
 
     def _commit_minimal_packed(self, o_inputs, scales, n_fwd, n_layers,
