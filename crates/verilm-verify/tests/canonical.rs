@@ -750,3 +750,4 @@ fn parity_tampered_io_root() {
     response.commitment.io_root[0] ^= 0xFF;
     assert_parity(&key, &response);
 }
+

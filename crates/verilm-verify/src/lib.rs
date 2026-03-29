@@ -6,6 +6,7 @@
 //! consistency by deriving intermediate i8 values from the accumulators.
 
 pub mod canonical;
+pub mod client;
 
 use std::time::{Duration, Instant};
 
@@ -146,6 +147,10 @@ pub enum FailureCode {
     UnsupportedDecodeFeature,
     UnknownEosPolicy,
 
+    // -- Challenge binding --
+    ChallengeTokenMismatch,
+    ChallengeLayerMismatch,
+
     // -- Semantic violation --
     TokenSelectionMismatch,
     ExceedsMaxTokens,
@@ -183,6 +188,7 @@ impl FailureCode {
             | RetainedHashMismatch | IoChainMismatch | IoChainProofFailed
             | SeedMismatch | PromptHashMismatch | ManifestHashMismatch
             | SpecHashMismatch | EmbeddingProofFailed | EmbeddingLeafMismatch
+            | ChallengeTokenMismatch | ChallengeLayerMismatch
                 => FailureCategory::CryptographicBinding,
 
             SpecFieldMismatch => FailureCategory::SpecMismatch,
