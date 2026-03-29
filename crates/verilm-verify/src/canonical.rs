@@ -1292,3 +1292,147 @@ fn reject_feature(st: &mut St, rejected: bool, field: &str, actual: &str, expect
         );
     }
 }
+
+// --- Unit tests for Ctx::new() precomputed fields
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use verilm_core::constants::ModelConfig;
+    use verilm_core::merkle::MerkleProof;
+    use verilm_core::types::{BatchCommitment, RetainedTokenState};
+
+    fn dummy_key() -> VerifierKey {
+        VerifierKey {
+            version: 1,
+            config: ModelConfig::toy(),
+            seed: [0u8; 32],
+            source_dtype: "int8".into(),
+            quantization_scales: vec![],
+            r_vectors: vec![],
+            v_vectors: vec![],
+            wo_norms: vec![],
+            max_v_norm: 0.0,
+            lm_head: None,
+            v_lm_head: None,
+            weight_hash: None,
+            rmsnorm_attn_weights: vec![],
+            rmsnorm_ffn_weights: vec![],
+            weight_scales: vec![],
+            rmsnorm_eps: 1e-5,
+            rope_config_hash: None,
+            embedding_merkle_root: None,
+            final_norm_weights: None,
+            quant_family: None,
+            scale_derivation: None,
+            quant_block_size: None,
+        }
+    }
+
+    fn dummy_response(
+        token_index: u32,
+        n_tokens: u32,
+        commit_n_prompt: Option<u32>,
+        resp_n_prompt: Option<u32>,
+    ) -> V4AuditResponse {
+        V4AuditResponse {
+            token_index,
+            retained: RetainedTokenState { layers: vec![] },
+            merkle_proof: MerkleProof { leaf_index: 0, siblings: vec![] },
+            io_proof: MerkleProof { leaf_index: 0, siblings: vec![] },
+            token_id: 0,
+            prev_io_hash: [0u8; 32],
+            prefix_leaf_hashes: vec![],
+            prefix_merkle_proofs: vec![],
+            prefix_token_ids: vec![],
+            commitment: BatchCommitment {
+                merkle_root: [0u8; 32],
+                io_root: [0u8; 32],
+                n_tokens,
+                manifest_hash: None,
+                input_spec_hash: None,
+                model_spec_hash: None,
+                decode_spec_hash: None,
+                output_spec_hash: None,
+                version: CommitmentVersion::V4,
+                prompt_hash: None,
+                seed_commitment: None,
+                n_prompt_tokens: commit_n_prompt,
+            },
+            revealed_seed: [0u8; 32],
+            shell_opening: None,
+            manifest: None,
+            prompt: None,
+            n_prompt_tokens: resp_n_prompt,
+            output_text: None,
+            prefix_embedding_rows: None,
+            prefix_embedding_proofs: None,
+            prefix_retained: None,
+            prefix_shell_openings: None,
+        }
+    }
+
+    #[test]
+    fn ctx_n_prompt_prefers_commitment() {
+        let key = dummy_key();
+        let r = dummy_response(0, 10, Some(5), Some(3));
+        let ctx = Ctx::new(&key, &r, None, None);
+        assert_eq!(ctx.n_prompt, 5);
+    }
+
+    #[test]
+    fn ctx_n_prompt_falls_back_to_response() {
+        let key = dummy_key();
+        let r = dummy_response(0, 10, None, Some(3));
+        let ctx = Ctx::new(&key, &r, None, None);
+        assert_eq!(ctx.n_prompt, 3);
+    }
+
+    #[test]
+    fn ctx_n_prompt_defaults_to_zero() {
+        let key = dummy_key();
+        let r = dummy_response(0, 10, None, None);
+        let ctx = Ctx::new(&key, &r, None, None);
+        assert_eq!(ctx.n_prompt, 0);
+    }
+
+    #[test]
+    fn ctx_gen_start_from_n_prompt() {
+        let key = dummy_key();
+        let r = dummy_response(0, 10, Some(5), Some(5));
+        let ctx = Ctx::new(&key, &r, None, None);
+        assert_eq!(ctx.gen_start, 4); // 5 - 1
+    }
+
+    #[test]
+    fn ctx_gen_start_saturates_at_zero() {
+        let key = dummy_key();
+        let r = dummy_response(0, 10, Some(0), Some(0));
+        let ctx = Ctx::new(&key, &r, None, None);
+        assert_eq!(ctx.gen_start, 0);
+    }
+
+    #[test]
+    fn ctx_is_last_final_token() {
+        let key = dummy_key();
+        let r = dummy_response(9, 10, Some(1), Some(1));
+        let ctx = Ctx::new(&key, &r, None, None);
+        assert!(ctx.is_last);
+    }
+
+    #[test]
+    fn ctx_is_last_not_final() {
+        let key = dummy_key();
+        let r = dummy_response(5, 10, Some(1), Some(1));
+        let ctx = Ctx::new(&key, &r, None, None);
+        assert!(!ctx.is_last);
+    }
+
+    #[test]
+    fn ctx_is_last_single_token() {
+        let key = dummy_key();
+        let r = dummy_response(0, 1, Some(1), Some(1));
+        let ctx = Ctx::new(&key, &r, None, None);
+        assert!(ctx.is_last);
+    }
+}

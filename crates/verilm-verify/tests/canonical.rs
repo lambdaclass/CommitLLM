@@ -6,8 +6,8 @@ use verilm_core::types::{
 };
 use verilm_prover::{commit_minimal, open_v4, CapturedLayerScales, FullBindingParams};
 use verilm_test_vectors::{generate_key, generate_model, LayerWeights};
-use verilm_verify::canonical::verify_binary;
-use verilm_verify::{verify_v4_legacy, Verdict};
+use verilm_verify::canonical::{verify_binary, verify_response};
+use verilm_verify::{verify_v4_legacy, FailureCode, Verdict};
 
 // ---------------------------------------------------------------------------
 // Shared helpers (same as v4_e2e.rs)
@@ -749,5 +749,197 @@ fn parity_tampered_io_root() {
     let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
     response.commitment.io_root[0] ^= 0xFF;
     assert_parity(&key, &response);
+}
+
+// ---------------------------------------------------------------------------
+// Phase-targeted tests
+//
+// Each test exercises a specific check within a named phase by tampering
+// exactly one field of a valid audit, then asserting the expected FailureCode.
+// ---------------------------------------------------------------------------
+
+// Phase 1: Structural — IO chain replay
+
+#[test]
+fn phase1_io_chain_tampered_rejected() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    response.prev_io_hash[0] ^= 0xFF;
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::IoChainMismatch),
+        "should have IoChainMismatch: {:?}", report.failures,
+    );
+}
+
+// Phase 1: Structural — n_prompt_tokens mismatch
+
+#[test]
+fn phase1_n_prompt_tokens_mismatch_rejected() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    // Set response n_prompt_tokens to differ from commitment
+    response.n_prompt_tokens = Some(response.commitment.n_prompt_tokens.unwrap_or(1) + 99);
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::NPromptTokensMismatch),
+        "should have NPromptTokensMismatch: {:?}", report.failures,
+    );
+}
+
+// Phase 1: Structural — missing seed commitment
+
+#[test]
+fn phase1_missing_seed_commitment_rejected() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    response.commitment.seed_commitment = None;
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::MissingSeedCommitment),
+        "should have MissingSeedCommitment: {:?}", report.failures,
+    );
+}
+
+// Phase 1: Structural — prompt hash binding
+
+#[test]
+fn phase1_prompt_hash_mismatch_rejected() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    response.prompt = Some(b"tampered".to_vec());
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::PromptHashMismatch),
+        "should have PromptHashMismatch: {:?}", report.failures,
+    );
+}
+
+// Phase 1: Structural — prefix count
+
+#[test]
+fn phase1_prefix_count_mismatch_rejected() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    // token_index=0 expects 0 prefix entries; inject a spurious set so
+    // check_io_chain can iterate without panic, but count mismatches.
+    response.prefix_leaf_hashes.push([0u8; 32]);
+    response.prefix_token_ids.push(0);
+    response.prefix_merkle_proofs.push(
+        verilm_core::merkle::MerkleProof { leaf_index: 0, siblings: vec![] },
+    );
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::PrefixTokenCountMismatch),
+        "should have PrefixTokenCountMismatch: {:?}", report.failures,
+    );
+}
+
+// Phase 1: Structural — Merkle proof tampered
+
+#[test]
+fn phase1_merkle_proof_tampered_rejected() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    response.commitment.merkle_root[0] ^= 0xFF;
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::MerkleProofFailed),
+        "should have MerkleProofFailed: {:?}", report.failures,
+    );
+}
+
+// Phase 2: Embedding — tampered initial_residual
+
+#[test]
+fn phase2_embedding_leaf_mismatch_rejected() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    if let Some(ref mut shell) = response.shell_opening {
+        if let Some(ref mut ir) = shell.initial_residual {
+            ir[0] += 999.0; // corrupt embedding
+        }
+    }
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::EmbeddingLeafMismatch
+            || f.code == FailureCode::EmbeddingProofFailed),
+        "should have embedding failure: {:?}", report.failures,
+    );
+}
+
+// Phase 3: Specs — manifest hash mismatch
+
+#[test]
+fn phase3_manifest_hash_mismatch_rejected() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    response.commitment.manifest_hash = Some([0xFFu8; 32]);
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::ManifestHashMismatch),
+        "should have ManifestHashMismatch: {:?}", report.failures,
+    );
+}
+
+// Phase 3: Specs — spec hash missing from commitment
+
+#[test]
+fn phase3_missing_spec_hash_rejected() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    response.commitment.input_spec_hash = None;
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::MissingSpecHash),
+        "should have MissingSpecHash: {:?}", report.failures,
+    );
+}
+
+// Phase 5: Bridge — Freivalds on Wq (QKV subcheck)
+
+#[test]
+fn phase5_freivalds_wq_tampered_rejected() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    if let Some(ref mut shell) = response.shell_opening {
+        if let Some(ref mut q) = shell.layers[0].q {
+            q[0] = q[0].wrapping_add(9999);
+        }
+    }
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::FreivaldsFailed
+            && f.context.matrix.as_deref() == Some("Wq")),
+        "should have FreivaldsFailed on Wq: {:?}", report.failures,
+    );
+}
+
+// Phase 5: Bridge — residual chain (attn_out tamper breaks bridge)
+
+#[test]
+fn phase5_bridge_residual_chain_broken() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    if let Some(ref mut shell) = response.shell_opening {
+        shell.layers[0].attn_out[0] = shell.layers[0].attn_out[0].wrapping_add(9999);
+    }
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    // Tampered attn_out breaks the residual chain, causing downstream Freivalds failures
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::FreivaldsFailed),
+        "should have FreivaldsFailed from broken residual chain: {:?}", report.failures,
+    );
 }
 
