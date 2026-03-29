@@ -10,7 +10,7 @@ use verilm_core::constants::{MatrixType, ModelConfig};
 use verilm_core::types::{
     BridgeParams, DeploymentManifest, RetainedLayerState, RetainedTokenState, ShellWeights,
 };
-use verilm_prover::{commit_minimal, open_v4, FullBindingParams};
+use verilm_prover::{commit_minimal, open_v4, CapturedLayerScales, FullBindingParams};
 use verilm_test_vectors::{forward_pass, generate_key, generate_model, LayerWeights};
 
 struct ToyWeights<'a>(&'a [LayerWeights]);
@@ -38,12 +38,13 @@ fn retained_from_traces(traces: &[verilm_core::types::LayerTrace]) -> RetainedTo
             .map(|lt| RetainedLayerState {
                 a: lt.a.clone(),
                 scale_a: lt.scale_a.unwrap_or(1.0),
-                scale_x_attn: lt.scale_x_attn.unwrap_or(1.0),
-                scale_x_ffn: lt.scale_x_ffn.unwrap_or(1.0),
-                scale_h: lt.scale_h.unwrap_or(1.0),
             })
             .collect(),
     }
+}
+
+fn unit_scales(n_layers: usize) -> Vec<CapturedLayerScales> {
+    vec![CapturedLayerScales { scale_x_attn: 1.0, scale_x_ffn: 1.0, scale_h: 1.0 }; n_layers]
 }
 
 // --- Full-bridge helpers (same as canonical.rs tests) ---
@@ -111,7 +112,7 @@ fn full_bridge_forward(
     weight_scales: &[Vec<f32>],
     scales: &[(f32, f32, f32, f32)],
     eps: f64,
-) -> RetainedTokenState {
+) -> (RetainedTokenState, Vec<CapturedLayerScales>) {
     use verilm_core::matmul::matmul_i32;
     use verilm_core::rmsnorm::{
         bridge_residual_rmsnorm, dequant_add_residual, quantize_f64_to_i8, rmsnorm_f64_input,
@@ -119,6 +120,7 @@ fn full_bridge_forward(
 
     let mut residual: Vec<f64> = initial_residual.iter().map(|&v| v as f64).collect();
     let mut layers = Vec::new();
+    let mut captured_scales = Vec::new();
     let heads_per_kv = cfg.n_q_heads / cfg.n_kv_heads;
 
     for (l, lw) in model.iter().enumerate() {
@@ -163,10 +165,11 @@ fn full_bridge_forward(
             dequant_add_residual(&ffn_out, ws(MatrixType::Wd), scale_h, &mut residual);
         }
 
-        layers.push(RetainedLayerState { a, scale_a, scale_x_attn, scale_x_ffn, scale_h });
+        layers.push(RetainedLayerState { a, scale_a });
+        captured_scales.push(CapturedLayerScales { scale_x_attn, scale_x_ffn, scale_h });
     }
 
-    RetainedTokenState { layers }
+    (RetainedTokenState { layers }, captured_scales)
 }
 
 fn setup_embedding_tree(
@@ -263,7 +266,7 @@ fn generate_frozen_fixtures() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)]);
     let response = open_v4(
         &state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false,
     );
@@ -288,7 +291,7 @@ fn generate_frozen_fixtures() {
     let (tree, root) = setup_embedding_tree(&initial_residual, token_id, 128);
     key_fb.embedding_merkle_root = Some(root);
 
-    let retained_fb = full_bridge_forward(
+    let (retained_fb, captured_scales_fb) = full_bridge_forward(
         &cfg_fb, &model_fb, &initial_residual, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
     );
 
@@ -309,7 +312,7 @@ fn generate_frozen_fixtures() {
         manifest: Some(&manifest),
         n_prompt_tokens: Some(1),
     };
-    let (_commitment_fb, state_fb) = commit_minimal(vec![retained_fb], &params_fb, None);
+    let (_commitment_fb, state_fb) = commit_minimal(vec![retained_fb], &params_fb, None, vec![captured_scales_fb]);
     let response_fb = open_v4(
         &state_fb, 0, &ToyWeights(&model_fb), &cfg_fb, &ws,
         Some(&bridge), None, None, None, false,

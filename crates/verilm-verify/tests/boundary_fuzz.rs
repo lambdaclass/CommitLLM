@@ -16,7 +16,7 @@ use verilm_core::serialize;
 use verilm_core::types::{
     DeploymentManifest, RetainedLayerState, RetainedTokenState, V4AuditResponse,
 };
-use verilm_prover::{commit_minimal, open_v4, FullBindingParams};
+use verilm_prover::{commit_minimal, open_v4, CapturedLayerScales, FullBindingParams};
 use verilm_test_vectors::{forward_pass, generate_key, generate_model, LayerWeights};
 use verilm_verify::{verify_v4_legacy, AuditCoverage, FailureCategory, FailureCode, Verdict};
 
@@ -56,12 +56,13 @@ fn retained_from_traces(traces: &[verilm_core::types::LayerTrace]) -> RetainedTo
             .map(|lt| RetainedLayerState {
                 a: lt.a.clone(),
                 scale_a: lt.scale_a.unwrap_or(1.0),
-                scale_x_attn: lt.scale_x_attn.unwrap_or(1.0),
-                scale_x_ffn: lt.scale_x_ffn.unwrap_or(1.0),
-                scale_h: lt.scale_h.unwrap_or(1.0),
             })
             .collect(),
     }
+}
+
+fn unit_scales(n_layers: usize) -> Vec<CapturedLayerScales> {
+    vec![CapturedLayerScales { scale_x_attn: 1.0, scale_x_ffn: 1.0, scale_h: 1.0 }; n_layers]
 }
 
 /// Build a valid V4AuditResponse via the prover, ready for mutation.
@@ -86,7 +87,9 @@ fn make_valid_response(
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None);
+    let n_tok = all_retained.len();
+    let all_scales = vec![unit_scales(cfg.n_layers); n_tok];
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
     // Open token 0 (has no prefix).
     let response = open_v4(&state, 0, &ToyWeights(model), cfg, &[], None, None, None, None, false);
     (key, response)
@@ -115,7 +118,9 @@ fn make_valid_response_at(
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None);
+    let n_tok = all_retained.len();
+    let all_scales = vec![unit_scales(cfg.n_layers); n_tok];
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
     let response = open_v4(&state, token_index, &ToyWeights(model), cfg, &[], None, None, None, None, false);
     (key, response)
 }
@@ -954,7 +959,9 @@ fn long_prompt_short_output_pass() {
         manifest: None,
         n_prompt_tokens: Some(n_prompt),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None);
+    let n_tok = all_retained.len();
+    let all_scales = vec![unit_scales(cfg.n_layers); n_tok];
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
     // Open the last token (the single generated token).
     let response = open_v4(&state, (n_tokens - 1) as u32, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
 
@@ -989,7 +996,9 @@ fn short_prompt_long_output_pass() {
         manifest: None,
         n_prompt_tokens: Some(n_prompt),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None);
+    let n_tok = all_retained.len();
+    let all_scales = vec![unit_scales(cfg.n_layers); n_tok];
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
     // Open a token in the middle of the generated range.
     let mid = (n_tokens / 2) as u32;
     let response = open_v4(&state, mid, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
@@ -1026,7 +1035,9 @@ fn all_prompt_no_generation_boundary() {
         manifest: None,
         n_prompt_tokens: Some(n_prompt),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None);
+    let n_tok = all_retained.len();
+    let all_scales = vec![unit_scales(cfg.n_layers); n_tok];
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
     let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
 
     // Should pass structural checks — n_prompt_tokens == n_tokens + 1 is the allowed maximum.

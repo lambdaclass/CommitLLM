@@ -4,7 +4,7 @@ use verilm_core::constants::{MatrixType, ModelConfig};
 use verilm_core::types::{
     BridgeParams, DeploymentManifest, RetainedLayerState, RetainedTokenState, ShellWeights,
 };
-use verilm_prover::{commit_minimal, open_v4, FullBindingParams};
+use verilm_prover::{commit_minimal, open_v4, CapturedLayerScales, FullBindingParams};
 use verilm_test_vectors::{generate_key, generate_model, LayerWeights};
 use verilm_verify::canonical::verify_binary;
 use verilm_verify::{verify_v4_legacy, Verdict};
@@ -95,7 +95,7 @@ fn full_bridge_forward(
     weight_scales: &[Vec<f32>],
     scales: &[(f32, f32, f32, f32)],
     eps: f64,
-) -> RetainedTokenState {
+) -> (RetainedTokenState, Vec<CapturedLayerScales>) {
     use verilm_core::matmul::matmul_i32;
     use verilm_core::rmsnorm::{
         bridge_residual_rmsnorm, dequant_add_residual, quantize_f64_to_i8, rmsnorm_f64_input,
@@ -103,6 +103,7 @@ fn full_bridge_forward(
 
     let mut residual: Vec<f64> = initial_residual.iter().map(|&v| v as f64).collect();
     let mut layers = Vec::new();
+    let mut captured_scales = Vec::new();
     let heads_per_kv = cfg.n_q_heads / cfg.n_kv_heads;
 
     for (l, lw) in model.iter().enumerate() {
@@ -149,10 +150,11 @@ fn full_bridge_forward(
             dequant_add_residual(&ffn_out, ws(MatrixType::Wd), scale_h, &mut residual);
         }
 
-        layers.push(RetainedLayerState { a, scale_a, scale_x_attn, scale_x_ffn, scale_h });
+        layers.push(RetainedLayerState { a, scale_a });
+        captured_scales.push(CapturedLayerScales { scale_x_attn, scale_x_ffn, scale_h });
     }
 
-    RetainedTokenState { layers }
+    (RetainedTokenState { layers }, captured_scales)
 }
 
 fn setup_embedding_tree(
@@ -237,7 +239,7 @@ fn build_canonical_audit(
     let (tree, root) = setup_embedding_tree(&initial_residual, token_id, 128);
     key.embedding_merkle_root = Some(root);
 
-    let retained = full_bridge_forward(
+    let (retained, captured_scales) = full_bridge_forward(
         &cfg, &model, &initial_residual, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
     );
 
@@ -257,7 +259,7 @@ fn build_canonical_audit(
         manifest,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales]);
     let response = open_v4(
         &state, 0, &ToyWeights(&model), &cfg, &ws,
         Some(&bridge), None, None, None, false,
@@ -282,7 +284,7 @@ fn build_canonical_audit_with_response(
     let (tree, root) = setup_embedding_tree(&initial_residual, token_id, 128);
     key.embedding_merkle_root = Some(root);
 
-    let retained = full_bridge_forward(
+    let (retained, captured_scales) = full_bridge_forward(
         &cfg, &model, &initial_residual, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
     );
 
@@ -302,7 +304,7 @@ fn build_canonical_audit_with_response(
         manifest,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales]);
     let response = open_v4(
         &state, 0, &ToyWeights(&model), &cfg, &ws,
         Some(&bridge), None, None, None, false,
@@ -455,6 +457,60 @@ fn canonical_tampered_embedding_detected() {
     assert!(report.failures.iter().any(|f| {
         f.code == verilm_verify::FailureCode::EmbeddingProofFailed
     }));
+}
+
+// ---------------------------------------------------------------------------
+// Revealed-scale tamper tests (#2 security: wrong scale → wrong quantization
+// → bridge/Freivalds mismatch → rejection)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn canonical_tampered_revealed_scale_x_attn_rejected() {
+    let (key, mut response) = build_canonical_audit_with_response(None);
+    let shell = response.shell_opening.as_mut().unwrap();
+    shell.layers[0].scale_x_attn *= 2.0; // wrong QKV input quantization
+    let binary = to_binary(&response);
+    let report = verify_binary(&key, &binary, None, None).unwrap();
+    assert_eq!(report.verdict, Verdict::Fail,
+        "tampered scale_x_attn must cause rejection via bridge equations");
+    assert!(report.failures.iter().any(|f| f.message.contains("Freivalds")),
+        "rejection should come from Freivalds mismatch, got: {:?}", report.failures);
+}
+
+#[test]
+fn canonical_tampered_revealed_scale_x_ffn_rejected() {
+    let (key, mut response) = build_canonical_audit_with_response(None);
+    let shell = response.shell_opening.as_mut().unwrap();
+    shell.layers[0].scale_x_ffn *= 2.0; // wrong gate_up input quantization
+    let binary = to_binary(&response);
+    let report = verify_binary(&key, &binary, None, None).unwrap();
+    assert_eq!(report.verdict, Verdict::Fail,
+        "tampered scale_x_ffn must cause rejection via bridge equations");
+    assert!(report.failures.iter().any(|f| f.message.contains("Freivalds")),
+        "rejection should come from Freivalds mismatch, got: {:?}", report.failures);
+}
+
+#[test]
+fn canonical_tampered_revealed_scale_h_rejected() {
+    let (key, mut response) = build_canonical_audit_with_response(None);
+    let shell = response.shell_opening.as_mut().unwrap();
+    shell.layers[0].scale_h *= 2.0; // wrong down projection input quantization
+    let binary = to_binary(&response);
+    let report = verify_binary(&key, &binary, None, None).unwrap();
+    assert_eq!(report.verdict, Verdict::Fail,
+        "tampered scale_h must cause rejection via bridge equations");
+    assert!(report.failures.iter().any(|f| f.message.contains("Freivalds")),
+        "rejection should come from Freivalds mismatch, got: {:?}", report.failures);
+}
+
+#[test]
+fn canonical_correct_revealed_scales_pass() {
+    // Confirm the clean path passes with scales in the shell opening.
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, binary) = build_canonical_audit(Some(&manifest));
+    let report = verify_binary(&key, &binary, None, None).unwrap();
+    assert_eq!(report.verdict, Verdict::Pass,
+        "correct revealed scales must pass: {:?}", report.failures);
 }
 
 // ---------------------------------------------------------------------------

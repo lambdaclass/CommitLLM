@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use verilm_core::constants::{MatrixType, ModelConfig};
 use verilm_core::types::{BridgeParams, RetainedLayerState, RetainedTokenState, ShellWeights};
-use verilm_prover::{commit_minimal, open_v4, FullBindingParams};
+use verilm_prover::{commit_minimal, open_v4, CapturedLayerScales, FullBindingParams};
 use verilm_test_vectors::{forward_pass_autoregressive, generate_key, generate_model, LayerWeights};
 use verilm_verify::{verify_v4_legacy, verify_v4_with_weights, Verdict};
 
@@ -92,12 +92,13 @@ fn full_bridge_forward(
     cfg: &ModelConfig, model: &[LayerWeights], initial_residual: &[f32],
     rmsnorm_attn: &[Vec<f32>], rmsnorm_ffn: &[Vec<f32>],
     weight_scales: &[Vec<f32>], scales: &[(f32, f32, f32, f32)], eps: f64,
-) -> RetainedTokenState {
+) -> (RetainedTokenState, Vec<CapturedLayerScales>) {
     use verilm_core::matmul::matmul_i32;
     use verilm_core::rmsnorm::{bridge_residual_rmsnorm, dequant_add_residual, rmsnorm_f64_input, quantize_f64_to_i8};
 
     let mut residual: Vec<f64> = initial_residual.iter().map(|&v| v as f64).collect();
     let mut layers = Vec::new();
+    let mut captured_scales = Vec::new();
     let heads_per_kv = cfg.n_q_heads / cfg.n_kv_heads;
 
     for (l, lw) in model.iter().enumerate() {
@@ -137,9 +138,10 @@ fn full_bridge_forward(
             dequant_add_residual(&ffn_out, ws(MatrixType::Wd), scale_h, &mut residual);
         }
 
-        layers.push(RetainedLayerState { a, scale_a, scale_x_attn, scale_x_ffn, scale_h });
+        layers.push(RetainedLayerState { a, scale_a });
+        captured_scales.push(CapturedLayerScales { scale_x_attn, scale_x_ffn, scale_h });
     }
-    RetainedTokenState { layers }
+    (RetainedTokenState { layers }, captured_scales)
 }
 
 fn setup_embedding_tree(ir: &[f32], token_id: u32, n_vocab: usize)
@@ -185,17 +187,23 @@ fn bench_gate_a() {
     // Simulate retained state extraction from full traces (the online cost).
     let token_ids: Vec<u32> = (0..N_TOKENS as u32).collect();
     let mut retained_all: Vec<RetainedTokenState> = Vec::with_capacity(N_TOKENS);
+    let mut scales_all: Vec<Vec<CapturedLayerScales>> = Vec::with_capacity(N_TOKENS);
     for t in 0..N_TOKENS {
         let layers: Vec<RetainedLayerState> = all_layers[t].iter().map(|lt| {
             RetainedLayerState {
                 a: lt.a.clone(),
                 scale_a: lt.scale_a.unwrap_or(1.0),
+            }
+        }).collect();
+        let token_scales: Vec<CapturedLayerScales> = all_layers[t].iter().map(|lt| {
+            CapturedLayerScales {
                 scale_x_attn: lt.scale_x_attn.unwrap_or(1.0),
                 scale_x_ffn: lt.scale_x_ffn.unwrap_or(1.0),
                 scale_h: lt.scale_h.unwrap_or(1.0),
             }
         }).collect();
         retained_all.push(RetainedTokenState { layers });
+        scales_all.push(token_scales);
     }
 
     let mut commit_times = Vec::with_capacity(ITERS);
@@ -209,7 +217,7 @@ fn bench_gate_a() {
             manifest: None,
             n_prompt_tokens: Some(1),
         };
-        let (_c, s) = commit_minimal(retained_all.clone(), &params, None);
+        let (_c, s) = commit_minimal(retained_all.clone(), &params, None, scales_all.clone());
         commit_times.push(start.elapsed());
         state = Some(s);
     }
@@ -246,7 +254,7 @@ fn bench_gate_a() {
     let (emb_tree, emb_root) = setup_embedding_tree(&fb_ir, fb_token_id, 128);
     fb_key.embedding_merkle_root = Some(emb_root);
 
-    let fb_retained = full_bridge_forward(
+    let (fb_retained, fb_captured_scales) = full_bridge_forward(
         &fb_cfg, &fb_model, &fb_ir, &fb_rn_attn, &fb_rn_ffn, &fb_ws, &fb_scales, 1e-5);
     let fb_proof = verilm_core::merkle::prove(&emb_tree, fb_token_id as usize);
 
@@ -257,7 +265,7 @@ fn bench_gate_a() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_fb_commitment, fb_state) = commit_minimal(vec![fb_retained], &fb_params, None);
+    let (_fb_commitment, fb_state) = commit_minimal(vec![fb_retained], &fb_params, None, vec![fb_captured_scales]);
 
     let fb_bridge = BridgeParams {
         rmsnorm_attn_weights: &fb_rn_attn,

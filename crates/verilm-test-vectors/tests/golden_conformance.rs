@@ -21,7 +21,7 @@ use verilm_core::constants::ModelConfig;
 use verilm_core::types::{
     AuditTier, DeploymentManifest, RetainedLayerState, RetainedTokenState, ShellWeights,
 };
-use verilm_prover::{commit_minimal, open_v4, FullBindingParams};
+use verilm_prover::{commit_minimal, open_v4, CapturedLayerScales, FullBindingParams};
 use verilm_test_vectors::{forward_pass, generate_key, generate_model, LayerWeights};
 
 // =========================================================================
@@ -53,12 +53,13 @@ fn retained_from_traces(traces: &[verilm_core::types::LayerTrace]) -> RetainedTo
             .map(|lt| RetainedLayerState {
                 a: lt.a.clone(),
                 scale_a: lt.scale_a.unwrap_or(1.0),
-                scale_x_attn: lt.scale_x_attn.unwrap_or(1.0),
-                scale_x_ffn: lt.scale_x_ffn.unwrap_or(1.0),
-                scale_h: lt.scale_h.unwrap_or(1.0),
             })
             .collect(),
     }
+}
+
+fn unit_scales(n_layers: usize) -> Vec<CapturedLayerScales> {
+    vec![CapturedLayerScales { scale_x_attn: 1.0, scale_x_ffn: 1.0, scale_h: 1.0 }; n_layers]
 }
 
 // =========================================================================
@@ -201,7 +202,7 @@ fn golden_e2e_verify() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (commitment, state) = commit_minimal(vec![retained], &params, None);
+    let (commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)]);
     let response = open_v4(
         &state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false,
     );
@@ -209,12 +210,12 @@ fn golden_e2e_verify() {
     // Pin commitment roots
     assert_eq!(
         hex::encode(commitment.merkle_root),
-        "90eae35fa1e6e611d39fab9c5a17fb7d45b3fd40048c0ab15554a60d14ad10d7",
+        "e18abb9e62d6267fc6b393da6f6c11e9c7ecc6adc46a7b7bf98ad1d0782d65c1",
         "merkle_root drifted — was retained-state hashing or commitment changed?"
     );
     assert_eq!(
         hex::encode(commitment.io_root),
-        "2955ac0a42797356c5458ee37b230a8d5f2c708b2255d5cbca65f3d375020d09",
+        "e749d661577510798f38e29a30fc39f365a2797bb2448e16bafe1c6b40072f02",
         "io_root drifted — was IO chain hashing or prompt binding changed?"
     );
 
@@ -254,7 +255,7 @@ fn binary_v4_audit_roundtrip() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)]);
     let response = open_v4(
         &state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false,
     );
@@ -322,7 +323,7 @@ fn binary_commitment_version_preserved() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)]);
     let response = open_v4(
         &state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false,
     );

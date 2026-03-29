@@ -662,7 +662,7 @@ fn commit_minimal_from_captures(
         });
     }
 
-    let all_retained = verilm_prover::build_retained_from_captures(
+    let (all_retained, captured_scales) = verilm_prover::build_retained_from_captures(
         &captures,
         n_layers,
         &fwd_batch_sizes,
@@ -697,6 +697,7 @@ fn commit_minimal_from_captures(
             n_prompt_tokens,
         },
         final_res,
+        captured_scales,
     );
 
     Ok(MinimalBatchStateHandle {

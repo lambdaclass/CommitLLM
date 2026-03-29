@@ -860,7 +860,7 @@ fn bridge_layers(
     }
 
     let (mut residual, mut x_attn) =
-        init_residual_chain(ir, key, retained.layers[0].scale_x_attn);
+        init_residual_chain(ir, key, shell.layers[0].scale_x_attn);
 
     let n_layers = shell.layers.len().min(retained.layers.len());
     for layer_idx in 0..n_layers {
@@ -869,14 +869,14 @@ fn bridge_layers(
 
         check_qkv(key, st, layer_idx, sl, &x_attn);
         check_wo(key, st, layer_idx, &rs.a, &sl.attn_out);
-        let x_ffn = bridge_attn_to_ffn(key, layer_idx, rs, &sl.attn_out, &mut residual);
-        check_ffn(key, st, layer_idx, rs, sl, &x_ffn);
-        let next_scale = retained
+        let x_ffn = bridge_attn_to_ffn(key, layer_idx, rs, sl, &sl.attn_out, &mut residual);
+        check_ffn(key, st, layer_idx, sl, &x_ffn);
+        let next_scale = shell
             .layers
             .get(layer_idx + 1)
-            .map(|r| r.scale_x_attn)
+            .map(|s| s.scale_x_attn)
             .unwrap_or(1.0);
-        x_attn = bridge_ffn_to_next(key, layer_idx, rs, &sl.ffn_out, &mut residual, next_scale);
+        x_attn = bridge_ffn_to_next(key, layer_idx, sl, &sl.ffn_out, &mut residual, next_scale);
     }
 }
 
@@ -932,6 +932,7 @@ fn bridge_attn_to_ffn(
     key: &VerifierKey,
     layer_idx: usize,
     rs: &verilm_core::types::RetainedLayerState,
+    sl: &verilm_core::types::ShellLayerOpening,
     attn_out: &[i32],
     residual: &mut Vec<f64>,
 ) -> Vec<i8> {
@@ -942,7 +943,7 @@ fn bridge_attn_to_ffn(
         residual,
         &key.rmsnorm_ffn_weights[layer_idx],
         key.rmsnorm_eps,
-        rs.scale_x_ffn,
+        sl.scale_x_ffn,
     )
 }
 
@@ -950,7 +951,6 @@ fn check_ffn(
     key: &VerifierKey,
     st: &mut St,
     layer_idx: usize,
-    rs: &verilm_core::types::RetainedLayerState,
     sl: &verilm_core::types::ShellLayerOpening,
     x_ffn: &[i8],
 ) {
@@ -961,8 +961,8 @@ fn check_ffn(
         &sl.u,
         key.weight_scale_for(layer_idx, MatrixType::Wg),
         key.weight_scale_for(layer_idx, MatrixType::Wu),
-        rs.scale_x_ffn,
-        rs.scale_h,
+        sl.scale_x_ffn,
+        sl.scale_h,
     );
     verify_freivalds(key, st, layer_idx, MatrixType::Wd, &h, &sl.ffn_out);
 }
@@ -970,7 +970,7 @@ fn check_ffn(
 fn bridge_ffn_to_next(
     key: &VerifierKey,
     layer_idx: usize,
-    rs: &verilm_core::types::RetainedLayerState,
+    sl: &verilm_core::types::ShellLayerOpening,
     ffn_out: &[i32],
     residual: &mut Vec<f64>,
     next_scale: f32,
@@ -979,7 +979,7 @@ fn bridge_ffn_to_next(
         verilm_core::rmsnorm::bridge_residual_rmsnorm(
             ffn_out,
             key.weight_scale_for(layer_idx, MatrixType::Wd),
-            rs.scale_h,
+            sl.scale_h,
             residual,
             &key.rmsnorm_attn_weights[layer_idx + 1],
             key.rmsnorm_eps,
@@ -990,7 +990,7 @@ fn bridge_ffn_to_next(
         verilm_core::rmsnorm::dequant_add_residual(
             ffn_out,
             key.weight_scale_for(layer_idx, MatrixType::Wd),
-            rs.scale_h,
+            sl.scale_h,
             residual,
         );
         Vec::new()

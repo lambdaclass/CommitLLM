@@ -20,7 +20,7 @@
 use verilm_core::constants::ModelConfig;
 use verilm_core::serialize;
 use verilm_core::types::{CommitmentVersion, RetainedLayerState, RetainedTokenState, ShellWeights};
-use verilm_prover::{commit_minimal, open_v4, FullBindingParams};
+use verilm_prover::{commit_minimal, open_v4, CapturedLayerScales, FullBindingParams};
 use verilm_test_vectors::{forward_pass, generate_key, generate_model, LayerWeights};
 use verilm_verify::{AuditCoverage, Verdict};
 
@@ -66,12 +66,13 @@ fn retained_from_traces(traces: &[verilm_core::types::LayerTrace]) -> RetainedTo
             .map(|lt| RetainedLayerState {
                 a: lt.a.clone(),
                 scale_a: lt.scale_a.unwrap_or(1.0),
-                scale_x_attn: lt.scale_x_attn.unwrap_or(1.0),
-                scale_x_ffn: lt.scale_x_ffn.unwrap_or(1.0),
-                scale_h: lt.scale_h.unwrap_or(1.0),
             })
             .collect(),
     }
+}
+
+fn unit_scales(n_layers: usize) -> Vec<CapturedLayerScales> {
+    vec![CapturedLayerScales { scale_x_attn: 1.0, scale_x_ffn: 1.0, scale_h: 1.0 }; n_layers]
 }
 
 // ===========================================================================
@@ -134,7 +135,7 @@ fn frozen_v4_audit_byte_stable() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)]);
     let response = open_v4(
         &state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false,
     );
@@ -361,7 +362,7 @@ fn frozen_audit_sha256_pinned() {
     // Pinned on first generation. Update ONLY on intentional format change.
     assert_eq!(
         hash,
-        "6f1079c8545d8414da9f6871fc67d6b685106142525a7be1cb443a7e86cc0b0e",
+        "3891dd7b022330dbb0b4f7a83eff79ab1ba7d38bca9bc8ed6d9b5e66493ac09c",
         "audit fixture checksum drifted — was the fixture silently regenerated?"
     );
 }

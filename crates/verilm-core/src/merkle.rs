@@ -131,23 +131,19 @@ pub fn hash_leaf(data: &[u8]) -> [u8; 32] {
 
 /// Compute the Merkle leaf hash for a token's minimal retained state.
 ///
-/// Hashes only the non-replayable attention boundary (`a`, `scale_a`)
-/// and the dynamic quantization scales needed for audit replay.
+/// Hashes only the irreducible attention boundary (`a`, `scale_a`).
+/// Bridge replay scales have moved to [`ShellLayerOpening`] and are
+/// verified implicitly by Freivalds at audit time.
 /// Used for V4 (retained-state) commitments.
 ///
-/// Domain separator `"vi-retained-v1"` ensures hash uniqueness.
+/// Domain separator `"vi-retained-v2"` ensures hash uniqueness.
 pub fn hash_retained_state_direct(state: &crate::types::RetainedTokenState) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"vi-retained-v1");
+    hasher.update(b"vi-retained-v2");
 
     for ls in &state.layers {
         hash_i8_into(&mut hasher, &ls.a);
         hasher.update(ls.scale_a.to_le_bytes());
-        // Bridge replay scales: needed for exact RMSNorm bridge replay
-        // at audit time under W8A8 quantization.
-        hasher.update(ls.scale_x_attn.to_le_bytes());
-        hasher.update(ls.scale_x_ffn.to_le_bytes());
-        hasher.update(ls.scale_h.to_le_bytes());
     }
 
     hasher.finalize().into()
@@ -591,9 +587,6 @@ mod tests {
             layers: vec![RetainedLayerState {
                 a: vec![1, 2, 3, 4],
                 scale_a: 0.5,
-                scale_x_attn: 0.1,
-                scale_x_ffn: 0.2,
-                scale_h: 0.3,
             }],
         };
         let h1 = hash_retained_state_direct(&state);
@@ -605,9 +598,6 @@ mod tests {
             layers: vec![RetainedLayerState {
                 a: vec![1, 2, 3, 5], // changed
                 scale_a: 0.5,
-                scale_x_attn: 0.1,
-                scale_x_ffn: 0.2,
-                scale_h: 0.3,
             }],
         };
         assert_ne!(h1, hash_retained_state_direct(&state2));
@@ -621,9 +611,6 @@ mod tests {
             layers: vec![RetainedLayerState {
                 a: vec![10, 20],
                 scale_a: 1.0,
-                scale_x_attn: 0.5,
-                scale_x_ffn: 0.5,
-                scale_h: 0.5,
             }],
         };
         let leaf_hash = hash_retained_state_direct(&state);
@@ -646,9 +633,6 @@ mod tests {
             layers: vec![RetainedLayerState {
                 a: vec![11, 20],
                 scale_a: 1.0,
-                scale_x_attn: 0.5,
-                scale_x_ffn: 0.5,
-                scale_h: 0.5,
             }],
         };
         let leaf_hash2 = hash_retained_state_direct(&state2);

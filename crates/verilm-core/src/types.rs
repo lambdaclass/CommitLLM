@@ -681,11 +681,9 @@ pub struct LayerTrace {
 /// via softmax(QK^T/√d)V and cannot be reconstructed from single-token
 /// local state + public weights alone.
 ///
-/// **Bridge replay scales** (`scale_x_attn`, `scale_x_ffn`, `scale_h`):
-/// theoretically derivable from public weights + the irreducible `a`, but
-/// retained because the key-only verifier path has no weight access.
-/// Once the verifier gains weight access (#32), these can be derived at
-/// audit time and dropped from the retained schema.
+/// Bridge replay scales (`scale_x_attn`, `scale_x_ffn`, `scale_h`) have been
+/// moved to [`ShellLayerOpening`] — Freivalds implicitly verifies them at
+/// audit time (wrong scales -> wrong quantization -> Freivalds fails).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RetainedLayerState {
     // --- Irreducible: depends on full KV prefix, not replayable ---
@@ -696,18 +694,6 @@ pub struct RetainedLayerState {
     /// Per-tensor activation scale for `a` (W_o projection input).
     /// Paired with the non-derivable `a` vector.
     pub scale_a: f32,
-
-    // --- Bridge replay scales: derivable with weight access ---
-
-    /// Per-tensor activation scale for QKV projection input.
-    /// Derivable from: RMSNorm_attn(residual) where residual is replayable.
-    pub scale_x_attn: f32,
-    /// Per-tensor activation scale for gate_up projection input.
-    /// Derivable from: RMSNorm_ffn(residual + dequant(W_o @ a)).
-    pub scale_x_ffn: f32,
-    /// Per-tensor activation scale for down projection input.
-    /// Derivable from: SiLU(dequant(W_g @ x_ffn)) * dequant(W_u @ x_ffn).
-    pub scale_h: f32,
 }
 
 /// Minimal per-token state retained for online commitment.
@@ -724,6 +710,10 @@ pub struct RetainedTokenState {
 ///
 /// The prover reconstructs these from the committed retained `a` + weights.
 /// The verifier checks each matmul with key-only Freivalds — no weights needed.
+///
+/// Bridge replay scales (`scale_x_attn`, `scale_x_ffn`, `scale_h`) are provided
+/// here rather than in [`RetainedLayerState`]: Freivalds implicitly verifies them
+/// (wrong scales -> wrong quantization -> Freivalds fails).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShellLayerOpening {
     /// W_o @ a (i32 accumulators). Input `a` is from retained state.
@@ -740,7 +730,19 @@ pub struct ShellLayerOpening {
     pub k: Option<Vec<i32>>,
     /// W_v @ x_attn (i32). Present for layers > 0.
     pub v: Option<Vec<i32>>,
+    /// Bridge replay scale: QKV projection input quantization.
+    /// Moved from RetainedLayerState — verified implicitly by Freivalds.
+    #[serde(default = "default_scale")]
+    pub scale_x_attn: f32,
+    /// Bridge replay scale: gate_up projection input quantization.
+    #[serde(default = "default_scale")]
+    pub scale_x_ffn: f32,
+    /// Bridge replay scale: down projection input quantization.
+    #[serde(default = "default_scale")]
+    pub scale_h: f32,
 }
+
+fn default_scale() -> f32 { 1.0 }
 
 /// Shell opening for a complete token: all layers' matmul intermediates.
 #[derive(Debug, Clone, Serialize, Deserialize)]

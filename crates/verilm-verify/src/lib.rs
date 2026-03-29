@@ -1545,7 +1545,7 @@ fn verify_shell_opening(
             &res, &key.rmsnorm_attn_weights[0], key.rmsnorm_eps,
         );
         let xa = verilm_core::rmsnorm::quantize_f64_to_i8(
-            &normed, retained.layers[0].scale_x_attn as f64,
+            &normed, shell.layers[0].scale_x_attn as f64,
         );
         (Some(res), Some(xa))
     } else {
@@ -1628,7 +1628,7 @@ fn verify_shell_opening(
                     res,
                     &key.rmsnorm_ffn_weights[layer_idx],
                     key.rmsnorm_eps,
-                    rs.scale_x_ffn,
+                    sl.scale_x_ffn,
                 )
             } else {
                 // Toy-model fallback: no residual, no RMSNorm
@@ -1636,7 +1636,7 @@ fn verify_shell_opening(
                     &sl.attn_out,
                     key.weight_scale_for(layer_idx, MatrixType::Wo),
                     rs.scale_a,
-                    rs.scale_x_ffn,
+                    sl.scale_x_ffn,
                 )
             };
 
@@ -1665,8 +1665,8 @@ fn verify_shell_opening(
                 &sl.g, &sl.u,
                 key.weight_scale_for(layer_idx, MatrixType::Wg),
                 key.weight_scale_for(layer_idx, MatrixType::Wu),
-                rs.scale_x_ffn,
-                rs.scale_h,
+                sl.scale_x_ffn,
+                sl.scale_h,
             );
 
             // W_d @ h
@@ -1685,9 +1685,9 @@ fn verify_shell_opening(
             }
 
             // Post-FFN bridge: derive x_attn for next layer
-            let next_scale_x_attn = retained.layers
-                .get(layer_idx + 1)
-                .map(|r| r.scale_x_attn)
+            let next_scale_x_attn = shell.layers
+                .get(si + 1)
+                .map(|s| s.scale_x_attn)
                 .unwrap_or(1.0);
 
             x_attn = if let Some(ref mut res) = residual {
@@ -1696,7 +1696,7 @@ fn verify_shell_opening(
                     Some(verilm_core::rmsnorm::bridge_residual_rmsnorm(
                         &sl.ffn_out,
                         key.weight_scale_for(layer_idx, MatrixType::Wd),
-                        rs.scale_h,
+                        sl.scale_h,
                         res,
                         &key.rmsnorm_attn_weights[layer_idx + 1],
                         key.rmsnorm_eps,
@@ -1707,13 +1707,13 @@ fn verify_shell_opening(
                     verilm_core::rmsnorm::dequant_add_residual(
                         &sl.ffn_out,
                         key.weight_scale_for(layer_idx, MatrixType::Wd),
-                        rs.scale_h,
+                        sl.scale_h,
                         res,
                     );
                     Some(verilm_core::bridge_requantize(
                         &sl.ffn_out,
                         key.weight_scale_for(layer_idx, MatrixType::Wd),
-                        rs.scale_h,
+                        sl.scale_h,
                         next_scale_x_attn,
                     ))
                 }
@@ -1722,7 +1722,7 @@ fn verify_shell_opening(
                 Some(verilm_core::bridge_requantize(
                     &sl.ffn_out,
                     key.weight_scale_for(layer_idx, MatrixType::Wd),
-                    rs.scale_h,
+                    sl.scale_h,
                     next_scale_x_attn,
                 ))
             };
@@ -2024,14 +2024,18 @@ fn replay_token_shell(
         && !key.rmsnorm_attn_weights.is_empty()
         && key.embedding_merkle_root.is_some();
 
+    // NOTE: replay_token_shell uses weight-backed replay with unit scales
+    // (toy model). Scales don't matter for this path since bridge_requantize
+    // uses them symmetrically. We use 1.0 defaults.
     let (mut residual, mut x_attn) = if use_full_bridge {
         let ir = initial_residual.unwrap();
         let res: Vec<f64> = ir.iter().map(|&v| v as f64).collect();
         let normed = verilm_core::rmsnorm::rmsnorm_f64_input(
             &res, &key.rmsnorm_attn_weights[0], key.rmsnorm_eps,
         );
+        // Weight-backed replay doesn't have shell layer scales. Use 1.0.
         let xa = verilm_core::rmsnorm::quantize_f64_to_i8(
-            &normed, retained.layers[0].scale_x_attn as f64,
+            &normed, 1.0_f64,
         );
         (Some(res), Some(xa))
     } else {
@@ -2093,9 +2097,8 @@ fn replay_token_shell(
             ));
         }
 
-        // Post-attention bridge: derive x_ffn
+        // Post-attention bridge: derive x_ffn (unit scales for weight-backed replay)
         let x_ffn = if let Some(ref mut res) = residual {
-            // Canonical: dequant → residual += attn_out → RMSNorm_ffn → quantize
             verilm_core::rmsnorm::bridge_residual_rmsnorm(
                 &attn_out,
                 key.weight_scale_for(layer_idx, MatrixType::Wo),
@@ -2103,15 +2106,14 @@ fn replay_token_shell(
                 res,
                 &key.rmsnorm_ffn_weights[layer_idx],
                 key.rmsnorm_eps,
-                rs.scale_x_ffn,
+                1.0,
             )
         } else {
-            // Toy-model fallback: no residual, no RMSNorm
             verilm_core::bridge_requantize(
                 &attn_out,
                 key.weight_scale_for(layer_idx, MatrixType::Wo),
                 rs.scale_a,
-                rs.scale_x_ffn,
+                1.0,
             )
         };
 
@@ -2149,13 +2151,13 @@ fn replay_token_shell(
             }
         }
 
-        // SiLU: h via scale-aware bridge
+        // SiLU: h via scale-aware bridge (unit scales for weight-backed replay)
         let h = verilm_core::silu::compute_h_scaled(
             &g, &u,
             key.weight_scale_for(layer_idx, MatrixType::Wg),
             key.weight_scale_for(layer_idx, MatrixType::Wu),
-            rs.scale_x_ffn,
-            rs.scale_h,
+            1.0,
+            1.0,
         );
 
         // W_d: ffn_out = W_d @ h
@@ -2182,46 +2184,38 @@ fn replay_token_shell(
             ));
         }
 
-        // Post-FFN bridge: derive x_attn for next layer
-        let next_scale_x_attn = retained.layers
-            .get(layer_idx + 1)
-            .map(|r| r.scale_x_attn)
-            .unwrap_or(1.0);
-
+        // Post-FFN bridge: derive x_attn for next layer (unit scales for weight-backed replay)
         x_attn = if let Some(ref mut res) = residual {
             if layer_idx + 1 < key.rmsnorm_attn_weights.len() {
-                // Canonical: dequant → residual += ffn_out → RMSNorm_attn_{l+1} → quantize
                 Some(verilm_core::rmsnorm::bridge_residual_rmsnorm(
                     &ffn_out,
                     key.weight_scale_for(layer_idx, MatrixType::Wd),
-                    rs.scale_h,
+                    1.0,
                     res,
                     &key.rmsnorm_attn_weights[layer_idx + 1],
                     key.rmsnorm_eps,
-                    next_scale_x_attn,
+                    1.0,
                 ))
             } else {
-                // Last layer: update residual for final_hidden, no subsequent RMSNorm
                 verilm_core::rmsnorm::dequant_add_residual(
                     &ffn_out,
                     key.weight_scale_for(layer_idx, MatrixType::Wd),
-                    rs.scale_h,
+                    1.0,
                     res,
                 );
                 Some(verilm_core::bridge_requantize(
                     &ffn_out,
                     key.weight_scale_for(layer_idx, MatrixType::Wd),
-                    rs.scale_h,
-                    next_scale_x_attn,
+                    1.0,
+                    1.0,
                 ))
             }
         } else {
-            // Toy-model fallback: no residual, no RMSNorm
             Some(verilm_core::bridge_requantize(
                 &ffn_out,
                 key.weight_scale_for(layer_idx, MatrixType::Wd),
-                rs.scale_h,
-                next_scale_x_attn,
+                1.0,
+                1.0,
             ))
         };
     }
