@@ -195,42 +195,45 @@ def _diagnose_model_scales(llm, n_layers):
     print(f"\n  weight: shape={tuple(w.shape)}, dtype={w.dtype}")
     print(f"  weight_scale: shape={tuple(qkv.weight_scale.shape)}, len={len(ws)}")
 
-    # 3. Verify QKV layout: compute matmul oracle
-    # Take a known input, compute the fused QKV output in float, compare channels.
-    print(f"\n  --- QKV layout oracle ---")
-    x_probe = torch.ones(1, w.shape[1], dtype=torch.float32, device=w.device)
-    w_f32 = w.detach().float()
-    # Raw matmul: x @ W.T gives [1, out_features]
-    raw = (x_probe @ w_f32.T).squeeze(0)
-    # With scales: raw[j] * weight_scale[j] gives dequantized output
-    dequant_oracle = raw * ws.to(raw.device)
-    q_oracle = dequant_oracle[:qkv.weight.shape[0]]  # for debugging
+    # 3. Verify QKV layout and dequant formula
+    print(f"\n  --- QKV layout + dequant formula ---")
+    print(f"  weight shape: {tuple(w.shape)} (rows x cols)")
+    print(f"  weight_scale shape: {tuple(qkv.weight_scale.shape)}")
 
-    # The Q portion should be first hidden_dim elements
-    # The K portion next kv_dim
-    # Verify by checking norms per section
+    # Determine out_features: for linear y = x @ W.T, W is [out, in]
+    # weight_scale should be [out_features]
+    out_features = w.shape[0]
+    in_features = w.shape[1]
     from verilm import capture as cap
     hidden_dim = cap._hidden_dim if hasattr(cap, '_hidden_dim') else 3584
     kv_dim = cap._kv_dim if hasattr(cap, '_kv_dim') else 512
-    total_out = w.shape[0]
-    print(f"  total output features: {total_out} (expect {hidden_dim}+{kv_dim}+{kv_dim}={hidden_dim+2*kv_dim})")
+    print(f"  out_features={out_features}, in_features={in_features}")
+    print(f"  expected: out={hidden_dim}+{kv_dim}+{kv_dim}={hidden_dim+2*kv_dim}")
 
-    # Print norm of each section to verify layout
+    leftover = out_features - hidden_dim - 2*kv_dim
+    if leftover != 0:
+        print(f"  WARNING: out_features mismatch by {leftover}!")
+
+    # Oracle: x_probe(ones) @ W.T gives raw INT-like accumulator [1, out_features]
+    w_f32 = w.detach().float()
+    x_probe = torch.ones(1, in_features, dtype=torch.float32, device=w.device)
+    raw = (x_probe @ w_f32.T).squeeze(0)  # [out_features]
+    print(f"  raw oracle shape: {tuple(raw.shape)}")
+
+    # Check section norms to verify [Q|K|V] layout
     sec_q = raw[:hidden_dim]
     sec_k = raw[hidden_dim:hidden_dim+kv_dim]
     sec_v = raw[hidden_dim+kv_dim:hidden_dim+2*kv_dim]
-    leftover = total_out - hidden_dim - 2*kv_dim
-    print(f"  section norms (raw): Q={sec_q.norm():.2f}, K={sec_k.norm():.2f}, V={sec_v.norm():.2f}")
-    if leftover > 0:
-        print(f"  WARNING: {leftover} leftover features beyond Q+K+V!")
+    print(f"  section norms: Q={sec_q.norm():.2f}, K={sec_k.norm():.2f}, V={sec_v.norm():.2f}")
 
-    # 4. Oracle: what the GPU should produce for x=ones with scale_x=1.0
-    # int8(ones) @ int8(W) gives raw accumulator, * scale * weight_scale gives float
-    print(f"\n  --- Dequant formula check (x=ones, scale_x=1.0) ---")
-    print(f"  raw_acc[:8] (sum of weight columns): {raw[:8].tolist()}")
-    print(f"  weight_scale[:8]: {ws[:8].tolist()}")
-    print(f"  acc*sw[:8]: {(raw[:8] * ws[:8].to(raw.device)).tolist()}")
-    print(f"  acc/sw[:8]: {(raw[:8] / ws[:8].to(raw.device)).tolist()}")
+    # Test dequant formulas on first 8 channels
+    ws8 = ws[:8].to(raw.device)
+    raw8 = raw[:8]
+    print(f"\n  --- Dequant formula check (first 8 Q channels, scale_x=1.0) ---")
+    print(f"  raw[:8]:    {raw8.tolist()}")
+    print(f"  ws[:8]:     {ws8.tolist()}")
+    print(f"  raw*ws:     {(raw8 * ws8).tolist()}")
+    print(f"  raw/ws:     {(raw8 / ws8).tolist()}")
 
     # 5. Check if there's an input_scale (static quantization)
     if hasattr(qkv, "input_scale") and qkv.input_scale is not None:
