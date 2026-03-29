@@ -83,6 +83,31 @@ pub fn dequantize_acc(acc: &[i32], scale_w: Option<f32>, scale_x: Option<f32>) -
     acc.iter().map(|&v| (v as f64) * scale).collect()
 }
 
+/// Dequantize i32 accumulators using per-channel weight scales.
+///
+/// `f64[i] = acc[i] * scale_w[i] * scale_x`
+///
+/// Used when the model has per-channel weight quantization (e.g., W8A8
+/// with `weight_scale` shape `[out_features]`). The VerifierKey's
+/// per-tensor scalar scale is incorrect for these models — it stores
+/// `0.0` for native INT8 weights, zeroing all dequantized values.
+///
+/// Measurement-only — not part of the verification protocol.
+pub fn dequantize_acc_per_channel(acc: &[i32], scale_w: &[f32], scale_x: f32) -> Vec<f64> {
+    assert_eq!(
+        acc.len(),
+        scale_w.len(),
+        "dequantize_acc_per_channel: acc len {} != scale_w len {}",
+        acc.len(),
+        scale_w.len()
+    );
+    let sx = scale_x as f64;
+    acc.iter()
+        .zip(scale_w.iter())
+        .map(|(&a, &sw)| (a as f64) * (sw as f64) * sx)
+        .collect()
+}
+
 /// Verify that a KV cache K entry matches the RoPE'd and requantized K projection.
 ///
 /// Steps:
@@ -207,5 +232,27 @@ mod tests {
         // 100 * 0.5 * 0.1 = 5.0, -200 * 0.5 * 0.1 = -10.0
         assert!((out[0] - 5.0).abs() < 1e-6);
         assert!((out[1] - (-10.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_dequantize_per_channel() {
+        let acc = vec![100, -200, 50];
+        let scale_w = vec![0.5, 0.1, 0.3];
+        let scale_x = 0.2;
+        let out = dequantize_acc_per_channel(&acc, &scale_w, scale_x);
+        // 100 * 0.5 * 0.2 = 10.0
+        // -200 * 0.1 * 0.2 = -4.0
+        // 50 * 0.3 * 0.2 = 3.0
+        assert!((out[0] - 10.0).abs() < 1e-6);
+        assert!((out[1] - (-4.0)).abs() < 1e-6);
+        assert!((out[2] - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    #[should_panic(expected = "acc len 2 != scale_w len 1")]
+    fn test_dequantize_per_channel_length_mismatch() {
+        let acc = vec![100, -200];
+        let scale_w = vec![0.5]; // wrong length
+        dequantize_acc_per_channel(&acc, &scale_w, 1.0);
     }
 }

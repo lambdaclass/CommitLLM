@@ -1382,19 +1382,35 @@ impl CaptureHook {
 /// the QKV accumulators, and returns a JSON-serialized `CorridorReport`
 /// with per-layer/per-position diff statistics.
 ///
+/// When `scale_overrides_json` is provided, uses per-channel weight scales
+/// for dequantization. Required for faithful measurement on W8A8 models
+/// where per-tensor weight scales are 0.0 (native INT8).
+///
 /// Args:
 ///     audit_binary: bytes — V4 audit in canonical binary format.
 ///     key_json: str — JSON-serialized VerifierKey.
+///     scale_overrides_json: Optional[str] — JSON-serialized CorridorScaleOverrides.
 ///
 /// Returns:
 ///     str — JSON-serialized CorridorReport.
 #[pyfunction]
-fn measure_corridor(audit_binary: &[u8], key_json: &str) -> PyResult<String> {
+#[pyo3(signature = (audit_binary, key_json, scale_overrides_json=None))]
+fn measure_corridor(
+    audit_binary: &[u8],
+    key_json: &str,
+    scale_overrides_json: Option<&str>,
+) -> PyResult<String> {
     let key: VerifierKey = serde_json::from_str(key_json)
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize key: {}", e)))?;
     let response = verilm_core::serialize::deserialize_v4_audit(audit_binary)
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize audit: {}", e)))?;
-    let report = verilm_verify::corridor::measure_corridor(&key, &response)
+    let overrides = scale_overrides_json
+        .map(|json| {
+            serde_json::from_str::<verilm_verify::corridor::CorridorScaleOverrides>(json)
+                .map_err(|e| PyValueError::new_err(format!("failed to deserialize scale overrides: {}", e)))
+        })
+        .transpose()?;
+    let report = verilm_verify::corridor::measure_corridor(&key, &response, overrides.as_ref())
         .map_err(|e| PyValueError::new_err(format!("corridor measurement failed: {}", e)))?;
     serde_json::to_string(&report)
         .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))

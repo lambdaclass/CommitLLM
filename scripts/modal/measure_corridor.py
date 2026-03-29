@@ -106,7 +106,62 @@ DECODE_CONFIGS = [
 ]
 
 
-def _measure_one(server, wl, dc, full_layers, key_json, model_id, corridor_mode, buf):
+def _extract_weight_scales(llm, n_layers, cfg):
+    """Extract per-channel weight scales from the vLLM model.
+
+    W8A8 models have per-channel (per output feature) weight scales stored
+    as `weight_scale` tensors on each linear layer. The fused QKV projection
+    has shape [hidden_dim + 2*kv_dim], which we split into Q, K, V portions.
+
+    Returns a dict suitable for JSON serialization as CorridorScaleOverrides.
+    """
+    import numpy as np
+
+    # Access the inner model through vLLM's execution pipeline.
+    model = llm.llm_engine.model_executor.driver_worker.model_runner.model
+
+    hidden_dim = cfg["hidden_dim"]
+    kv_dim = cfg["kv_dim"]
+
+    scales = {"wq": [], "wk": [], "wv": []}
+
+    for layer_idx in range(n_layers):
+        layer = model.model.layers[layer_idx]
+        qkv_proj = layer.self_attn.qkv_proj
+
+        # weight_scale: per-channel scales, shape [out_features]
+        # For fused QKV: out_features = hidden_dim + 2 * kv_dim
+        ws = qkv_proj.weight_scale
+        if ws is None:
+            raise RuntimeError(f"layer {layer_idx}: no weight_scale on qkv_proj")
+
+        ws_np = ws.detach().cpu().float().numpy().flatten()
+        expected_len = hidden_dim + 2 * kv_dim
+        if ws_np.shape[0] != expected_len:
+            raise RuntimeError(
+                f"layer {layer_idx}: weight_scale shape {ws_np.shape} != expected {expected_len}"
+            )
+
+        # Split: Q first, then K, then V (vLLM QKVParallelLinear layout)
+        wq = ws_np[:hidden_dim]
+        wk = ws_np[hidden_dim:hidden_dim + kv_dim]
+        wv = ws_np[hidden_dim + kv_dim:]
+
+        scales["wq"].append(wq.tolist())
+        scales["wk"].append(wk.tolist())
+        scales["wv"].append(wv.tolist())
+
+    print(f"  Extracted per-channel weight scales: {n_layers} layers, "
+          f"wq[{hidden_dim}] wk[{kv_dim}] wv[{kv_dim}]")
+
+    # Spot-check: print scale range for layer 0
+    wq0 = np.array(scales["wq"][0])
+    print(f"  Layer 0 wq scale range: [{wq0.min():.6f}, {wq0.max():.6f}]")
+
+    return scales
+
+
+def _measure_one(server, wl, dc, full_layers, key_json, model_id, corridor_mode, buf, scale_overrides_json):
     """Run one workload/decode_config and return results for all token positions."""
     import json
 
@@ -156,7 +211,9 @@ def _measure_one(server, wl, dc, full_layers, key_json, model_id, corridor_mode,
             )
 
         import verilm_rs
-        report_json = verilm_rs.measure_corridor(audit_binary, key_json)
+        report_json = verilm_rs.measure_corridor(
+            audit_binary, key_json, scale_overrides_json,
+        )
         report = json.loads(report_json)
 
         result_entry = {
@@ -225,11 +282,20 @@ def _run_model(model_id: str):
     key_json = verilm_rs.generate_key(model_dir, key_seed)
     full_layers = list(range(n_layers))
 
+    # Extract per-channel weight scales from the model for faithful replay.
+    cfg = json.loads(key_json)["config"]
+    cfg_dict = {
+        "hidden_dim": cfg["hidden_dim"],
+        "kv_dim": cfg["n_kv_heads"] * cfg["d_head"],
+    }
+    weight_scales = _extract_weight_scales(llm, n_layers, cfg_dict)
+    scale_overrides_json = json.dumps(weight_scales)
+
     all_results = []
 
     # ── Phase 1: Precision corridor (GPU x_attn → accurate QKV accumulators) ──
     print(f"\n{'='*70}")
-    print("PHASE 1: Precision corridor (captured x_attn)")
+    print("PHASE 1: Precision corridor (captured x_attn + per-channel scales)")
     print(f"{'='*70}")
     buf._capture_x_attn = True
     for wl in WORKLOADS[:3]:  # short, medium, long only
@@ -239,13 +305,14 @@ def _run_model(model_id: str):
             has_xa = hasattr(buf, '_capture_x_attn') and buf._capture_x_attn
             print(f"  x_attn capture: {has_xa}")
             results = _measure_one(
-                server, wl, dc, full_layers, key_json, model_id, "precision", buf,
+                server, wl, dc, full_layers, key_json, model_id,
+                "precision", buf, scale_overrides_json,
             )
             all_results.extend(results)
 
     # ── Phase 2: Verifier replay corridor (bridge-derived QKV accumulators) ──
     print(f"\n{'='*70}")
-    print("PHASE 2: Verifier replay corridor (bridge-derived)")
+    print("PHASE 2: Verifier replay corridor (bridge-derived + per-channel scales)")
     print(f"{'='*70}")
     buf._capture_x_attn = False
     for wl in WORKLOADS[:3]:  # short, medium, long
@@ -253,7 +320,8 @@ def _run_model(model_id: str):
             label = f"{wl['name']}/{dc['name']}"
             print(f"\n--- {label} (max_tokens={wl['max_tokens']}) ---")
             results = _measure_one(
-                server, wl, dc, full_layers, key_json, model_id, "replay", buf,
+                server, wl, dc, full_layers, key_json, model_id,
+                "replay", buf, scale_overrides_json,
             )
             all_results.extend(results)
 

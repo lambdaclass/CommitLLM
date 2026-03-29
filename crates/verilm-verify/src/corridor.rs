@@ -13,6 +13,28 @@ use verilm_core::attention::{measure_attention_diff, AttentionDiffStats};
 use verilm_core::constants::MatrixType;
 use verilm_core::types::{V4AuditResponse, VerifierKey};
 
+/// Per-channel weight scales for faithful corridor measurement.
+///
+/// W8A8 models have per-channel (per output feature) weight scales, but
+/// the VerifierKey stores `0.0` for native INT8 weights — zeroing all
+/// dequantized values and producing meaningless L-inf=127 results.
+///
+/// This struct provides the model's actual per-channel weight scales,
+/// extracted at measurement time from the served model. It is used
+/// only in the corridor/debug path, not in the verification protocol.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct CorridorScaleOverrides {
+    /// Per-channel weight scales for Q projection, per layer.
+    /// `wq[layer]` has length `hidden_dim` (n_q_heads * d_head).
+    pub wq: Vec<Vec<f32>>,
+    /// Per-channel weight scales for K projection, per layer.
+    /// `wk[layer]` has length `kv_dim` (n_kv_heads * d_head).
+    pub wk: Vec<Vec<f32>>,
+    /// Per-channel weight scales for V projection, per layer.
+    /// `wv[layer]` has length `kv_dim` (n_kv_heads * d_head).
+    pub wv: Vec<Vec<f32>>,
+}
+
 /// Aggregated corridor measurement across all layers and token positions.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CorridorReport {
@@ -29,10 +51,15 @@ pub struct CorridorReport {
 /// toy (raw requantize) and production (dequant + RoPE + f64) paths based
 /// on `key.rope_aware_replay`.
 ///
+/// When `scale_overrides` is provided, uses per-channel weight scales for
+/// dequantization instead of the VerifierKey's per-tensor scales. This is
+/// required for faithful measurement on W8A8 models.
+///
 /// Returns `Err` if prefix data is missing or malformed.
 pub fn measure_corridor(
     key: &VerifierKey,
     response: &V4AuditResponse,
+    scale_overrides: Option<&CorridorScaleOverrides>,
 ) -> Result<CorridorReport, String> {
     // Fail closed: require all three data sources.
     let prefix_ret = response
@@ -61,7 +88,7 @@ pub fn measure_corridor(
     );
 
     let measurements = if key.rope_aware_replay {
-        measure_roped(key, prefix_ret, prefix_shells, response, n_layers)?
+        measure_roped(key, prefix_ret, prefix_shells, response, n_layers, scale_overrides)?
     } else {
         measure_toy(key, prefix_ret, prefix_shells, response, n_layers)?
     };
@@ -132,6 +159,7 @@ fn measure_roped(
     prefix_shells: &[verilm_core::types::ShellTokenOpening],
     response: &V4AuditResponse,
     n_layers: usize,
+    scale_overrides: Option<&CorridorScaleOverrides>,
 ) -> Result<Vec<AttentionDiffStats>, String> {
     let cfg = &key.config;
     let mut all_stats = Vec::new();
@@ -152,7 +180,7 @@ fn measure_roped(
             };
 
             let (_, k_roped, v_deq) =
-                dequant_rope_qkv(key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, j);
+                dequant_rope_qkv(key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, j, scale_overrides);
             kv_k.push(k_roped);
             kv_v.push(v_deq);
 
@@ -161,7 +189,7 @@ fn measure_roped(
             }
 
             let (q_roped, _, _) =
-                dequant_rope_qkv(key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, j);
+                dequant_rope_qkv(key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, j, scale_overrides);
             let replayed = verilm_core::attention::replay_attention_roped(
                 &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
             );
@@ -177,7 +205,7 @@ fn measure_roped(
             let pos = response.token_index as usize;
 
             let (q_roped, k_roped, v_deq) =
-                dequant_rope_qkv(key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, pos);
+                dequant_rope_qkv(key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, pos, scale_overrides);
             kv_k.push(k_roped);
             kv_v.push(v_deq);
 
@@ -193,8 +221,8 @@ fn measure_roped(
 
 /// Dequantize + RoPE for Q, K, V accumulators.
 ///
-/// Same logic as `canonical::dequant_rope_qkv` but standalone to avoid
-/// depending on canonical.rs internals.
+/// When `overrides` is provided, uses per-channel weight scales for
+/// dequantization. Otherwise falls back to VerifierKey's per-tensor scales.
 fn dequant_rope_qkv(
     key: &VerifierKey,
     layer_idx: usize,
@@ -203,15 +231,29 @@ fn dequant_rope_qkv(
     v_acc: &[i32],
     scale_x_attn: f32,
     position: usize,
+    overrides: Option<&CorridorScaleOverrides>,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    let scale_wq = key.weight_scale_for(layer_idx, MatrixType::Wq);
-    let scale_wk = key.weight_scale_for(layer_idx, MatrixType::Wk);
-    let scale_wv = key.weight_scale_for(layer_idx, MatrixType::Wv);
-    let sx = Some(scale_x_attn);
-
-    let q_f64 = verilm_core::rope::dequantize_acc(q_acc, Some(scale_wq), sx);
-    let k_f64 = verilm_core::rope::dequantize_acc(k_acc, Some(scale_wk), sx);
-    let v_f64 = verilm_core::rope::dequantize_acc(v_acc, Some(scale_wv), sx);
+    let (q_f64, k_f64, v_f64) = if let Some(ovr) = overrides {
+        let q = verilm_core::rope::dequantize_acc_per_channel(
+            q_acc, &ovr.wq[layer_idx], scale_x_attn,
+        );
+        let k = verilm_core::rope::dequantize_acc_per_channel(
+            k_acc, &ovr.wk[layer_idx], scale_x_attn,
+        );
+        let v = verilm_core::rope::dequantize_acc_per_channel(
+            v_acc, &ovr.wv[layer_idx], scale_x_attn,
+        );
+        (q, k, v)
+    } else {
+        let scale_wq = key.weight_scale_for(layer_idx, MatrixType::Wq);
+        let scale_wk = key.weight_scale_for(layer_idx, MatrixType::Wk);
+        let scale_wv = key.weight_scale_for(layer_idx, MatrixType::Wv);
+        let sx = Some(scale_x_attn);
+        let q = verilm_core::rope::dequantize_acc(q_acc, Some(scale_wq), sx);
+        let k = verilm_core::rope::dequantize_acc(k_acc, Some(scale_wk), sx);
+        let v = verilm_core::rope::dequantize_acc(v_acc, Some(scale_wv), sx);
+        (q, k, v)
+    };
 
     let q_roped = verilm_core::rope::apply_rope_q(&q_f64, position, &key.config);
     let k_roped = verilm_core::rope::apply_rope_k(&k_f64, position, &key.config);

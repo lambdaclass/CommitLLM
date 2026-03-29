@@ -2107,7 +2107,7 @@ fn corridor_toy_model_all_diffs_zero() {
     let (key, response) = build_deep_prefix_audit();
     assert!(!key.rope_aware_replay, "toy model should not use RoPE replay");
 
-    let report = verilm_verify::corridor::measure_corridor(&key, &response).unwrap();
+    let report = verilm_verify::corridor::measure_corridor(&key, &response, None).unwrap();
     assert_eq!(
         report.global_linf, 0,
         "toy model corridor should have zero diff everywhere: {:?}",
@@ -2126,7 +2126,7 @@ fn corridor_roped_toy_model_all_diffs_zero() {
     let (key, response) = build_deep_prefix_audit_roped();
     assert!(key.rope_aware_replay, "roped key should use RoPE replay");
 
-    let report = verilm_verify::corridor::measure_corridor(&key, &response).unwrap();
+    let report = verilm_verify::corridor::measure_corridor(&key, &response, None).unwrap();
     assert_eq!(
         report.global_linf, 0,
         "roped toy model corridor should have zero diff: {:?}",
@@ -2142,15 +2142,15 @@ fn corridor_roped_toy_model_all_diffs_zero() {
 fn corridor_missing_prefix_fails_closed() {
     let (key, mut response) = build_deep_prefix_audit();
     response.prefix_retained = None;
-    assert!(verilm_verify::corridor::measure_corridor(&key, &response).is_err());
+    assert!(verilm_verify::corridor::measure_corridor(&key, &response, None).is_err());
 
     let (key2, mut response2) = build_deep_prefix_audit();
     response2.prefix_shell_openings = None;
-    assert!(verilm_verify::corridor::measure_corridor(&key2, &response2).is_err());
+    assert!(verilm_verify::corridor::measure_corridor(&key2, &response2, None).is_err());
 
     let (key3, mut response3) = build_deep_prefix_audit();
     response3.shell_opening = None;
-    assert!(verilm_verify::corridor::measure_corridor(&key3, &response3).is_err());
+    assert!(verilm_verify::corridor::measure_corridor(&key3, &response3, None).is_err());
 }
 
 #[test]
@@ -2160,7 +2160,7 @@ fn corridor_aggregation_with_known_diffs() {
     let (key, mut response) = build_deep_prefix_audit();
 
     // Sanity: untampered should be all-zero.
-    let clean = verilm_verify::corridor::measure_corridor(&key, &response).unwrap();
+    let clean = verilm_verify::corridor::measure_corridor(&key, &response, None).unwrap();
     assert_eq!(clean.global_linf, 0);
 
     // Tamper prefix token 1, layer 0: shift a[0] by +3
@@ -2172,7 +2172,7 @@ fn corridor_aggregation_with_known_diffs() {
     let orig_opened = response.retained.layers[1].a[0];
     response.retained.layers[1].a[0] = orig_opened.wrapping_add(5);
 
-    let report = verilm_verify::corridor::measure_corridor(&key, &response).unwrap();
+    let report = verilm_verify::corridor::measure_corridor(&key, &response, None).unwrap();
 
     // global_linf should be 5 (the larger tamper)
     assert_eq!(report.global_linf, 5, "global_linf: {:?}", report.per_layer_max_linf);
