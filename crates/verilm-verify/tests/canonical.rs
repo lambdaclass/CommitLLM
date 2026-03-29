@@ -1339,6 +1339,107 @@ impl EmbeddingLookup for TestEmbeddingLookup {
     }
 }
 
+/// Multi-token forward with RoPE-aware attention (production path).
+///
+/// Like `multi_token_forward_with_attention` but uses dequantize→RoPE→f64 replay
+/// and stores `a_i8 = round(a_f64 / scale_a)`.
+fn multi_token_forward_with_rope(
+    cfg: &ModelConfig,
+    model: &[LayerWeights],
+    initial_residuals: &[Vec<f32>],
+    rmsnorm_attn: &[Vec<f32>],
+    rmsnorm_ffn: &[Vec<f32>],
+    weight_scales: &[Vec<f32>],
+    scales: &[(f32, f32, f32, f32)],
+    eps: f64,
+) -> Vec<(RetainedTokenState, Vec<CapturedLayerScales>)> {
+    use verilm_core::attention::replay_attention_roped;
+    use verilm_core::matmul::matmul_i32;
+    use verilm_core::rmsnorm::{
+        bridge_residual_rmsnorm, dequant_add_residual, quantize_f64_to_i8, rmsnorm_f64_input,
+    };
+    use verilm_core::rope::{apply_rope_k, apply_rope_q, dequantize_acc};
+
+    let n_tokens = initial_residuals.len();
+    // Per-layer KV cache in f64 (post-RoPE K, dequantized V)
+    let mut kv_k_cache: Vec<Vec<Vec<f64>>> = (0..cfg.n_layers).map(|_| Vec::new()).collect();
+    let mut kv_v_cache: Vec<Vec<Vec<f64>>> = (0..cfg.n_layers).map(|_| Vec::new()).collect();
+    let mut results = Vec::with_capacity(n_tokens);
+
+    for t in 0..n_tokens {
+        let mut residual: Vec<f64> = initial_residuals[t].iter().map(|&v| v as f64).collect();
+        let mut layers = Vec::new();
+        let mut captured = Vec::new();
+
+        for (l, lw) in model.iter().enumerate() {
+            let (scale_x_attn, scale_a, scale_x_ffn, scale_h) = scales[l];
+            let ws = |mt: MatrixType| -> f32 {
+                let idx = MatrixType::PER_LAYER.iter().position(|&m| m == mt).unwrap();
+                weight_scales[l][idx]
+            };
+
+            let normed = rmsnorm_f64_input(&residual, &rmsnorm_attn[l], eps);
+            let x_attn = quantize_f64_to_i8(&normed, scale_x_attn as f64);
+
+            // QKV projections (i32 accumulators)
+            let q_acc = matmul_i32(&lw.wq, &x_attn, cfg.hidden_dim, cfg.hidden_dim);
+            let k_acc = matmul_i32(&lw.wk, &x_attn, cfg.kv_dim, cfg.hidden_dim);
+            let v_acc = matmul_i32(&lw.wv, &x_attn, cfg.kv_dim, cfg.hidden_dim);
+
+            // Dequantize + RoPE
+            let sx = Some(scale_x_attn);
+            let q_f64 = dequantize_acc(&q_acc, Some(ws(MatrixType::Wq)), sx);
+            let k_f64 = dequantize_acc(&k_acc, Some(ws(MatrixType::Wk)), sx);
+            let v_f64 = dequantize_acc(&v_acc, Some(ws(MatrixType::Wv)), sx);
+
+            let q_roped = apply_rope_q(&q_f64, t, cfg);
+            let k_roped = apply_rope_k(&k_f64, t, cfg);
+
+            kv_k_cache[l].push(k_roped);
+            kv_v_cache[l].push(v_f64);
+
+            // Attention with full KV cache (seq_len = t+1), requantized with scale_a
+            let a = replay_attention_roped(
+                &q_roped,
+                &kv_k_cache[l],
+                &kv_v_cache[l],
+                scale_a as f64,
+                cfg,
+            );
+
+            let attn_out = matmul_i32(&lw.wo, &a, cfg.hidden_dim, cfg.hidden_dim);
+            let x_ffn = bridge_residual_rmsnorm(
+                &attn_out, ws(MatrixType::Wo), scale_a,
+                &mut residual, &rmsnorm_ffn[l], eps, scale_x_ffn,
+            );
+
+            let g = matmul_i32(&lw.wg, &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
+            let u = matmul_i32(&lw.wu, &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
+            let h = verilm_core::silu::compute_h_scaled(
+                &g, &u, ws(MatrixType::Wg), ws(MatrixType::Wu), scale_x_ffn, scale_h,
+            );
+            let ffn_out = matmul_i32(&lw.wd, &h, cfg.hidden_dim, cfg.ffn_dim);
+
+            if l + 1 < rmsnorm_attn.len() {
+                let next_scale = scales.get(l + 1).map(|s| s.0).unwrap_or(1.0);
+                bridge_residual_rmsnorm(
+                    &ffn_out, ws(MatrixType::Wd), scale_h,
+                    &mut residual, &rmsnorm_attn[l + 1], eps, next_scale,
+                );
+            } else {
+                dequant_add_residual(&ffn_out, ws(MatrixType::Wd), scale_h, &mut residual);
+            }
+
+            layers.push(RetainedLayerState { a, scale_a });
+            captured.push(CapturedLayerScales { scale_x_attn, scale_x_ffn, scale_h });
+        }
+
+        results.push((RetainedTokenState { layers }, captured));
+    }
+
+    results
+}
+
 /// Build a 3-token deep-prefix audit, opening token 2.
 /// Returns (key, response) where response has prefix_retained and prefix_shell_openings.
 fn build_deep_prefix_audit() -> (
@@ -1730,6 +1831,242 @@ fn build_deep_prefix_audit_fake_opened_a() -> (
     (key, response, honest_a_layer0, fake_a_layer0)
 }
 
+// ---------------------------------------------------------------------------
+// RoPE-aware deep-prefix tests (production path)
+// ---------------------------------------------------------------------------
+
+/// Single-token forward with RoPE — the attacker shortcut (ignores KV cache).
+fn full_bridge_forward_with_rope(
+    cfg: &ModelConfig,
+    model: &[LayerWeights],
+    initial_residual: &[f32],
+    rmsnorm_attn: &[Vec<f32>],
+    rmsnorm_ffn: &[Vec<f32>],
+    weight_scales: &[Vec<f32>],
+    scales: &[(f32, f32, f32, f32)],
+    eps: f64,
+    position: usize,
+) -> (RetainedTokenState, Vec<CapturedLayerScales>) {
+    let results = multi_token_forward_with_rope(
+        cfg, model, &[initial_residual.to_vec()],
+        rmsnorm_attn, rmsnorm_ffn, weight_scales, scales, eps,
+    );
+    // The forward ran at t=0 internally, but the real position matters only for
+    // RoPE. For a single-token shortcut, the attacker would process position 0.
+    // This is correct — the attack is using seq_len=1 instead of the full cache.
+    let _ = position;
+    results.into_iter().next().unwrap()
+}
+
+/// Build a 3-token deep-prefix audit using the RoPE-aware production forward.
+fn build_deep_prefix_audit_roped() -> (
+    verilm_core::types::VerifierKey,
+    verilm_core::types::V4AuditResponse,
+) {
+    let (cfg, model, mut key, ws, rmsnorm_attn, rmsnorm_ffn, initial_residual) =
+        setup_full_bridge();
+    key.rope_aware_replay = true;
+    let scales = bridge_scales(&cfg);
+    let token_ids = [10u32, 20, 30];
+
+    let residuals: Vec<Vec<f32>> = (0..3)
+        .map(|t| {
+            initial_residual
+                .iter()
+                .map(|&v| v + 0.05 * t as f32)
+                .collect()
+        })
+        .collect();
+
+    let n_vocab = 128;
+    let mut leaves = Vec::with_capacity(n_vocab);
+    for i in 0..n_vocab {
+        if let Some(pos) = token_ids.iter().position(|&tid| tid as usize == i) {
+            leaves.push(verilm_core::merkle::hash_embedding_row(&residuals[pos]));
+        } else {
+            let row: Vec<f32> = (0..initial_residual.len())
+                .map(|j| (i * 1000 + j) as f32 * 0.001)
+                .collect();
+            leaves.push(verilm_core::merkle::hash_embedding_row(&row));
+        }
+    }
+    let tree = verilm_core::merkle::build_tree(&leaves);
+    key.embedding_merkle_root = Some(tree.root);
+
+    let all_results = multi_token_forward_with_rope(
+        &cfg, &model, &residuals, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+    );
+    let (all_retained, all_scales): (Vec<_>, Vec<_>) = all_results.into_iter().unzip();
+
+    let mut lookup_entries = std::collections::HashMap::new();
+    for (i, &tid) in token_ids.iter().enumerate() {
+        let proof = verilm_core::merkle::prove(&tree, tid as usize);
+        lookup_entries.insert(tid, (residuals[i].clone(), proof));
+    }
+    let lookup = TestEmbeddingLookup { entries: lookup_entries };
+
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let params = FullBindingParams {
+        token_ids: &token_ids,
+        prompt: b"rope deep prefix test",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+
+    let proof = verilm_core::merkle::prove(&tree, 30);
+    let bridge = BridgeParams {
+        rmsnorm_attn_weights: &rmsnorm_attn,
+        rmsnorm_ffn_weights: &rmsnorm_ffn,
+        rmsnorm_eps: 1e-5,
+        initial_residual: &residuals[2],
+        embedding_proof: Some(proof),
+    };
+    let response = open_v4(
+        &state, 2, &ToyWeights(&model), &cfg, &ws,
+        Some(&bridge), None, None, Some(&lookup), true,
+    );
+
+    (key, response)
+}
+
+#[test]
+fn rope_deep_prefix_attention_replay_pass() {
+    let (key, response) = build_deep_prefix_audit_roped();
+    assert!(key.rope_aware_replay);
+
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "RoPE deep-prefix honest audit must pass: {:?}",
+        report.failures,
+    );
+    // Should have attention checks from both prefix and opened token
+    assert!(report.checks_run >= 20, "expected >= 20 checks, got {}", report.checks_run);
+}
+
+/// Build a 3-token audit with RoPE where the opened token uses a single-token
+/// shortcut (fake attention). The verifier should detect the mismatch.
+fn build_deep_prefix_audit_roped_fake_a() -> (
+    verilm_core::types::VerifierKey,
+    verilm_core::types::V4AuditResponse,
+    Vec<i8>,
+    Vec<i8>,
+) {
+    let (cfg, model, mut key, ws, rmsnorm_attn, rmsnorm_ffn, initial_residual) =
+        setup_full_bridge();
+    key.rope_aware_replay = true;
+    let scales = bridge_scales(&cfg);
+    let token_ids = [10u32, 20, 30];
+
+    let residuals: Vec<Vec<f32>> = (0..3)
+        .map(|t| {
+            initial_residual
+                .iter()
+                .map(|&v| v + 0.05 * t as f32)
+                .collect()
+        })
+        .collect();
+
+    let n_vocab = 128;
+    let mut leaves = Vec::with_capacity(n_vocab);
+    for i in 0..n_vocab {
+        if let Some(pos) = token_ids.iter().position(|&tid| tid as usize == i) {
+            leaves.push(verilm_core::merkle::hash_embedding_row(&residuals[pos]));
+        } else {
+            let row: Vec<f32> = (0..initial_residual.len())
+                .map(|j| (i * 1000 + j) as f32 * 0.001)
+                .collect();
+            leaves.push(verilm_core::merkle::hash_embedding_row(&row));
+        }
+    }
+    let tree = verilm_core::merkle::build_tree(&leaves);
+    key.embedding_merkle_root = Some(tree.root);
+
+    // Honest multi-token forward with RoPE
+    let honest_results = multi_token_forward_with_rope(
+        &cfg, &model, &residuals, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+    );
+    let honest_a_layer0 = honest_results[2].0.layers[0].a.clone();
+
+    // Fake: single-token RoPE forward for token 2 (ignores KV cache from tokens 0,1)
+    let (fake_retained_2, fake_scales_2) = full_bridge_forward_with_rope(
+        &cfg, &model, &residuals[2], &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5, 2,
+    );
+    let fake_a_layer0 = fake_retained_2.layers[0].a.clone();
+
+    let all_retained = vec![
+        honest_results[0].0.clone(),
+        honest_results[1].0.clone(),
+        fake_retained_2,
+    ];
+    let all_scales = vec![
+        honest_results[0].1.clone(),
+        honest_results[1].1.clone(),
+        fake_scales_2,
+    ];
+
+    let mut lookup_entries = std::collections::HashMap::new();
+    for (i, &tid) in token_ids.iter().enumerate() {
+        let proof = verilm_core::merkle::prove(&tree, tid as usize);
+        lookup_entries.insert(tid, (residuals[i].clone(), proof));
+    }
+    let lookup = TestEmbeddingLookup { entries: lookup_entries };
+
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let params = FullBindingParams {
+        token_ids: &token_ids,
+        prompt: b"rope deep prefix fake a test",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+
+    let proof = verilm_core::merkle::prove(&tree, 30);
+    let bridge = BridgeParams {
+        rmsnorm_attn_weights: &rmsnorm_attn,
+        rmsnorm_ffn_weights: &rmsnorm_ffn,
+        rmsnorm_eps: 1e-5,
+        initial_residual: &residuals[2],
+        embedding_proof: Some(proof),
+    };
+    let response = open_v4(
+        &state, 2, &ToyWeights(&model), &cfg, &ws,
+        Some(&bridge), None, None, Some(&lookup), true,
+    );
+
+    (key, response, honest_a_layer0, fake_a_layer0)
+}
+
+#[test]
+fn rope_deep_prefix_fake_a_caught() {
+    let (key, response, honest_a, fake_a) = build_deep_prefix_audit_roped_fake_a();
+
+    assert_ne!(
+        honest_a, fake_a,
+        "fake a must differ from honest a to prove the detection is real"
+    );
+
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(
+        report.verdict,
+        Verdict::Fail,
+        "RoPE deep-prefix MUST catch fake opened-token attention: {:?}",
+        report.failures,
+    );
+    assert!(
+        report.failures.iter().any(|f| {
+            f.code == FailureCode::AttentionReplayMismatch
+                && f.message.contains("opened token")
+        }),
+        "should have AttentionReplayMismatch for opened token: {:?}",
+        report.failures,
+    );
+}
+
 /// Deep-prefix mode catches the same fake-attention attack that routine audit
 /// misses. The opened token has fake `a` from single-token shortcut, but the
 /// verifier replays attention using the full prefix KV cache and detects the
@@ -1759,5 +2096,60 @@ fn deep_prefix_opened_token_fake_a_caught() {
         "should have AttentionReplayMismatch for opened token: {:?}",
         report.failures,
     );
+}
+
+// ---------------------------------------------------------------------------
+// Corridor measurement tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn corridor_toy_model_all_diffs_zero() {
+    let (key, response) = build_deep_prefix_audit();
+    assert!(!key.rope_aware_replay, "toy model should not use RoPE replay");
+
+    let report = verilm_verify::corridor::measure_corridor(&key, &response).unwrap();
+    assert_eq!(
+        report.global_linf, 0,
+        "toy model corridor should have zero diff everywhere: {:?}",
+        report.measurements,
+    );
+    for m in &report.measurements {
+        assert_eq!(m.linf, 0, "layer {} pos {}: expected zero linf", m.layer, m.token_position);
+        assert_eq!(m.frac_eq, 1.0, "layer {} pos {}: expected all equal", m.layer, m.token_position);
+        assert_eq!(m.histogram[0], m.n_elements);
+    }
+    assert!(!report.measurements.is_empty(), "should have measurements");
+}
+
+#[test]
+fn corridor_roped_toy_model_all_diffs_zero() {
+    let (key, response) = build_deep_prefix_audit_roped();
+    assert!(key.rope_aware_replay, "roped key should use RoPE replay");
+
+    let report = verilm_verify::corridor::measure_corridor(&key, &response).unwrap();
+    assert_eq!(
+        report.global_linf, 0,
+        "roped toy model corridor should have zero diff: {:?}",
+        report.measurements,
+    );
+    for m in &report.measurements {
+        assert_eq!(m.linf, 0);
+        assert_eq!(m.frac_eq, 1.0);
+    }
+}
+
+#[test]
+fn corridor_missing_prefix_fails_closed() {
+    let (key, mut response) = build_deep_prefix_audit();
+    response.prefix_retained = None;
+    assert!(verilm_verify::corridor::measure_corridor(&key, &response).is_err());
+
+    let (key2, mut response2) = build_deep_prefix_audit();
+    response2.prefix_shell_openings = None;
+    assert!(verilm_verify::corridor::measure_corridor(&key2, &response2).is_err());
+
+    let (key3, mut response3) = build_deep_prefix_audit();
+    response3.shell_opening = None;
+    assert!(verilm_verify::corridor::measure_corridor(&key3, &response3).is_err());
 }
 

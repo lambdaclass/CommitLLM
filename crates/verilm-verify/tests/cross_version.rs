@@ -375,7 +375,7 @@ fn frozen_key_sha256_pinned() {
     // Pinned on first generation. Update ONLY on intentional format change.
     assert_eq!(
         hash,
-        "64b65aad7f03820f089eaf14954b84b205ec39db180def79e20d8ddeb1089f08",
+        "d8fa0f945799cf180260d672f7d8b3f00f4b7cb3fea1871005e935f4b988ab9e",
         "key fixture checksum drifted — was the fixture silently regenerated?"
     );
 }

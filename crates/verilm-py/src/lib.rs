@@ -503,6 +503,16 @@ struct MinimalBatchStateHandle {
 
 #[pymethods]
 impl MinimalBatchStateHandle {
+    #[setter]
+    fn set_deep_prefix(&mut self, val: bool) {
+        self.deep_prefix = val;
+    }
+
+    #[getter]
+    fn get_deep_prefix(&self) -> bool {
+        self.deep_prefix
+    }
+
     fn commitment_json(&self) -> PyResult<String> {
         serde_json::to_string(&self.commitment)
             .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
@@ -726,6 +736,16 @@ struct PackedBatchStateHandle {
 
 #[pymethods]
 impl PackedBatchStateHandle {
+    #[setter]
+    fn set_deep_prefix(&mut self, val: bool) {
+        self.deep_prefix = val;
+    }
+
+    #[getter]
+    fn get_deep_prefix(&self) -> bool {
+        self.deep_prefix
+    }
+
     fn commitment_json(&self) -> PyResult<String> {
         serde_json::to_string(&self.commitment)
             .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
@@ -1337,6 +1357,30 @@ impl CaptureHook {
     }
 }
 
+/// Measure the attention corridor for a deep-prefix audit.
+///
+/// Takes a binary V4 audit and a JSON verifier key, replays attention from
+/// the QKV accumulators, and returns a JSON-serialized `CorridorReport`
+/// with per-layer/per-position diff statistics.
+///
+/// Args:
+///     audit_binary: bytes — V4 audit in canonical binary format.
+///     key_json: str — JSON-serialized VerifierKey.
+///
+/// Returns:
+///     str — JSON-serialized CorridorReport.
+#[pyfunction]
+fn measure_corridor(audit_binary: &[u8], key_json: &str) -> PyResult<String> {
+    let key: VerifierKey = serde_json::from_str(key_json)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize key: {}", e)))?;
+    let response = verilm_core::serialize::deserialize_v4_audit(audit_binary)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize audit: {}", e)))?;
+    let report = verilm_verify::corridor::measure_corridor(&key, &response)
+        .map_err(|e| PyValueError::new_err(format!("corridor measurement failed: {}", e)))?;
+    serde_json::to_string(&report)
+        .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+}
+
 #[pymodule]
 fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(commit_minimal_from_captures, m)?)?;
@@ -1351,6 +1395,7 @@ fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<MinimalBatchStateHandle>()?;
     m.add_function(wrap_pyfunction!(commit_minimal_packed, m)?)?;
     m.add_class::<PackedBatchStateHandle>()?;
+    m.add_function(wrap_pyfunction!(measure_corridor, m)?)?;
     m.add_class::<CaptureHook>()?;
     m.add_function(wrap_pyfunction!(verify_input_tokenization, m)?)?;
     Ok(())

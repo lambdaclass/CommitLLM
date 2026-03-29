@@ -894,6 +894,11 @@ fn bridge_layers(
 /// softmax([score]) = [1.0] and the attention output is simply the GQA
 /// head-expanded requantized V projection. This costs no extra data —
 /// Q, K, V accumulators are already in the shell opening.
+///
+/// Two paths:
+/// - **Toy/reference** (`rope_aware_replay == false`): raw `requantize` i32→i8, no RoPE.
+/// - **Production** (`rope_aware_replay == true`): dequantize using weight+activation
+///   scales, apply RoPE (identity at position 0), replay in f64, requantize with `scale_a`.
 fn check_attention_token0(
     key: &VerifierKey,
     st: &mut St,
@@ -908,13 +913,20 @@ fn check_attention_token0(
 
     st.check();
 
-    let q_i8 = verilm_core::requantize(q_acc);
-    let k_i8 = verilm_core::requantize(k_acc);
-    let v_i8 = verilm_core::requantize(v_acc);
-
-    let expected_a = verilm_core::attention::replay_attention_reference(
-        &q_i8, &[k_i8], &[v_i8], &key.config,
-    );
+    let expected_a = if key.rope_aware_replay {
+        let (q_roped, k_roped, v_deq) =
+            dequant_rope_qkv(key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, 0);
+        verilm_core::attention::replay_attention_roped(
+            &q_roped, &[k_roped], &[v_deq], rs.scale_a as f64, &key.config,
+        )
+    } else {
+        let q_i8 = verilm_core::requantize(q_acc);
+        let k_i8 = verilm_core::requantize(k_acc);
+        let v_i8 = verilm_core::requantize(v_acc);
+        verilm_core::attention::replay_attention_reference(
+            &q_i8, &[k_i8], &[v_i8], &key.config,
+        )
+    };
 
     let tolerance = verilm_core::attention::AttentionToleranceConfig::default();
     if let Some(max_diff) = verilm_core::attention::compare_attention_output(
@@ -932,6 +944,33 @@ fn check_attention_token0(
             },
         );
     }
+}
+
+/// Dequantize Q/K/V accumulators and apply RoPE to Q and K.
+///
+/// Returns `(q_roped_f64, k_roped_f64, v_deq_f64)`.
+fn dequant_rope_qkv(
+    key: &VerifierKey,
+    layer_idx: usize,
+    q_acc: &[i32],
+    k_acc: &[i32],
+    v_acc: &[i32],
+    scale_x_attn: f32,
+    position: usize,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let scale_wq = key.weight_scale_for(layer_idx, MatrixType::Wq);
+    let scale_wk = key.weight_scale_for(layer_idx, MatrixType::Wk);
+    let scale_wv = key.weight_scale_for(layer_idx, MatrixType::Wv);
+    let sx = Some(scale_x_attn);
+
+    let q_f64 = verilm_core::rope::dequantize_acc(q_acc, Some(scale_wq), sx);
+    let k_f64 = verilm_core::rope::dequantize_acc(k_acc, Some(scale_wk), sx);
+    let v_f64 = verilm_core::rope::dequantize_acc(v_acc, Some(scale_wv), sx);
+
+    let q_roped = verilm_core::rope::apply_rope_q(&q_f64, position, &key.config);
+    let k_roped = verilm_core::rope::apply_rope_k(&k_f64, position, &key.config);
+
+    (q_roped, k_roped, v_f64)
 }
 
 fn init_residual_chain(ir: &[f32], key: &VerifierKey, first_scale: f32) -> (Vec<f64>, Vec<i8>) {
@@ -1172,18 +1211,15 @@ fn phase_deep_prefix(ctx: &Ctx, st: &mut St) {
     replay_deep_prefix_attention(ctx, prefix_ret, prefix_shells, st);
 }
 
-/// Deep-prefix attention replay: verify `a` for prefix tokens j >= 1.
+/// Deep-prefix attention replay: verify `a` for prefix tokens j >= 1 and
+/// for the opened token, using the accumulated KV cache.
 ///
-/// For each layer, incrementally builds the KV cache from each prefix token's
-/// requantized K/V accumulators, then replays `softmax(QK^T/sqrt(d))V` and
-/// compares against the retained `a`.
+/// Two paths:
+/// - **Toy** (`rope_aware_replay == false`): raw `requantize` i32→i8, no RoPE.
+/// - **Production** (`rope_aware_replay == true`): dequantize → RoPE → f64 replay
+///   → requantize with `scale_a`.
 ///
 /// Token 0 is already checked by `check_attention_token0` inside `bridge_layers`.
-///
-/// Currently uses raw requantized Q/K (no RoPE). This is correct for the toy
-/// model where the prover also skips RoPE. For production models, this function
-/// must be extended to dequantize Q/K accumulators, apply RoPE at each position
-/// using `verilm_core::rope::apply_rope_{q,k}`, and requantize before replay.
 fn replay_deep_prefix_attention(
     ctx: &Ctx,
     prefix_ret: &[RetainedTokenState],
@@ -1203,105 +1239,178 @@ fn replay_deep_prefix_attention(
             .unwrap_or(0),
     );
 
-    for layer_idx in 0..n_layers {
-        let mut kv_cache_k: Vec<Vec<i8>> = Vec::new();
-        let mut kv_cache_v: Vec<Vec<i8>> = Vec::new();
-
-        for (j, (shell_j, ret_j)) in prefix_shells.iter().zip(prefix_ret.iter()).enumerate() {
-            if layer_idx >= ret_j.layers.len() {
-                break;
-            }
-            let sl = &shell_j.layers[layer_idx];
-            let rs = &ret_j.layers[layer_idx];
-
-            let (q_acc, k_acc, v_acc) = match (&sl.q, &sl.k, &sl.v) {
-                (Some(q), Some(k), Some(v)) => (q, k, v),
-                _ => break, // QKV missing — can't replay further
-            };
-
-            // Add this token's K/V to the cache (pre-RoPE requantize for toy model)
-            kv_cache_k.push(verilm_core::requantize(k_acc));
-            kv_cache_v.push(verilm_core::requantize(v_acc));
-
-            // Skip token 0 — already verified by check_attention_token0
-            if j == 0 {
-                continue;
-            }
-
-            // Replay attention with KV cache [0..=j]
-            st.check();
-            let q_i8 = verilm_core::requantize(q_acc);
-            let expected_a = verilm_core::attention::replay_attention_reference(
-                &q_i8, &kv_cache_k, &kv_cache_v, cfg,
-            );
-
-            let tolerance = verilm_core::attention::AttentionToleranceConfig::default();
-            if let Some(max_diff) = verilm_core::attention::compare_attention_output(
-                &rs.a, &expected_a, &tolerance,
-            ) {
-                st.fail_ctx(
-                    FailureCode::AttentionReplayMismatch,
-                    format!(
-                        "prefix token {} layer {}: attention replay mismatch (max_diff={})",
-                        j, layer_idx, max_diff
-                    ),
-                    FailureContext {
-                        token_index: Some(j as u32),
-                        layer: Some(layer_idx),
-                        ..Default::default()
-                    },
-                );
-            }
-        }
-
-        // Replay the opened token's attention using full prefix KV cache + own K/V.
-        // This closes the deep-prefix attention gap: with prefix KV data available,
-        // the verifier can verify the opened token's attention computation too.
-        replay_opened_token_layer(ctx, &mut kv_cache_k, &mut kv_cache_v, layer_idx, st);
+    if ctx.key.rope_aware_replay {
+        replay_deep_prefix_roped(ctx, prefix_ret, prefix_shells, n_layers, st);
+    } else {
+        replay_deep_prefix_toy(ctx, prefix_ret, prefix_shells, n_layers, st);
     }
 }
 
-/// Replay attention for the opened token at a single layer, using the prefix
-/// KV cache accumulated by `replay_deep_prefix_attention`.
-///
-/// Appends the opened token's own K/V to the cache, replays
-/// `softmax(QK^T/√d)·V`, and compares against the retained `a`.
-fn replay_opened_token_layer(
+/// Toy/reference path: raw i8 requantize, no RoPE.
+fn replay_deep_prefix_toy(
     ctx: &Ctx,
-    kv_cache_k: &mut Vec<Vec<i8>>,
-    kv_cache_v: &mut Vec<Vec<i8>>,
-    layer_idx: usize,
+    prefix_ret: &[RetainedTokenState],
+    prefix_shells: &[ShellTokenOpening],
+    n_layers: usize,
     st: &mut St,
 ) {
-    let shell = match &ctx.r.shell_opening {
-        Some(s) if layer_idx < s.layers.len() => s,
-        _ => return,
-    };
-    if layer_idx >= ctx.r.retained.layers.len() {
-        return;
-    }
-
-    let sl = &shell.layers[layer_idx];
-    let rs = &ctx.r.retained.layers[layer_idx];
     let cfg = &ctx.key.config;
 
-    let (q_acc, k_acc, v_acc) = match (&sl.q, &sl.k, &sl.v) {
-        (Some(q), Some(k), Some(v)) => (q, k, v),
-        _ => return,
-    };
+    for layer_idx in 0..n_layers {
+        let mut kv_k: Vec<Vec<i8>> = Vec::new();
+        let mut kv_v: Vec<Vec<i8>> = Vec::new();
 
-    kv_cache_k.push(verilm_core::requantize(k_acc));
-    kv_cache_v.push(verilm_core::requantize(v_acc));
+        for (j, (shell_j, ret_j)) in prefix_shells.iter().zip(prefix_ret.iter()).enumerate() {
+            if layer_idx >= ret_j.layers.len() { break; }
+            let sl = &shell_j.layers[layer_idx];
+            let rs = &ret_j.layers[layer_idx];
+            let (q_acc, k_acc, v_acc) = match (&sl.q, &sl.k, &sl.v) {
+                (Some(q), Some(k), Some(v)) => (q, k, v),
+                _ => break,
+            };
 
-    st.check();
-    let q_i8 = verilm_core::requantize(q_acc);
-    let expected_a = verilm_core::attention::replay_attention_reference(
-        &q_i8, kv_cache_k, kv_cache_v, cfg,
-    );
+            kv_k.push(verilm_core::requantize(k_acc));
+            kv_v.push(verilm_core::requantize(v_acc));
 
+            if j == 0 { continue; } // token 0 handled by check_attention_token0
+
+            st.check();
+            let q_i8 = verilm_core::requantize(q_acc);
+            let expected_a = verilm_core::attention::replay_attention_reference(
+                &q_i8, &kv_k, &kv_v, cfg,
+            );
+            check_attention_result(st, &rs.a, &expected_a, "prefix token", j, layer_idx);
+        }
+
+        // Opened token replay
+        if let Some((q_acc, k_acc, v_acc, rs)) = opened_token_qkv(ctx, layer_idx) {
+            kv_k.push(verilm_core::requantize(k_acc));
+            kv_v.push(verilm_core::requantize(v_acc));
+            st.check();
+            let q_i8 = verilm_core::requantize(q_acc);
+            let expected_a = verilm_core::attention::replay_attention_reference(
+                &q_i8, &kv_k, &kv_v, cfg,
+            );
+            check_attention_result_opened(ctx, st, &rs.a, &expected_a, layer_idx);
+        }
+    }
+}
+
+/// Production path: dequantize + RoPE + f64 replay.
+fn replay_deep_prefix_roped(
+    ctx: &Ctx,
+    prefix_ret: &[RetainedTokenState],
+    prefix_shells: &[ShellTokenOpening],
+    n_layers: usize,
+    st: &mut St,
+) {
+    let cfg = &ctx.key.config;
+
+    for layer_idx in 0..n_layers {
+        let mut kv_k: Vec<Vec<f64>> = Vec::new();
+        let mut kv_v: Vec<Vec<f64>> = Vec::new();
+
+        for (j, (shell_j, ret_j)) in prefix_shells.iter().zip(prefix_ret.iter()).enumerate() {
+            if layer_idx >= ret_j.layers.len() { break; }
+            let sl = &shell_j.layers[layer_idx];
+            let rs = &ret_j.layers[layer_idx];
+            let (q_acc, k_acc, v_acc) = match (&sl.q, &sl.k, &sl.v) {
+                (Some(q), Some(k), Some(v)) => (q, k, v),
+                _ => break,
+            };
+
+            let (_, k_roped, v_deq) =
+                dequant_rope_qkv(ctx.key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, j);
+            kv_k.push(k_roped);
+            kv_v.push(v_deq);
+
+            if j == 0 { continue; }
+
+            st.check();
+            let (q_roped, _, _) =
+                dequant_rope_qkv(ctx.key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, j);
+            let expected_a = verilm_core::attention::replay_attention_roped(
+                &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
+            );
+            check_attention_result(st, &rs.a, &expected_a, "prefix token", j, layer_idx);
+        }
+
+        // Opened token replay
+        if let Some((q_acc, k_acc, v_acc, rs)) = opened_token_qkv(ctx, layer_idx) {
+            let shell = ctx.r.shell_opening.as_ref().unwrap();
+            let sl = &shell.layers[layer_idx];
+            let pos = ctx.r.token_index as usize;
+
+            let (q_roped, k_roped, v_deq) =
+                dequant_rope_qkv(ctx.key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, pos);
+            kv_k.push(k_roped);
+            kv_v.push(v_deq);
+
+            st.check();
+            let expected_a = verilm_core::attention::replay_attention_roped(
+                &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
+            );
+            check_attention_result_opened(ctx, st, &rs.a, &expected_a, layer_idx);
+        }
+    }
+}
+
+/// Extract the opened token's QKV accumulators and retained state for a given layer.
+fn opened_token_qkv<'a>(
+    ctx: &'a Ctx,
+    layer_idx: usize,
+) -> Option<(&'a [i32], &'a [i32], &'a [i32], &'a verilm_core::types::RetainedLayerState)> {
+    let shell = ctx.r.shell_opening.as_ref()?;
+    if layer_idx >= shell.layers.len() || layer_idx >= ctx.r.retained.layers.len() {
+        return None;
+    }
+    let sl = &shell.layers[layer_idx];
+    let rs = &ctx.r.retained.layers[layer_idx];
+    match (&sl.q, &sl.k, &sl.v) {
+        (Some(q), Some(k), Some(v)) => Some((q, k, v, rs)),
+        _ => None,
+    }
+}
+
+/// Check an attention replay result and emit failure if mismatched (prefix tokens).
+fn check_attention_result(
+    st: &mut St,
+    claimed: &[i8],
+    expected: &[i8],
+    label: &str,
+    token_j: usize,
+    layer_idx: usize,
+) {
     let tolerance = verilm_core::attention::AttentionToleranceConfig::default();
     if let Some(max_diff) =
-        verilm_core::attention::compare_attention_output(&rs.a, &expected_a, &tolerance)
+        verilm_core::attention::compare_attention_output(claimed, expected, &tolerance)
+    {
+        st.fail_ctx(
+            FailureCode::AttentionReplayMismatch,
+            format!(
+                "{} {} layer {}: attention replay mismatch (max_diff={})",
+                label, token_j, layer_idx, max_diff
+            ),
+            FailureContext {
+                token_index: Some(token_j as u32),
+                layer: Some(layer_idx),
+                ..Default::default()
+            },
+        );
+    }
+}
+
+/// Check an attention replay result for the opened token.
+fn check_attention_result_opened(
+    ctx: &Ctx,
+    st: &mut St,
+    claimed: &[i8],
+    expected: &[i8],
+    layer_idx: usize,
+) {
+    let tolerance = verilm_core::attention::AttentionToleranceConfig::default();
+    if let Some(max_diff) =
+        verilm_core::attention::compare_attention_output(claimed, expected, &tolerance)
     {
         st.fail_ctx(
             FailureCode::AttentionReplayMismatch,
@@ -1533,6 +1642,7 @@ mod tests {
             quant_family: None,
             scale_derivation: None,
             quant_block_size: None,
+            rope_aware_replay: false,
         }
     }
 

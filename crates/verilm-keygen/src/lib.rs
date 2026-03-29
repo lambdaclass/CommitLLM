@@ -546,6 +546,7 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         quant_family: None,
         scale_derivation: None,
         quant_block_size: None,
+        rope_aware_replay: false,
     })
 }
 

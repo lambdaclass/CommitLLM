@@ -7,6 +7,7 @@
 
 pub mod canonical;
 pub mod client;
+pub mod corridor;
 
 use std::time::{Duration, Instant};
 

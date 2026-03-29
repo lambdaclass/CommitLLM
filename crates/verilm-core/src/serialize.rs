@@ -107,6 +107,7 @@ mod tests {
             quant_family: None,
             scale_derivation: None,
             quant_block_size: None,
+            rope_aware_replay: false,
         };
         let data = serialize_key(&key);
         let key2 = deserialize_key(&data).unwrap();

@@ -120,6 +120,178 @@ pub fn replay_attention_reference(
     a
 }
 
+/// RoPE-aware f64 attention replay for production models.
+///
+/// Takes post-RoPE Q and K in f64, dequantized V in f64, and requantizes
+/// the output to i8 using `scale_a`. This is the production counterpart to
+/// [`replay_attention_reference`] which uses raw i8 inputs (toy model).
+///
+/// The caller is responsible for:
+/// - Dequantizing i32 accumulators via [`crate::rope::dequantize_acc`]
+/// - Applying RoPE via [`crate::rope::apply_rope_q`] / [`crate::rope::apply_rope_k`]
+/// - Passing the correct `scale_a` from `RetainedLayerState`
+///
+/// # Arguments
+/// - `q_roped` — post-RoPE Q, length `hidden_dim` (f64)
+/// - `kv_cache_k_roped` — post-RoPE K entries per seq position, each length `kv_dim`
+/// - `kv_cache_v_deq` — dequantized V entries (no RoPE), each length `kv_dim`
+/// - `scale_a` — quantization scale for the output `a_i8 = round(a_f64 / scale_a)`
+/// - `cfg` — model config
+pub fn replay_attention_roped(
+    q_roped: &[f64],
+    kv_cache_k_roped: &[Vec<f64>],
+    kv_cache_v_deq: &[Vec<f64>],
+    scale_a: f64,
+    cfg: &ModelConfig,
+) -> Vec<i8> {
+    let d_head = cfg.d_head;
+    let heads_per_kv = cfg.n_q_heads / cfg.n_kv_heads;
+    let inv_sqrt_d = 1.0 / (d_head as f64).sqrt();
+    let seq_len = kv_cache_k_roped.len();
+    let inv_scale = if scale_a.abs() > 1e-30 { 1.0 / scale_a } else { 1.0 };
+
+    let mut a = vec![0i8; cfg.hidden_dim];
+
+    for qh in 0..cfg.n_q_heads {
+        let kv_head = qh / heads_per_kv;
+
+        let q_head: Vec<f64> = (0..d_head)
+            .map(|i| q_roped[qh * d_head + i])
+            .collect();
+
+        // Attention scores: q · k_t / sqrt(d)
+        let scores: Vec<f64> = (0..seq_len)
+            .map(|t| {
+                let k_t = &kv_cache_k_roped[t];
+                let dot: f64 = (0..d_head)
+                    .map(|i| q_head[i] * k_t[kv_head * d_head + i])
+                    .sum();
+                dot * inv_sqrt_d
+            })
+            .collect();
+
+        // Softmax
+        let max_score = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let exp_scores: Vec<f64> = scores.iter().map(|&s| (s - max_score).exp()).collect();
+        let sum_exp: f64 = exp_scores.iter().sum();
+        let weights: Vec<f64> = exp_scores.iter().map(|&e| e / sum_exp).collect();
+
+        // Weighted sum of V
+        let mut head_out = vec![0.0f64; d_head];
+        for t in 0..seq_len {
+            let v_t = &kv_cache_v_deq[t];
+            for i in 0..d_head {
+                head_out[i] += weights[t] * v_t[kv_head * d_head + i];
+            }
+        }
+
+        // Requantize: a_i8 = round(a_f64 / scale_a)
+        for i in 0..d_head {
+            a[qh * d_head + i] = (head_out[i] * inv_scale)
+                .round()
+                .clamp(-128.0, 127.0) as i8;
+        }
+    }
+
+    a
+}
+
+/// Per-element diff statistics between claimed and replayed attention outputs.
+///
+/// Used by corridor measurement to characterize the FP16-vs-f64 divergence
+/// without a pass/fail threshold.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AttentionDiffStats {
+    pub layer: usize,
+    pub token_position: usize,
+    /// Max |claimed - replayed| across all elements.
+    pub linf: i16,
+    /// Mean of |claimed - replayed|.
+    pub mean_abs: f64,
+    /// Root mean square of element-wise diffs.
+    pub rms: f64,
+    /// 95th percentile of |claimed - replayed|.
+    pub p95_abs_diff: i16,
+    /// Fraction of elements with diff == 0.
+    pub frac_eq: f64,
+    /// Fraction of elements with diff <= 1.
+    pub frac_le_1: f64,
+    /// Fraction of elements with diff <= 2.
+    pub frac_le_2: f64,
+    /// Histogram: count of elements with diff = 0, 1, 2, 3, 4, 5+.
+    pub histogram: [usize; 6],
+    pub n_elements: usize,
+}
+
+/// Compute element-wise diff statistics between claimed and replayed attention outputs.
+///
+/// Pure comparison — no replay logic. Sits next to [`compare_attention_output`].
+/// Returns `Err` if lengths differ.
+pub fn measure_attention_diff(
+    claimed: &[i8],
+    replayed: &[i8],
+    layer: usize,
+    token_position: usize,
+) -> Result<AttentionDiffStats, String> {
+    if claimed.len() != replayed.len() {
+        return Err(format!(
+            "length mismatch: claimed={} replayed={}",
+            claimed.len(),
+            replayed.len()
+        ));
+    }
+    let n = claimed.len();
+    let mut linf: i16 = 0;
+    let mut sum_abs: f64 = 0.0;
+    let mut sum_sq: f64 = 0.0;
+    let mut histogram = [0usize; 6];
+    let mut all_diffs: Vec<i16> = Vec::with_capacity(n);
+
+    for (&c, &r) in claimed.iter().zip(replayed.iter()) {
+        let diff = (c as i16 - r as i16).abs();
+        if diff > linf {
+            linf = diff;
+        }
+        sum_abs += diff as f64;
+        sum_sq += (diff as f64) * (diff as f64);
+        let bucket = (diff as usize).min(5);
+        histogram[bucket] += 1;
+        all_diffs.push(diff);
+    }
+
+    // p95: sort and pick the 95th percentile element
+    all_diffs.sort_unstable();
+    let p95_abs_diff = if n > 0 {
+        let idx = ((n as f64 * 0.95).ceil() as usize).min(n) - 1;
+        all_diffs[idx]
+    } else {
+        0
+    };
+
+    let n_f = n as f64;
+    let frac_eq = if n > 0 { histogram[0] as f64 / n_f } else { 0.0 };
+    let frac_le_1 = if n > 0 { (histogram[0] + histogram[1]) as f64 / n_f } else { 0.0 };
+    let frac_le_2 = if n > 0 {
+        (histogram[0] + histogram[1] + histogram[2]) as f64 / n_f
+    } else {
+        0.0
+    };
+
+    Ok(AttentionDiffStats {
+        layer,
+        token_position,
+        linf,
+        mean_abs: if n > 0 { sum_abs / n_f } else { 0.0 },
+        rms: if n > 0 { (sum_sq / n_f).sqrt() } else { 0.0 },
+        p95_abs_diff,
+        frac_eq,
+        frac_le_1,
+        frac_le_2,
+        histogram,
+        n_elements: n,
+    })
+}
+
 /// Compare claimed vs replayed attention output with tolerance policy.
 ///
 /// Returns `None` if the vectors have equal length and the L-infinity difference
@@ -245,5 +417,53 @@ mod tests {
         // Extended claimed vector is also rejected
         let claimed2 = vec![1i8, 2, 3, 4, 5];
         assert_eq!(compare_attention_output(&claimed2, &replayed, &tol), Some(i16::MAX));
+    }
+
+    #[test]
+    fn test_measure_diff_exact_match() {
+        let a = vec![1i8, 2, 3, -128, 127];
+        let b = vec![1i8, 2, 3, -128, 127];
+        let stats = measure_attention_diff(&a, &b, 0, 5).unwrap();
+        assert_eq!(stats.linf, 0);
+        assert_eq!(stats.mean_abs, 0.0);
+        assert_eq!(stats.rms, 0.0);
+        assert_eq!(stats.p95_abs_diff, 0);
+        assert_eq!(stats.frac_eq, 1.0);
+        assert_eq!(stats.frac_le_1, 1.0);
+        assert_eq!(stats.frac_le_2, 1.0);
+        assert_eq!(stats.histogram, [5, 0, 0, 0, 0, 0]);
+        assert_eq!(stats.n_elements, 5);
+        assert_eq!(stats.layer, 0);
+        assert_eq!(stats.token_position, 5);
+    }
+
+    #[test]
+    fn test_measure_diff_known_values() {
+        // diffs: 0, 1, 2, 3, 5, 7
+        let claimed  = vec![10i8, 20, 30, 40, 50, 60];
+        let replayed = vec![10i8, 19, 28, 37, 45, 53];
+        let stats = measure_attention_diff(&claimed, &replayed, 3, 10).unwrap();
+        assert_eq!(stats.linf, 7);
+        assert_eq!(stats.n_elements, 6);
+        // histogram: diff=0 -> 1, diff=1 -> 1, diff=2 -> 1, diff=3 -> 1, diff=4 -> 0, diff=5+ -> 2
+        assert_eq!(stats.histogram, [1, 1, 1, 1, 0, 2]);
+        // mean_abs = (0+1+2+3+5+7)/6 = 18/6 = 3.0
+        assert!((stats.mean_abs - 3.0).abs() < 1e-10);
+        // rms = sqrt((0+1+4+9+25+49)/6) = sqrt(88/6) = sqrt(14.666...)
+        let expected_rms = (88.0f64 / 6.0).sqrt();
+        assert!((stats.rms - expected_rms).abs() < 1e-10);
+        // frac_eq = 1/6, frac_le_1 = 2/6, frac_le_2 = 3/6
+        assert!((stats.frac_eq - 1.0 / 6.0).abs() < 1e-10);
+        assert!((stats.frac_le_1 - 2.0 / 6.0).abs() < 1e-10);
+        assert!((stats.frac_le_2 - 3.0 / 6.0).abs() < 1e-10);
+        // p95: sorted diffs = [0,1,2,3,5,7], idx = ceil(6*0.95)-1 = ceil(5.7)-1 = 5, diffs[5]=7
+        assert_eq!(stats.p95_abs_diff, 7);
+    }
+
+    #[test]
+    fn test_measure_diff_length_mismatch() {
+        let a = vec![1i8, 2, 3];
+        let b = vec![1i8, 2];
+        assert!(measure_attention_diff(&a, &b, 0, 0).is_err());
     }
 }

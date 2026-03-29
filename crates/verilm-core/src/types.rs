@@ -579,6 +579,13 @@ pub struct VerifierKey {
     /// Cross-checked against the manifest's `quant_block_size` when both are present.
     #[serde(default)]
     pub quant_block_size: Option<u32>,
+
+    /// When true, attention replay dequantizes Q/K accumulators using weight
+    /// and activation scales, applies RoPE at each token position, and replays
+    /// in f64 space. When false (default), uses raw `requantize` (toy/reference
+    /// path where the forward pass does not apply RoPE).
+    #[serde(default)]
+    pub rope_aware_replay: bool,
 }
 
 impl VerifierKey {
