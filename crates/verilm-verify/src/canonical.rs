@@ -24,6 +24,8 @@
 //!        │         └─ bridge_ffn_to_next (residual → next x_attn)
 //!        ├─ phase_lm_head       (reads BridgeState + SpecState)
 //!        ├─ phase_deep_prefix
+//!        │    ├─ replay_deep_prefix_attention (prefix tokens j≥1)
+//!        │    └─ replay_opened_token_layer    (opened token via prefix KV)
 //!        ├─ phase_tokenization   (reads SpecState.input_spec)
 //!        └─ phase_detokenization (reads SpecState.detok_policy)
 //! ```
@@ -1188,8 +1190,8 @@ fn replay_deep_prefix_attention(
     prefix_shells: &[ShellTokenOpening],
     st: &mut St,
 ) {
-    if prefix_shells.len() <= 1 {
-        return; // Token 0 handled by check_attention_token0
+    if prefix_shells.is_empty() {
+        return; // No prefix data to build KV cache from
     }
 
     let cfg = &ctx.key.config;
@@ -1251,6 +1253,68 @@ fn replay_deep_prefix_attention(
                 );
             }
         }
+
+        // Replay the opened token's attention using full prefix KV cache + own K/V.
+        // This closes the deep-prefix attention gap: with prefix KV data available,
+        // the verifier can verify the opened token's attention computation too.
+        replay_opened_token_layer(ctx, &mut kv_cache_k, &mut kv_cache_v, layer_idx, st);
+    }
+}
+
+/// Replay attention for the opened token at a single layer, using the prefix
+/// KV cache accumulated by `replay_deep_prefix_attention`.
+///
+/// Appends the opened token's own K/V to the cache, replays
+/// `softmax(QK^T/√d)·V`, and compares against the retained `a`.
+fn replay_opened_token_layer(
+    ctx: &Ctx,
+    kv_cache_k: &mut Vec<Vec<i8>>,
+    kv_cache_v: &mut Vec<Vec<i8>>,
+    layer_idx: usize,
+    st: &mut St,
+) {
+    let shell = match &ctx.r.shell_opening {
+        Some(s) if layer_idx < s.layers.len() => s,
+        _ => return,
+    };
+    if layer_idx >= ctx.r.retained.layers.len() {
+        return;
+    }
+
+    let sl = &shell.layers[layer_idx];
+    let rs = &ctx.r.retained.layers[layer_idx];
+    let cfg = &ctx.key.config;
+
+    let (q_acc, k_acc, v_acc) = match (&sl.q, &sl.k, &sl.v) {
+        (Some(q), Some(k), Some(v)) => (q, k, v),
+        _ => return,
+    };
+
+    kv_cache_k.push(verilm_core::requantize(k_acc));
+    kv_cache_v.push(verilm_core::requantize(v_acc));
+
+    st.check();
+    let q_i8 = verilm_core::requantize(q_acc);
+    let expected_a = verilm_core::attention::replay_attention_reference(
+        &q_i8, kv_cache_k, kv_cache_v, cfg,
+    );
+
+    let tolerance = verilm_core::attention::AttentionToleranceConfig::default();
+    if let Some(max_diff) =
+        verilm_core::attention::compare_attention_output(&rs.a, &expected_a, &tolerance)
+    {
+        st.fail_ctx(
+            FailureCode::AttentionReplayMismatch,
+            format!(
+                "opened token layer {}: deep-prefix attention replay mismatch (max_diff={})",
+                layer_idx, max_diff
+            ),
+            FailureContext {
+                token_index: Some(ctx.r.token_index),
+                layer: Some(layer_idx),
+                ..Default::default()
+            },
+        );
     }
 }
 

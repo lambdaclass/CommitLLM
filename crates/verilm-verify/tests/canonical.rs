@@ -1462,3 +1462,302 @@ fn phase7b_deep_prefix_tampered_attention_rejected() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Known-gap test: routine audit with self-consistent fake attention
+// ---------------------------------------------------------------------------
+
+/// Build a 2-token audit where token 1 has a self-consistent fake attention
+/// vector (single-token shortcut instead of proper multi-token attention).
+///
+/// Returns (key, response) where the response is a routine audit (no deep
+/// prefix) for token 1.
+///
+/// The attack: the prover computes correct QKV projections but derives `a`
+/// using a single-token attention shortcut (just GQA-expand V, ignoring the
+/// KV cache from token 0). Everything downstream — Wo·a, bridge, FFN — is
+/// recomputed consistently from the fake `a`. The routine audit passes because
+/// `bridge_layers` checks `Wo·a == attn_out` (self-consistent) but does NOT
+/// verify that `a` was correctly derived from QKV via multi-token attention.
+fn build_routine_audit_with_fake_a() -> (
+    verilm_core::types::VerifierKey,
+    verilm_core::types::V4AuditResponse,
+    Vec<i8>, // honest_a_layer0 for assertion
+    Vec<i8>, // fake_a_layer0 for assertion
+) {
+    let (cfg, model, mut key, ws, rmsnorm_attn, rmsnorm_ffn, initial_residual) =
+        setup_full_bridge();
+    let scales = bridge_scales(&cfg);
+    let token_ids = [42u32, 43];
+
+    // Different embedding per token
+    let residuals: Vec<Vec<f32>> = (0..2)
+        .map(|t| {
+            initial_residual
+                .iter()
+                .map(|&v| v + 0.05 * t as f32)
+                .collect()
+        })
+        .collect();
+
+    // Embedding Merkle tree
+    let n_vocab = 128;
+    let mut leaves = Vec::with_capacity(n_vocab);
+    for i in 0..n_vocab {
+        if let Some(pos) = token_ids.iter().position(|&tid| tid as usize == i) {
+            leaves.push(verilm_core::merkle::hash_embedding_row(&residuals[pos]));
+        } else {
+            let row: Vec<f32> = (0..initial_residual.len())
+                .map(|j| (i * 1000 + j) as f32 * 0.001)
+                .collect();
+            leaves.push(verilm_core::merkle::hash_embedding_row(&row));
+        }
+    }
+    let tree = verilm_core::merkle::build_tree(&leaves);
+    key.embedding_merkle_root = Some(tree.root);
+
+    // Honest multi-token forward (proper attention with KV cache)
+    let honest_results = multi_token_forward_with_attention(
+        &cfg, &model, &residuals, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+    );
+    let honest_a_layer0 = honest_results[1].0.layers[0].a.clone();
+
+    // Fake: single-token forward for token 1 (ignores KV cache from token 0)
+    let (fake_retained_1, fake_scales_1) = full_bridge_forward(
+        &cfg, &model, &residuals[1], &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+    );
+    let fake_a_layer0 = fake_retained_1.layers[0].a.clone();
+
+    // Commit with: honest token 0, fake token 1
+    let all_retained = vec![honest_results[0].0.clone(), fake_retained_1];
+    let all_scales = vec![honest_results[0].1.clone(), fake_scales_1];
+
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let params = FullBindingParams {
+        token_ids: &token_ids,
+        prompt: b"routine audit gap test",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+
+    // Open token 1 as routine audit (NOT deep prefix)
+    let proof = verilm_core::merkle::prove(&tree, 43);
+    let bridge = BridgeParams {
+        rmsnorm_attn_weights: &rmsnorm_attn,
+        rmsnorm_ffn_weights: &rmsnorm_ffn,
+        rmsnorm_eps: 1e-5,
+        initial_residual: &residuals[1],
+        embedding_proof: Some(proof),
+    };
+    let response = open_v4(
+        &state, 1, &ToyWeights(&model), &cfg, &ws,
+        Some(&bridge), None, None, None, false,
+    );
+
+    (key, response, honest_a_layer0, fake_a_layer0)
+}
+
+/// Documents the known routine-audit limitation: a prover can substitute a
+/// self-consistent fake attention vector for token_index > 0 and pass all
+/// verifier checks.
+///
+/// The fake path: compute correct QKV (Freivalds-verifiable), but derive `a`
+/// from single-token attention (ignoring KV cache from prior tokens). Then
+/// honestly compute Wo·a, bridge, and FFN from the fake `a`. The verifier's
+/// Freivalds on Wo confirms `Wo·a == attn_out` (self-consistent), but never
+/// checks that `a` was correctly derived from `softmax(QK^T/√d)·V` with the
+/// full sequence context.
+///
+/// This gap is closed by:
+/// - Token-0 attention replay (seq_len=1, softmax trivial)
+/// - Deep-prefix attention replay (all co-opened prefix tokens)
+/// - Future: bounded KV-cache commitment for arbitrary-token replay (roadmap #72)
+#[test]
+fn routine_audit_self_consistent_fake_a_passes() {
+    let (key, response, honest_a, fake_a) = build_routine_audit_with_fake_a();
+
+    // Precondition: the fake and honest attention vectors MUST differ.
+    // If they don't, the test is vacuous.
+    assert_ne!(
+        honest_a, fake_a,
+        "fake a (single-token shortcut) must differ from honest a (multi-token attention) \
+         to prove the gap is real"
+    );
+
+    // The routine audit passes despite the wrong attention computation.
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "routine audit MUST pass with self-consistent fake attention vector — \
+         this documents the known limitation: routine audits for token_index > 0 \
+         verify Wo·a consistency but not QKV→a derivation. \
+         Failures: {:?}",
+        report.failures
+    );
+
+    // Verify that the bridge checks ran (the pass isn't vacuous)
+    assert!(
+        report.checks_run >= 12,
+        "expected full bridge checks to run, got only {}",
+        report.checks_run
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Deep-prefix: opened-token attention replay
+// ---------------------------------------------------------------------------
+
+/// Verify that the existing deep-prefix audit still passes now that the
+/// verifier also replays the opened token's attention.
+#[test]
+fn deep_prefix_opened_token_replay_pass() {
+    let (key, response) = build_deep_prefix_audit();
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "deep prefix audit (including opened-token replay) should pass: {:?}",
+        report.failures
+    );
+    // The opened-token replay adds n_layers extra checks vs the prefix-only version.
+    // With 3 tokens, 2 layers: prefix replay (2 checks for token 1) + opened token
+    // replay (2 checks) + token-0 replay (2 checks) + structural/bridge/etc.
+    assert!(
+        report.checks_run >= 16,
+        "expected extra checks from opened-token replay, got {}",
+        report.checks_run
+    );
+}
+
+/// Build a 3-token deep-prefix audit where the opened token (token 2) has a
+/// self-consistent fake `a` (single-token shortcut). Prefix tokens 0 and 1
+/// are honest. This is the same attack as `routine_audit_self_consistent_fake_a_passes`
+/// but in deep-prefix mode — here the verifier CAN detect it.
+fn build_deep_prefix_audit_fake_opened_a() -> (
+    verilm_core::types::VerifierKey,
+    verilm_core::types::V4AuditResponse,
+    Vec<i8>, // honest_a_layer0 for assertion
+    Vec<i8>, // fake_a_layer0 for assertion
+) {
+    let (cfg, model, mut key, ws, rmsnorm_attn, rmsnorm_ffn, initial_residual) =
+        setup_full_bridge();
+    let scales = bridge_scales(&cfg);
+    let token_ids = [10u32, 20, 30];
+
+    let residuals: Vec<Vec<f32>> = (0..3)
+        .map(|t| {
+            initial_residual
+                .iter()
+                .map(|&v| v + 0.05 * t as f32)
+                .collect()
+        })
+        .collect();
+
+    let n_vocab = 128;
+    let mut leaves = Vec::with_capacity(n_vocab);
+    for i in 0..n_vocab {
+        if let Some(pos) = token_ids.iter().position(|&tid| tid as usize == i) {
+            leaves.push(verilm_core::merkle::hash_embedding_row(&residuals[pos]));
+        } else {
+            let row: Vec<f32> = (0..initial_residual.len())
+                .map(|j| (i * 1000 + j) as f32 * 0.001)
+                .collect();
+            leaves.push(verilm_core::merkle::hash_embedding_row(&row));
+        }
+    }
+    let tree = verilm_core::merkle::build_tree(&leaves);
+    key.embedding_merkle_root = Some(tree.root);
+
+    // Honest multi-token forward
+    let honest_results = multi_token_forward_with_attention(
+        &cfg, &model, &residuals, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+    );
+    let honest_a_layer0 = honest_results[2].0.layers[0].a.clone();
+
+    // Fake: single-token forward for token 2 (ignores KV cache from tokens 0,1)
+    let (fake_retained_2, fake_scales_2) = full_bridge_forward(
+        &cfg, &model, &residuals[2], &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+    );
+    let fake_a_layer0 = fake_retained_2.layers[0].a.clone();
+
+    // Commit: honest tokens 0,1 + fake token 2
+    let all_retained = vec![
+        honest_results[0].0.clone(),
+        honest_results[1].0.clone(),
+        fake_retained_2,
+    ];
+    let all_scales = vec![
+        honest_results[0].1.clone(),
+        honest_results[1].1.clone(),
+        fake_scales_2,
+    ];
+
+    let mut lookup_entries = std::collections::HashMap::new();
+    for (i, &tid) in token_ids.iter().enumerate() {
+        let proof = verilm_core::merkle::prove(&tree, tid as usize);
+        lookup_entries.insert(tid, (residuals[i].clone(), proof));
+    }
+    let lookup = TestEmbeddingLookup {
+        entries: lookup_entries,
+    };
+
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let params = FullBindingParams {
+        token_ids: &token_ids,
+        prompt: b"deep prefix opened token gap test",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+
+    // Open token 2 with deep_prefix=true
+    let proof = verilm_core::merkle::prove(&tree, 30);
+    let bridge = BridgeParams {
+        rmsnorm_attn_weights: &rmsnorm_attn,
+        rmsnorm_ffn_weights: &rmsnorm_ffn,
+        rmsnorm_eps: 1e-5,
+        initial_residual: &residuals[2],
+        embedding_proof: Some(proof),
+    };
+    let response = open_v4(
+        &state, 2, &ToyWeights(&model), &cfg, &ws,
+        Some(&bridge), None, None, Some(&lookup), true,
+    );
+
+    (key, response, honest_a_layer0, fake_a_layer0)
+}
+
+/// Deep-prefix mode catches the same fake-attention attack that routine audit
+/// misses. The opened token has fake `a` from single-token shortcut, but the
+/// verifier replays attention using the full prefix KV cache and detects the
+/// mismatch.
+#[test]
+fn deep_prefix_opened_token_fake_a_caught() {
+    let (key, response, honest_a, fake_a) = build_deep_prefix_audit_fake_opened_a();
+
+    // Precondition: fake and honest attention differ
+    assert_ne!(
+        honest_a, fake_a,
+        "fake a must differ from honest a to prove the detection is real"
+    );
+
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(
+        report.verdict,
+        Verdict::Fail,
+        "deep-prefix audit MUST catch fake opened-token attention: {:?}",
+        report.failures
+    );
+    assert!(
+        report.failures.iter().any(|f| {
+            f.code == FailureCode::AttentionReplayMismatch
+                && f.message.contains("opened token")
+        }),
+        "should have AttentionReplayMismatch for opened token: {:?}",
+        report.failures,
+    );
+}
+
