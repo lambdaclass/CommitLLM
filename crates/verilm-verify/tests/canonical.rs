@@ -2,12 +2,13 @@
 
 use verilm_core::constants::{MatrixType, ModelConfig};
 use verilm_core::types::{
-    BridgeParams, DeploymentManifest, RetainedLayerState, RetainedTokenState, ShellWeights,
+    BridgeParams, DeploymentManifest, EmbeddingLookup, RetainedLayerState, RetainedTokenState,
+    ShellWeights,
 };
 use verilm_prover::{commit_minimal, open_v4, CapturedLayerScales, FullBindingParams};
 use verilm_test_vectors::{generate_key, generate_model, LayerWeights};
 use verilm_verify::canonical::{verify_binary, verify_response};
-use verilm_verify::{verify_v4_legacy, FailureCode, Verdict};
+use verilm_verify::{verify_v4_legacy, Detokenizer, FailureCode, PromptTokenizer, Verdict};
 
 // ---------------------------------------------------------------------------
 // Shared helpers (same as v4_e2e.rs)
@@ -940,6 +941,524 @@ fn phase5_bridge_residual_chain_broken() {
     assert!(
         report.failures.iter().any(|f| f.code == FailureCode::FreivaldsFailed),
         "should have FreivaldsFailed from broken residual chain: {:?}", report.failures,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5b: Token-0 attention replay
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phase5_token0_attention_replay_pass() {
+    // Clean token-0 audit: attention replay should pass (already covered by
+    // canonical_full_bridge_pass, but this explicitly checks extra check count).
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, binary) = build_canonical_audit(Some(&manifest));
+    let report = verify_binary(&key, &binary, None, None).unwrap();
+    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+    // Attention replay adds one check per layer (toy model has 2 layers).
+    assert!(report.checks_run >= 14, "expected attention replay checks: {}", report.checks_run);
+}
+
+#[test]
+fn phase5_token0_attention_tampered_a_rejected() {
+    // Tamper retained.a to break the attention replay check.
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    // Flip a byte in layer 0's attention output.
+    response.retained.layers[0].a[0] ^= 0x7F;
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::AttentionReplayMismatch),
+        "should have AttentionReplayMismatch: {:?}", report.failures,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4: Output policy
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phase4_ignore_eos_violated() {
+    // ignore_eos=true but token_id=42 matches eos_token_id → IgnoreEosViolated
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.ignore_eos = true;
+    manifest.eos_token_id = Some(42); // matches the test token_id
+    let (key, response) = build_canonical_audit_with_response(Some(&manifest));
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::IgnoreEosViolated),
+        "should have IgnoreEosViolated: {:?}", report.failures,
+    );
+}
+
+#[test]
+fn phase4_unknown_eos_policy() {
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.eos_policy = "badpolicy".into();
+    manifest.eos_token_id = Some(42);
+    let (key, response) = build_canonical_audit_with_response(Some(&manifest));
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::UnknownEosPolicy),
+        "should have UnknownEosPolicy: {:?}", report.failures,
+    );
+}
+
+#[test]
+fn phase4_missing_eos_token_id() {
+    // min_tokens > 0 but eos_token_id is None → MissingEosTokenId
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.min_tokens = 5;
+    // eos_token_id stays None
+    let (key, response) = build_canonical_audit_with_response(Some(&manifest));
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::MissingEosTokenId),
+        "should have MissingEosTokenId: {:?}", report.failures,
+    );
+}
+
+#[test]
+fn phase4_min_tokens_violated() {
+    // min_tokens=100 but n_generated=1 → MinTokensViolated
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.min_tokens = 100;
+    manifest.eos_token_id = Some(42);
+    let (key, response) = build_canonical_audit_with_response(Some(&manifest));
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::MinTokensViolated),
+        "should have MinTokensViolated: {:?}", report.failures,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6: LM-head (structural guards)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phase6_missing_logits_rejected() {
+    // Key advertises lm_head Freivalds capability but shell has no logits.
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (mut key, response) = build_canonical_audit_with_response(Some(&manifest));
+    // Populate key's LmHead Freivalds fields so phase 6 runs.
+    // LmHead is index 7 in MatrixType::ALL.
+    let hidden_dim = key.config.hidden_dim;
+    let vocab_size = key.config.vocab_size;
+    key.r_vectors[7] = vec![verilm_core::field::Fp(1); vocab_size];
+    key.v_lm_head = Some(vec![verilm_core::field::Fp(1); hidden_dim]);
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::MissingLogits),
+        "should have MissingLogits: {:?}", report.failures,
+    );
+}
+
+#[test]
+fn phase6_missing_final_hidden_rejected() {
+    // Shell has (fake) logits but bridge can't produce final_hidden because
+    // final_residual is missing → MissingFinalHidden.
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (mut key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    let hidden_dim = key.config.hidden_dim;
+    let vocab_size = key.config.vocab_size;
+    // Enable LmHead Freivalds so phase 6 doesn't early-return.
+    key.r_vectors[7] = vec![verilm_core::field::Fp(1); vocab_size];
+    key.v_lm_head = Some(vec![verilm_core::field::Fp(1); hidden_dim]);
+    // Remove final_residual so bridge produces final_hidden=None.
+    if let Some(ref mut shell) = response.shell_opening {
+        shell.final_residual = None;
+        // Add fake logits so shell has logits_i32.
+        shell.logits_i32 = Some(vec![0i32; vocab_size]);
+    }
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::MissingFinalHidden),
+        "should have MissingFinalHidden: {:?}", report.failures,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7: Deep prefix
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phase7_deep_prefix_count_mismatch() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    // Inject mismatched deep prefix arrays.
+    // prefix_leaf_hashes has 0 entries; prefix_retained has 1 → mismatch.
+    response.prefix_retained = Some(vec![RetainedTokenState {
+        layers: vec![RetainedLayerState { a: vec![0i8; key.config.hidden_dim], scale_a: 1.0 }],
+    }]);
+    response.prefix_shell_openings = Some(vec![verilm_core::types::ShellTokenOpening {
+        layers: vec![],
+        layer_indices: None,
+        initial_residual: None,
+        embedding_proof: None,
+        final_residual: None,
+        logits_i32: None,
+    }]);
+    // prefix_leaf_hashes still has 0 entries → count mismatch
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::PrefixCountMismatch),
+        "should have PrefixCountMismatch: {:?}", report.failures,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8: Tokenization
+// ---------------------------------------------------------------------------
+
+struct MockTokenizer {
+    result: Result<Vec<u32>, String>,
+}
+
+impl PromptTokenizer for MockTokenizer {
+    fn tokenize(
+        &self,
+        _prompt: &[u8],
+        _input_spec: &verilm_core::types::InputSpec,
+    ) -> Result<Vec<u32>, String> {
+        self.result.clone()
+    }
+}
+
+#[test]
+fn phase8_tokenizer_count_mismatch() {
+    // Tokenizer returns 3 tokens but n_prompt_tokens=1 → PromptTokenCountMismatch
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, response) = build_canonical_audit_with_response(Some(&manifest));
+    let tokenizer = MockTokenizer { result: Ok(vec![10, 20, 30]) };
+    let report = verify_response(&key, &response, Some(&tokenizer), None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::PromptTokenCountMismatch),
+        "should have PromptTokenCountMismatch: {:?}", report.failures,
+    );
+}
+
+#[test]
+fn phase8_tokenizer_error() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, response) = build_canonical_audit_with_response(Some(&manifest));
+    let tokenizer = MockTokenizer { result: Err("mock tokenizer failure".into()) };
+    let report = verify_response(&key, &response, Some(&tokenizer), None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::TokenizerError),
+        "should have TokenizerError: {:?}", report.failures,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 9: Detokenization
+// ---------------------------------------------------------------------------
+
+struct MockDetokenizer {
+    result: Result<String, String>,
+}
+
+impl Detokenizer for MockDetokenizer {
+    fn decode(
+        &self,
+        _token_ids: &[u32],
+        _policy: Option<&str>,
+    ) -> Result<String, String> {
+        self.result.clone()
+    }
+}
+
+#[test]
+fn phase9_missing_output_text() {
+    // Detokenizer provided but response has no output_text → MissingOutputText
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    response.output_text = None; // explicitly no output text
+    let detokenizer = MockDetokenizer { result: Ok("decoded".into()) };
+    let report = verify_response(&key, &response, None, Some(&detokenizer));
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::MissingOutputText),
+        "should have MissingOutputText: {:?}", report.failures,
+    );
+}
+
+#[test]
+fn phase9_detokenization_mismatch() {
+    // Detokenizer returns "decoded" but claimed output_text is "wrong" → mismatch
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    response.output_text = Some("wrong output".into());
+    let detokenizer = MockDetokenizer { result: Ok("decoded".into()) };
+    let report = verify_response(&key, &response, None, Some(&detokenizer));
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::DetokenizationMismatch),
+        "should have DetokenizationMismatch: {:?}", report.failures,
+    );
+}
+
+#[test]
+fn phase9_detokenizer_error() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    response.output_text = Some("claimed".into());
+    let detokenizer = MockDetokenizer { result: Err("mock detokenizer failure".into()) };
+    let report = verify_response(&key, &response, None, Some(&detokenizer));
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::DetokenizerError),
+        "should have DetokenizerError: {:?}", report.failures,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7b: Deep-prefix attention replay
+//
+// Multi-token test infrastructure that computes actual attention (with QK
+// scoring and softmax) so that deep-prefix attention replay can be exercised.
+// ---------------------------------------------------------------------------
+
+/// Forward pass with proper multi-token attention (no RoPE, matching toy model).
+///
+/// Processes `n_tokens` sequentially, maintaining a per-layer KV cache.
+/// Each token's attention output `a` is computed via `replay_attention_reference`
+/// with the accumulated KV cache, giving correct multi-token behavior.
+fn multi_token_forward_with_attention(
+    cfg: &ModelConfig,
+    model: &[LayerWeights],
+    initial_residuals: &[Vec<f32>],
+    rmsnorm_attn: &[Vec<f32>],
+    rmsnorm_ffn: &[Vec<f32>],
+    weight_scales: &[Vec<f32>],
+    scales: &[(f32, f32, f32, f32)],
+    eps: f64,
+) -> Vec<(RetainedTokenState, Vec<CapturedLayerScales>)> {
+    use verilm_core::attention::replay_attention_reference;
+    use verilm_core::matmul::matmul_i32;
+    use verilm_core::rmsnorm::{
+        bridge_residual_rmsnorm, dequant_add_residual, quantize_f64_to_i8, rmsnorm_f64_input,
+    };
+
+    let n_tokens = initial_residuals.len();
+    // Per-layer KV cache: kv_caches[layer] = (all_k_i8, all_v_i8)
+    let mut kv_caches: Vec<(Vec<Vec<i8>>, Vec<Vec<i8>>)> =
+        (0..cfg.n_layers).map(|_| (Vec::new(), Vec::new())).collect();
+    let mut results = Vec::with_capacity(n_tokens);
+
+    for t in 0..n_tokens {
+        let mut residual: Vec<f64> = initial_residuals[t].iter().map(|&v| v as f64).collect();
+        let mut layers = Vec::new();
+        let mut captured = Vec::new();
+
+        for (l, lw) in model.iter().enumerate() {
+            let (scale_x_attn, scale_a, scale_x_ffn, scale_h) = scales[l];
+            let ws = |mt: MatrixType| -> f32 {
+                let idx = MatrixType::PER_LAYER.iter().position(|&m| m == mt).unwrap();
+                weight_scales[l][idx]
+            };
+
+            let normed = rmsnorm_f64_input(&residual, &rmsnorm_attn[l], eps);
+            let x_attn = quantize_f64_to_i8(&normed, scale_x_attn as f64);
+
+            // QKV projections
+            let q_i8 = verilm_core::requantize(
+                &matmul_i32(&lw.wq, &x_attn, cfg.hidden_dim, cfg.hidden_dim),
+            );
+            let k_i8 = verilm_core::requantize(
+                &matmul_i32(&lw.wk, &x_attn, cfg.kv_dim, cfg.hidden_dim),
+            );
+            let v_i8 = verilm_core::requantize(
+                &matmul_i32(&lw.wv, &x_attn, cfg.kv_dim, cfg.hidden_dim),
+            );
+
+            kv_caches[l].0.push(k_i8);
+            kv_caches[l].1.push(v_i8);
+
+            // Attention with full KV cache (seq_len = t+1)
+            let a = replay_attention_reference(&q_i8, &kv_caches[l].0, &kv_caches[l].1, cfg);
+
+            let attn_out = matmul_i32(&lw.wo, &a, cfg.hidden_dim, cfg.hidden_dim);
+            let x_ffn = bridge_residual_rmsnorm(
+                &attn_out, ws(MatrixType::Wo), scale_a,
+                &mut residual, &rmsnorm_ffn[l], eps, scale_x_ffn,
+            );
+
+            let g = matmul_i32(&lw.wg, &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
+            let u = matmul_i32(&lw.wu, &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
+            let h = verilm_core::silu::compute_h_scaled(
+                &g, &u, ws(MatrixType::Wg), ws(MatrixType::Wu), scale_x_ffn, scale_h,
+            );
+            let ffn_out = matmul_i32(&lw.wd, &h, cfg.hidden_dim, cfg.ffn_dim);
+
+            if l + 1 < rmsnorm_attn.len() {
+                let next_scale = scales.get(l + 1).map(|s| s.0).unwrap_or(1.0);
+                bridge_residual_rmsnorm(
+                    &ffn_out, ws(MatrixType::Wd), scale_h,
+                    &mut residual, &rmsnorm_attn[l + 1], eps, next_scale,
+                );
+            } else {
+                dequant_add_residual(&ffn_out, ws(MatrixType::Wd), scale_h, &mut residual);
+            }
+
+            layers.push(RetainedLayerState { a, scale_a });
+            captured.push(CapturedLayerScales { scale_x_attn, scale_x_ffn, scale_h });
+        }
+
+        results.push((RetainedTokenState { layers }, captured));
+    }
+
+    results
+}
+
+/// Simple embedding lookup for test vectors.
+struct TestEmbeddingLookup {
+    /// Map from token_id → (embedding_row, merkle_proof)
+    entries: std::collections::HashMap<u32, (Vec<f32>, verilm_core::merkle::MerkleProof)>,
+}
+
+impl EmbeddingLookup for TestEmbeddingLookup {
+    fn embedding_row_and_proof(
+        &self,
+        token_id: u32,
+    ) -> Option<(Vec<f32>, Option<verilm_core::merkle::MerkleProof>)> {
+        self.entries
+            .get(&token_id)
+            .map(|(row, proof)| (row.clone(), Some(proof.clone())))
+    }
+}
+
+/// Build a 3-token deep-prefix audit, opening token 2.
+/// Returns (key, response) where response has prefix_retained and prefix_shell_openings.
+fn build_deep_prefix_audit() -> (
+    verilm_core::types::VerifierKey,
+    verilm_core::types::V4AuditResponse,
+) {
+    let (cfg, model, mut key, ws, rmsnorm_attn, rmsnorm_ffn, initial_residual) =
+        setup_full_bridge();
+    let scales = bridge_scales(&cfg);
+    let token_ids = [10u32, 20, 30];
+
+    // Embedding rows per token (offset from base)
+    let residuals: Vec<Vec<f32>> = (0..3)
+        .map(|t| {
+            initial_residual
+                .iter()
+                .map(|&v| v + 0.05 * t as f32)
+                .collect()
+        })
+        .collect();
+
+    // Build embedding Merkle tree
+    let n_vocab = 128;
+    let mut leaves = Vec::with_capacity(n_vocab);
+    for i in 0..n_vocab {
+        if let Some(pos) = token_ids.iter().position(|&tid| tid as usize == i) {
+            leaves.push(verilm_core::merkle::hash_embedding_row(&residuals[pos]));
+        } else {
+            let row: Vec<f32> = (0..initial_residual.len())
+                .map(|j| (i * 1000 + j) as f32 * 0.001)
+                .collect();
+            leaves.push(verilm_core::merkle::hash_embedding_row(&row));
+        }
+    }
+    let tree = verilm_core::merkle::build_tree(&leaves);
+    key.embedding_merkle_root = Some(tree.root);
+
+    // Multi-token forward with proper attention
+    let all_results = multi_token_forward_with_attention(
+        &cfg, &model, &residuals, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+    );
+    let (all_retained, all_scales): (Vec<_>, Vec<_>) = all_results.into_iter().unzip();
+
+    // Embedding lookup for deep prefix
+    let mut lookup_entries = std::collections::HashMap::new();
+    for (i, &tid) in token_ids.iter().enumerate() {
+        let proof = verilm_core::merkle::prove(&tree, tid as usize);
+        lookup_entries.insert(tid, (residuals[i].clone(), proof));
+    }
+    let lookup = TestEmbeddingLookup {
+        entries: lookup_entries,
+    };
+
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let params = FullBindingParams {
+        token_ids: &token_ids,
+        prompt: b"deep prefix test",
+        sampling_seed: [7u8; 32],
+        manifest: Some(&manifest),
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales);
+
+    // Open token 2 with deep_prefix=true
+    let proof = verilm_core::merkle::prove(&tree, 30);
+    let bridge = BridgeParams {
+        rmsnorm_attn_weights: &rmsnorm_attn,
+        rmsnorm_ffn_weights: &rmsnorm_ffn,
+        rmsnorm_eps: 1e-5,
+        initial_residual: &residuals[2],
+        embedding_proof: Some(proof),
+    };
+    let response = open_v4(
+        &state,
+        2,
+        &ToyWeights(&model),
+        &cfg,
+        &ws,
+        Some(&bridge),
+        None,
+        None,
+        Some(&lookup),
+        true, // deep_prefix
+    );
+
+    (key, response)
+}
+
+#[test]
+fn phase7b_deep_prefix_attention_replay_pass() {
+    let (key, response) = build_deep_prefix_audit();
+    // Verify prefix data is present
+    assert!(response.prefix_retained.is_some(), "should have prefix_retained");
+    assert!(response.prefix_shell_openings.is_some(), "should have prefix_shell_openings");
+    let prefix_len = response.prefix_retained.as_ref().unwrap().len();
+    assert_eq!(prefix_len, 2, "token 2 should have 2 prefix tokens");
+
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "deep prefix audit should pass: {:?}",
+        report.failures
+    );
+}
+
+#[test]
+fn phase7b_deep_prefix_tampered_attention_rejected() {
+    let (key, mut response) = build_deep_prefix_audit();
+    // Tamper prefix token 1's retained attention output (layer 0).
+    // This should be caught by the deep-prefix attention replay.
+    if let Some(ref mut prefix_ret) = response.prefix_retained {
+        prefix_ret[1].layers[0].a[0] ^= 0x7F;
+    }
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::AttentionReplayMismatch),
+        "should have AttentionReplayMismatch from tampered prefix attention: {:?}",
+        report.failures,
     );
 }
 

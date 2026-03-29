@@ -137,6 +137,7 @@ pub enum FailureCode {
     SpecHashMismatch,
     EmbeddingProofFailed,
     EmbeddingLeafMismatch,
+    AttentionReplayMismatch,
 
     // -- Spec mismatch --
     SpecFieldMismatch,
@@ -188,6 +189,7 @@ impl FailureCode {
             | RetainedHashMismatch | IoChainMismatch | IoChainProofFailed
             | SeedMismatch | PromptHashMismatch | ManifestHashMismatch
             | SpecHashMismatch | EmbeddingProofFailed | EmbeddingLeafMismatch
+            | AttentionReplayMismatch
             | ChallengeTokenMismatch | ChallengeLayerMismatch
                 => FailureCategory::CryptographicBinding,
 
