@@ -2153,3 +2153,74 @@ fn corridor_missing_prefix_fails_closed() {
     assert!(verilm_verify::corridor::measure_corridor(&key3, &response3).is_err());
 }
 
+#[test]
+fn corridor_aggregation_with_known_diffs() {
+    // Start from a passing toy audit, then tamper specific retained `a` values
+    // so we get known non-zero diffs and can check the aggregation fields.
+    let (key, mut response) = build_deep_prefix_audit();
+
+    // Sanity: untampered should be all-zero.
+    let clean = verilm_verify::corridor::measure_corridor(&key, &response).unwrap();
+    assert_eq!(clean.global_linf, 0);
+
+    // Tamper prefix token 1, layer 0: shift a[0] by +3
+    let prefix_ret = response.prefix_retained.as_mut().unwrap();
+    let original = prefix_ret[1].layers[0].a[0];
+    prefix_ret[1].layers[0].a[0] = original.wrapping_add(3);
+
+    // Tamper opened token (token 2), layer 1: shift a[0] by +5
+    let orig_opened = response.retained.layers[1].a[0];
+    response.retained.layers[1].a[0] = orig_opened.wrapping_add(5);
+
+    let report = verilm_verify::corridor::measure_corridor(&key, &response).unwrap();
+
+    // global_linf should be 5 (the larger tamper)
+    assert_eq!(report.global_linf, 5, "global_linf: {:?}", report.per_layer_max_linf);
+
+    // per_layer_max_linf: layer 0 should be 3, layer 1 should be 5
+    assert!(report.per_layer_max_linf.len() >= 2);
+    assert_eq!(report.per_layer_max_linf[0], 3, "layer 0 max linf");
+    assert_eq!(report.per_layer_max_linf[1], 5, "layer 1 max linf");
+
+    // per_position_max_linf: should have entries for pos=1 (diff=3) and
+    // pos=2 (diff=5). They're sorted by position.
+    assert!(report.per_position_max_linf.len() >= 2);
+    // Find the max linf for each position from measurements directly
+    let pos1_max = report.measurements.iter()
+        .filter(|m| m.token_position == 1)
+        .map(|m| m.linf)
+        .max()
+        .unwrap_or(0);
+    let pos2_max = report.measurements.iter()
+        .filter(|m| m.token_position == 2)
+        .map(|m| m.linf)
+        .max()
+        .unwrap_or(0);
+    assert_eq!(pos1_max, 3, "position 1 max linf from measurements");
+    assert_eq!(pos2_max, 5, "position 2 max linf from measurements");
+
+    // Verify the per_position_max_linf vector matches the measurements
+    for &max_linf in &report.per_position_max_linf {
+        assert!(max_linf <= report.global_linf);
+    }
+
+    // Check that the tampered measurement for layer 0 / pos 1 has correct frac fields
+    let m_l0_p1 = report.measurements.iter()
+        .find(|m| m.layer == 0 && m.token_position == 1)
+        .expect("should have measurement for layer 0, pos 1");
+    assert_eq!(m_l0_p1.linf, 3);
+    // Only 1 element was tampered; the rest are exact. frac_eq should be (n-1)/n.
+    let expected_frac_eq = (m_l0_p1.n_elements - 1) as f64 / m_l0_p1.n_elements as f64;
+    assert!(
+        (m_l0_p1.frac_eq - expected_frac_eq).abs() < 1e-10,
+        "frac_eq: got {} expected {}",
+        m_l0_p1.frac_eq, expected_frac_eq,
+    );
+    // frac_le_2 should also be (n-1)/n since the one tampered element has diff=3
+    assert!(
+        (m_l0_p1.frac_le_2 - expected_frac_eq).abs() < 1e-10,
+        "frac_le_2: got {} expected {}",
+        m_l0_p1.frac_le_2, expected_frac_eq,
+    );
+}
+
