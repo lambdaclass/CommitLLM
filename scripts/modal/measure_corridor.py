@@ -75,6 +75,24 @@ WORKLOADS = [
         ),
         "max_tokens": 512,
     },
+    {
+        "name": "long_context",
+        "prompt": (
+            "You are a senior software architect writing a comprehensive design "
+            "document. Cover the following topics in depth with concrete examples: "
+            "(1) microservices vs monolithic architecture trade-offs, including "
+            "failure modes, deployment complexity, and data consistency; "
+            "(2) event-driven systems with Kafka or similar message brokers, "
+            "covering exactly-once semantics, consumer group rebalancing, and "
+            "schema evolution; (3) database sharding strategies including "
+            "consistent hashing, range partitioning, and cross-shard transactions; "
+            "(4) observability infrastructure including structured logging, "
+            "distributed tracing with OpenTelemetry, and SLO-based alerting; "
+            "(5) CI/CD pipeline design for zero-downtime deployments with "
+            "canary releases and automated rollbacks."
+        ),
+        "max_tokens": 1024,
+    },
 ]
 
 SEEDS = [42, 137, 2024]
