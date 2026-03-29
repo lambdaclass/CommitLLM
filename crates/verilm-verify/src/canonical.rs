@@ -1,18 +1,26 @@
-//! Minimal canonical verifier: binary-only, key-only, full-bridge-only.
+//! Canonical production verifier.
 //!
-//! # Entry point
+//! **Accepts**: VV4A binary audit only.
+//! **Trusted mode**: key-only, full-bridge-only.
+//! **Rejects**: missing shell, missing manifest, missing initial_residual,
+//!   missing embedding proof, unsupported decode features.
+//! **Pass means**: every enabled canonical check succeeded.
 //!
-//! [`verify_binary`] accepts a verifier key and raw audit bytes (VV4A magic +
-//! zstd + bincode). Returns `Err` for deserialization failures, `Ok(report)`
-//! for all verification outcomes.
+//! # Structure
 //!
-//! # Constraints
-//!
-//! - **Binary-only**: canonical VV4A wire format
-//! - **Key-only**: precomputed Freivalds vectors, no weight replay
-//! - **Full bridge only**: `bridge_residual_rmsnorm`, no toy requantize fallback
-//! - **Final residual + final norm**: exact LM-head path, no shell replay
-//! - **Fail-closed**: missing or unsupported features are rejected
+//! ```text
+//! verify_binary / verify_response
+//!   └─ run(Ctx) → V4VerifyReport
+//!        ├─ phase_structural  → StructuralState
+//!        ├─ phase_embedding
+//!        ├─ phase_specs       → SpecState
+//!        ├─ phase_output_policy
+//!        ├─ phase_bridge
+//!        ├─ phase_lm_head
+//!        ├─ phase_deep_prefix
+//!        ├─ phase_tokenization
+//!        └─ phase_detokenization
+//! ```
 
 use std::time::Instant;
 
@@ -24,19 +32,16 @@ use verilm_core::types::{
 use verilm_core::{freivalds, merkle, serialize};
 
 use crate::{
-    vfail, vfail_ctx, AuditCoverage, Detokenizer, FailureCode, FailureContext,
-    PromptTokenizer, V4VerifyReport, Verdict, VerificationFailure,
+    AuditCoverage, Detokenizer, FailureCode, FailureContext, PromptTokenizer, V4VerifyReport,
+    Verdict, VerificationFailure,
 };
 
-// ---------------------------------------------------------------------------
-// Public entry point
-// ---------------------------------------------------------------------------
+// --- Public API
 
 /// Verify a V4 audit from canonical binary wire format.
 ///
-/// Returns `Err(description)` only for format-level failures (bad magic,
-/// decompression error, malformed bincode). All protocol-level failures
-/// produce `Ok(report)` with `verdict == Fail`.
+/// Returns `Err` only for format-level failures (bad magic, decompression,
+/// malformed bincode). All protocol-level failures produce `Ok(report)`.
 pub fn verify_binary(
     key: &VerifierKey,
     audit_bytes: &[u8],
@@ -47,160 +52,279 @@ pub fn verify_binary(
     Ok(verify_response(key, &response, tokenizer, detokenizer))
 }
 
-// ---------------------------------------------------------------------------
-// Orchestrator
-// ---------------------------------------------------------------------------
-
-fn verify_response(
+/// Verify a deserialized V4 audit response.
+///
+/// This is the trusted path — all public entrypoints delegate here.
+pub fn verify_response(
     key: &VerifierKey,
     r: &V4AuditResponse,
     tokenizer: Option<&dyn PromptTokenizer>,
     detokenizer: Option<&dyn Detokenizer>,
 ) -> V4VerifyReport {
-    let start = Instant::now();
-    let mut c = 0usize;
-    let mut f: Vec<VerificationFailure> = Vec::new();
+    let n_prompt = r.commitment.n_prompt_tokens.or(r.n_prompt_tokens).unwrap_or(0);
+    run(&Ctx {
+        key,
+        r,
+        tokenizer,
+        detokenizer,
+        start: Instant::now(),
+        gen_start: n_prompt.saturating_sub(1),
+        is_last: r.token_index == r.commitment.n_tokens.saturating_sub(1),
+        n_prompt,
+    })
+}
 
-    // Phase 1: Structural
-    structural(r, &mut c, &mut f);
+// --- Orchestrator state
 
-    // Phase 2: Shell opening (required)
-    let shell = match &r.shell_opening {
-        Some(s) => s,
+struct Ctx<'a> {
+    key: &'a VerifierKey,
+    r: &'a V4AuditResponse,
+    tokenizer: Option<&'a dyn PromptTokenizer>,
+    detokenizer: Option<&'a dyn Detokenizer>,
+    start: Instant,
+    // Precomputed
+    gen_start: u32,
+    is_last: bool,
+    n_prompt: u32,
+}
+
+struct St {
+    checks: usize,
+    failures: Vec<VerificationFailure>,
+}
+
+impl St {
+    fn new() -> Self { Self { checks: 0, failures: Vec::new() } }
+    fn check(&mut self) { self.checks += 1; }
+    fn fail(&mut self, code: FailureCode, msg: impl Into<String>) {
+        self.failures.push(VerificationFailure {
+            category: code.category(),
+            code,
+            message: msg.into(),
+            context: FailureContext::default(),
+        });
+    }
+    fn fail_ctx(&mut self, code: FailureCode, msg: impl Into<String>, ctx: FailureContext) {
+        self.failures.push(VerificationFailure {
+            category: code.category(),
+            code,
+            message: msg.into(),
+            context: ctx,
+        });
+    }
+}
+
+struct StructuralState<'a> {
+    shell: Option<&'a ShellTokenOpening>,
+    coverage: AuditCoverage,
+}
+
+struct SpecState {
+    decode_params: Option<verilm_core::sampling::DecodeParams>,
+    output_spec: Option<OutputSpec>,
+}
+
+// --- Orchestrator
+
+fn run(ctx: &Ctx) -> V4VerifyReport {
+    let mut st = St::new();
+
+    let structural = phase_structural(ctx, &mut st);
+    phase_embedding(ctx, &structural, &mut st);
+    let specs = phase_specs(ctx, &mut st);
+
+    if let Some(shell) = structural.shell {
+        if let Some(ref os) = specs.output_spec {
+            phase_output_policy(ctx, os, &mut st);
+        }
+        phase_bridge(ctx, shell, &mut st);
+        phase_lm_head(ctx, shell, &specs, &mut st);
+    }
+
+    phase_deep_prefix(ctx, &mut st);
+    phase_tokenization(ctx, &mut st);
+    phase_detokenization(ctx, &mut st);
+
+    finish(ctx, st, structural.coverage)
+}
+
+// --- Phase 1: Structural checks
+
+fn phase_structural<'a>(ctx: &'a Ctx, st: &mut St) -> StructuralState<'a> {
+    check_version(ctx, st);
+    check_seed(ctx, st);
+    check_prompt_hash(ctx, st);
+    check_n_prompt_tokens(ctx, st);
+    check_merkle_proofs(ctx, st);
+    check_io_chain(ctx, st);
+    check_prefix_count(ctx, st);
+
+    let shell = match &ctx.r.shell_opening {
+        Some(s) => {
+            let checked = s
+                .layer_indices
+                .as_ref()
+                .map_or(s.layers.len(), |v| v.len());
+            let coverage = if checked >= ctx.key.config.n_layers {
+                AuditCoverage::Full {
+                    layers_checked: checked,
+                }
+            } else {
+                AuditCoverage::Routine {
+                    layers_checked: checked,
+                    layers_total: ctx.key.config.n_layers,
+                }
+            };
+            return StructuralState {
+                shell: Some(s),
+                coverage,
+            };
+        }
         None => {
-            f.push(vfail(
+            st.fail(
                 FailureCode::MissingShellOpening,
                 "canonical: shell_opening required",
-            ));
-            return build_report(r, key, c, f, start);
+            );
+            None
         }
     };
 
-    // Phase 3: Embedding binding
-    embedding_binding(key, r, shell, &mut c, &mut f);
-    rich_prefix_embeddings(key, r, &mut c, &mut f);
-
-    // Phase 4: Manifest + spec binding → decode params
-    let (decode_params, output_spec) = spec_binding(key, r, &mut c, &mut f);
-
-    // Phase 5: Output policy
-    if let Some(ref os) = output_spec {
-        output_policy(r, os, &mut c, &mut f);
+    StructuralState {
+        shell,
+        coverage: AuditCoverage::Unknown,
     }
-
-    // Phase 6: Full bridge (Freivalds + bridge chain)
-    full_bridge(key, &r.retained, shell, &mut c, &mut f);
-
-    // Phase 7: LM-head + token replay
-    lm_head(key, r, shell, decode_params, &mut c, &mut f);
-
-    // Phase 8: Deep prefix
-    deep_prefix(key, r, &mut c, &mut f);
-
-    // Phase 9: Tokenization
-    tokenization_verify(r, tokenizer, &mut c, &mut f);
-
-    // Phase 10: Detokenization
-    detokenization_verify(r, detokenizer, &mut c, &mut f);
-
-    build_report(r, key, c, f, start)
 }
-
-// ---------------------------------------------------------------------------
-// Phase 1: Structural checks
-// ---------------------------------------------------------------------------
-
-fn structural(
-    r: &V4AuditResponse,
-    c: &mut usize,
-    f: &mut Vec<VerificationFailure>,
-) {
-    // 1. V4 commitment version
-    *c += 1;
-    if r.commitment.version != CommitmentVersion::V4 {
-        f.push(vfail(
+fn check_version(ctx: &Ctx, st: &mut St) {
+    st.check();
+    if ctx.r.commitment.version != CommitmentVersion::V4 {
+        st.fail(
             FailureCode::WrongCommitmentVersion,
-            format!("expected V4, got {:?}", r.commitment.version),
-        ));
+            format!("expected V4, got {:?}", ctx.r.commitment.version),
+        );
     }
-
-    // 2. Seed commitment
-    *c += 1;
-    match r.commitment.seed_commitment {
+}
+fn check_seed(ctx: &Ctx, st: &mut St) {
+    st.check();
+    match ctx.r.commitment.seed_commitment {
         Some(expected) => {
-            if merkle::hash_seed(&r.revealed_seed) != expected {
-                f.push(vfail(
+            if merkle::hash_seed(&ctx.r.revealed_seed) != expected {
+                st.fail(
                     FailureCode::SeedMismatch,
                     "hash(revealed_seed) != commitment.seed_commitment",
-                ));
+                );
             }
         }
-        None => f.push(vfail(
+        None => st.fail(
             FailureCode::MissingSeedCommitment,
             "V4 commitment missing seed_commitment",
-        )),
+        ),
     }
+}
 
-    // 3. Prompt hash binding (fail-closed)
-    *c += 1;
-    match (&r.prompt, r.commitment.prompt_hash) {
+fn check_prompt_hash(ctx: &Ctx, st: &mut St) {
+    st.check();
+    match (&ctx.r.prompt, ctx.r.commitment.prompt_hash) {
         (Some(prompt), Some(committed)) => {
             if merkle::hash_prompt(prompt) != committed {
-                f.push(vfail(FailureCode::PromptHashMismatch, "hash(prompt) != prompt_hash"));
+                st.fail(FailureCode::PromptHashMismatch, "hash(prompt) != prompt_hash");
             }
         }
-        (None, Some(_)) => f.push(vfail(FailureCode::MissingPromptBytes, "commitment has prompt_hash but response missing prompt")),
-        (Some(_), None) => f.push(vfail(FailureCode::UncommittedPrompt, "response has prompt but commitment missing prompt_hash")),
-        (None, None) => f.push(vfail(FailureCode::MissingPromptHash, "V4 commitment missing prompt_hash")),
+        (None, Some(_)) => st.fail(
+            FailureCode::MissingPromptBytes,
+            "commitment has prompt_hash but response missing prompt",
+        ),
+        (Some(_), None) => st.fail(
+            FailureCode::UncommittedPrompt,
+            "response has prompt but commitment missing prompt_hash",
+        ),
+        (None, None) => st.fail(
+            FailureCode::MissingPromptHash,
+            "V4 commitment missing prompt_hash",
+        ),
     }
-
-    // 4. n_prompt_tokens binding
-    *c += 1;
-    match (r.commitment.n_prompt_tokens, r.n_prompt_tokens) {
+}
+fn check_n_prompt_tokens(ctx: &Ctx, st: &mut St) {
+    st.check();
+    match (ctx.r.commitment.n_prompt_tokens, ctx.r.n_prompt_tokens) {
         (Some(committed), Some(response)) => {
             if committed != response {
-                f.push(vfail(
+                st.fail(
                     FailureCode::NPromptTokensMismatch,
-                    format!("n_prompt_tokens: commitment={} response={}", committed, response),
-                ));
+                    format!(
+                        "n_prompt_tokens: commitment={} response={}",
+                        committed, response
+                    ),
+                );
             }
-            if committed > r.commitment.n_tokens + 1 {
-                f.push(vfail(
+            if committed > ctx.r.commitment.n_tokens + 1 {
+                st.fail(
                     FailureCode::NPromptTokensBound,
-                    format!("n_prompt_tokens {} exceeds n_tokens {} + 1", committed, r.commitment.n_tokens),
-                ));
+                    format!(
+                        "n_prompt_tokens {} exceeds n_tokens {} + 1",
+                        committed, ctx.r.commitment.n_tokens
+                    ),
+                );
             }
         }
-        (None, _) => f.push(vfail(FailureCode::MissingNPromptTokens, "commitment missing n_prompt_tokens")),
-        (_, None) => f.push(vfail(FailureCode::MissingNPromptTokens, "response missing n_prompt_tokens")),
+        (None, _) => st.fail(
+            FailureCode::MissingNPromptTokens,
+            "commitment missing n_prompt_tokens",
+        ),
+        (_, None) => st.fail(
+            FailureCode::MissingNPromptTokens,
+            "response missing n_prompt_tokens",
+        ),
     }
-
-    // 5. Retained leaf Merkle proof (includes final_residual when present)
-    *c += 1;
-    let fr_ref = r.shell_opening.as_ref().and_then(|s| s.final_residual.as_deref());
-    let leaf_hash = merkle::hash_retained_with_residual(&r.retained, fr_ref);
-    if !merkle::verify(&r.commitment.merkle_root, &leaf_hash, &r.merkle_proof) {
-        f.push(vfail_ctx(
+}
+fn check_merkle_proofs(ctx: &Ctx, st: &mut St) {
+    // Retained leaf (includes final_residual when present)
+    st.check();
+    let fr_ref = ctx
+        .r
+        .shell_opening
+        .as_ref()
+        .and_then(|s| s.final_residual.as_deref());
+    let leaf = merkle::hash_retained_with_residual(&ctx.r.retained, fr_ref);
+    if !merkle::verify(&ctx.r.commitment.merkle_root, &leaf, &ctx.r.merkle_proof) {
+        st.fail_ctx(
             FailureCode::MerkleProofFailed,
-            format!("token {}: retained leaf Merkle proof failed", r.token_index),
-            FailureContext { token_index: Some(r.token_index), ..Default::default() },
-        ));
+            format!(
+                "token {}: retained leaf Merkle proof failed",
+                ctx.r.token_index
+            ),
+            FailureContext {
+                token_index: Some(ctx.r.token_index),
+                ..Default::default()
+            },
+        );
     }
 
-    // 6. Prefix retained leaf Merkle proofs
-    for (j, (hash, proof)) in r.prefix_leaf_hashes.iter().zip(r.prefix_merkle_proofs.iter()).enumerate() {
-        *c += 1;
-        if !merkle::verify(&r.commitment.merkle_root, hash, proof) {
-            f.push(vfail_ctx(
+    // Prefix retained leaves
+    for (j, (hash, proof)) in ctx
+        .r
+        .prefix_leaf_hashes
+        .iter()
+        .zip(ctx.r.prefix_merkle_proofs.iter())
+        .enumerate()
+    {
+        st.check();
+        if !merkle::verify(&ctx.r.commitment.merkle_root, hash, proof) {
+            st.fail_ctx(
                 FailureCode::MerkleProofFailed,
                 format!("prefix token {}: Merkle proof failed", j),
-                FailureContext { token_index: Some(j as u32), ..Default::default() },
-            ));
+                FailureContext {
+                    token_index: Some(j as u32),
+                    ..Default::default()
+                },
+            );
         }
     }
+}
+fn check_io_chain(ctx: &Ctx, st: &mut St) {
+    let r = ctx.r;
 
-    // 7. IO chain
-    *c += 1;
+    // Replay IO chain from genesis
+    st.check();
     let io_genesis = match r.commitment.prompt_hash {
         Some(ph) => merkle::io_genesis_v4(ph),
         None => [0u8; 32],
@@ -210,518 +334,489 @@ fn structural(
         prev_io = merkle::io_hash_v4(*hash, r.prefix_token_ids[j], prev_io);
     }
     if prev_io != r.prev_io_hash {
-        f.push(vfail_ctx(
+        st.fail_ctx(
             FailureCode::IoChainMismatch,
             format!("token {}: prev_io_hash mismatch", r.token_index),
-            FailureContext { token_index: Some(r.token_index), ..Default::default() },
-        ));
+            FailureContext {
+                token_index: Some(r.token_index),
+                ..Default::default()
+            },
+        );
     }
 
-    // 8. IO chain proof
-    *c += 1;
-    let challenged_io = merkle::io_hash_v4(leaf_hash, r.token_id, prev_io);
+    // IO chain proof
+    st.check();
+    let fr_ref = r
+        .shell_opening
+        .as_ref()
+        .and_then(|s| s.final_residual.as_deref());
+    let leaf = merkle::hash_retained_with_residual(&r.retained, fr_ref);
+    let challenged_io = merkle::io_hash_v4(leaf, r.token_id, prev_io);
     if !merkle::verify(&r.commitment.io_root, &challenged_io, &r.io_proof) {
-        f.push(vfail_ctx(
+        st.fail_ctx(
             FailureCode::IoChainProofFailed,
             format!("token {}: IO chain proof failed", r.token_index),
-            FailureContext { token_index: Some(r.token_index), ..Default::default() },
-        ));
+            FailureContext {
+                token_index: Some(r.token_index),
+                ..Default::default()
+            },
+        );
     }
-
-    // 9. Prefix count == token_index
-    *c += 1;
-    if r.prefix_leaf_hashes.len() != r.token_index as usize {
-        f.push(vfail_ctx(
+}
+fn check_prefix_count(ctx: &Ctx, st: &mut St) {
+    st.check();
+    if ctx.r.prefix_leaf_hashes.len() != ctx.r.token_index as usize {
+        st.fail_ctx(
             FailureCode::PrefixTokenCountMismatch,
             format!(
                 "token {}: expected {} prefix tokens, got {}",
-                r.token_index, r.token_index, r.prefix_leaf_hashes.len()
+                ctx.r.token_index,
+                ctx.r.token_index,
+                ctx.r.prefix_leaf_hashes.len()
             ),
-            FailureContext { token_index: Some(r.token_index), ..Default::default() },
-        ));
+            FailureContext {
+                token_index: Some(ctx.r.token_index),
+                ..Default::default()
+            },
+        );
     }
 }
 
-// ---------------------------------------------------------------------------
-// Phase 3: Embedding binding
-// ---------------------------------------------------------------------------
+// --- Phase 2: Embedding binding
 
-fn embedding_binding(
-    key: &VerifierKey,
-    r: &V4AuditResponse,
-    shell: &ShellTokenOpening,
-    c: &mut usize,
-    f: &mut Vec<VerificationFailure>,
-) {
-    let emb_root = match &key.embedding_merkle_root {
+fn phase_embedding(ctx: &Ctx, structural: &StructuralState, st: &mut St) {
+    if let Some(shell) = structural.shell {
+        check_embedding_binding(ctx, shell, st);
+    }
+    check_rich_prefix_embeddings(ctx, st);
+}
+
+fn check_embedding_binding(ctx: &Ctx, shell: &ShellTokenOpening, st: &mut St) {
+    let emb_root = match &ctx.key.embedding_merkle_root {
         Some(root) => root,
         None => {
-            // Canonical: embedding root required for authenticated initial_residual.
             if shell.initial_residual.is_some() {
-                *c += 1;
-                f.push(vfail(
+                st.check();
+                st.fail(
                     FailureCode::UnboundInitialResidual,
                     "shell has initial_residual but key has no embedding_merkle_root",
-                ));
+                );
             }
             return;
         }
     };
 
-    *c += 1;
+    st.check();
     match (&shell.initial_residual, &shell.embedding_proof) {
         (Some(ir), Some(proof)) => {
             let leaf = merkle::hash_embedding_row(ir);
-            if proof.leaf_index != r.token_id {
-                f.push(vfail(
+            if proof.leaf_index != ctx.r.token_id {
+                st.fail(
                     FailureCode::EmbeddingLeafMismatch,
-                    format!("embedding proof leaf_index {} != token_id {}", proof.leaf_index, r.token_id),
-                ));
+                    format!(
+                        "embedding proof leaf_index {} != token_id {}",
+                        proof.leaf_index, ctx.r.token_id
+                    ),
+                );
             } else if !merkle::verify(emb_root, &leaf, proof) {
-                f.push(vfail(FailureCode::EmbeddingProofFailed, "embedding Merkle proof failed"));
+                st.fail(
+                    FailureCode::EmbeddingProofFailed,
+                    "embedding Merkle proof failed",
+                );
             }
         }
-        (None, _) => f.push(vfail(
+        (None, _) => st.fail(
             FailureCode::MissingInitialResidual,
             "canonical: initial_residual required (key has embedding_merkle_root)",
-        )),
-        (Some(_), None) => f.push(vfail(
+        ),
+        (Some(_), None) => st.fail(
             FailureCode::MissingEmbeddingProof,
             "canonical: embedding_proof required (key has embedding_merkle_root)",
-        )),
+        ),
     }
 }
 
-fn rich_prefix_embeddings(
-    key: &VerifierKey,
-    r: &V4AuditResponse,
-    c: &mut usize,
-    f: &mut Vec<VerificationFailure>,
-) {
+fn check_rich_prefix_embeddings(ctx: &Ctx, st: &mut St) {
     let (emb_root, rows, proofs) = match (
-        &key.embedding_merkle_root,
-        &r.prefix_embedding_rows,
-        &r.prefix_embedding_proofs,
+        &ctx.key.embedding_merkle_root,
+        &ctx.r.prefix_embedding_rows,
+        &ctx.r.prefix_embedding_proofs,
     ) {
         (Some(root), Some(rows), Some(proofs)) => (root, rows, proofs),
         _ => return,
     };
 
-    if rows.len() != r.prefix_token_ids.len() || proofs.len() != r.prefix_token_ids.len() {
-        *c += 1;
-        f.push(vfail(
+    if rows.len() != ctx.r.prefix_token_ids.len() || proofs.len() != ctx.r.prefix_token_ids.len()
+    {
+        st.check();
+        st.fail(
             FailureCode::PrefixCountMismatch,
             format!(
                 "prefix embedding count: {} rows, {} proofs, {} token_ids",
-                rows.len(), proofs.len(), r.prefix_token_ids.len()
+                rows.len(),
+                proofs.len(),
+                ctx.r.prefix_token_ids.len()
             ),
-        ));
+        );
         return;
     }
 
-    for (j, ((row, proof), &tid)) in rows.iter().zip(proofs.iter()).zip(r.prefix_token_ids.iter()).enumerate() {
-        *c += 1;
+    for (j, ((row, proof), &tid)) in rows
+        .iter()
+        .zip(proofs.iter())
+        .zip(ctx.r.prefix_token_ids.iter())
+        .enumerate()
+    {
+        st.check();
         let leaf = merkle::hash_embedding_row(row);
         if proof.leaf_index != tid {
-            f.push(vfail_ctx(
+            st.fail_ctx(
                 FailureCode::EmbeddingLeafMismatch,
-                format!("prefix {}: embedding leaf_index {} != token_id {}", j, proof.leaf_index, tid),
-                FailureContext { token_index: Some(j as u32), ..Default::default() },
-            ));
+                format!(
+                    "prefix {}: embedding leaf_index {} != token_id {}",
+                    j, proof.leaf_index, tid
+                ),
+                FailureContext {
+                    token_index: Some(j as u32),
+                    ..Default::default()
+                },
+            );
         } else if !merkle::verify(emb_root, &leaf, proof) {
-            f.push(vfail_ctx(
+            st.fail_ctx(
                 FailureCode::EmbeddingProofFailed,
                 format!("prefix {}: embedding Merkle proof failed", j),
-                FailureContext { token_index: Some(j as u32), ..Default::default() },
-            ));
+                FailureContext {
+                    token_index: Some(j as u32),
+                    ..Default::default()
+                },
+            );
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Phase 4: Manifest + spec binding
-// ---------------------------------------------------------------------------
+// --- Phase 3: Manifest + spec binding
 
-fn spec_binding(
-    key: &VerifierKey,
-    r: &V4AuditResponse,
-    c: &mut usize,
-    f: &mut Vec<VerificationFailure>,
-) -> (Option<verilm_core::sampling::DecodeParams>, Option<OutputSpec>) {
-    let manifest = match &r.manifest {
+fn phase_specs(ctx: &Ctx, st: &mut St) -> SpecState {
+    let manifest = match &ctx.r.manifest {
         Some(m) => m,
         None => {
-            f.push(vfail(
+            st.fail(
                 FailureCode::MissingManifestHash,
                 "canonical: manifest required for spec verification",
-            ));
-            return (None, None);
+            );
+            return SpecState {
+                decode_params: None,
+                output_spec: None,
+            };
         }
     };
 
     let (input_spec, model_spec, decode_spec, output_spec) = manifest.split();
-    let h_in = merkle::hash_input_spec(&input_spec);
-    let h_mod = merkle::hash_model_spec(&model_spec);
-    let h_dec = merkle::hash_decode_spec(&decode_spec);
-    let h_out = merkle::hash_output_spec(&output_spec);
+    let hashes = [
+        merkle::hash_input_spec(&input_spec),
+        merkle::hash_model_spec(&model_spec),
+        merkle::hash_decode_spec(&decode_spec),
+        merkle::hash_output_spec(&output_spec),
+    ];
+    check_spec_hashes(ctx, &hashes, st);
+    check_manifest_hash(ctx, &hashes, st);
+    cross_check_model_vs_key(ctx, &model_spec, st);
+    check_decode_features(&decode_spec, &output_spec, st);
 
-    // Four spec hashes (fail-closed)
-    *c += 4;
-    check_spec_hash(r.commitment.input_spec_hash, h_in, "input", f);
-    check_spec_hash(r.commitment.model_spec_hash, h_mod, "model", f);
-    check_spec_hash(r.commitment.decode_spec_hash, h_dec, "decode", f);
-    check_spec_hash(r.commitment.output_spec_hash, h_out, "output", f);
+    SpecState {
+        decode_params: Some(verilm_core::sampling::DecodeParams {
+            temperature: decode_spec.temperature,
+            top_k: decode_spec.top_k,
+            top_p: decode_spec.top_p,
+        }),
+        output_spec: Some(output_spec),
+    }
+}
 
-    // Composed manifest hash
-    *c += 1;
-    match r.commitment.manifest_hash {
-        None => f.push(vfail(FailureCode::MissingManifestHash, "commitment missing manifest_hash")),
+fn check_spec_hashes(ctx: &Ctx, hashes: &[[u8; 32]; 4], st: &mut St) {
+    let pairs: [(&str, Option<[u8; 32]>, [u8; 32]); 4] = [
+        ("input",  ctx.r.commitment.input_spec_hash,  hashes[0]),
+        ("model",  ctx.r.commitment.model_spec_hash,  hashes[1]),
+        ("decode", ctx.r.commitment.decode_spec_hash, hashes[2]),
+        ("output", ctx.r.commitment.output_spec_hash, hashes[3]),
+    ];
+    for (name, committed, computed) in &pairs {
+        st.check();
+        match committed {
+            None => st.fail_ctx(
+                FailureCode::MissingSpecHash,
+                format!("commitment missing {}_spec_hash", name),
+                FailureContext {
+                    spec: Some((*name).into()),
+                    ..Default::default()
+                },
+            ),
+            Some(h) if h != computed => st.fail_ctx(
+                FailureCode::SpecHashMismatch,
+                format!("{}_spec_hash mismatch", name),
+                FailureContext {
+                    spec: Some((*name).into()),
+                    ..Default::default()
+                },
+            ),
+            _ => {}
+        }
+    }
+}
+
+fn check_manifest_hash(ctx: &Ctx, hashes: &[[u8; 32]; 4], st: &mut St) {
+    st.check();
+    match ctx.r.commitment.manifest_hash {
+        None => st.fail(FailureCode::MissingManifestHash, "commitment missing manifest_hash"),
         Some(committed) => {
-            if merkle::hash_manifest_composed(h_in, h_mod, h_dec, h_out) != committed {
-                f.push(vfail(FailureCode::ManifestHashMismatch, "manifest hash mismatch"));
+            if merkle::hash_manifest_composed(hashes[0], hashes[1], hashes[2], hashes[3]) != committed {
+                st.fail(FailureCode::ManifestHashMismatch, "manifest hash mismatch");
             }
         }
     }
+}
 
-    // Model spec cross-checks against verifier key
-    model_cross_checks(key, &model_spec, c, f);
+fn cross_check_model_vs_key(
+    ctx: &Ctx,
+    spec: &verilm_core::types::ModelSpec,
+    st: &mut St,
+) {
+    xcheck_f64(st, "rmsnorm_eps", spec.rmsnorm_eps, ctx.key.rmsnorm_eps);
+    xcheck_f64(st, "rope_theta", spec.rope_theta, ctx.key.config.rope_theta);
+    xcheck_hash(st, "rope_config_hash", spec.rope_config_hash, ctx.key.rope_config_hash);
+    xcheck_hash(st, "weight_hash", spec.weight_hash, ctx.key.weight_hash);
+    xcheck_hash(st, "embedding_merkle_root", spec.embedding_merkle_root, ctx.key.embedding_merkle_root);
+    xcheck_dim(st, "n_layers", spec.n_layers, ctx.key.config.n_layers);
+    xcheck_dim(st, "hidden_dim", spec.hidden_dim, ctx.key.config.hidden_dim);
+    xcheck_dim(st, "vocab_size", spec.vocab_size, ctx.key.config.vocab_size);
+    xcheck_dim(st, "kv_dim", spec.kv_dim, ctx.key.config.kv_dim);
+    xcheck_dim(st, "ffn_dim", spec.ffn_dim, ctx.key.config.ffn_dim);
+    xcheck_dim(st, "d_head", spec.d_head, ctx.key.config.d_head);
+    xcheck_dim(st, "n_q_heads", spec.n_q_heads, ctx.key.config.n_q_heads);
+    xcheck_dim(st, "n_kv_heads", spec.n_kv_heads, ctx.key.config.n_kv_heads);
+    xcheck_str(st, "quant_family", spec.quant_family.as_deref(), ctx.key.quant_family.as_deref());
+    xcheck_str(st, "scale_derivation", spec.scale_derivation.as_deref(), ctx.key.scale_derivation.as_deref());
+    if let (Some(m), Some(k)) = (spec.quant_block_size, ctx.key.quant_block_size) {
+        st.check();
+        if m != k {
+            st.fail_ctx(
+                FailureCode::SpecFieldMismatch,
+                format!("quant_block_size mismatch: manifest={} key={}", m, k),
+                FailureContext {
+                    field: Some("quant_block_size".into()),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+}
 
+fn check_decode_features(
+    decode: &verilm_core::types::DecodeSpec,
+    output: &OutputSpec,
+    st: &mut St,
+) {
     // Sampler version
-    *c += 1;
-    match decode_spec.sampler_version.as_deref() {
+    st.check();
+    match decode.sampler_version.as_deref() {
         Some("chacha20-vi-sample-v1") | None => {}
-        Some(other) => f.push(vfail(
+        Some(other) => st.fail(
             FailureCode::UnsupportedSamplerVersion,
             format!("unsupported sampler_version='{}'", other),
-        )),
+        ),
     }
 
     // Decode mode consistency
-    if let Some(ref dm) = decode_spec.decode_mode {
-        *c += 1;
+    if let Some(ref dm) = decode.decode_mode {
+        st.check();
         match dm.as_str() {
-            "greedy" if decode_spec.temperature != 0.0 => f.push(vfail(
+            "greedy" if decode.temperature != 0.0 => st.fail(
                 FailureCode::DecodeModeTempInconsistent,
-                format!("decode_mode='greedy' but temperature={}", decode_spec.temperature),
-            )),
-            "sampled" if decode_spec.temperature == 0.0 => f.push(vfail(
+                format!("decode_mode='greedy' but temperature={}", decode.temperature),
+            ),
+            "sampled" if decode.temperature == 0.0 => st.fail(
                 FailureCode::DecodeModeTempInconsistent,
                 "decode_mode='sampled' but temperature=0.0",
-            )),
+            ),
             "greedy" | "sampled" => {}
-            other => f.push(vfail(
+            other => st.fail(
                 FailureCode::UnsupportedDecodeMode,
                 format!("unsupported decode_mode='{}'", other),
-            )),
+            ),
         }
     }
 
-    // Unsupported decode features (fail-closed)
-    *c += 1;
-    reject_unsupported_feature(decode_spec.repetition_penalty != 1.0, "repetition_penalty", &format!("{}", decode_spec.repetition_penalty), "1.0", f);
-    reject_unsupported_feature(decode_spec.frequency_penalty != 0.0, "frequency_penalty", &format!("{}", decode_spec.frequency_penalty), "0.0", f);
-    reject_unsupported_feature(decode_spec.presence_penalty != 0.0, "presence_penalty", &format!("{}", decode_spec.presence_penalty), "0.0", f);
-    reject_unsupported_feature(!decode_spec.logit_bias.is_empty(), "logit_bias", &format!("{} entries", decode_spec.logit_bias.len()), "empty", f);
-    reject_unsupported_feature(!decode_spec.bad_word_ids.is_empty(), "bad_word_ids", &format!("{} entries", decode_spec.bad_word_ids.len()), "empty", f);
-    reject_unsupported_feature(!decode_spec.guided_decoding.is_empty(), "guided_decoding", &decode_spec.guided_decoding, "empty", f);
-    reject_unsupported_feature(!output_spec.stop_sequences.is_empty(), "stop_sequences", &format!("{} entries", output_spec.stop_sequences.len()), "empty", f);
-
-    let decode_params = verilm_core::sampling::DecodeParams {
-        temperature: decode_spec.temperature,
-        top_k: decode_spec.top_k,
-        top_p: decode_spec.top_p,
-    };
-
-    (Some(decode_params), Some(output_spec))
+    st.check();
+    reject_feature(st, decode.repetition_penalty != 1.0, "repetition_penalty", &format!("{}", decode.repetition_penalty), "1.0");
+    reject_feature(st, decode.frequency_penalty != 0.0, "frequency_penalty", &format!("{}", decode.frequency_penalty), "0.0");
+    reject_feature(st, decode.presence_penalty != 0.0, "presence_penalty", &format!("{}", decode.presence_penalty), "0.0");
+    reject_feature(st, !decode.logit_bias.is_empty(), "logit_bias", &format!("{} entries", decode.logit_bias.len()), "empty");
+    reject_feature(st, !decode.bad_word_ids.is_empty(), "bad_word_ids", &format!("{} entries", decode.bad_word_ids.len()), "empty");
+    reject_feature(st, !decode.guided_decoding.is_empty(), "guided_decoding", &decode.guided_decoding, "empty");
+    reject_feature(st, !output.stop_sequences.is_empty(), "stop_sequences", &format!("{} entries", output.stop_sequences.len()), "empty");
 }
 
-fn check_spec_hash(
-    committed: Option<[u8; 32]>,
-    computed: [u8; 32],
-    name: &str,
-    f: &mut Vec<VerificationFailure>,
-) {
-    match committed {
-        None => f.push(vfail_ctx(
-            FailureCode::MissingSpecHash,
-            format!("commitment missing {}_spec_hash", name),
-            FailureContext { spec: Some(name.into()), ..Default::default() },
-        )),
-        Some(h) if h != computed => f.push(vfail_ctx(
-            FailureCode::SpecHashMismatch,
-            format!("{}_spec_hash mismatch", name),
-            FailureContext { spec: Some(name.into()), ..Default::default() },
-        )),
-        _ => {}
-    }
-}
+// --- Phase 4: Output policy
 
-fn model_cross_checks(
-    key: &VerifierKey,
-    spec: &verilm_core::types::ModelSpec,
-    c: &mut usize,
-    f: &mut Vec<VerificationFailure>,
-) {
-    // Each cross-check is opt-in: only fires when the manifest declares the field.
-    macro_rules! cross_check_usize {
-        ($field:ident, $key_val:expr) => {
-            if let Some(v) = spec.$field {
-                *c += 1;
-                if v as usize != $key_val {
-                    f.push(vfail_ctx(
-                        FailureCode::SpecFieldMismatch,
-                        format!(concat!(stringify!($field), " mismatch: manifest={} key={}"), v, $key_val),
-                        FailureContext { field: Some(stringify!($field).into()), ..Default::default() },
-                    ));
-                }
-            }
-        };
-    }
-
-    macro_rules! cross_check_hash {
-        ($field:ident, $key_val:expr) => {
-            if let (Some(mval), Some(kval)) = (spec.$field, $key_val) {
-                *c += 1;
-                if mval != kval {
-                    f.push(vfail_ctx(
-                        FailureCode::SpecFieldMismatch,
-                        format!(concat!(stringify!($field), " mismatch: manifest != key")),
-                        FailureContext { field: Some(stringify!($field).into()), ..Default::default() },
-                    ));
-                }
-            }
-        };
-    }
-
-    macro_rules! cross_check_string {
-        ($field:ident, $key_val:expr) => {
-            if let (Some(ref mval), Some(ref kval)) = (&spec.$field, &$key_val) {
-                *c += 1;
-                if mval != kval {
-                    f.push(vfail_ctx(
-                        FailureCode::SpecFieldMismatch,
-                        format!(concat!(stringify!($field), " mismatch: manifest='{}' key='{}'"), mval, kval),
-                        FailureContext { field: Some(stringify!($field).into()), ..Default::default() },
-                    ));
-                }
-            }
-        };
-    }
-
-    // f64 fields
-    if let Some(eps) = spec.rmsnorm_eps {
-        *c += 1;
-        if (eps - key.rmsnorm_eps).abs() > f64::EPSILON {
-            f.push(vfail_ctx(
-                FailureCode::SpecFieldMismatch,
-                format!("rmsnorm_eps mismatch: manifest={} key={}", eps, key.rmsnorm_eps),
-                FailureContext { field: Some("rmsnorm_eps".into()), ..Default::default() },
-            ));
-        }
-    }
-    if let Some(theta) = spec.rope_theta {
-        *c += 1;
-        if (theta - key.config.rope_theta).abs() > f64::EPSILON {
-            f.push(vfail_ctx(
-                FailureCode::SpecFieldMismatch,
-                format!("rope_theta mismatch: manifest={} key={}", theta, key.config.rope_theta),
-                FailureContext { field: Some("rope_theta".into()), ..Default::default() },
-            ));
-        }
-    }
-
-    // Hash fields
-    cross_check_hash!(rope_config_hash, key.rope_config_hash);
-    cross_check_hash!(weight_hash, key.weight_hash);
-    cross_check_hash!(embedding_merkle_root, key.embedding_merkle_root);
-
-    // usize fields
-    cross_check_usize!(n_layers, key.config.n_layers);
-    cross_check_usize!(hidden_dim, key.config.hidden_dim);
-    cross_check_usize!(vocab_size, key.config.vocab_size);
-    cross_check_usize!(kv_dim, key.config.kv_dim);
-    cross_check_usize!(ffn_dim, key.config.ffn_dim);
-    cross_check_usize!(d_head, key.config.d_head);
-    cross_check_usize!(n_q_heads, key.config.n_q_heads);
-    cross_check_usize!(n_kv_heads, key.config.n_kv_heads);
-
-    // String fields
-    cross_check_string!(quant_family, key.quant_family);
-    cross_check_string!(scale_derivation, key.scale_derivation);
-
-    // u32 field
-    if let (Some(m_bs), Some(k_bs)) = (spec.quant_block_size, key.quant_block_size) {
-        *c += 1;
-        if m_bs != k_bs {
-            f.push(vfail_ctx(
-                FailureCode::SpecFieldMismatch,
-                format!("quant_block_size mismatch: manifest={} key={}", m_bs, k_bs),
-                FailureContext { field: Some("quant_block_size".into()), ..Default::default() },
-            ));
-        }
-    }
-}
-
-fn reject_unsupported_feature(
-    rejected: bool,
-    field: &str,
-    actual: &str,
-    expected: &str,
-    f: &mut Vec<VerificationFailure>,
-) {
-    if rejected {
-        f.push(vfail_ctx(
-            FailureCode::UnsupportedDecodeFeature,
-            format!("unsupported {}={} (canonical requires {})", field, actual, expected),
-            FailureContext { field: Some(field.into()), ..Default::default() },
-        ));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Phase 5: Output policy
-// ---------------------------------------------------------------------------
-
-fn output_policy(
-    r: &V4AuditResponse,
-    os: &OutputSpec,
-    c: &mut usize,
-    f: &mut Vec<VerificationFailure>,
-) {
-    // max_tokens
+fn phase_output_policy(ctx: &Ctx, os: &OutputSpec, st: &mut St) {
+    let r = ctx.r;
     if os.max_tokens > 0 {
-        let n_prompt = r.commitment.n_prompt_tokens.unwrap_or(0);
-        let n_generated = r.commitment.n_tokens.saturating_sub(n_prompt.saturating_sub(1));
-
+        let n_generated = r.commitment.n_tokens.saturating_sub(ctx.n_prompt.saturating_sub(1));
         if r.token_index >= r.commitment.n_tokens {
-            f.push(vfail(
+            st.fail(
                 FailureCode::ExceedsMaxTokens,
                 format!("token_index {} >= n_tokens {}", r.token_index, r.commitment.n_tokens),
-            ));
+            );
         }
         if n_generated > os.max_tokens {
-            f.push(vfail(
+            st.fail(
                 FailureCode::ExceedsMaxTokens,
                 format!("generated {} tokens > max_tokens {}", n_generated, os.max_tokens),
-            ));
+            );
         }
     }
-
-    // min_tokens + ignore_eos require eos_token_id
     if let Some(eos_id) = os.eos_token_id {
-        if os.min_tokens > 0 {
-            *c += 1;
-            let gen_start = r.n_prompt_tokens.unwrap_or(1).saturating_sub(1);
-            let n_generated = r.commitment.n_tokens.saturating_sub(gen_start);
-            if n_generated < os.min_tokens {
-                f.push(vfail(
-                    FailureCode::MinTokensViolated,
-                    format!("only {} generated tokens, min_tokens={}", n_generated, os.min_tokens),
-                ));
-            }
-            let gen_index = r.token_index.saturating_sub(gen_start);
-            if gen_index < os.min_tokens && r.token_id == eos_id {
-                f.push(vfail(
-                    FailureCode::MinTokensViolated,
-                    format!("EOS at generation position {} < min_tokens={}", gen_index, os.min_tokens),
-                ));
-            }
-        }
-
-        if os.ignore_eos {
-            *c += 1;
-            if r.token_id == eos_id {
-                f.push(vfail(
-                    FailureCode::IgnoreEosViolated,
-                    format!("token_id {} is EOS but ignore_eos=true", r.token_id),
-                ));
-            }
-        }
-
-        // eos_policy
-        if os.eos_policy == "stop" {
-            *c += 1;
-            let is_last = r.token_index == r.commitment.n_tokens.saturating_sub(1);
-            if r.token_id == eos_id && !is_last {
-                f.push(vfail(
-                    FailureCode::EosPolicyViolated,
-                    format!(
-                        "eos_policy='stop': EOS at index {} is not last (n_tokens={})",
-                        r.token_index, r.commitment.n_tokens
-                    ),
-                ));
-            }
-        } else if os.eos_policy != "sample" {
-            f.push(vfail(
-                FailureCode::UnknownEosPolicy,
-                format!("unknown eos_policy='{}'", os.eos_policy),
-            ));
-        }
+        check_min_tokens(ctx, os, eos_id, st);
+        check_ignore_eos(r, os, eos_id, st);
+        check_eos_policy(ctx, os, eos_id, st);
     } else if os.min_tokens > 0 || os.ignore_eos {
-        f.push(vfail(
+        st.fail(
             FailureCode::MissingEosTokenId,
             "output_spec needs eos_token_id for min_tokens/ignore_eos enforcement",
-        ));
+        );
     }
 }
 
-// ---------------------------------------------------------------------------
-// Phase 6: Full bridge (Freivalds + bridge chain)
-// ---------------------------------------------------------------------------
-
-fn full_bridge(
-    key: &VerifierKey,
-    retained: &RetainedTokenState,
-    shell: &ShellTokenOpening,
-    c: &mut usize,
-    f: &mut Vec<VerificationFailure>,
-) {
-    // Prerequisites for full bridge
-    let ir = match &shell.initial_residual {
-        Some(ir) => ir,
-        None => return, // Already recorded in embedding_binding
-    };
-    if key.rmsnorm_attn_weights.is_empty() || key.rmsnorm_ffn_weights.is_empty() {
-        return; // Can't run full bridge without RMSNorm weights
-    }
-    if retained.layers.is_empty() {
+fn check_min_tokens(ctx: &Ctx, os: &OutputSpec, eos_id: u32, st: &mut St) {
+    if os.min_tokens == 0 {
         return;
     }
+    st.check();
+    let r = ctx.r;
+    let n_generated = r.commitment.n_tokens.saturating_sub(ctx.gen_start);
+    if n_generated < os.min_tokens {
+        st.fail(
+            FailureCode::MinTokensViolated,
+            format!("only {} generated tokens, min_tokens={}", n_generated, os.min_tokens),
+        );
+    }
+    let gen_index = r.token_index.saturating_sub(ctx.gen_start);
+    if gen_index < os.min_tokens && r.token_id == eos_id {
+        st.fail(
+            FailureCode::MinTokensViolated,
+            format!("EOS at generation position {} < min_tokens={}", gen_index, os.min_tokens),
+        );
+    }
+}
+fn check_ignore_eos(r: &V4AuditResponse, os: &OutputSpec, eos_id: u32, st: &mut St) {
+    if !os.ignore_eos {
+        return;
+    }
+    st.check();
+    if r.token_id == eos_id {
+        st.fail(
+            FailureCode::IgnoreEosViolated,
+            format!("token_id {} is EOS but ignore_eos=true", r.token_id),
+        );
+    }
+}
+fn check_eos_policy(ctx: &Ctx, os: &OutputSpec, eos_id: u32, st: &mut St) {
+    if os.eos_policy == "stop" {
+        st.check();
+        let r = ctx.r;
+        if r.token_id == eos_id && !ctx.is_last {
+            st.fail(
+                FailureCode::EosPolicyViolated,
+                format!(
+                    "eos_policy='stop': EOS at index {} is not last (n_tokens={})",
+                    r.token_index, r.commitment.n_tokens
+                ),
+            );
+        }
+    } else if os.eos_policy != "sample" {
+        st.fail(
+            FailureCode::UnknownEosPolicy,
+            format!("unknown eos_policy='{}'", os.eos_policy),
+        );
+    }
+}
 
-    // Resolve opened layers
-    let opened_layers: Vec<usize> = shell
+// --- Phase 5: Full bridge (Freivalds + residual chain)
+
+fn phase_bridge(ctx: &Ctx, shell: &ShellTokenOpening, st: &mut St) {
+    bridge_layers(ctx.key, &ctx.r.retained, shell, st);
+}
+
+/// Validate bridge shape: layer_indices contiguity and count match.
+///
+/// Returns the opened layer index list, or `None` if validation failed.
+fn validate_bridge_shape(
+    shell: &ShellTokenOpening,
+    retained: &RetainedTokenState,
+    st: &mut St,
+) -> Option<Vec<usize>> {
+    let opened: Vec<usize> = shell
         .layer_indices
         .clone()
         .unwrap_or_else(|| (0..retained.layers.len()).collect());
 
-    if shell.layers.len() != opened_layers.len() {
-        f.push(vfail(
+    if shell.layers.len() != opened.len() {
+        st.fail(
             FailureCode::ShellLayerCountMismatch,
-            format!("shell has {} layers, indices specify {}", shell.layers.len(), opened_layers.len()),
-        ));
-        return;
+            format!(
+                "shell has {} layers, indices specify {}",
+                shell.layers.len(),
+                opened.len()
+            ),
+        );
+        return None;
     }
-
-    // Contiguous prefix required
     if let Some(ref indices) = shell.layer_indices {
         if !indices.iter().enumerate().all(|(i, &li)| li == i) {
-            f.push(vfail(
+            st.fail(
                 FailureCode::NonContiguousLayerIndices,
-                format!("layer_indices must be contiguous prefix 0..N, got {:?}", indices),
-            ));
-            return;
+                format!(
+                    "layer_indices must be contiguous prefix 0..N, got {:?}",
+                    indices
+                ),
+            );
+            return None;
         }
     }
 
-    let max_layer = opened_layers.iter().copied().max().unwrap_or(0);
+    Some(opened)
+}
+
+fn bridge_layers(
+    key: &VerifierKey,
+    retained: &RetainedTokenState,
+    shell: &ShellTokenOpening,
+    st: &mut St,
+) {
+    let ir = match &shell.initial_residual {
+        Some(ir) => ir,
+        None => return, // already recorded in phase_embedding
+    };
+    if key.rmsnorm_attn_weights.is_empty()
+        || key.rmsnorm_ffn_weights.is_empty()
+        || retained.layers.is_empty()
+    {
+        return;
+    }
+
+    let opened = match validate_bridge_shape(shell, retained, st) {
+        Some(o) => o,
+        None => return,
+    };
+
+    let max_layer = opened.iter().copied().max().unwrap_or(0);
     let mut shell_idx_for = vec![None; max_layer + 1];
-    for (si, &li) in opened_layers.iter().enumerate() {
+    for (si, &li) in opened.iter().enumerate() {
         if li <= max_layer {
             shell_idx_for[li] = Some(si);
         }
     }
 
-    // Initialize: RMSNorm(initial_residual) → x_attn_0
     let mut residual: Vec<f64> = ir.iter().map(|&v| v as f64).collect();
     let normed = verilm_core::rmsnorm::rmsnorm_f64_input(
         &residual,
@@ -733,6 +828,7 @@ fn full_bridge(
         retained.layers[0].scale_x_attn as f64,
     );
 
+    // Per-layer verification
     for layer_idx in 0..=max_layer {
         if layer_idx >= retained.layers.len() {
             break;
@@ -744,28 +840,15 @@ fn full_bridge(
         };
         let sl = &shell.layers[si];
 
-        // QKV Freivalds — all required in canonical path
-        for (mt, acc, _dim) in [
-            (MatrixType::Wq, &sl.q, key.config.hidden_dim),
-            (MatrixType::Wk, &sl.k, key.config.kv_dim),
-            (MatrixType::Wv, &sl.v, key.config.kv_dim),
+        // QKV Freivalds (all required in canonical path)
+        for (mt, acc) in [
+            (MatrixType::Wq, &sl.q),
+            (MatrixType::Wk, &sl.k),
+            (MatrixType::Wv, &sl.v),
         ] {
             match acc {
-                Some(z) => {
-                    *c += 1;
-                    if !freivalds::check(key.v_for(layer_idx, mt), &x_attn, key.r_for(mt), z) {
-                        f.push(vfail_ctx(
-                            FailureCode::FreivaldsFailed,
-                            format!("layer {} {:?}: Freivalds failed", layer_idx, mt),
-                            FailureContext {
-                                layer: Some(layer_idx),
-                                matrix: Some(format!("{:?}", mt)),
-                                ..Default::default()
-                            },
-                        ));
-                    }
-                }
-                None => f.push(vfail_ctx(
+                Some(z) => verify_freivalds(key, st, layer_idx, mt, &x_attn, z),
+                None => st.fail_ctx(
                     FailureCode::MissingQkv,
                     format!("layer {} {:?}: QKV required in canonical path", layer_idx, mt),
                     FailureContext {
@@ -773,29 +856,12 @@ fn full_bridge(
                         matrix: Some(format!("{:?}", mt)),
                         ..Default::default()
                     },
-                )),
+                ),
             }
         }
 
         // Wo @ a
-        *c += 1;
-        if !freivalds::check(
-            key.v_for(layer_idx, MatrixType::Wo),
-            &rs.a,
-            key.r_for(MatrixType::Wo),
-            &sl.attn_out,
-        ) {
-            f.push(vfail_ctx(
-                FailureCode::FreivaldsFailed,
-                format!("layer {} Wo: Freivalds failed", layer_idx),
-                FailureContext {
-                    layer: Some(layer_idx),
-                    matrix: Some("Wo".into()),
-                    ..Default::default()
-                },
-            ));
-        }
-
+        verify_freivalds(key, st, layer_idx, MatrixType::Wo, &rs.a, &sl.attn_out);
         // Post-attention bridge: dequant → residual += attn_out → RMSNorm_ffn → quantize
         let x_ffn = verilm_core::rmsnorm::bridge_residual_rmsnorm(
             &sl.attn_out,
@@ -806,23 +872,9 @@ fn full_bridge(
             key.rmsnorm_eps,
             rs.scale_x_ffn,
         );
-
         // Wg, Wu @ x_ffn
-        for (mt, z) in [(MatrixType::Wg, &sl.g), (MatrixType::Wu, &sl.u)] {
-            *c += 1;
-            if !freivalds::check(key.v_for(layer_idx, mt), &x_ffn, key.r_for(mt), z) {
-                f.push(vfail_ctx(
-                    FailureCode::FreivaldsFailed,
-                    format!("layer {} {:?}: Freivalds failed", layer_idx, mt),
-                    FailureContext {
-                        layer: Some(layer_idx),
-                        matrix: Some(format!("{:?}", mt)),
-                        ..Default::default()
-                    },
-                ));
-            }
-        }
-
+        verify_freivalds(key, st, layer_idx, MatrixType::Wg, &x_ffn, &sl.g);
+        verify_freivalds(key, st, layer_idx, MatrixType::Wu, &x_ffn, &sl.u);
         // SiLU gate → h
         let h = verilm_core::silu::compute_h_scaled(
             &sl.g,
@@ -832,25 +884,8 @@ fn full_bridge(
             rs.scale_x_ffn,
             rs.scale_h,
         );
-
         // Wd @ h
-        *c += 1;
-        if !freivalds::check(
-            key.v_for(layer_idx, MatrixType::Wd),
-            &h,
-            key.r_for(MatrixType::Wd),
-            &sl.ffn_out,
-        ) {
-            f.push(vfail_ctx(
-                FailureCode::FreivaldsFailed,
-                format!("layer {} Wd: Freivalds failed", layer_idx),
-                FailureContext {
-                    layer: Some(layer_idx),
-                    matrix: Some("Wd".into()),
-                    ..Default::default()
-                },
-            ));
-        }
+        verify_freivalds(key, st, layer_idx, MatrixType::Wd, &h, &sl.ffn_out);
 
         // Post-FFN bridge → x_attn for next layer
         let next_scale = retained
@@ -870,81 +905,64 @@ fn full_bridge(
                 next_scale,
             )
         } else {
-            // Last layer: update residual for final_hidden, no next-layer RMSNorm
+            // Last layer: update residual, no next-layer RMSNorm
             verilm_core::rmsnorm::dequant_add_residual(
                 &sl.ffn_out,
                 key.weight_scale_for(layer_idx, MatrixType::Wd),
                 rs.scale_h,
                 &mut residual,
             );
-            Vec::new() // not used after last layer
+            Vec::new()
         };
     }
 }
 
-// ---------------------------------------------------------------------------
-// Phase 7: LM-head + token replay
-// ---------------------------------------------------------------------------
+// --- Phase 6: LM-head + token replay
 
-fn lm_head(
-    key: &VerifierKey,
-    r: &V4AuditResponse,
-    shell: &ShellTokenOpening,
-    decode_params: Option<verilm_core::sampling::DecodeParams>,
-    c: &mut usize,
-    f: &mut Vec<VerificationFailure>,
-) {
-    // Canonical: derive final_hidden from captured final_residual + final_norm.
-    // No shell-replay fallback.
-    let final_hidden: Option<Vec<i8>> = match (&shell.final_residual, &key.final_norm_weights) {
+fn phase_lm_head(ctx: &Ctx, shell: &ShellTokenOpening, specs: &SpecState, st: &mut St) {
+    // Derive final_hidden from captured final_residual + final_norm.
+    // No shell-replay fallback in canonical path.
+    let final_hidden: Option<Vec<i8>> = match (&shell.final_residual, &ctx.key.final_norm_weights)
+    {
         (Some(fr), Some(fnw)) => {
             let res_f64: Vec<f64> = fr.iter().map(|&v| v as f64).collect();
-            let normed = verilm_core::rmsnorm::rmsnorm_f64_input(&res_f64, fnw, key.rmsnorm_eps);
-            Some(
-                normed
-                    .iter()
-                    .map(|&v| v.round().clamp(-128.0, 127.0) as i8)
-                    .collect(),
-            )
+            let normed = verilm_core::rmsnorm::rmsnorm_f64_input(&res_f64, fnw, ctx.key.rmsnorm_eps);
+            Some(normed.iter().map(|&v| v.round().clamp(-128.0, 127.0) as i8).collect())
         }
-        (None, Some(_)) if key.lm_head.is_some() => {
-            f.push(vfail(
+        (None, Some(_)) if ctx.key.lm_head.is_some() => {
+            st.fail(
                 FailureCode::MissingFinalResidual,
                 "canonical: final_residual required for LM-head (no shell replay fallback)",
-            ));
+            );
             None
         }
-        _ => None, // key lacks final_norm_weights — no LM-head verification possible
+        _ => None,
     };
 
     // LM-head Freivalds
-    let r_lm = key.r_for(MatrixType::LmHead);
-    let has_lm_freivalds = !r_lm.is_empty() && key.v_lm_head.is_some();
-
-    if !has_lm_freivalds {
+    let r_lm = ctx.key.r_for(MatrixType::LmHead);
+    if r_lm.is_empty() || ctx.key.v_lm_head.is_none() {
         return;
     }
-
-    let v_lm = key.v_lm_head.as_ref().unwrap();
-
     match (&shell.logits_i32, &final_hidden) {
         (Some(logits), Some(fh)) => {
-            *c += 1;
-            if !freivalds::check(v_lm, fh, r_lm, logits) {
-                f.push(vfail(
+            st.check();
+            if !freivalds::check(ctx.key.v_lm_head.as_ref().unwrap(), fh, r_lm, logits) {
+                st.fail(
                     FailureCode::LmHeadFreivaldsFailed,
                     "lm_head: Freivalds check failed on logits_i32",
-                ));
+                );
             }
 
             // Token replay (generated tokens only)
-            let gen_start = r.n_prompt_tokens.map(|npt| npt.saturating_sub(1)).unwrap_or(0);
-            if key.config.vocab_size > 0 && r.token_index >= gen_start {
-                *c += 1;
+            if ctx.key.config.vocab_size > 0 && ctx.r.token_index >= ctx.gen_start {
+                st.check();
                 let logits_f32: Vec<f32> = logits.iter().map(|&v| v as f32).collect();
-                let expected = if let Some(ref dp) = decode_params {
-                    let seed =
-                        verilm_core::sampling::derive_token_seed(&r.revealed_seed, r.token_index);
+                let expected = if let Some(ref dp) = specs.decode_params {
+                    let seed = verilm_core::sampling::derive_token_seed(
+                        &ctx.r.revealed_seed,
+                        ctx.r.token_index,
+                    );
                     verilm_core::sampling::sample(&logits_f32, dp, &seed)
                 } else {
                     logits_f32
@@ -954,83 +972,76 @@ fn lm_head(
                         .map(|(i, _)| i as u32)
                         .unwrap_or(0)
                 };
-                if expected != r.token_id {
-                    f.push(vfail(
+                if expected != ctx.r.token_id {
+                    st.fail(
                         FailureCode::TokenSelectionMismatch,
-                        format!("lm_head: expected token {} but got {}", expected, r.token_id),
-                    ));
+                        format!("lm_head: expected token {} but got {}", expected, ctx.r.token_id),
+                    );
                 }
             }
         }
-        (None, _) => f.push(vfail(
+        (None, _) => st.fail(
             FailureCode::MissingLogits,
             "lm_head: key requires logits_i32 but shell missing it",
-        )),
-        (Some(_), None) => f.push(vfail(
+        ),
+        (Some(_), None) => st.fail(
             FailureCode::MissingFinalHidden,
             "lm_head: logits_i32 present but no final_hidden to verify against",
-        )),
+        ),
     }
 }
 
-// ---------------------------------------------------------------------------
-// Phase 8: Deep prefix
-// ---------------------------------------------------------------------------
+// --- Phase 7: Deep prefix
 
-fn deep_prefix(
-    key: &VerifierKey,
-    r: &V4AuditResponse,
-    c: &mut usize,
-    f: &mut Vec<VerificationFailure>,
-) {
-    let (prefix_ret, prefix_shells) = match (&r.prefix_retained, &r.prefix_shell_openings) {
+fn phase_deep_prefix(ctx: &Ctx, st: &mut St) {
+    let (prefix_ret, prefix_shells) = match (&ctx.r.prefix_retained, &ctx.r.prefix_shell_openings)
+    {
         (Some(ret), Some(shells)) => (ret, shells),
         _ => return,
     };
 
-    if prefix_ret.len() != r.prefix_leaf_hashes.len()
-        || prefix_shells.len() != r.prefix_leaf_hashes.len()
+    if prefix_ret.len() != ctx.r.prefix_leaf_hashes.len()
+        || prefix_shells.len() != ctx.r.prefix_leaf_hashes.len()
     {
-        *c += 1;
-        f.push(vfail(
+        st.check();
+        st.fail(
             FailureCode::PrefixCountMismatch,
             format!(
                 "deep prefix count: {} retained, {} shells, {} leaf_hashes",
                 prefix_ret.len(),
                 prefix_shells.len(),
-                r.prefix_leaf_hashes.len()
+                ctx.r.prefix_leaf_hashes.len()
             ),
-        ));
+        );
         return;
     }
 
     for (j, ((ret_j, shell_j), &expected_hash)) in prefix_ret
         .iter()
         .zip(prefix_shells.iter())
-        .zip(r.prefix_leaf_hashes.iter())
+        .zip(ctx.r.prefix_leaf_hashes.iter())
         .enumerate()
     {
         // Hash consistency
-        *c += 1;
+        st.check();
         let fr_ref = shell_j.final_residual.as_deref();
         let hash_j = merkle::hash_retained_with_residual(ret_j, fr_ref);
         if hash_j != expected_hash {
-            f.push(vfail_ctx(
+            st.fail_ctx(
                 FailureCode::RetainedHashMismatch,
                 format!("prefix token {}: retained hash mismatch", j),
                 FailureContext {
                     token_index: Some(j as u32),
                     ..Default::default()
                 },
-            ));
+            );
             continue;
         }
 
-        // Shell Freivalds + bridge (reuses full_bridge)
-        let before = f.len();
-        full_bridge(key, ret_j, shell_j, c, f);
-        // Tag bridge failures with the prefix token index.
-        for failure in &mut f[before..] {
+        // Shell Freivalds + bridge (reuses bridge_layers)
+        let before = st.failures.len();
+        bridge_layers(ctx.key, ret_j, shell_j, st);
+        for failure in &mut st.failures[before..] {
             failure.message = format!("prefix token {}: {}", j, failure.message);
             if failure.context.token_index.is_none() {
                 failure.context.token_index = Some(j as u32);
@@ -1039,152 +1050,186 @@ fn deep_prefix(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Phase 9: Tokenization
-// ---------------------------------------------------------------------------
+// --- Phase 8: Tokenization
 
-fn tokenization_verify(
-    r: &V4AuditResponse,
-    tokenizer: Option<&dyn PromptTokenizer>,
-    c: &mut usize,
-    f: &mut Vec<VerificationFailure>,
-) {
-    let tok = match tokenizer {
+fn phase_tokenization(ctx: &Ctx, st: &mut St) {
+    let tok = match ctx.tokenizer {
         Some(t) => t,
         None => return,
     };
-
-    let (prompt, manifest) = match (&r.prompt, &r.manifest) {
+    let (prompt, manifest) = match (&ctx.r.prompt, &ctx.r.manifest) {
         (Some(p), Some(m)) => (p, m),
-        _ => return, // Can't reconstruct without prompt + manifest
+        _ => return,
     };
 
     let input_spec = InputSpec::from(manifest);
     match tok.tokenize(prompt, &input_spec) {
         Ok(tids) => {
-            *c += 1;
-            let tok_failures = crate::verify_input_tokenization(r, &tids);
-            f.extend(tok_failures);
+            st.check();
+            let tok_failures = crate::verify_input_tokenization(ctx.r, &tids);
+            st.failures.extend(tok_failures);
         }
-        Err(e) => f.push(vfail(
+        Err(e) => st.fail(
             FailureCode::TokenizerError,
             format!("tokenizer reconstruction failed: {}", e),
-        )),
+        ),
     }
 }
 
-// ---------------------------------------------------------------------------
-// Phase 10: Detokenization
-// ---------------------------------------------------------------------------
+// --- Phase 9: Detokenization
 
-fn detokenization_verify(
-    r: &V4AuditResponse,
-    detokenizer: Option<&dyn Detokenizer>,
-    c: &mut usize,
-    f: &mut Vec<VerificationFailure>,
-) {
-    let detok = match detokenizer {
+fn phase_detokenization(ctx: &Ctx, st: &mut St) {
+    let detok = match ctx.detokenizer {
         Some(d) => d,
         None => return,
     };
 
-    *c += 1;
-    let claimed = match &r.output_text {
+    st.check();
+    let claimed = match &ctx.r.output_text {
         Some(t) => t,
         None => {
-            f.push(vfail(
+            st.fail(
                 FailureCode::MissingOutputText,
                 "detokenizer provided but response missing output_text",
-            ));
+            );
             return;
         }
     };
 
-    let policy = r
+    let policy = ctx
+        .r
         .manifest
         .as_ref()
         .map(|m| OutputSpec::from(m))
         .and_then(|os| os.detokenization_policy);
 
-    // Collect generation token IDs
-    let gen_start = r.n_prompt_tokens.unwrap_or(1).saturating_sub(1) as usize;
-    let mut gen_tids: Vec<u32> = r
+    let gen_start = ctx.gen_start as usize;
+    let mut gen_tids: Vec<u32> = ctx
+        .r
         .prefix_token_ids
         .get(gen_start..)
         .unwrap_or(&[])
         .to_vec();
-    gen_tids.push(r.token_id);
-
-    let is_last = r.token_index == r.commitment.n_tokens.saturating_sub(1);
+    gen_tids.push(ctx.r.token_id);
 
     match detok.decode(&gen_tids, policy.as_deref()) {
         Ok(decoded) => {
-            if is_last {
+            if ctx.is_last {
                 if decoded != *claimed {
-                    f.push(vfail(
+                    st.fail(
                         FailureCode::DetokenizationMismatch,
-                        format!("detokenization mismatch: decoded={:?} claimed={:?}", decoded, claimed),
-                    ));
+                        format!(
+                            "detokenization mismatch: decoded={:?} claimed={:?}",
+                            decoded, claimed
+                        ),
+                    );
                 }
             } else if !claimed.starts_with(&decoded) {
-                f.push(vfail(
+                st.fail(
                     FailureCode::DetokenizationMismatch,
                     format!(
                         "detokenization prefix mismatch: decoded={:?} not prefix of claimed={:?}",
                         decoded, claimed
                     ),
-                ));
+                );
             }
         }
-        Err(e) => f.push(vfail(
+        Err(e) => st.fail(
             FailureCode::DetokenizerError,
             format!("detokenization failed: {}", e),
-        )),
+        ),
     }
 }
 
-// ---------------------------------------------------------------------------
-// Report builder
-// ---------------------------------------------------------------------------
+// --- Report builder
 
-fn build_report(
-    r: &V4AuditResponse,
-    key: &VerifierKey,
-    checks_run: usize,
-    failures: Vec<VerificationFailure>,
-    start: Instant,
-) -> V4VerifyReport {
-    let coverage = match &r.shell_opening {
-        Some(shell) => {
-            let checked = shell
-                .layer_indices
-                .as_ref()
-                .map_or(shell.layers.len(), |v| v.len());
-            if checked >= key.config.n_layers {
-                AuditCoverage::Full {
-                    layers_checked: checked,
-                }
-            } else {
-                AuditCoverage::Routine {
-                    layers_checked: checked,
-                    layers_total: key.config.n_layers,
-                }
-            }
-        }
-        None => AuditCoverage::Unknown,
-    };
-
+fn finish(ctx: &Ctx, st: St, coverage: AuditCoverage) -> V4VerifyReport {
     V4VerifyReport {
-        verdict: if failures.is_empty() {
+        verdict: if st.failures.is_empty() {
             Verdict::Pass
         } else {
             Verdict::Fail
         },
-        token_index: r.token_index,
-        checks_run,
-        checks_passed: checks_run.saturating_sub(failures.len()),
-        failures,
+        token_index: ctx.r.token_index,
+        checks_run: st.checks,
+        checks_passed: st.checks.saturating_sub(st.failures.len()),
+        failures: st.failures,
         coverage,
-        duration: start.elapsed(),
+        duration: ctx.start.elapsed(),
+    }
+}
+
+// --- Small helpers
+
+fn verify_freivalds(key: &VerifierKey, st: &mut St, layer: usize, mt: MatrixType, input: &[i8], accum: &[i32]) {
+    st.check();
+    if !freivalds::check(key.v_for(layer, mt), input, key.r_for(mt), accum) {
+        st.fail_ctx(
+            FailureCode::FreivaldsFailed,
+            format!("layer {} {:?}: Freivalds failed", layer, mt),
+            FailureContext {
+                layer: Some(layer),
+                matrix: Some(format!("{:?}", mt)),
+                ..Default::default()
+            },
+        );
+    }
+}
+
+fn xcheck_f64(st: &mut St, name: &str, manifest: Option<f64>, key: f64) {
+    if let Some(v) = manifest {
+        st.check();
+        if (v - key).abs() > f64::EPSILON {
+            st.fail_ctx(
+                FailureCode::SpecFieldMismatch,
+                format!("{} mismatch: manifest={} key={}", name, v, key),
+                FailureContext { field: Some(name.into()), ..Default::default() },
+            );
+        }
+    }
+}
+fn xcheck_hash(st: &mut St, name: &str, manifest: Option<[u8; 32]>, key: Option<[u8; 32]>) {
+    if let (Some(m), Some(k)) = (manifest, key) {
+        st.check();
+        if m != k {
+            st.fail_ctx(
+                FailureCode::SpecFieldMismatch,
+                format!("{} mismatch: manifest != key", name),
+                FailureContext { field: Some(name.into()), ..Default::default() },
+            );
+        }
+    }
+}
+fn xcheck_dim(st: &mut St, name: &str, manifest: Option<u32>, key: usize) {
+    if let Some(v) = manifest {
+        st.check();
+        if v as usize != key {
+            st.fail_ctx(
+                FailureCode::SpecFieldMismatch,
+                format!("{} mismatch: manifest={} key={}", name, v, key),
+                FailureContext { field: Some(name.into()), ..Default::default() },
+            );
+        }
+    }
+}
+fn xcheck_str(st: &mut St, name: &str, manifest: Option<&str>, key: Option<&str>) {
+    if let (Some(m), Some(k)) = (manifest, key) {
+        st.check();
+        if m != k {
+            st.fail_ctx(
+                FailureCode::SpecFieldMismatch,
+                format!("{} mismatch: manifest='{}' key='{}'", name, m, k),
+                FailureContext { field: Some(name.into()), ..Default::default() },
+            );
+        }
+    }
+}
+fn reject_feature(st: &mut St, rejected: bool, field: &str, actual: &str, expected: &str) {
+    if rejected {
+        st.fail_ctx(
+            FailureCode::UnsupportedDecodeFeature,
+            format!("unsupported {}={} (canonical requires {})", field, actual, expected),
+            FailureContext { field: Some(field.into()), ..Default::default() },
+        );
     }
 }

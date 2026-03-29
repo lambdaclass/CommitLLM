@@ -24,6 +24,15 @@ use verilm_prover::{commit_minimal, open_v4, FullBindingParams};
 use verilm_test_vectors::{forward_pass, generate_key, generate_model, LayerWeights};
 use verilm_verify::{AuditCoverage, Verdict};
 
+/// Thin wrapper: routes through the legacy verifier while canonical is validated.
+fn verify_v4_compat(
+    key: &verilm_core::types::VerifierKey,
+    response: &verilm_core::types::V4AuditResponse,
+    expected_prompt_token_ids: Option<&[u32]>,
+) -> verilm_verify::V4VerifyReport {
+    verilm_verify::verify_v4_legacy(key, response, expected_prompt_token_ids, None, None)
+}
+
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -96,7 +105,7 @@ fn frozen_v4_audit_verifies_pass() {
     let model = generate_model(&cfg, 12345);
     let key = generate_key(&cfg, &model, [1u8; 32]);
 
-    let report = verilm_verify::verify_v4(&key, &response, None);
+    let report = verify_v4_compat(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass,
         "frozen fixture must verify pass, failures: {:?}", report.failures);
     assert!(report.checks_run >= 15,
@@ -180,7 +189,7 @@ fn frozen_v4_key_used_with_frozen_audit() {
     let key = serialize::deserialize_key(&key_data).unwrap();
     let response = serialize::deserialize_v4_audit(&audit_data).unwrap();
 
-    let report = verilm_verify::verify_v4(&key, &response, None);
+    let report = verify_v4_compat(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass,
         "frozen key + frozen audit must verify pass, failures: {:?}", report.failures);
 }
@@ -267,6 +276,52 @@ fn future_magic_vv9z_rejected() {
     data[2] = b'9';
     data[3] = b'Z';
     assert!(serialize::deserialize_v4_audit(&data).is_err());
+}
+
+// ===========================================================================
+// Canonical full-bridge fixtures (pass canonical::verify_response)
+// ===========================================================================
+
+#[test]
+fn frozen_fullbridge_audit_passes_canonical_verification() {
+    let key_data = fixture("v4_key_fullbridge.bin");
+    let audit_data = fixture("v4_audit_fullbridge.bin");
+
+    let key = serialize::deserialize_key(&key_data).unwrap();
+    let response = serialize::deserialize_v4_audit(&audit_data).unwrap();
+
+    let report = verilm_verify::canonical::verify_response(&key, &response, None, None);
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "frozen fullbridge fixture must pass canonical verification, failures: {:?}",
+        report.failures
+    );
+    assert!(
+        report.checks_run >= 20,
+        "expected >= 20 canonical checks, got {}",
+        report.checks_run
+    );
+    match &report.coverage {
+        AuditCoverage::Full { layers_checked } => {
+            assert!(*layers_checked >= 2, "expected >= 2 layers checked");
+        }
+        other => panic!("expected Full coverage, got {:?}", other),
+    }
+}
+
+#[test]
+fn frozen_fullbridge_has_manifest_and_bridge() {
+    let audit_data = fixture("v4_audit_fullbridge.bin");
+    let response = serialize::deserialize_v4_audit(&audit_data).unwrap();
+
+    assert!(response.manifest.is_some(), "canonical fixture must have manifest");
+    let shell = response.shell_opening.as_ref().expect("must have shell");
+    assert!(shell.initial_residual.is_some(), "canonical fixture must have initial_residual");
+    assert!(shell.embedding_proof.is_some(), "canonical fixture must have embedding_proof");
+    assert!(response.commitment.manifest_hash.is_some(), "commitment must have manifest_hash");
+    assert!(response.commitment.input_spec_hash.is_some(), "commitment must have input_spec_hash");
+    assert!(response.commitment.model_spec_hash.is_some(), "commitment must have model_spec_hash");
 }
 
 #[test]

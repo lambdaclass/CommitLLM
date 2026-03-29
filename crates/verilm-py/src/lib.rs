@@ -954,15 +954,18 @@ fn generate_key(model_dir: String, seed: Vec<u8>) -> PyResult<String> {
 /// the normative bincode+zstd wire format. This JSON entry point exists
 /// for debugging and development.
 ///
+/// Internally delegates to the canonical verifier (`canonical::verify_response`).
+///
 /// Args:
 ///     audit_json: str — JSON-serialized V4AuditResponse.
 ///     key_json: str — JSON-serialized VerifierKey.
-///     expected_prompt_token_ids: Optional[list[int]] — caller-supplied prompt token IDs.
+///     expected_prompt_token_ids: Optional[list[int]] — **ignored** (accepted for API
+///         compatibility only). The canonical verifier requires a tokenizer callback
+///         for tokenization checks; caller-supplied IDs are not used.
 ///     tokenizer_fn: Optional[Callable[[bytes, dict], list[int]]] — tokenizer callback.
 ///         When provided, the verifier calls `tokenizer_fn(prompt_bytes, input_spec_dict)`
 ///         to reconstruct prompt token IDs from raw bytes + the committed InputSpec.
-///         This is the canonical path (verifier derives tokens, not the caller).
-///         Falls back to `expected_prompt_token_ids` when the response lacks prompt/manifest.
+///     detokenizer_fn: Optional[Callable[[list[int], str|None], str]] — detokenizer callback.
 ///
 /// Returns:
 ///     dict with `passed` (bool), `checks_run` (int), `checks_passed` (int),
@@ -998,10 +1001,14 @@ fn verify_v4<'py>(
 
 /// Verify a V4 audit response from binary (bincode+zstd) format — canonical production path.
 ///
+/// Internally delegates to the canonical verifier (`canonical::verify_response`).
+///
 /// Args:
 ///     audit_binary: bytes — binary V4AuditResponse (from audit_v4_binary).
 ///     key_json: str — JSON-serialized VerifierKey.
-///     expected_prompt_token_ids: Optional[list[int]] — caller-supplied prompt token IDs.
+///     expected_prompt_token_ids: Optional[list[int]] — **ignored** (accepted for API
+///         compatibility only). The canonical verifier requires a tokenizer callback
+///         for tokenization checks; caller-supplied IDs are not used.
 ///     tokenizer_fn: Optional[Callable[[bytes, dict], list[int]]] — tokenizer callback.
 ///     detokenizer_fn: Optional[Callable[[list[int], str|None], str]] — detokenizer callback.
 #[pyfunction]
@@ -1078,7 +1085,8 @@ fn coverage_to_py<'py>(py: Python<'py>, coverage: &verilm_verify::AuditCoverage)
     d
 }
 
-/// Shared verification logic: dispatches to verify_v4 or verify_v4_full.
+/// Shared verification logic: delegates to canonical verifier via verify_v4_full.
+/// Note: expected_prompt_token_ids is ignored by the canonical path.
 fn run_verify(
     key: &VerifierKey,
     response: &V4AuditResponse,

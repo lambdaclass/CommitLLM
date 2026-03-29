@@ -18,7 +18,16 @@ use verilm_core::types::{
 };
 use verilm_prover::{commit_minimal, open_v4, FullBindingParams};
 use verilm_test_vectors::{forward_pass, generate_key, generate_model, LayerWeights};
-use verilm_verify::{verify_v4, AuditCoverage, FailureCategory, FailureCode, Verdict};
+use verilm_verify::{verify_v4_legacy, AuditCoverage, FailureCategory, FailureCode, Verdict};
+
+/// Thin wrapper: routes through the legacy verifier while canonical is validated.
+fn verify_v4(
+    key: &verilm_core::types::VerifierKey,
+    response: &verilm_core::types::V4AuditResponse,
+    expected_prompt_token_ids: Option<&[u32]>,
+) -> verilm_verify::V4VerifyReport {
+    verify_v4_legacy(key, response, expected_prompt_token_ids, None, None)
+}
 
 // ── Helpers ──────────────────────────────────────────────────
 

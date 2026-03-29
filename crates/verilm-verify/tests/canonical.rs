@@ -7,7 +7,7 @@ use verilm_core::types::{
 use verilm_prover::{commit_minimal, open_v4, FullBindingParams};
 use verilm_test_vectors::{generate_key, generate_model, LayerWeights};
 use verilm_verify::canonical::verify_binary;
-use verilm_verify::Verdict;
+use verilm_verify::{verify_v4_legacy, Verdict};
 
 // ---------------------------------------------------------------------------
 // Shared helpers (same as v4_e2e.rs)
@@ -526,25 +526,171 @@ fn canonical_reports_full_coverage() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn canonical_frozen_audit_pass() {
-    // Load the frozen binary audit + key fixtures used by cross_version tests.
-    // These are toy-model fixtures WITHOUT initial_residual — they should
-    // produce a report (not Err) but may fail on canonical requirements.
-    let audit_path = std::path::Path::new("tests/fixtures/frozen_v4_audit.bin");
-    let key_path = std::path::Path::new("tests/fixtures/frozen_v4_key.bin");
+fn canonical_frozen_audit_deserializes() {
+    // Legacy frozen fixtures are toy-model (no initial_residual) — canonical will reject
+    // them on bridge requirements, but must deserialize and produce a report.
+    let audit_path = std::path::Path::new("tests/fixtures/v4_audit_canonical.bin");
+    let key_path = std::path::Path::new("tests/fixtures/v4_key_canonical.bin");
     if !audit_path.exists() || !key_path.exists() {
-        return; // Skip if fixtures not present
+        return;
     }
 
     let audit_data = std::fs::read(audit_path).unwrap();
     let key_data = std::fs::read(key_path).unwrap();
     let key = verilm_core::serialize::deserialize_key(&key_data).unwrap();
 
-    // The canonical verifier should at least deserialize and produce a report.
     let report = verify_binary(&key, &audit_data, None, None).unwrap();
-    // Frozen fixtures are toy-model — canonical may reject them, but should NOT panic.
-    assert!(
-        report.verdict == Verdict::Pass || report.verdict == Verdict::Fail,
-        "should produce a verdict"
+    // Must not panic; verdict is either Pass or Fail.
+    assert!(report.verdict == Verdict::Pass || report.verdict == Verdict::Fail);
+}
+
+#[test]
+fn canonical_frozen_fullbridge_passes() {
+    let audit_path = std::path::Path::new("tests/fixtures/v4_audit_fullbridge.bin");
+    let key_path = std::path::Path::new("tests/fixtures/v4_key_fullbridge.bin");
+
+    let audit_data = std::fs::read(audit_path)
+        .unwrap_or_else(|e| panic!("fixture not found: {} — run gen_fixtures first", e));
+    let key_data = std::fs::read(key_path)
+        .unwrap_or_else(|e| panic!("fixture not found: {} — run gen_fixtures first", e));
+    let key = verilm_core::serialize::deserialize_key(&key_data).unwrap();
+
+    let report = verify_binary(&key, &audit_data, None, None).unwrap();
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "canonical frozen fullbridge fixture must pass: {:?}",
+        report.failures
     );
+    assert!(report.checks_run >= 20, "expected >= 20 checks, got {}", report.checks_run);
+}
+
+// ===========================================================================
+// Parity tests: legacy verify_v4_full vs canonical::verify_binary
+//
+// For canonical-grade inputs (full bridge + manifest + embedding proof),
+// both verifiers must produce the same verdict and same failure codes.
+// ===========================================================================
+
+/// Run both verifiers on the same response/binary and assert parity.
+fn assert_parity(
+    key: &verilm_core::types::VerifierKey,
+    response: &verilm_core::types::V4AuditResponse,
+) {
+    let legacy = verify_v4_legacy(key, response, None, None, None);
+    let binary = to_binary(response);
+    let canonical = verify_binary(key, &binary, None, None).unwrap();
+
+    assert_eq!(
+        legacy.verdict, canonical.verdict,
+        "verdict mismatch: legacy={:?} canonical={:?}\nlegacy failures: {:?}\ncanonical failures: {:?}",
+        legacy.verdict, canonical.verdict, legacy.failures, canonical.failures
+    );
+
+    let legacy_codes: std::collections::BTreeSet<_> =
+        legacy.failures.iter().map(|f| format!("{:?}", f.code)).collect();
+    let canonical_codes: std::collections::BTreeSet<_> =
+        canonical.failures.iter().map(|f| format!("{:?}", f.code)).collect();
+
+    assert_eq!(
+        legacy_codes, canonical_codes,
+        "failure code mismatch:\n  legacy only: {:?}\n  canonical only: {:?}",
+        legacy_codes.difference(&canonical_codes).collect::<Vec<_>>(),
+        canonical_codes.difference(&legacy_codes).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn parity_clean_pass() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, response) = build_canonical_audit_with_response(Some(&manifest));
+    assert_parity(&key, &response);
+}
+
+#[test]
+fn parity_tampered_attn_out() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    response.shell_opening.as_mut().unwrap().layers[0].attn_out[0] ^= 0x7FFF_FFFF;
+    assert_parity(&key, &response);
+}
+
+#[test]
+fn parity_tampered_ffn_out() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    response.shell_opening.as_mut().unwrap().layers[0].ffn_out[0] ^= 0x7FFF_FFFF;
+    assert_parity(&key, &response);
+}
+
+#[test]
+fn parity_tampered_seed() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    response.revealed_seed[0] ^= 0xFF;
+    assert_parity(&key, &response);
+}
+
+#[test]
+fn parity_tampered_embedding() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    response.shell_opening.as_mut().unwrap().initial_residual.as_mut().unwrap()[0] += 1.0;
+    assert_parity(&key, &response);
+}
+
+#[test]
+fn parity_missing_shell_opening() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    response.shell_opening = None;
+    assert_parity(&key, &response);
+}
+
+#[test]
+fn parity_unsupported_sampler() {
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.sampler_version = Some("custom-sampler-v99".into());
+    let (key, response) = build_canonical_audit_with_response(Some(&manifest));
+    assert_parity(&key, &response);
+}
+
+#[test]
+fn parity_unsupported_repetition_penalty() {
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.repetition_penalty = 1.5;
+    let (key, response) = build_canonical_audit_with_response(Some(&manifest));
+    assert_parity(&key, &response);
+}
+
+#[test]
+fn parity_decode_mode_inconsistency() {
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.decode_mode = Some("sampled".into());
+    let (key, response) = build_canonical_audit_with_response(Some(&manifest));
+    assert_parity(&key, &response);
+}
+
+#[test]
+fn parity_wrong_prompt_bytes() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    response.prompt = Some(b"tampered prompt".to_vec());
+    assert_parity(&key, &response);
+}
+
+#[test]
+fn parity_tampered_merkle_root() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    response.commitment.merkle_root[0] ^= 0xFF;
+    assert_parity(&key, &response);
+}
+
+#[test]
+fn parity_tampered_io_root() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    response.commitment.io_root[0] ^= 0xFF;
+    assert_parity(&key, &response);
 }

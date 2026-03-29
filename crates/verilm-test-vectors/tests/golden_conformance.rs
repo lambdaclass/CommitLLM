@@ -219,7 +219,7 @@ fn golden_e2e_verify() {
     );
 
     // Pin verification outcome
-    let report = verilm_verify::verify_v4(&key, &response, None);
+    let report = verilm_verify::verify_v4_legacy(&key, &response, None, None, None);
     assert_eq!(
         report.verdict,
         verilm_verify::Verdict::Pass,
@@ -274,7 +274,7 @@ fn binary_v4_audit_roundtrip() {
     assert_eq!(restored.prev_io_hash, response.prev_io_hash);
 
     // Restored response must still verify
-    let report = verilm_verify::verify_v4(&key, &restored, None);
+    let report = verilm_verify::verify_v4_legacy(&key, &restored, None, None, None);
     assert_eq!(
         report.verdict,
         verilm_verify::Verdict::Pass,

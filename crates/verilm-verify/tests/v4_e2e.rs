@@ -10,7 +10,27 @@ use verilm_core::types::{BridgeParams, DeploymentManifest, EmbeddingLookup, Reta
 use verilm_prover::{commit_minimal, open_v4, open_v4_structural, FullBindingParams};
 use verilm_test_vectors::{forward_pass, generate_key, generate_model, LayerWeights};
 use verilm_core::types::InputSpec;
-use verilm_verify::{verify_v4, verify_v4_full, verify_v4_with_weights, Detokenizer, PromptTokenizer, Verdict};
+use verilm_verify::{verify_v4_legacy, verify_v4_with_weights, Detokenizer, PromptTokenizer, Verdict};
+
+/// Thin wrapper: routes through the legacy verifier while the canonical path
+/// is validated. Will be removed once test vectors are upgraded to canonical-grade.
+fn verify_v4(
+    key: &verilm_core::types::VerifierKey,
+    response: &verilm_core::types::V4AuditResponse,
+    expected_prompt_token_ids: Option<&[u32]>,
+) -> verilm_verify::V4VerifyReport {
+    verify_v4_legacy(key, response, expected_prompt_token_ids, None, None)
+}
+
+fn verify_v4_full(
+    key: &verilm_core::types::VerifierKey,
+    response: &verilm_core::types::V4AuditResponse,
+    expected_prompt_token_ids: Option<&[u32]>,
+    tokenizer: Option<&dyn PromptTokenizer>,
+    detokenizer: Option<&dyn Detokenizer>,
+) -> verilm_verify::V4VerifyReport {
+    verify_v4_legacy(key, response, expected_prompt_token_ids, tokenizer, detokenizer)
+}
 
 /// Adapter: exposes toy model LayerWeights as ShellWeights.
 struct ToyWeights<'a>(&'a [LayerWeights]);

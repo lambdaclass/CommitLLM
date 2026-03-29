@@ -540,43 +540,42 @@ impl std::fmt::Display for V4VerifyReport {
 }
 
 
-/// Verify V4 audit response: structural checks + key-only Freivalds on shell openings.
+/// Verify V4 audit response using the canonical verifier.
 ///
-/// This is the protocol verifier — requires only the precomputed VerifierKey,
-/// no weights. Checks:
-/// 1. Structural: version, seed, prompt, Merkle proofs, IO chain, prefix count
-/// 2. Shell opening: Freivalds on each matmul (W_o, W_g, W_u, W_d, optionally QKV)
-/// 3. Bridge consistency: verifier derives intermediate i8 values from i32 accumulators
-/// 4. Retained-state binding: shell openings must be consistent with committed `a`
-/// 5. Input tokenization: when a `PromptTokenizer` is provided, the verifier
-///    reconstructs prompt token IDs from raw prompt bytes + `InputSpec` and
-///    checks them against the committed chain. Alternatively, pass
-///    pre-tokenized IDs via `expected_prompt_token_ids`.
-/// 6. Output policy: min_tokens, ignore_eos, and eos_policy enforcement.
+/// Delegates to [`canonical::verify_response`] — binary-only mental model,
+/// key-only Freivalds, full-bridge-only, fail-closed on missing fields.
+///
+/// `expected_prompt_token_ids` is accepted for API compatibility but ignored;
+/// pass a `PromptTokenizer` via [`verify_v4_full`] for tokenization checks.
 pub fn verify_v4(
     key: &VerifierKey,
     response: &V4AuditResponse,
-    expected_prompt_token_ids: Option<&[u32]>,
+    _expected_prompt_token_ids: Option<&[u32]>,
 ) -> V4VerifyReport {
-    let no_tok: Option<&dyn PromptTokenizer> = None;
-    let no_detok: Option<&dyn Detokenizer> = None;
-    verify_v4_full(key, response, expected_prompt_token_ids, no_tok, no_detok)
+    canonical::verify_response(key, response, None, None)
 }
 
 /// Full verification with optional canonical tokenizer and detokenizer.
 ///
-/// When `tokenizer` is `Some`, the verifier reconstructs prompt token IDs from
-/// `response.prompt` + the manifest's `InputSpec`, then checks them against
-/// the committed chain. This is the canonical path — the verifier independently
-/// derives the expected tokens rather than trusting caller-supplied IDs.
-///
-/// When `detokenizer` is `Some` and `response.output_text` is present, the
-/// verifier decodes the committed generation token IDs and compares against
-/// the claimed output text under the committed `detokenization_policy`.
-///
-/// `expected_prompt_token_ids` is a fallback: used only when no tokenizer is
-/// provided or when the response lacks the fields needed for reconstruction.
+/// Delegates to [`canonical::verify_response`]. The canonical verifier
+/// reconstructs prompt token IDs from `response.prompt` + manifest `InputSpec`
+/// when a tokenizer is provided. `expected_prompt_token_ids` is accepted for
+/// API compatibility but ignored — the canonical path requires a tokenizer.
 pub fn verify_v4_full(
+    key: &VerifierKey,
+    response: &V4AuditResponse,
+    _expected_prompt_token_ids: Option<&[u32]>,
+    tokenizer: Option<&dyn PromptTokenizer>,
+    detokenizer: Option<&dyn Detokenizer>,
+) -> V4VerifyReport {
+    canonical::verify_response(key, response, tokenizer, detokenizer)
+}
+
+/// Legacy verification path — kept for differential testing and rollback.
+///
+/// This is the original monolithic verifier. It will be removed once the
+/// canonical path is fully validated in production.
+pub fn verify_v4_legacy(
     key: &VerifierKey,
     response: &V4AuditResponse,
     expected_prompt_token_ids: Option<&[u32]>,
