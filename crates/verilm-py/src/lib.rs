@@ -600,7 +600,7 @@ impl MinimalBatchStateHandle {
         });
         let tail = provider.tail_params();
         let emb_lookup: Option<&dyn verilm_core::types::EmbeddingLookup> =
-            if self.rich_prefix { Some(provider.as_ref()) } else { None };
+            if self.rich_prefix || self.deep_prefix { Some(provider.as_ref()) } else { None };
         Ok(verilm_prover::open_v4(
             &self.inner, token_index, provider.as_ref(), provider.config(),
             provider.weight_scales(), bridge.as_ref(), tail.as_ref(), layer_filter,
@@ -827,7 +827,7 @@ impl PackedBatchStateHandle {
         });
         let tail = provider.tail_params();
         let emb_lookup: Option<&dyn verilm_core::types::EmbeddingLookup> =
-            if self.rich_prefix { Some(provider.as_ref()) } else { None };
+            if self.rich_prefix || self.deep_prefix { Some(provider.as_ref()) } else { None };
         Ok(verilm_prover::open_v4_packed(
             &self.inner, token_index, provider.as_ref(), provider.config(),
             provider.weight_scales(), bridge.as_ref(), tail.as_ref(), layer_filter,
