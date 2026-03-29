@@ -2,7 +2,7 @@
 
 When you get a response from an LLM, there is usually no technical way to know what produced it. Not which checkpoint ran. Not whether the decode policy was the one the provider claimed. Not whether the output was modified between generation and delivery. Not whether the provider used the weights they charged for.
 
-VeriLM is a commit-and-audit protocol for open-weight LLM inference. A provider serves a response normally and returns a compact receipt. Later, a verifier can challenge specific token positions and layers, request an opening, and check the opened computation against:
+VeriLM is a cryptographic commit-and-audit protocol for open-weight LLM inference. A provider serves a response normally and returns a compact receipt. Later, a verifier can challenge specific token positions and layers, request an opening, and check the opened computation against:
 
 - the committed model identity
 - the committed preprocessing policy
@@ -12,9 +12,9 @@ VeriLM is a commit-and-audit protocol for open-weight LLM inference. A provider 
 
 The goal is simple to state and difficult to fake:
 
-> Everything except the attention interior is exact, replayable, and cryptographically bound.
+> Everything except the attention interior is exact, replayable, and bound by cryptographic commitments plus verifier-secret, information-theoretically sound algebraic checks.
 
-That is a stronger statement than “the outputs looked plausible” or “several replicas agreed.” It is a statement about computation provenance.
+That is a stronger statement than “the outputs looked plausible” or “several replicas agreed.” The provider commits before learning the audit challenge, and the opened region must satisfy cryptographically bound checks. It is a statement about computation provenance.
 
 ## Why provenance matters
 
@@ -26,7 +26,7 @@ Open-weight models are attractive precisely because their weights are public and
 - **Decentralized or untrusted compute.** Networks such as Gensyn, Ritual, or Bittensor cannot rely on “just trust the node.”
 - **Agent systems.** If an autonomous system takes action, the question of which model produced the decision becomes a liability and governance question.
 
-VeriLM turns “we ran this model” from a dashboard claim into a cryptographically auditable statement.
+VeriLM turns “we ran this model” from a dashboard claim into a cryptographically auditable, client-held statement.
 
 ## The core trick: verify huge matrix multiplies cheaply
 
@@ -52,7 +52,7 @@ v · x  =?  r^T · z
 
 with arithmetic in a finite field `F_p` for a prime `p ≥ 2^32`. If `z = W @ x`, the equality always holds. If the provider used the wrong weights or the wrong output, it fails except with probability at most `1/p`.
 
-This is an information-theoretically sound check: if the provider uses the wrong weights or wrong output, the false-accept probability is at most `1/p`. That matters because transformers are mostly matrix multiplication. Once those multiplications become cheap to audit, the verifier can check model identity without rerunning the full model.
+This is an information-theoretically sound check: if the provider uses the wrong weights or wrong output, the false-accept probability is at most `1/p`. In VeriLM, Freivalds is the verifier-secret algebraic check inside a broader cryptographic protocol; commitments, Merkle proofs, and challenge timing provide the cryptographic binding. That matters because transformers are mostly matrix multiplication. Once those multiplications become cheap to audit, the verifier can check model identity without rerunning the full model.
 
 In the final VeriLM protocol, Freivalds is used for:
 
@@ -104,7 +104,7 @@ If any of those semantics change, the committed receipt changes.
 
 VeriLM has four guarantee classes:
 
-- **Exact.** Cryptographically checked or canonically recomputed with unambiguous semantics.
+- **Exact.** Cryptographically bound and then checked by information-theoretically sound algebraic verification or canonical recomputation with unambiguous semantics.
 - **Approximate.** Replayed and constrained, but not bit-reproducible because native FP16/BF16 attention is hardware-sensitive.
 - **Statistical.** Commitment binding is exact, but correctness of unopened positions depends on challenge sampling unless deep audit is used.
 - **Fail-closed.** A feature is either replayed exactly or rejected explicitly. The verifier never silently accepts unsupported semantics.
@@ -169,6 +169,8 @@ Then the verifier generates a secret verifier key:
 - model configuration needed for canonical replay
 
 The verifier key is secret. If the prover learns the verifier’s Freivalds vectors, the linear checks can be forged.
+
+Verification is therefore client-held and non-transferable rather than a public proof: the provider answers an interactive audit, and only the verifier who holds the secret key material can check it.
 
 ### Phase 1: Commitment
 

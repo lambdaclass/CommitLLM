@@ -1,6 +1,6 @@
 # VeriLM
 
-VeriLM is a commit-and-audit protocol for open-weight LLM inference.
+VeriLM is a cryptographic commit-and-audit protocol for open-weight LLM inference.
 
 A provider serves responses normally and returns a compact receipt. Later, a verifier can challenge specific tokens and layers, request an opening, and check the opened computation against:
 
@@ -12,7 +12,9 @@ A provider serves responses normally and returns a compact receipt. Later, a ver
 
 The design goal is:
 
-> Everything except the attention interior is exact, replayable, and bound by cryptographic commitments plus information-theoretically sound checks.
+> Everything except the attention interior is exact, replayable, and bound by cryptographic commitments plus verifier-secret, information-theoretically sound algebraic checks.
+
+The audit is interactive, client-held, and non-transferable: the provider commits first, the verifier challenges later, and only the client who holds verifier-secret material can check the opening. This is stronger than ordinary spot-checking or replica agreement, but still weaker than full exact verification of the entire computation.
 
 This README describes the final protocol boundary. The implementation roadmap for reaching that boundary is in [roadmap.md](./roadmap.md).
 
@@ -58,6 +60,7 @@ For a given deployment, VeriLM binds a public model identity `R_W` and a verifie
   - `W_up`
   - `W_down`
   - `LM_head`
+- These vectors are precomputed into the verifier key rather than sampled publicly during audit. Freivalds is therefore the verifier-secret algebraic check inside the broader cryptographic protocol, not a public proof by itself.
 - The verifier key also binds the model configuration needed for canonical replay:
   - hidden sizes and head counts
   - RoPE/scaling configuration
