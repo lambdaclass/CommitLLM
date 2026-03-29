@@ -853,42 +853,19 @@ fn bridge_layers(
     {
         return;
     }
-
-    let opened = match validate_bridge_shape(shell, retained, st) {
-        Some(o) => o,
-        None => return,
-    };
-
-    let max_layer = opened.iter().copied().max().unwrap_or(0);
-    let mut shell_idx_for = vec![None; max_layer + 1];
-    for (si, &li) in opened.iter().enumerate() {
-        if li <= max_layer {
-            shell_idx_for[li] = Some(si);
-        }
+    // validate_bridge_shape enforces contiguous 0..N, so shell.layers[i]
+    // corresponds to retained.layers[i] — no index map needed.
+    if validate_bridge_shape(shell, retained, st).is_none() {
+        return;
     }
 
-    let mut residual: Vec<f64> = ir.iter().map(|&v| v as f64).collect();
-    let normed = verilm_core::rmsnorm::rmsnorm_f64_input(
-        &residual,
-        &key.rmsnorm_attn_weights[0],
-        key.rmsnorm_eps,
-    );
-    let mut x_attn = verilm_core::rmsnorm::quantize_f64_to_i8(
-        &normed,
-        retained.layers[0].scale_x_attn as f64,
-    );
+    let (mut residual, mut x_attn) =
+        init_residual_chain(ir, key, retained.layers[0].scale_x_attn);
 
-    // Per-layer verification
-    for layer_idx in 0..=max_layer {
-        if layer_idx >= retained.layers.len() {
-            break;
-        }
+    let n_layers = shell.layers.len().min(retained.layers.len());
+    for layer_idx in 0..n_layers {
         let rs = &retained.layers[layer_idx];
-        let si = match shell_idx_for[layer_idx] {
-            Some(si) => si,
-            None => continue,
-        };
-        let sl = &shell.layers[si];
+        let sl = &shell.layers[layer_idx];
 
         check_qkv(key, st, layer_idx, sl, &x_attn);
         check_wo(key, st, layer_idx, &rs.a, &sl.attn_out);
@@ -901,6 +878,17 @@ fn bridge_layers(
             .unwrap_or(1.0);
         x_attn = bridge_ffn_to_next(key, layer_idx, rs, &sl.ffn_out, &mut residual, next_scale);
     }
+}
+
+fn init_residual_chain(ir: &[f32], key: &VerifierKey, first_scale: f32) -> (Vec<f64>, Vec<i8>) {
+    let residual: Vec<f64> = ir.iter().map(|&v| v as f64).collect();
+    let normed = verilm_core::rmsnorm::rmsnorm_f64_input(
+        &residual,
+        &key.rmsnorm_attn_weights[0],
+        key.rmsnorm_eps,
+    );
+    let x_attn = verilm_core::rmsnorm::quantize_f64_to_i8(&normed, first_scale as f64);
+    (residual, x_attn)
 }
 
 fn check_qkv(
