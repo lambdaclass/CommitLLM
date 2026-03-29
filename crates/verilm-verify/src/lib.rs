@@ -5,6 +5,8 @@
 //! i32 accumulators with precomputed Freivalds keys and verifies bridge
 //! consistency by deriving intermediate i8 values from the accumulators.
 
+pub mod canonical;
+
 use std::time::{Duration, Instant};
 
 use verilm_core::constants::MatrixType;
@@ -252,7 +254,7 @@ impl std::fmt::Display for VerificationFailure {
 }
 
 /// Create a [`VerificationFailure`] from a code and message.
-fn vfail(code: FailureCode, msg: impl Into<String>) -> VerificationFailure {
+pub(crate) fn vfail(code: FailureCode, msg: impl Into<String>) -> VerificationFailure {
     VerificationFailure {
         category: code.category(),
         code,
@@ -262,7 +264,7 @@ fn vfail(code: FailureCode, msg: impl Into<String>) -> VerificationFailure {
 }
 
 /// Create a [`VerificationFailure`] with structured context.
-fn vfail_ctx(code: FailureCode, msg: impl Into<String>, ctx: FailureContext) -> VerificationFailure {
+pub(crate) fn vfail_ctx(code: FailureCode, msg: impl Into<String>, ctx: FailureContext) -> VerificationFailure {
     VerificationFailure {
         category: code.category(),
         code,
