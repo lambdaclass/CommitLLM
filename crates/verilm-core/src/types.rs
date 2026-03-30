@@ -732,9 +732,12 @@ pub struct LayerTrace {
 /// via softmax(QK^T/√d)V and cannot be reconstructed from single-token
 /// local state + public weights alone.
 ///
-/// Bridge replay scales (`scale_x_attn`, `scale_x_ffn`, `scale_h`) have been
-/// moved to [`ShellLayerOpening`] — Freivalds implicitly verifies them at
-/// audit time (wrong scales -> wrong quantization -> Freivalds fails).
+/// Bridge replay scales (`scale_x_ffn`, `scale_h`) remain in
+/// [`ShellLayerOpening`] — Freivalds implicitly verifies them at audit time.
+///
+/// `x_attn_i8` and `scale_x_attn` are committed here as the bridge trust
+/// boundary: the verifier check-and-gates against canonical recomputation,
+/// then continues from committed values to prevent error propagation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RetainedLayerState {
     // --- Irreducible: depends on full KV prefix, not replayable ---
@@ -745,6 +748,17 @@ pub struct RetainedLayerState {
     /// Per-tensor activation scale for `a` (W_o projection input).
     /// Paired with the non-derivable `a` vector.
     pub scale_a: f32,
+
+    // --- Bridge trust boundary: committed QKV input ---
+
+    /// Committed quantized attention input: `quantize(rmsnorm(residual), scale_x_attn)`.
+    /// When present, the verifier check-and-gates against its canonical derivation
+    /// and uses this committed value for downstream QKV Freivalds checks.
+    #[serde(default)]
+    pub x_attn_i8: Option<Vec<i8>>,
+    /// Committed activation scale paired with `x_attn_i8`.
+    #[serde(default)]
+    pub scale_x_attn: Option<f32>,
 }
 
 /// Minimal per-token state retained for online commitment.

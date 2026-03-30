@@ -136,14 +136,25 @@ pub fn hash_leaf(data: &[u8]) -> [u8; 32] {
 /// verified implicitly by Freivalds at audit time.
 /// Used for V4 (retained-state) commitments.
 ///
-/// Domain separator `"vi-retained-v2"` ensures hash uniqueness.
+/// Domain separator `"vi-retained-v3"` ensures hash uniqueness.
+///
+/// v3 adds committed bridge trust boundary fields (`x_attn_i8`, `scale_x_attn`)
+/// to the hash when present. A presence marker byte distinguishes committed
+/// vs uncommitted layers so that `None` fields produce a distinct hash.
 pub fn hash_retained_state_direct(state: &crate::types::RetainedTokenState) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"vi-retained-v2");
+    hasher.update(b"vi-retained-v3");
 
     for ls in &state.layers {
         hash_i8_into(&mut hasher, &ls.a);
         hasher.update(ls.scale_a.to_le_bytes());
+        if let (Some(ref xa), Some(sx)) = (&ls.x_attn_i8, ls.scale_x_attn) {
+            hasher.update(b"\x01");
+            hash_i8_into(&mut hasher, xa);
+            hasher.update(sx.to_le_bytes());
+        } else {
+            hasher.update(b"\x00");
+        }
     }
 
     hasher.finalize().into()
@@ -587,6 +598,8 @@ mod tests {
             layers: vec![RetainedLayerState {
                 a: vec![1, 2, 3, 4],
                 scale_a: 0.5,
+                x_attn_i8: None,
+                scale_x_attn: None,
             }],
         };
         let h1 = hash_retained_state_direct(&state);
@@ -598,6 +611,8 @@ mod tests {
             layers: vec![RetainedLayerState {
                 a: vec![1, 2, 3, 5], // changed
                 scale_a: 0.5,
+                x_attn_i8: None,
+                scale_x_attn: None,
             }],
         };
         assert_ne!(h1, hash_retained_state_direct(&state2));
@@ -611,6 +626,8 @@ mod tests {
             layers: vec![RetainedLayerState {
                 a: vec![10, 20],
                 scale_a: 1.0,
+                x_attn_i8: None,
+                scale_x_attn: None,
             }],
         };
         let leaf_hash = hash_retained_state_direct(&state);
@@ -633,6 +650,8 @@ mod tests {
             layers: vec![RetainedLayerState {
                 a: vec![11, 20],
                 scale_a: 1.0,
+                x_attn_i8: None,
+                scale_x_attn: None,
             }],
         };
         let leaf_hash2 = hash_retained_state_direct(&state2);

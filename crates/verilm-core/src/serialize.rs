@@ -141,6 +141,8 @@ mod tests {
             layers: vec![RetainedLayerState {
                 a: vec![1i8, 2, 3],
                 scale_a: 0.5,
+                x_attn_i8: None,
+                scale_x_attn: None,
             }],
         };
         let shell = ShellTokenOpening {

@@ -151,7 +151,11 @@ fn full_bridge_forward(
             dequant_add_residual(&ffn_out, ws(MatrixType::Wd), scale_h, &mut residual);
         }
 
-        layers.push(RetainedLayerState { a, scale_a });
+        layers.push(RetainedLayerState {
+            a, scale_a,
+            x_attn_i8: Some(x_attn),
+            scale_x_attn: Some(scale_x_attn),
+        });
         captured_scales.push(CapturedLayerScales { scale_x_attn, scale_x_ffn, scale_h });
     }
 
@@ -474,8 +478,12 @@ fn canonical_tampered_revealed_scale_x_attn_rejected() {
     let report = verify_binary(&key, &binary, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail,
         "tampered scale_x_attn must cause rejection via bridge equations");
-    assert!(report.failures.iter().any(|f| f.message.contains("Freivalds")),
-        "rejection should come from Freivalds mismatch, got: {:?}", report.failures);
+    // With check-and-gate, BridgeScaleMismatch catches the tampered shell scale.
+    // Freivalds may still pass since the gated x_attn uses the committed value.
+    assert!(report.failures.iter().any(|f|
+        f.message.contains("Freivalds")
+        || matches!(f.code, FailureCode::BridgeScaleMismatch | FailureCode::BridgeXAttnMismatch)),
+        "rejection should come from Freivalds or bridge mismatch, got: {:?}", report.failures);
 }
 
 #[test]
@@ -644,17 +652,16 @@ fn assert_parity(
         legacy.verdict, canonical.verdict, legacy.failures, canonical.failures
     );
 
-    let legacy_codes: std::collections::BTreeSet<_> =
-        legacy.failures.iter().map(|f| format!("{:?}", f.code)).collect();
-    let canonical_codes: std::collections::BTreeSet<_> =
-        canonical.failures.iter().map(|f| format!("{:?}", f.code)).collect();
-
-    assert_eq!(
-        legacy_codes, canonical_codes,
-        "failure code mismatch:\n  legacy only: {:?}\n  canonical only: {:?}",
-        legacy_codes.difference(&canonical_codes).collect::<Vec<_>>(),
-        canonical_codes.difference(&legacy_codes).collect::<Vec<_>>(),
-    );
+    // Check-and-gate changes which codes fire (e.g. BridgeXAttnMismatch replaces
+    // FreivaldsFailed when committed x_attn is used). Require same verdict + both
+    // non-empty when failing, but allow different codes.
+    if legacy.verdict == Verdict::Fail {
+        assert!(
+            !canonical.failures.is_empty(),
+            "legacy failed but canonical has no failures\n  legacy: {:?}\n  canonical: {:?}",
+            legacy.failures, canonical.failures,
+        );
+    }
 }
 
 #[test]
@@ -1097,7 +1104,7 @@ fn phase7_deep_prefix_count_mismatch() {
     // Inject mismatched deep prefix arrays.
     // prefix_leaf_hashes has 0 entries; prefix_retained has 1 → mismatch.
     response.prefix_retained = Some(vec![RetainedTokenState {
-        layers: vec![RetainedLayerState { a: vec![0i8; key.config.hidden_dim], scale_a: 1.0 }],
+        layers: vec![RetainedLayerState { a: vec![0i8; key.config.hidden_dim], scale_a: 1.0, x_attn_i8: None, scale_x_attn: None }],
     }]);
     response.prefix_shell_openings = Some(vec![verilm_core::types::ShellTokenOpening {
         layers: vec![],
@@ -1312,7 +1319,7 @@ fn multi_token_forward_with_attention(
                 dequant_add_residual(&ffn_out, ws(MatrixType::Wd), scale_h, &mut residual);
             }
 
-            layers.push(RetainedLayerState { a, scale_a });
+            layers.push(RetainedLayerState { a, scale_a, x_attn_i8: None, scale_x_attn: None });
             captured.push(CapturedLayerScales { scale_x_attn, scale_x_ffn, scale_h });
         }
 
@@ -1430,7 +1437,7 @@ fn multi_token_forward_with_rope(
                 dequant_add_residual(&ffn_out, ws(MatrixType::Wd), scale_h, &mut residual);
             }
 
-            layers.push(RetainedLayerState { a, scale_a });
+            layers.push(RetainedLayerState { a, scale_a, x_attn_i8: None, scale_x_attn: None });
             captured.push(CapturedLayerScales { scale_x_attn, scale_x_ffn, scale_h });
         }
 
@@ -2222,5 +2229,103 @@ fn corridor_aggregation_with_known_diffs() {
         "frac_le_2: got {} expected {}",
         m_l0_p1.frac_le_2, expected_frac_eq,
     );
+}
+
+// =========================================================================
+// Check-and-gate bridge trust boundary tests
+// =========================================================================
+
+/// Verify that committed x_attn matching derived exactly passes verification.
+#[test]
+fn bridge_check_and_gate_exact_match_passes() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, response) = build_canonical_audit_with_response(Some(&manifest));
+    // full_bridge_forward now populates x_attn_i8 + scale_x_attn — should pass.
+    let binary = to_binary(&response);
+    let report = verify_binary(&key, &binary, None, None).unwrap();
+    assert_eq!(report.verdict, Verdict::Pass,
+        "exact-match committed x_attn should pass: {:?}", report.failures);
+    assert!(
+        !report.failures.iter().any(|f| matches!(f.code,
+            FailureCode::BridgeXAttnMismatch | FailureCode::BridgeScaleMismatch)),
+        "no bridge mismatch expected: {:?}", report.failures
+    );
+}
+
+/// Verify that a tampered committed x_attn produces BridgeXAttnMismatch.
+#[test]
+fn bridge_check_and_gate_tampered_x_attn_rejected() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    // Tamper committed x_attn by a large amount.
+    if let Some(ref mut xa) = response.retained.layers[0].x_attn_i8 {
+        for v in xa.iter_mut() {
+            *v = v.wrapping_add(10);
+        }
+    }
+    let binary = to_binary(&response);
+    let report = verify_binary(&key, &binary, None, None).unwrap();
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::BridgeXAttnMismatch),
+        "tampered x_attn should produce BridgeXAttnMismatch: {:?}", report.failures
+    );
+}
+
+/// Verify that a tampered committed scale_x_attn produces BridgeScaleMismatch.
+#[test]
+fn bridge_check_and_gate_tampered_scale_rejected() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
+    response.retained.layers[0].scale_x_attn = Some(999.0); // wrong scale
+    let binary = to_binary(&response);
+    let report = verify_binary(&key, &binary, None, None).unwrap();
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report.failures.iter().any(|f| f.code == FailureCode::BridgeScaleMismatch),
+        "tampered scale should produce BridgeScaleMismatch: {:?}", report.failures
+    );
+}
+
+/// Verify that hash domain v3 includes x_attn in the hash.
+#[test]
+fn bridge_hash_v3_includes_x_attn() {
+    use verilm_core::types::{RetainedLayerState, RetainedTokenState};
+
+    let a = vec![1i8, 2, 3, 4];
+    let with_xa = RetainedTokenState {
+        layers: vec![RetainedLayerState {
+            a: a.clone(), scale_a: 1.0,
+            x_attn_i8: Some(vec![10i8, 20, 30, 40]),
+            scale_x_attn: Some(0.5),
+        }],
+    };
+    let without_xa = RetainedTokenState {
+        layers: vec![RetainedLayerState {
+            a: a.clone(), scale_a: 1.0,
+            x_attn_i8: None,
+            scale_x_attn: None,
+        }],
+    };
+    let h1 = verilm_core::merkle::hash_retained_state_direct(&with_xa);
+    let h2 = verilm_core::merkle::hash_retained_state_direct(&without_xa);
+    assert_ne!(h1, h2, "committed vs uncommitted x_attn must produce different hashes");
+}
+
+/// Verify that different committed x_attn values produce different hashes.
+#[test]
+fn bridge_hash_v3_different_x_attn_different_hash() {
+    use verilm_core::types::{RetainedLayerState, RetainedTokenState};
+
+    let make = |xa: Vec<i8>| RetainedTokenState {
+        layers: vec![RetainedLayerState {
+            a: vec![1i8; 4], scale_a: 1.0,
+            x_attn_i8: Some(xa),
+            scale_x_attn: Some(0.5),
+        }],
+    };
+    let h1 = verilm_core::merkle::hash_retained_state_direct(&make(vec![10, 20, 30, 40]));
+    let h2 = verilm_core::merkle::hash_retained_state_direct(&make(vec![11, 20, 30, 40]));
+    assert_ne!(h1, h2, "different x_attn values must produce different hashes");
 }
 

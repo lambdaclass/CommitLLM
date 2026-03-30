@@ -152,7 +152,7 @@ fn full_bridge_forward(
             dequant_add_residual(&ffn_out, ws(MatrixType::Wd), scale_h, &mut residual);
         }
 
-        layers.push(RetainedLayerState { a, scale_a });
+        layers.push(RetainedLayerState { a, scale_a, x_attn_i8: None, scale_x_attn: None });
         captured_scales.push(CapturedLayerScales { scale_x_attn, scale_x_ffn, scale_h });
     }
 

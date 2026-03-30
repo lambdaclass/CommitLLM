@@ -136,6 +136,8 @@ pub fn build_retained_from_captures(
                 layers.push(RetainedLayerState {
                     a,
                     scale_a: entry.scale_a,
+                    x_attn_i8: None,
+                    scale_x_attn: None,
                 });
                 token_scales.push(CapturedLayerScales {
                     scale_x_attn: entry.scale_x_attn,
@@ -382,7 +384,7 @@ impl PackedBatchState {
         let fwd_byte_offset = self.token_index.cumulative[fwd] * self.n_layers * hd;
 
         let mut hasher = Sha256::new();
-        hasher.update(b"vi-retained-v2");
+        hasher.update(b"vi-retained-v3");
 
         for l in 0..self.n_layers {
             // a slice for (fwd, layer, batch_pos)
@@ -390,9 +392,13 @@ impl PackedBatchState {
             let a_start = layer_base + pos * hd;
             hasher.update(&self.packed_a[a_start..a_start + hd]);
 
-            // Only hash irreducible fields: a (above) + scale_a.
+            // Irreducible: scale_a.
             let s_base = (fwd * self.n_layers + l) * 4;
             hasher.update(self.packed_scales[s_base + 1].to_le_bytes()); // scale_a
+
+            // Bridge trust boundary: x_attn_i8 + scale_x_attn (absence marker for now).
+            // TODO: when packed_x_attn is populated, hash presence marker + data here.
+            hasher.update(b"\x00");
         }
 
         let base: [u8; 32] = hasher.finalize().into();
@@ -434,6 +440,8 @@ impl PackedBatchState {
             layers.push(RetainedLayerState {
                 a,
                 scale_a: self.packed_scales[s_base + 1],
+                x_attn_i8: None,
+                scale_x_attn: None,
             });
         }
         RetainedTokenState { layers }
@@ -1602,6 +1610,8 @@ mod tests {
             layers.push(RetainedLayerState {
                 a: vec![(l * 7 + 3) as i8; hidden],
                 scale_a: 0.22 * (l + 1) as f32,
+                x_attn_i8: None,
+                scale_x_attn: None,
             });
         }
         let state = RetainedTokenState { layers };

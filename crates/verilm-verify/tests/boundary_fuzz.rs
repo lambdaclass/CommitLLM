@@ -56,6 +56,8 @@ fn retained_from_traces(traces: &[verilm_core::types::LayerTrace]) -> RetainedTo
             .map(|lt| RetainedLayerState {
                 a: lt.a.clone(),
                 scale_a: lt.scale_a.unwrap_or(1.0),
+                x_attn_i8: None,
+                scale_x_attn: None,
             })
             .collect(),
     }

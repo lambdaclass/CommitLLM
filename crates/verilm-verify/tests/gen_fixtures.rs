@@ -38,6 +38,8 @@ fn retained_from_traces(traces: &[verilm_core::types::LayerTrace]) -> RetainedTo
             .map(|lt| RetainedLayerState {
                 a: lt.a.clone(),
                 scale_a: lt.scale_a.unwrap_or(1.0),
+                x_attn_i8: None,
+                scale_x_attn: None,
             })
             .collect(),
     }
@@ -165,7 +167,7 @@ fn full_bridge_forward(
             dequant_add_residual(&ffn_out, ws(MatrixType::Wd), scale_h, &mut residual);
         }
 
-        layers.push(RetainedLayerState { a, scale_a });
+        layers.push(RetainedLayerState { a, scale_a, x_attn_i8: None, scale_x_attn: None });
         captured_scales.push(CapturedLayerScales { scale_x_attn, scale_x_ffn, scale_h });
     }
 

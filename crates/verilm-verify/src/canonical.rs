@@ -34,8 +34,8 @@ use std::time::Instant;
 
 use verilm_core::constants::MatrixType;
 use verilm_core::types::{
-    CommitmentVersion, InputSpec, OutputSpec, RetainedTokenState, ShellTokenOpening,
-    V4AuditResponse, VerifierKey,
+    CommitmentVersion, InputSpec, OutputSpec, RetainedLayerState, RetainedTokenState,
+    ShellTokenOpening, V4AuditResponse, VerifierKey,
 };
 use verilm_core::{freivalds, merkle, serialize};
 
@@ -862,24 +862,27 @@ fn bridge_layers(
         return;
     }
 
-    let (mut residual, mut x_attn) =
+    let (mut residual, derived_x_attn) =
         init_residual_chain(ir, key, shell.layers[0].scale_x_attn);
+
+    // Check-and-gate layer 0: compare committed x_attn against canonical derivation.
+    let mut x_attn = check_and_gate_x_attn(
+        st, key, 0, &derived_x_attn, &retained.layers[0], shell.layers[0].scale_x_attn,
+    );
 
     let n_layers = shell.layers.len().min(retained.layers.len());
     for layer_idx in 0..n_layers {
         let rs = &retained.layers[layer_idx];
         let sl = &shell.layers[layer_idx];
 
+        // QKV Freivalds uses the gated x_attn (committed when available).
         check_qkv(key, st, layer_idx, sl, &x_attn);
         // Token-0 attention replay: with seq_len=1, softmax is trivial,
         // so we can verify a = GQA_expand(requant(Wv·x)) at zero extra cost.
         if token_index == 0 {
             check_attention_token0(key, st, layer_idx, sl, rs);
         }
-        // Attention replay is compare-and-gate only. Downstream exact checks
-        // continue from the committed retained state `rs.a`, not from the
-        // verifier's replayed approximation, so mixed-precision error does
-        // not compound across layers.
+        // Downstream exact checks continue from committed `rs.a`.
         check_wo(key, st, layer_idx, &rs.a, &sl.attn_out);
         let x_ffn = bridge_attn_to_ffn(key, layer_idx, rs, sl, &sl.attn_out, &mut residual);
         check_ffn(key, st, layer_idx, sl, &x_ffn);
@@ -888,7 +891,16 @@ fn bridge_layers(
             .get(layer_idx + 1)
             .map(|s| s.scale_x_attn)
             .unwrap_or(1.0);
-        x_attn = bridge_ffn_to_next(key, layer_idx, sl, &sl.ffn_out, &mut residual, next_scale);
+        let derived_next = bridge_ffn_to_next(key, layer_idx, sl, &sl.ffn_out, &mut residual, next_scale);
+        // Check-and-gate at layer boundary: compare committed vs derived.
+        if layer_idx + 1 < retained.layers.len() {
+            x_attn = check_and_gate_x_attn(
+                st, key, layer_idx + 1, &derived_next,
+                &retained.layers[layer_idx + 1], next_scale,
+            );
+        } else {
+            x_attn = derived_next;
+        }
     }
 }
 
@@ -986,6 +998,96 @@ fn dequant_acc(
     } else {
         let scale_w = key.weight_scale_for(layer_idx, mt);
         verilm_core::rope::dequantize_acc(acc, Some(scale_w), Some(scale_x))
+    }
+}
+
+/// Per-step tolerance for bridge x_attn check-and-gate.
+///
+/// Because check-and-gate resets to committed values at each layer, errors
+/// cannot compound. This tolerance accommodates BF16-vs-f64 differences in
+/// dequant, residual accumulation, RMSNorm, and requantization.
+///
+/// Placeholder: max_abs_diff = 1 (one INT8 bucket). Roadmap #4 will derive
+/// the analytical bound. Toy model (f64 everywhere) should see exact match.
+fn bridge_x_attn_tolerance(key: &VerifierKey) -> u8 {
+    // Toy model: weights are empty or have no real quant scales — exact match expected.
+    if key.rmsnorm_attn_weights.is_empty() || key.weight_scales.is_empty() {
+        return 0;
+    }
+    // TODO(roadmap#4): derive analytically
+    1
+}
+
+/// Check-and-gate: compare committed x_attn against canonical derivation.
+///
+/// If committed value is within tolerance, returns it for downstream use.
+/// If outside tolerance, records failure but still returns committed value
+/// (downstream checks continue from committed to give a clean error trail).
+/// If no committed value, returns derived value (backward compat).
+fn check_and_gate_x_attn(
+    st: &mut St,
+    key: &VerifierKey,
+    layer_idx: usize,
+    derived_x_attn: &[i8],
+    committed: &RetainedLayerState,
+    shell_scale: f32,
+) -> Vec<i8> {
+    match (&committed.x_attn_i8, committed.scale_x_attn) {
+        (Some(committed_xa), Some(committed_scale)) => {
+            // Scale consistency: committed scale must match shell-provided scale.
+            if (committed_scale - shell_scale).abs() > f32::EPSILON {
+                st.fail_ctx(
+                    FailureCode::BridgeScaleMismatch,
+                    format!(
+                        "layer {}: committed scale_x_attn ({}) != shell scale ({})",
+                        layer_idx, committed_scale, shell_scale
+                    ),
+                    FailureContext {
+                        layer: Some(layer_idx),
+                        ..Default::default()
+                    },
+                );
+            }
+            // L-inf comparison within tolerance.
+            let tolerance = bridge_x_attn_tolerance(key);
+            if committed_xa.len() != derived_x_attn.len() {
+                st.fail_ctx(
+                    FailureCode::BridgeXAttnMismatch,
+                    format!(
+                        "layer {}: committed x_attn len {} != derived len {}",
+                        layer_idx, committed_xa.len(), derived_x_attn.len()
+                    ),
+                    FailureContext {
+                        layer: Some(layer_idx),
+                        ..Default::default()
+                    },
+                );
+            } else {
+                let max_diff: i16 = committed_xa.iter().zip(derived_x_attn.iter())
+                    .map(|(&a, &b)| (a as i16 - b as i16).abs())
+                    .max()
+                    .unwrap_or(0);
+                if max_diff > tolerance as i16 {
+                    st.fail_ctx(
+                        FailureCode::BridgeXAttnMismatch,
+                        format!(
+                            "layer {}: committed x_attn vs derived L-inf={} > tolerance={}",
+                            layer_idx, max_diff, tolerance
+                        ),
+                        FailureContext {
+                            layer: Some(layer_idx),
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+            // GATE: always continue from committed value.
+            committed_xa.clone()
+        }
+        _ => {
+            // No committed x_attn — fall back to derived (backward compat).
+            derived_x_attn.to_vec()
+        }
     }
 }
 

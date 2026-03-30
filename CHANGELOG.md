@@ -15,6 +15,7 @@ Historical references below to “roadmap #N” refer to the pre-2026-03-30 road
 ### Changed
 
 - The roadmap was renumbered into a single linear sequence of remaining tasks, and completed items were removed from `roadmap.md` so the roadmap is now strictly an open-items tracker while this changelog carries completed milestones.
+- With roadmap `#1` closed, the active attention-critical path now starts at roadmap `#2`: bridge trust boundary, then full-causal `kv_root`, cleanup of the old confounded gap path, and only then analytical/empirical attention-gap work.
 
 ## 2026-03-29
 

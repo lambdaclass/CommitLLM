@@ -66,6 +66,8 @@ fn retained_from_traces(traces: &[verilm_core::types::LayerTrace]) -> RetainedTo
             .map(|lt| RetainedLayerState {
                 a: lt.a.clone(),
                 scale_a: lt.scale_a.unwrap_or(1.0),
+                x_attn_i8: None,
+                scale_x_attn: None,
             })
             .collect(),
     }
@@ -362,8 +364,8 @@ fn frozen_audit_sha256_pinned() {
     // Pinned on first generation. Update ONLY on intentional format change.
     assert_eq!(
         hash,
-        "3891dd7b022330dbb0b4f7a83eff79ab1ba7d38bca9bc8ed6d9b5e66493ac09c",
-        "audit fixture checksum drifted — was the fixture silently regenerated?"
+        "a6d8c84d71b358a6873ab9eba076c3502af091bd28613207b19706568fdd5c78",
+        "audit fixture checksum drifted — was the fixture silently regenerated? (v3: bridge trust boundary)"
     );
 }
 

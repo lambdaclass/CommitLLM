@@ -53,6 +53,8 @@ fn retained_from_traces(traces: &[verilm_core::types::LayerTrace]) -> RetainedTo
             .map(|lt| RetainedLayerState {
                 a: lt.a.clone(),
                 scale_a: lt.scale_a.unwrap_or(1.0),
+                x_attn_i8: None,
+                scale_x_attn: None,
             })
             .collect(),
     }
@@ -210,13 +212,13 @@ fn golden_e2e_verify() {
     // Pin commitment roots
     assert_eq!(
         hex::encode(commitment.merkle_root),
-        "e18abb9e62d6267fc6b393da6f6c11e9c7ecc6adc46a7b7bf98ad1d0782d65c1",
-        "merkle_root drifted — was retained-state hashing or commitment changed?"
+        "de54562ec98e6ec3dc1cb484758553713dc93caffee16d167cd2064dd512a880",
+        "merkle_root drifted — was retained-state hashing or commitment changed? (v3 domain: bridge trust boundary)"
     );
     assert_eq!(
         hex::encode(commitment.io_root),
-        "e749d661577510798f38e29a30fc39f365a2797bb2448e16bafe1c6b40072f02",
-        "io_root drifted — was IO chain hashing or prompt binding changed?"
+        "62240adf4325d2c15b3d81be456351851d4796d6ba202fd7e24fc4c5729cf5f7",
+        "io_root drifted — was IO chain hashing or prompt binding changed? (v3 domain: bridge trust boundary)"
     );
 
     // Pin verification outcome

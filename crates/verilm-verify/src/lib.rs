@@ -153,6 +153,10 @@ pub enum FailureCode {
     ChallengeTokenMismatch,
     ChallengeLayerMismatch,
 
+    // -- Bridge trust boundary --
+    BridgeXAttnMismatch,
+    BridgeScaleMismatch,
+
     // -- Semantic violation --
     TokenSelectionMismatch,
     ExceedsMaxTokens,
@@ -192,6 +196,7 @@ impl FailureCode {
             | SpecHashMismatch | EmbeddingProofFailed | EmbeddingLeafMismatch
             | AttentionReplayMismatch
             | ChallengeTokenMismatch | ChallengeLayerMismatch
+            | BridgeXAttnMismatch | BridgeScaleMismatch
                 => FailureCategory::CryptographicBinding,
 
             SpecFieldMismatch => FailureCategory::SpecMismatch,
