@@ -23,6 +23,11 @@
 //! - [`compare_attention_output`] — tolerance-aware comparison between the
 //!   claimed `a` vector and the replayed output. Exact for the toy model
 //!   (tolerance=0), tolerant for mixed-precision production paths.
+//!
+//! Important protocol rule: replayed attention is a **comparison reference**,
+//! not a replacement state. If the claimed/opened `a` passes tolerance against
+//! the verifier's replay, downstream verification should continue from the
+//! claimed/opened value so approximation error does not compound across layers.
 
 use crate::constants::ModelConfig;
 

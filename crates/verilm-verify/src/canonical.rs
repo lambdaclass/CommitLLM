@@ -876,6 +876,10 @@ fn bridge_layers(
         if token_index == 0 {
             check_attention_token0(key, st, layer_idx, sl, rs);
         }
+        // Attention replay is compare-and-gate only. Downstream exact checks
+        // continue from the committed retained state `rs.a`, not from the
+        // verifier's replayed approximation, so mixed-precision error does
+        // not compound across layers.
         check_wo(key, st, layer_idx, &rs.a, &sl.attn_out);
         let x_ffn = bridge_attn_to_ffn(key, layer_idx, rs, sl, &sl.attn_out, &mut residual);
         check_ffn(key, st, layer_idx, sl, &x_ffn);
@@ -1373,6 +1377,10 @@ fn opened_token_qkv<'a>(
 }
 
 /// Check an attention replay result and emit failure if mismatched (prefix tokens).
+///
+/// This function is intentionally compare-only: callers should keep using the
+/// committed/opened `claimed` value for downstream verification rather than the
+/// replayed `expected` value.
 fn check_attention_result(
     st: &mut St,
     claimed: &[i8],
@@ -1401,6 +1409,10 @@ fn check_attention_result(
 }
 
 /// Check an attention replay result for the opened token.
+///
+/// Like [`check_attention_result`], this is a non-state-replacing tolerance
+/// check: the verifier continues from the committed/opened token state if the
+/// comparison passes.
 fn check_attention_result_opened(
     ctx: &Ctx,
     st: &mut St,

@@ -196,7 +196,11 @@ fn measure_roped(
                 let (replayed, a_f64) = verilm_core::attention::replay_attention_roped_raw(
                     &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
                 );
-                let n = 16;
+                let n = 16
+                    .min(a_f64.len())
+                    .min(replayed.len())
+                    .min(rs.a.len())
+                    .min(cfg.d_head);
                 // V min/max across all KV cache entries for head 0 (first d_head dims)
                 let d_head = cfg.d_head;
                 let mut v_min = vec![f64::INFINITY; d_head];
@@ -265,7 +269,11 @@ fn measure_roped(
                 let (replayed, a_f64) = verilm_core::attention::replay_attention_roped_raw(
                     &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
                 );
-                let n = 16;
+                let n = 16
+                    .min(a_f64.len())
+                    .min(replayed.len())
+                    .min(rs.a.len())
+                    .min(cfg.d_head);
                 let d_head = cfg.d_head;
                 let mut v_min = vec![f64::INFINITY; d_head];
                 let mut v_max = vec![f64::NEG_INFINITY; d_head];
