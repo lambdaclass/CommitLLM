@@ -137,7 +137,7 @@ fn frozen_v4_audit_byte_stable() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)], None);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)], None, None);
     let response = open_v4(
         &state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false,
     );
@@ -364,8 +364,8 @@ fn frozen_audit_sha256_pinned() {
     // Pinned on first generation. Update ONLY on intentional format change.
     assert_eq!(
         hash,
-        "a6d8c84d71b358a6873ab9eba076c3502af091bd28613207b19706568fdd5c78",
-        "audit fixture checksum drifted — was the fixture silently regenerated? (v3: bridge trust boundary)"
+        "bd8fda2f8b653d66cf7babef52db687bce6ea22fc3cb6b1a4633b23e9508e032",
+        "audit fixture checksum drifted — was the fixture silently regenerated? (v4: kv_roots + kv_entries)"
     );
 }
 

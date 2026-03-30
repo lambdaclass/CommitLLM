@@ -7,7 +7,7 @@ use verilm_core::matmul::matmul_i32;
 use verilm_core::merkle;
 use verilm_core::rmsnorm::{bridge_residual_rmsnorm, dequant_add_residual, rmsnorm_f64_input, quantize_f64_to_i8};
 use verilm_core::types::{
-    BatchCommitment, BridgeParams, CommitmentVersion, TailParams,
+    BatchCommitment, BridgeParams, CommitmentVersion, KvEntry, TailParams,
     DeploymentManifest, RetainedLayerState, RetainedTokenState,
     ShellLayerOpening, ShellTokenOpening, ShellWeights,
     V4AuditResponse,
@@ -67,6 +67,12 @@ pub struct MinimalBatchState {
     /// Measurement-only: not committed. Used for precision corridor measurement
     /// (bypasses bridge re-derivation of x_attn for QKV accumulator computation).
     pub captured_x_attn: Option<Vec<Vec<Vec<i8>>>>,
+    /// Per-layer KV Merkle trees. `kv_trees[layer]` is the tree over all
+    /// positions at that layer. Empty when KV transcript is not committed.
+    pub kv_trees: Vec<merkle::MerkleTree>,
+    /// Per-layer KV entries: `kv_entries[layer][position]`.
+    /// Stored for audit-time proof generation. Empty when not committed.
+    pub kv_entries: Vec<Vec<KvEntry>>,
 }
 
 /// Per-layer bridge replay scales captured during inference.
@@ -170,6 +176,7 @@ pub fn commit_minimal(
     final_residuals: Option<Vec<Vec<f32>>>,
     captured_scales: Vec<Vec<CapturedLayerScales>>,
     captured_x_attn: Option<Vec<Vec<Vec<i8>>>>,
+    kv_transcripts: Option<Vec<Vec<KvEntry>>>,
 ) -> (BatchCommitment, MinimalBatchState) {
     let n_tokens = all_retained.len();
     assert_eq!(
@@ -227,6 +234,26 @@ pub fn commit_minimal(
 
     let t_trees = if timers { Some(std::time::Instant::now()) } else { None };
 
+    // Build per-layer KV Merkle trees when KV transcripts are provided.
+    let (kv_roots, kv_trees, kv_entries_stored) = match kv_transcripts {
+        Some(transcripts) => {
+            let mut roots = Vec::with_capacity(transcripts.len());
+            let mut trees = Vec::with_capacity(transcripts.len());
+            for (layer_idx, layer_entries) in transcripts.iter().enumerate() {
+                let leaves: Vec<[u8; 32]> = layer_entries.iter().enumerate()
+                    .map(|(pos, entry)| {
+                        merkle::hash_kv_entry(layer_idx, pos, &entry.k_roped, &entry.v_deq)
+                    })
+                    .collect();
+                let tree = merkle::build_tree(&leaves);
+                roots.push(tree.root);
+                trees.push(tree);
+            }
+            (roots, trees, transcripts)
+        }
+        None => (vec![], vec![], vec![]),
+    };
+
     let commitment = BatchCommitment {
         merkle_root: trace_tree.root,
         io_root: io_tree.root,
@@ -241,6 +268,7 @@ pub fn commit_minimal(
         seed_commitment: Some(merkle::hash_seed(&params.sampling_seed)),
 
         n_prompt_tokens: params.n_prompt_tokens,
+        kv_roots,
     };
 
     let state = MinimalBatchState {
@@ -263,6 +291,8 @@ pub fn commit_minimal(
         n_prompt_tokens: params.n_prompt_tokens,
         captured_scales,
         captured_x_attn,
+        kv_trees,
+        kv_entries: kv_entries_stored,
     };
 
     if let (Some(t0), Some(t_leaf), Some(t_io_chain), Some(t_trees)) =
@@ -615,6 +645,7 @@ pub fn commit_minimal_packed(
         seed_commitment: Some(merkle::hash_seed(&params.sampling_seed)),
 
         n_prompt_tokens: params.n_prompt_tokens,
+        kv_roots: vec![],
     };
 
     // Reconstitute final state with real trees.
@@ -696,6 +727,7 @@ pub fn open_v4_packed(
         seed_commitment: Some(state.seed_commitment),
 
         n_prompt_tokens: state.n_prompt_tokens,
+        kv_roots: vec![],
     };
 
     // Prefix leaf hashes: hash from packed buffers (no materialization).
@@ -782,6 +814,7 @@ pub fn open_v4_packed(
         (None, None)
     };
 
+    // Packed path does not yet capture KV transcripts.
     V4AuditResponse {
         token_index,
         retained: retained_token,
@@ -803,6 +836,8 @@ pub fn open_v4_packed(
         prefix_embedding_proofs: prefix_embeddings.map(|(_, proofs)| proofs),
         prefix_retained: dp_retained,
         prefix_shell_openings: dp_shells,
+        kv_entries: None,
+        kv_proofs: None,
     }
 }
 
@@ -1064,6 +1099,32 @@ pub fn open_v4(
         }
     }
 
+    // Open KV entries + proofs for challenged layers when KV trees exist.
+    if !state.kv_trees.is_empty() {
+        let i = token_index as usize;
+        let all_layers: Vec<usize> = (0..cfg.n_layers).collect();
+        let challenged_layers = layer_filter.unwrap_or(&all_layers);
+        let n_positions = i + 1;
+        let mut all_entries = Vec::with_capacity(challenged_layers.len());
+        let mut all_proofs = Vec::with_capacity(challenged_layers.len());
+        for &layer_idx in challenged_layers {
+            if layer_idx < state.kv_trees.len() && layer_idx < state.kv_entries.len() {
+                let tree = &state.kv_trees[layer_idx];
+                let layer_kv = &state.kv_entries[layer_idx];
+                let mut entries = Vec::with_capacity(n_positions);
+                let mut proofs = Vec::with_capacity(n_positions);
+                for pos in 0..n_positions.min(layer_kv.len()) {
+                    entries.push(layer_kv[pos].clone());
+                    proofs.push(merkle::prove(tree, pos));
+                }
+                all_entries.push(entries);
+                all_proofs.push(proofs);
+            }
+        }
+        response.kv_entries = Some(all_entries);
+        response.kv_proofs = Some(all_proofs);
+    }
+
     response
 }
 
@@ -1073,6 +1134,8 @@ pub fn open_v4(
 pub fn open_v4_structural(state: &MinimalBatchState, token_index: u32) -> V4AuditResponse {
     let i = token_index as usize;
     assert!(i < state.all_retained.len(), "token_index out of range");
+
+    let kv_roots: Vec<[u8; 32]> = state.kv_trees.iter().map(|t| t.root).collect();
 
     let commitment = BatchCommitment {
         merkle_root: state.retained_tree.root,
@@ -1088,6 +1151,7 @@ pub fn open_v4_structural(state: &MinimalBatchState, token_index: u32) -> V4Audi
         seed_commitment: Some(state.seed_commitment),
 
         n_prompt_tokens: state.n_prompt_tokens,
+        kv_roots,
     };
 
     let mut prefix_leaf_hashes = Vec::with_capacity(i);
@@ -1127,6 +1191,8 @@ pub fn open_v4_structural(state: &MinimalBatchState, token_index: u32) -> V4Audi
         prefix_embedding_proofs: None,
         prefix_retained: None,
         prefix_shell_openings: None,
+        kv_entries: None,
+        kv_proofs: None,
     }
 }
 
@@ -1209,7 +1275,7 @@ mod tests {
             n_prompt_tokens: Some(1),
         };
 
-        let (commitment, state) = commit_minimal(retained, &params, None, scales, None);
+        let (commitment, state) = commit_minimal(retained, &params, None, scales, None, None);
 
         assert_eq!(commitment.version, CommitmentVersion::V4);
         assert_eq!(commitment.n_tokens, 3);
@@ -1238,7 +1304,7 @@ mod tests {
             n_prompt_tokens: Some(1),
         };
 
-        let (_, state) = commit_minimal(retained.clone(), &params, None, scales, None);
+        let (_, state) = commit_minimal(retained.clone(), &params, None, scales, None, None);
 
         // Verify IO chain uses leaf hashes, not ad hoc features.
         let leaf0 = merkle::hash_retained_state_direct(&retained[0]);
@@ -1269,8 +1335,8 @@ mod tests {
         let (retained1, scales1, _) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
         let (retained2, scales2, _) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
 
-        let (c1, _) = commit_minimal(retained1, &params, None, scales1, None);
-        let (c2, _) = commit_minimal(retained2, &params, None, scales2, None);
+        let (c1, _) = commit_minimal(retained1, &params, None, scales1, None, None);
+        let (c2, _) = commit_minimal(retained2, &params, None, scales2, None, None);
 
         assert_eq!(c1.merkle_root, c2.merkle_root);
         assert_eq!(c1.io_root, c2.io_root);
@@ -1291,7 +1357,7 @@ mod tests {
             n_prompt_tokens: Some(1),
         };
 
-        let (commitment, state) = commit_minimal(retained, &params, None, scales, None);
+        let (commitment, state) = commit_minimal(retained, &params, None, scales, None, None);
 
         // Open token 2 — should include prefix tokens 0, 1.
         let response = open_v4_structural(&state, 2);
@@ -1343,7 +1409,7 @@ mod tests {
             n_prompt_tokens: Some(1),
         };
 
-        let (_, state) = commit_minimal(retained, &params, None, captured_scales, None);
+        let (_, state) = commit_minimal(retained, &params, None, captured_scales, None, None);
         let response = open_v4_structural(&state, 0);
 
         assert_eq!(response.prefix_leaf_hashes.len(), 0);
@@ -1400,7 +1466,7 @@ mod tests {
             manifest: None,
             n_prompt_tokens: Some(1),
         };
-        let (commit_old, state_old) = commit_minimal(retained, &params, None, captured_scales, None);
+        let (commit_old, state_old) = commit_minimal(retained, &params, None, captured_scales, None, None);
 
         // Packed path.
         let (packed_a, packed_scales) = make_packed_data(n_layers, n_tokens, hidden, &fwd_batch_sizes);
@@ -1454,7 +1520,7 @@ mod tests {
             manifest: None,
             n_prompt_tokens: Some(1),
         };
-        let (commit_old, state_old) = commit_minimal(retained, &params, None, captured_scales, None);
+        let (commit_old, state_old) = commit_minimal(retained, &params, None, captured_scales, None, None);
 
         // Packed path.
         let (packed_a, packed_scales) = make_packed_data(n_layers, n_tokens, hidden, &fwd_batch_sizes);
@@ -1516,7 +1582,7 @@ mod tests {
             n_prompt_tokens: Some(1),
         };
 
-        let (_, state_old) = commit_minimal(retained.clone(), &params, None, scales, None);
+        let (_, state_old) = commit_minimal(retained.clone(), &params, None, scales, None, None);
         let (packed_a, packed_scales) = make_packed_data(n_layers, n_tokens, hidden, &fwd_batch_sizes);
         let (_, packed_state) = commit_minimal_packed(
             packed_a, packed_scales, n_layers, hidden, fwd_batch_sizes, &params, None, 0,
@@ -1559,7 +1625,7 @@ mod tests {
             manifest: None,
             n_prompt_tokens: Some(1),
         };
-        let (commit_old, _) = commit_minimal(retained, &params, final_residuals, scales, None);
+        let (commit_old, _) = commit_minimal(retained, &params, final_residuals, scales, None, None);
 
         // Packed path: pack final residuals as contiguous f32 bytes.
         let (packed_a, packed_scales) = make_packed_data(n_layers, n_tokens, hidden, &fwd_batch_sizes);

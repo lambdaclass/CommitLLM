@@ -731,6 +731,7 @@ fn commit_minimal_from_captures(
         final_res,
         captured_scales,
         captured_x_attn,
+        None,
     );
 
     Ok(MinimalBatchStateHandle {

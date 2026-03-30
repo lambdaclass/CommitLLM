@@ -219,6 +219,27 @@ fn hash_f32_into(hasher: &mut Sha256, data: &[f32]) {
     hasher.update(bytes);
 }
 
+fn hash_f64_into(hasher: &mut Sha256, data: &[f64]) {
+    let bytes: &[u8] =
+        unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 8) };
+    hasher.update(bytes);
+}
+
+/// Hash a KV entry (one position at one layer) to produce a Merkle leaf.
+///
+/// Domain separator `"vi-kv-v1"` prevents collisions with other hash domains.
+/// Commits post-RoPE K and dequantized V in f64, the exact values consumed
+/// by the verifier's attention replay.
+pub fn hash_kv_entry(layer: usize, position: usize, k_roped: &[f64], v_deq: &[f64]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"vi-kv-v1");
+    hasher.update((layer as u32).to_le_bytes());
+    hasher.update((position as u32).to_le_bytes());
+    hash_f64_into(&mut hasher, k_roped);
+    hash_f64_into(&mut hasher, v_deq);
+    hasher.finalize().into()
+}
+
 
 #[derive(Debug, Clone)]
 pub struct MerkleTree {

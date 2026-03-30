@@ -204,7 +204,7 @@ fn golden_e2e_verify() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)], None);
+    let (commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)], None, None);
     let response = open_v4(
         &state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false,
     );
@@ -257,7 +257,7 @@ fn binary_v4_audit_roundtrip() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)], None);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)], None, None);
     let response = open_v4(
         &state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false,
     );
@@ -325,7 +325,7 @@ fn binary_commitment_version_preserved() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)], None);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)], None, None);
     let response = open_v4(
         &state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false,
     );

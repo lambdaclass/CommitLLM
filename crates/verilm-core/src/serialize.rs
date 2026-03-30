@@ -193,7 +193,7 @@ mod tests {
                 prompt_hash: None,
                 seed_commitment: None,
                 n_prompt_tokens: Some(1),
-
+                kv_roots: vec![],
             },
             revealed_seed: [0xff; 32],
             shell_opening: Some(shell),
@@ -205,6 +205,8 @@ mod tests {
             prefix_embedding_proofs: None,
             prefix_retained: None,
             prefix_shell_openings: None,
+            kv_entries: None,
+            kv_proofs: None,
         };
 
         let binary = serialize_v4_audit(&resp);

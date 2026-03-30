@@ -771,6 +771,26 @@ pub struct RetainedTokenState {
     pub layers: Vec<RetainedLayerState>,
 }
 
+// ===========================================================================
+// KV transcript types (roadmap #3: committed causal KV)
+// ===========================================================================
+
+/// Post-RoPE K and dequantized V for one (layer, position) pair.
+///
+/// These are the exact values consumed by the attention dot product:
+///   K_roped = RoPE(dequant(Wk @ x_attn))
+///   V_deq   = dequant(Wv @ x_attn)
+///
+/// Committed per-layer under `kv_roots[layer]` so the verifier can replay
+/// attention from committed values without re-deriving from weights.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KvEntry {
+    /// Post-RoPE K vector, length kv_dim. f64 for deterministic hashing.
+    pub k_roped: Vec<f64>,
+    /// Dequantized V vector (no RoPE), length kv_dim.
+    pub v_deq: Vec<f64>,
+}
+
 /// Per-layer shell intermediates opened by the prover at audit time.
 ///
 /// The prover reconstructs these from the committed retained `a` + weights.
@@ -965,6 +985,20 @@ pub struct V4AuditResponse {
     /// on prefix tokens. Each entry includes matmul accumulators per layer.
     #[serde(default)]
     pub prefix_shell_openings: Option<Vec<ShellTokenOpening>>,
+
+    // ──── Committed KV transcript (roadmap #3) ────
+
+    /// Per-layer KV entries for the causal prefix of the challenged token.
+    /// Outer index: challenged layer index. Inner: positions 0..=token_index.
+    /// Only present for challenged layers when `kv_roots` is populated.
+    #[serde(default)]
+    pub kv_entries: Option<Vec<Vec<KvEntry>>>,
+
+    /// Per-layer Merkle proofs for the KV entries, matching `kv_entries`.
+    /// Each inner vec contains proofs for positions 0..=token_index,
+    /// verifiable against `commitment.kv_roots[layer]`.
+    #[serde(default)]
+    pub kv_proofs: Option<Vec<Vec<MerkleProof>>>,
 }
 
 // ===========================================================================
@@ -1151,6 +1185,12 @@ pub struct BatchCommitment {
     /// tokens are determined by the tokenizer vs. by sampling.
     #[serde(default)]
     pub n_prompt_tokens: Option<u32>,
+
+    /// Per-layer Merkle root over the KV transcript.
+    /// `kv_roots[l]` commits post-RoPE K and dequantized V for all positions
+    /// at layer `l`. Empty for legacy/toy commitments without KV binding.
+    #[serde(default)]
+    pub kv_roots: Vec<[u8; 32]>,
 }
 
 

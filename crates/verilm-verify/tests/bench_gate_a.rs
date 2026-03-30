@@ -219,7 +219,7 @@ fn bench_gate_a() {
             manifest: None,
             n_prompt_tokens: Some(1),
         };
-        let (_c, s) = commit_minimal(retained_all.clone(), &params, None, scales_all.clone(), None);
+        let (_c, s) = commit_minimal(retained_all.clone(), &params, None, scales_all.clone(), None, None);
         commit_times.push(start.elapsed());
         state = Some(s);
     }
@@ -267,7 +267,7 @@ fn bench_gate_a() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_fb_commitment, fb_state) = commit_minimal(vec![fb_retained], &fb_params, None, vec![fb_captured_scales], None);
+    let (_fb_commitment, fb_state) = commit_minimal(vec![fb_retained], &fb_params, None, vec![fb_captured_scales], None, None);
 
     let fb_bridge = BridgeParams {
         rmsnorm_attn_weights: &fb_rn_attn,

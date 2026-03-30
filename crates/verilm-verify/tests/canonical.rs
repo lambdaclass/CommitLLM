@@ -264,7 +264,7 @@ fn build_canonical_audit(
         manifest,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales], None);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales], None, None);
     let response = open_v4(
         &state, 0, &ToyWeights(&model), &cfg, &ws,
         Some(&bridge), None, None, None, false,
@@ -309,7 +309,7 @@ fn build_canonical_audit_with_response(
         manifest,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales], None);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales], None, None);
     let response = open_v4(
         &state, 0, &ToyWeights(&model), &cfg, &ws,
         Some(&bridge), None, None, None, false,
@@ -1508,7 +1508,7 @@ fn build_deep_prefix_audit() -> (
         manifest: Some(&manifest),
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None);
 
     // Open token 2 with deep_prefix=true
     let proof = verilm_core::merkle::prove(&tree, 30);
@@ -1647,7 +1647,7 @@ fn build_routine_audit_with_fake_a() -> (
         manifest: Some(&manifest),
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None);
 
     // Open token 1 as routine audit (NOT deep prefix)
     let proof = verilm_core::merkle::prove(&tree, 43);
@@ -1819,7 +1819,7 @@ fn build_deep_prefix_audit_fake_opened_a() -> (
         manifest: Some(&manifest),
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None);
 
     // Open token 2 with deep_prefix=true
     let proof = verilm_core::merkle::prove(&tree, 30);
@@ -1920,7 +1920,7 @@ fn build_deep_prefix_audit_roped() -> (
         manifest: Some(&manifest),
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None);
 
     let proof = verilm_core::merkle::prove(&tree, 30);
     let bridge = BridgeParams {
@@ -2030,7 +2030,7 @@ fn build_deep_prefix_audit_roped_fake_a() -> (
         manifest: Some(&manifest),
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None);
 
     let proof = verilm_core::merkle::prove(&tree, 30);
     let bridge = BridgeParams {
@@ -2327,5 +2327,298 @@ fn bridge_hash_v3_different_x_attn_different_hash() {
     let h1 = verilm_core::merkle::hash_retained_state_direct(&make(vec![10, 20, 30, 40]));
     let h2 = verilm_core::merkle::hash_retained_state_direct(&make(vec![11, 20, 30, 40]));
     assert_ne!(h1, h2, "different x_attn values must produce different hashes");
+}
+
+// ===========================================================================
+// KV transcript Merkle tests (roadmap #3)
+// ===========================================================================
+
+/// KV entry hash is deterministic for same inputs.
+#[test]
+fn kv_hash_deterministic() {
+    let k = vec![1.0f64, 2.0, 3.0, 4.0];
+    let v = vec![5.0f64, 6.0, 7.0, 8.0];
+    let h1 = verilm_core::merkle::hash_kv_entry(0, 0, &k, &v);
+    let h2 = verilm_core::merkle::hash_kv_entry(0, 0, &k, &v);
+    assert_eq!(h1, h2);
+}
+
+/// Different K values produce different hashes.
+#[test]
+fn kv_hash_different_k() {
+    let v = vec![5.0f64, 6.0, 7.0, 8.0];
+    let h1 = verilm_core::merkle::hash_kv_entry(0, 0, &[1.0, 2.0, 3.0, 4.0], &v);
+    let h2 = verilm_core::merkle::hash_kv_entry(0, 0, &[1.0, 2.0, 3.0, 4.1], &v);
+    assert_ne!(h1, h2);
+}
+
+/// Different V values produce different hashes.
+#[test]
+fn kv_hash_different_v() {
+    let k = vec![1.0f64, 2.0, 3.0, 4.0];
+    let h1 = verilm_core::merkle::hash_kv_entry(0, 0, &k, &[5.0, 6.0, 7.0, 8.0]);
+    let h2 = verilm_core::merkle::hash_kv_entry(0, 0, &k, &[5.0, 6.0, 7.0, 8.1]);
+    assert_ne!(h1, h2);
+}
+
+/// Different layer indices produce different hashes (domain separation).
+#[test]
+fn kv_hash_different_layer() {
+    let k = vec![1.0f64, 2.0];
+    let v = vec![3.0f64, 4.0];
+    let h1 = verilm_core::merkle::hash_kv_entry(0, 5, &k, &v);
+    let h2 = verilm_core::merkle::hash_kv_entry(1, 5, &k, &v);
+    assert_ne!(h1, h2);
+}
+
+/// Different positions produce different hashes (domain separation).
+#[test]
+fn kv_hash_different_position() {
+    let k = vec![1.0f64, 2.0];
+    let v = vec![3.0f64, 4.0];
+    let h1 = verilm_core::merkle::hash_kv_entry(0, 0, &k, &v);
+    let h2 = verilm_core::merkle::hash_kv_entry(0, 1, &k, &v);
+    assert_ne!(h1, h2);
+}
+
+/// KV Merkle tree: build tree from entries, verify proof roundtrip.
+#[test]
+fn kv_merkle_tree_roundtrip() {
+    use verilm_core::merkle;
+
+    let entries: Vec<([f64; 2], [f64; 2])> = vec![
+        ([1.0, 2.0], [3.0, 4.0]),
+        ([5.0, 6.0], [7.0, 8.0]),
+        ([9.0, 10.0], [11.0, 12.0]),
+    ];
+
+    let layer = 0;
+    let leaves: Vec<[u8; 32]> = entries.iter().enumerate()
+        .map(|(pos, (k, v))| merkle::hash_kv_entry(layer, pos, k, v))
+        .collect();
+
+    let tree = merkle::build_tree(&leaves);
+    assert_eq!(tree.n_leaves, 3);
+
+    // Prove and verify each leaf.
+    for i in 0..3 {
+        let proof = merkle::prove(&tree, i);
+        assert!(merkle::verify(&tree.root, &leaves[i], &proof));
+    }
+
+    // Tampered leaf should fail.
+    let mut tampered = leaves[1];
+    tampered[0] ^= 0xff;
+    let proof1 = merkle::prove(&tree, 1);
+    assert!(!merkle::verify(&tree.root, &tampered, &proof1));
+}
+
+/// compute_root matches build_tree root for KV leaves.
+#[test]
+fn kv_compute_root_matches_build_tree() {
+    use verilm_core::merkle;
+
+    let leaves: Vec<[u8; 32]> = (0..5)
+        .map(|pos| merkle::hash_kv_entry(2, pos, &[pos as f64; 4], &[0.0; 4]))
+        .collect();
+
+    let tree = merkle::build_tree(&leaves);
+    let root = merkle::compute_root(&leaves);
+    assert_eq!(tree.root, root);
+}
+
+/// End-to-end: commit KV entries from toy autoregressive forward pass,
+/// verify kv_roots are populated and Merkle proofs validate.
+#[test]
+fn kv_commit_e2e_toy_autoregressive() {
+    use verilm_core::merkle;
+
+    let cfg = ModelConfig::toy();
+    let model = generate_model(&cfg, 42);
+    let initial: Vec<i8> = (0..cfg.hidden_dim as i8).collect();
+
+    let traces = verilm_test_vectors::forward_pass_autoregressive(&cfg, &model, &initial, 3);
+    let kv_entries = verilm_test_vectors::kv_entries_from_traces(&cfg, &traces);
+
+    let all_retained: Vec<_> = traces.iter().map(|token_traces| {
+        verilm_core::types::RetainedTokenState {
+            layers: token_traces.iter().map(|lt| RetainedLayerState {
+                a: lt.a.clone(),
+                scale_a: lt.scale_a.unwrap_or(1.0),
+                x_attn_i8: None,
+                scale_x_attn: None,
+            }).collect(),
+        }
+    }).collect();
+
+    let params = verilm_prover::FullBindingParams {
+        token_ids: &[10, 20, 30],
+        prompt: b"kv commit test",
+        sampling_seed: [9u8; 32],
+        manifest: None,
+        n_prompt_tokens: Some(1),
+    };
+    let scales = vec![
+        vec![verilm_prover::CapturedLayerScales { scale_x_attn: 1.0, scale_x_ffn: 1.0, scale_h: 1.0 }; cfg.n_layers];
+        3
+    ];
+
+    let (commitment, _state) = commit_minimal(
+        all_retained, &params, None, scales, None, Some(kv_entries.clone()),
+    );
+
+    // kv_roots must have one root per layer.
+    assert_eq!(commitment.kv_roots.len(), cfg.n_layers);
+
+    // Each root must match independently computed root.
+    for (layer_idx, layer_entries) in kv_entries.iter().enumerate() {
+        let leaves: Vec<[u8; 32]> = layer_entries.iter().enumerate()
+            .map(|(pos, e)| merkle::hash_kv_entry(layer_idx, pos, &e.k_roped, &e.v_deq))
+            .collect();
+        let expected_root = merkle::compute_root(&leaves);
+        assert_eq!(commitment.kv_roots[layer_idx], expected_root,
+            "kv_root mismatch at layer {}", layer_idx);
+    }
+
+    // Each layer should have 3 entries (one per token).
+    for layer_entries in &kv_entries {
+        assert_eq!(layer_entries.len(), 3);
+    }
+}
+
+/// kv_roots field in BatchCommitment defaults to empty via serde.
+#[test]
+fn kv_roots_default_empty() {
+    use verilm_core::types::BatchCommitment;
+
+    // JSON without kv_roots should deserialize with empty vec.
+    let json = r#"{
+        "merkle_root": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        "io_root": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        "n_tokens": 1,
+        "version": "V4"
+    }"#;
+    let c: BatchCommitment = serde_json::from_str(json).unwrap();
+    assert!(c.kv_roots.is_empty());
+}
+
+/// End-to-end: commit + open produces valid KV Merkle proofs in audit response.
+#[test]
+fn kv_open_produces_valid_merkle_proofs() {
+    use verilm_core::merkle;
+
+    let cfg = ModelConfig::toy();
+    let model = generate_model(&cfg, 42);
+    let _key = generate_key(&cfg, &model, [1u8; 32]);
+    let initial: Vec<i8> = (0..cfg.hidden_dim as i8).collect();
+
+    let traces = verilm_test_vectors::forward_pass_autoregressive(&cfg, &model, &initial, 3);
+    let kv_entries = verilm_test_vectors::kv_entries_from_traces(&cfg, &traces);
+
+    let all_retained: Vec<_> = traces.iter().map(|token_traces| {
+        verilm_core::types::RetainedTokenState {
+            layers: token_traces.iter().map(|lt| RetainedLayerState {
+                a: lt.a.clone(),
+                scale_a: lt.scale_a.unwrap_or(1.0),
+                x_attn_i8: None,
+                scale_x_attn: None,
+            }).collect(),
+        }
+    }).collect();
+
+    let params = verilm_prover::FullBindingParams {
+        token_ids: &[10, 20, 30],
+        prompt: b"kv open test",
+        sampling_seed: [9u8; 32],
+        manifest: None,
+        n_prompt_tokens: Some(1),
+    };
+    let scales = vec![
+        vec![verilm_prover::CapturedLayerScales { scale_x_attn: 1.0, scale_x_ffn: 1.0, scale_h: 1.0 }; cfg.n_layers];
+        3
+    ];
+
+    let (_commitment, state) = commit_minimal(
+        all_retained, &params, None, scales, None, Some(kv_entries),
+    );
+
+    // Open audit for token 2 (last token) — should include KV for positions 0..=2.
+    let response = verilm_prover::open_v4(
+        &state, 2, &ToyWeights(&model), &cfg, &[], None, None, None, None, false,
+    );
+
+    // Verify KV entries and proofs are present.
+    let kv_entries = response.kv_entries.as_ref().expect("kv_entries must be present");
+    let kv_proofs = response.kv_proofs.as_ref().expect("kv_proofs must be present");
+    assert_eq!(kv_entries.len(), cfg.n_layers, "one set of entries per layer");
+    assert_eq!(kv_proofs.len(), cfg.n_layers, "one set of proofs per layer");
+
+    // Each layer should have 3 entries (positions 0, 1, 2).
+    for (layer_idx, (entries, proofs)) in kv_entries.iter().zip(kv_proofs.iter()).enumerate() {
+        assert_eq!(entries.len(), 3, "layer {} should have 3 KV entries", layer_idx);
+        assert_eq!(proofs.len(), 3, "layer {} should have 3 KV proofs", layer_idx);
+
+        let root = response.commitment.kv_roots[layer_idx];
+        for (pos, (entry, proof)) in entries.iter().zip(proofs.iter()).enumerate() {
+            let leaf = merkle::hash_kv_entry(layer_idx, pos, &entry.k_roped, &entry.v_deq);
+            assert!(merkle::verify(&root, &leaf, proof),
+                "KV proof invalid at layer {} pos {}", layer_idx, pos);
+        }
+    }
+}
+
+/// Tampered KV entry fails Merkle proof verification.
+#[test]
+fn kv_tampered_entry_fails_proof() {
+    use verilm_core::merkle;
+
+    let cfg = ModelConfig::toy();
+    let model = generate_model(&cfg, 42);
+    let initial: Vec<i8> = (0..cfg.hidden_dim as i8).collect();
+
+    let traces = verilm_test_vectors::forward_pass_autoregressive(&cfg, &model, &initial, 2);
+    let kv_entries = verilm_test_vectors::kv_entries_from_traces(&cfg, &traces);
+
+    let all_retained: Vec<_> = traces.iter().map(|token_traces| {
+        verilm_core::types::RetainedTokenState {
+            layers: token_traces.iter().map(|lt| RetainedLayerState {
+                a: lt.a.clone(),
+                scale_a: lt.scale_a.unwrap_or(1.0),
+                x_attn_i8: None,
+                scale_x_attn: None,
+            }).collect(),
+        }
+    }).collect();
+
+    let params = verilm_prover::FullBindingParams {
+        token_ids: &[10, 20],
+        prompt: b"kv tamper test",
+        sampling_seed: [9u8; 32],
+        manifest: None,
+        n_prompt_tokens: Some(1),
+    };
+    let scales = vec![
+        vec![verilm_prover::CapturedLayerScales { scale_x_attn: 1.0, scale_x_ffn: 1.0, scale_h: 1.0 }; cfg.n_layers];
+        2
+    ];
+
+    let (_commitment, state) = commit_minimal(
+        all_retained, &params, None, scales, None, Some(kv_entries),
+    );
+
+    let mut response = verilm_prover::open_v4(
+        &state, 1, &ToyWeights(&model), &cfg, &[], None, None, None, None, false,
+    );
+
+    // Tamper with KV entry at layer 0, position 0.
+    let kv = response.kv_entries.as_mut().unwrap();
+    kv[0][0].k_roped[0] += 1.0;
+
+    // Proof should now be invalid.
+    let proofs = response.kv_proofs.as_ref().unwrap();
+    let tampered_leaf = merkle::hash_kv_entry(0, 0, &kv[0][0].k_roped, &kv[0][0].v_deq);
+    let root = response.commitment.kv_roots[0];
+    assert!(!merkle::verify(&root, &tampered_leaf, &proofs[0][0]),
+        "tampered KV entry must fail Merkle proof");
 }
 

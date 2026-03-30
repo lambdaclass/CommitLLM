@@ -263,7 +263,7 @@ fn build_audit() -> (
         manifest: Some(&manifest),
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales], None);
+    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales], None, None);
     let response = open_v4(
         &state, 0, &ToyWeights(&model), &cfg, &ws,
         Some(&bridge), None, None, None, false,

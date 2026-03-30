@@ -1827,6 +1827,7 @@ mod tests {
                 prompt_hash: None,
                 seed_commitment: None,
                 n_prompt_tokens: commit_n_prompt,
+                kv_roots: vec![],
             },
             revealed_seed: [0u8; 32],
             shell_opening: None,
@@ -1838,6 +1839,8 @@ mod tests {
             prefix_embedding_proofs: None,
             prefix_retained: None,
             prefix_shell_openings: None,
+            kv_entries: None,
+            kv_proofs: None,
         }
     }
 

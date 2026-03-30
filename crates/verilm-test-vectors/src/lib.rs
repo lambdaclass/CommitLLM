@@ -12,7 +12,7 @@ use verilm_core::constants::{MatrixType, ModelConfig};
 use verilm_core::field::Fp;
 use verilm_core::freivalds;
 pub use verilm_core::requantize;
-use verilm_core::types::{LayerTrace, VerifierKey};
+use verilm_core::types::{KvEntry, LayerTrace, VerifierKey};
 
 // Re-export V4 prover types.
 pub use verilm_prover::FullBindingParams;
@@ -285,6 +285,31 @@ pub fn forward_pass_autoregressive(
     }
 
     all_traces
+}
+
+/// Extract per-layer KV entries from autoregressive traces (toy model, no RoPE).
+///
+/// Returns `kv_entries[layer][position]` — the post-RoPE K and dequantized V
+/// at each (layer, position) pair. For the toy model, K and V are simply
+/// the requantized i32 accumulators cast to f64 (no RoPE, unit scale).
+pub fn kv_entries_from_traces(
+    cfg: &ModelConfig,
+    traces: &[Vec<LayerTrace>],
+) -> Vec<Vec<KvEntry>> {
+    let mut result: Vec<Vec<KvEntry>> = (0..cfg.n_layers).map(|_| Vec::new()).collect();
+
+    for token_traces in traces {
+        for (layer_idx, lt) in token_traces.iter().enumerate() {
+            let k_i8 = requantize(&lt.k);
+            let v_i8 = requantize(&lt.v);
+            result[layer_idx].push(KvEntry {
+                k_roped: k_i8.iter().map(|&b| b as f64).collect(),
+                v_deq: v_i8.iter().map(|&b| b as f64).collect(),
+            });
+        }
+    }
+
+    result
 }
 
 /// Generate a verifier-secret key from model weights.
