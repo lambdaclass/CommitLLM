@@ -437,13 +437,11 @@ class CaptureBuffer:
         if hook is not None:
             scales, count = hook.drain_scales()  # returns (numpy_array, count)
         else:
-            # Python fallback: normalize multi-element scales then stack.
+            # Python fallback: flatten per-row scales and cat (no .max() reduction).
             count = self._minimal_call_count
             if self._minimal_scales:
-                reduced = []
-                for s in self._minimal_scales:
-                    reduced.append(s.max() if s.numel() > 1 else s.reshape(()))
-                scales = torch.stack(reduced).cpu().numpy()
+                flat = [s.flatten() for s in self._minimal_scales]
+                scales = torch.cat(flat).cpu().numpy()
             else:
                 import numpy as np
                 scales = np.array([], dtype=np.float32)

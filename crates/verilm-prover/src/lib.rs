@@ -5,7 +5,7 @@ use verilm_core::bridge_requantize;
 use verilm_core::constants::MatrixType;
 use verilm_core::matmul::matmul_i32;
 use verilm_core::merkle;
-use verilm_core::rmsnorm::{bridge_residual_rmsnorm, dequant_add_residual, rmsnorm_f64_input, quantize_f64_to_i8};
+use verilm_core::rmsnorm::{dequant_add_residual, dequant_add_residual_per_channel, rmsnorm_f64_input, quantize_f64_to_i8};
 use verilm_core::types::{
     BatchCommitment, BridgeParams, CommitmentVersion, KvEntry, TailParams,
     DeploymentManifest, RetainedLayerState, RetainedTokenState,
@@ -94,14 +94,15 @@ pub struct MinimalCaptureEntry {
     /// QKV projection input (x_attn_i8) captured from GPU.
     /// Measurement-only: used for precision corridor (bypasses bridge re-derivation).
     pub x_attn_i8: Option<Vec<i8>>,
-    /// Activation scale for QKV projection input.
-    pub scale_x_attn: f32,
-    /// Activation scale for W_o projection input.
-    pub scale_a: f32,
-    /// Activation scale for gate_up projection input.
-    pub scale_x_ffn: f32,
-    /// Activation scale for down projection input.
-    pub scale_h: f32,
+    /// Per-row activation scale for QKV projection input.
+    /// Length = batch_size for the forward pass (1 for decode, >1 for prefill).
+    pub scale_x_attn: Vec<f32>,
+    /// Per-row activation scale for W_o projection input.
+    pub scale_a: Vec<f32>,
+    /// Per-row activation scale for gate_up projection input.
+    pub scale_x_ffn: Vec<f32>,
+    /// Per-row activation scale for down projection input.
+    pub scale_h: Vec<f32>,
 }
 
 /// Build `Vec<RetainedTokenState>` and `Vec<Vec<CapturedLayerScales>>` from minimal captures.
@@ -141,14 +142,14 @@ pub fn build_retained_from_captures(
 
                 layers.push(RetainedLayerState {
                     a,
-                    scale_a: entry.scale_a,
+                    scale_a: entry.scale_a[b],
                     x_attn_i8: None,
                     scale_x_attn: None,
                 });
                 token_scales.push(CapturedLayerScales {
-                    scale_x_attn: entry.scale_x_attn,
-                    scale_x_ffn: entry.scale_x_ffn,
-                    scale_h: entry.scale_h,
+                    scale_x_attn: entry.scale_x_attn[b],
+                    scale_x_ffn: entry.scale_x_ffn[b],
+                    scale_h: entry.scale_h[b],
                 });
             }
 
@@ -163,6 +164,106 @@ pub fn build_retained_from_captures(
 
     let x_attn_out = if has_x_attn { Some(all_x_attn) } else { None };
     (all_retained, all_scales, x_attn_out)
+}
+
+/// Compute the KV transcript from captured `x_attn` + weights at commit time.
+///
+/// For each (token, layer), computes:
+/// - `k_acc = W_k @ x_attn` (exact INT8 matmul → i32)
+/// - `v_acc = W_v @ x_attn` (exact INT8 matmul → i32)
+/// - Dequantizes and applies RoPE → `KvEntry { k_roped, v_deq }`
+///
+/// The resulting KV values are deterministic (same as verifier-side replay)
+/// because the INT8 matmul is exact and dequant+RoPE are in f64.
+///
+/// # Arguments
+/// - `captured_x_attn`: `[n_tokens][n_layers][hidden_dim]` — captured QKV input per token/layer
+/// - `weights`: weight matrices (W_k, W_v per layer)
+/// - `cfg`: model config (dimensions, RoPE theta, head counts)
+/// - `captured_scales`: per-token/layer activation scales (scale_x_attn for dequantization)
+/// - `per_tensor_scales`: `[layer][matrix_type_idx]` per-tensor weight scales (0.0 for native INT8)
+/// - `per_channel_scales`: `[layer][matrix_type_idx][output_dim]` per-channel weight scales (empty = not available)
+///
+/// Returns `[n_layers][n_tokens]` — one `KvEntry` per (layer, position).
+pub fn compute_kv_transcript(
+    captured_x_attn: &[Vec<Vec<i8>>],
+    weights: &dyn ShellWeights,
+    cfg: &verilm_core::constants::ModelConfig,
+    captured_scales: &[Vec<CapturedLayerScales>],
+    per_tensor_scales: &[Vec<f32>],
+    per_channel_scales: &[Vec<Vec<f32>>],
+) -> Vec<Vec<KvEntry>> {
+    let n_layers = cfg.n_layers;
+    let n_tokens = captured_x_attn.len();
+    let use_rope = !per_tensor_scales.is_empty() || !per_channel_scales.is_empty();
+
+    let mut result: Vec<Vec<KvEntry>> = (0..n_layers).map(|_| Vec::with_capacity(n_tokens)).collect();
+
+    for (token_pos, token_x_attn) in captured_x_attn.iter().enumerate() {
+        for layer_idx in 0..n_layers.min(token_x_attn.len()) {
+            let x_attn = &token_x_attn[layer_idx];
+            let scale_x = captured_scales[token_pos][layer_idx].scale_x_attn;
+
+            // INT8 matmul → exact i32 accumulators (matches GPU CUTLASS)
+            let k_acc = matmul_i32(
+                weights.weight(layer_idx, MatrixType::Wk),
+                x_attn,
+                cfg.kv_dim,
+                cfg.hidden_dim,
+            );
+            let v_acc = matmul_i32(
+                weights.weight(layer_idx, MatrixType::Wv),
+                x_attn,
+                cfg.kv_dim,
+                cfg.hidden_dim,
+            );
+
+            let (k_roped, v_deq) = if use_rope {
+                // Production: dequantize with per-channel or per-tensor scales, then RoPE for K
+                let k_mt_idx = MatrixType::PER_LAYER.iter().position(|&m| m == MatrixType::Wk).unwrap();
+                let v_mt_idx = MatrixType::PER_LAYER.iter().position(|&m| m == MatrixType::Wv).unwrap();
+
+                let k_f64 = if !per_channel_scales.is_empty()
+                    && layer_idx < per_channel_scales.len()
+                    && !per_channel_scales[layer_idx][k_mt_idx].is_empty()
+                {
+                    verilm_core::rope::dequantize_acc_per_channel(
+                        &k_acc, &per_channel_scales[layer_idx][k_mt_idx], scale_x,
+                    )
+                } else {
+                    let sw = per_tensor_scales.get(layer_idx).and_then(|s| s.get(k_mt_idx)).copied().unwrap_or(0.0);
+                    verilm_core::rope::dequantize_acc(&k_acc, Some(sw), Some(scale_x))
+                };
+
+                let v_f64 = if !per_channel_scales.is_empty()
+                    && layer_idx < per_channel_scales.len()
+                    && !per_channel_scales[layer_idx][v_mt_idx].is_empty()
+                {
+                    verilm_core::rope::dequantize_acc_per_channel(
+                        &v_acc, &per_channel_scales[layer_idx][v_mt_idx], scale_x,
+                    )
+                } else {
+                    let sw = per_tensor_scales.get(layer_idx).and_then(|s| s.get(v_mt_idx)).copied().unwrap_or(0.0);
+                    verilm_core::rope::dequantize_acc(&v_acc, Some(sw), Some(scale_x))
+                };
+
+                let k_roped = verilm_core::rope::apply_rope_k(&k_f64, token_pos, cfg);
+                (k_roped, v_f64)
+            } else {
+                // Toy: requantize i32→i8, store as f64 (matches kv_entries_from_traces)
+                let k_i8 = verilm_core::requantize(&k_acc);
+                let v_i8 = verilm_core::requantize(&v_acc);
+                (
+                    k_i8.iter().map(|&b| b as f64).collect(),
+                    v_i8.iter().map(|&b| b as f64).collect(),
+                )
+            };
+
+            result[layer_idx].push(KvEntry { k_roped, v_deq });
+        }
+    }
+
+    result
 }
 
 /// V4 commit: retained-state commitment.
@@ -422,8 +523,8 @@ impl PackedBatchState {
             let a_start = layer_base + pos * hd;
             hasher.update(&self.packed_a[a_start..a_start + hd]);
 
-            // Irreducible: scale_a.
-            let s_base = (fwd * self.n_layers + l) * 4;
+            // Irreducible: scale_a (per-token).
+            let s_base = (token_global * self.n_layers + l) * 4;
             hasher.update(self.packed_scales[s_base + 1].to_le_bytes()); // scale_a
 
             // Bridge trust boundary: x_attn_i8 + scale_x_attn (absence marker for now).
@@ -466,7 +567,7 @@ impl PackedBatchState {
             // Reinterpret u8 → i8 (identical memory layout).
             let a: Vec<i8> = a_bytes.iter().map(|&b| b as i8).collect();
 
-            let s_base = (fwd * self.n_layers + l) * 4;
+            let s_base = (token_global * self.n_layers + l) * 4;
             layers.push(RetainedLayerState {
                 a,
                 scale_a: self.packed_scales[s_base + 1],
@@ -481,10 +582,9 @@ impl PackedBatchState {
     ///
     /// Used at audit time alongside `extract_token` for `compute_shell_opening`.
     pub fn extract_scales(&self, token_global: usize) -> Vec<CapturedLayerScales> {
-        let (fwd, _pos) = self.token_index.locate(token_global);
         let mut out = Vec::with_capacity(self.n_layers);
         for l in 0..self.n_layers {
-            let s_base = (fwd * self.n_layers + l) * 4;
+            let s_base = (token_global * self.n_layers + l) * 4;
             out.push(CapturedLayerScales {
                 scale_x_attn: self.packed_scales[s_base],
                 scale_x_ffn: self.packed_scales[s_base + 2],
@@ -545,11 +645,11 @@ pub fn commit_minimal_packed(
         "packed_a length ({}) != expected ({} tokens × {} layers × {} dim)",
         packed_a.len(), n_tokens, n_layers, hidden_dim
     );
-    let expected_scales = fwd_batch_sizes.len() * n_layers * 4;
+    let expected_scales = n_tokens * n_layers * 4;
     assert_eq!(
         packed_scales.len(), expected_scales,
-        "packed_scales length ({}) != expected ({} fwd × {} layers × 4)",
-        packed_scales.len(), fwd_batch_sizes.len(), n_layers
+        "packed_scales length ({}) != expected ({} tokens × {} layers × 4)",
+        packed_scales.len(), n_tokens, n_layers
     );
     if let Some(ref fr) = packed_final_res {
         let expected_fr = n_tokens * final_res_dim * 4;
@@ -704,6 +804,7 @@ pub fn open_v4_packed(
     weights: &dyn ShellWeights,
     cfg: &verilm_core::constants::ModelConfig,
     weight_scales: &[Vec<f32>],
+    per_channel_weight_scales: &[Vec<Vec<f32>>],
     bridge: Option<&BridgeParams>,
     tail: Option<&TailParams>,
     layer_filter: Option<&[usize]>,
@@ -751,7 +852,8 @@ pub fn open_v4_packed(
     let token_scales = state.extract_scales(i);
 
     let mut shell = compute_shell_opening(
-        &retained_token, weights, cfg, weight_scales, bridge, layer_filter, &token_scales, None,
+        &retained_token, weights, cfg, weight_scales, per_channel_weight_scales,
+        bridge, layer_filter, &token_scales, None,
     );
     shell.final_residual = state.extract_final_residual(i);
 
@@ -798,7 +900,7 @@ pub fn open_v4_packed(
                         embedding_proof: None,
                     };
                     let mut shell_j = compute_shell_opening(
-                        &retained_j, weights, cfg, weight_scales,
+                        &retained_j, weights, cfg, weight_scales, per_channel_weight_scales,
                         Some(&bridge_j), layer_filter, &scales_j, None,
                     );
                     shell_j.final_residual = state.extract_final_residual(j);
@@ -863,6 +965,7 @@ pub fn compute_shell_opening(
     weights: &dyn ShellWeights,
     cfg: &verilm_core::constants::ModelConfig,
     weight_scales: &[Vec<f32>],
+    per_channel_weight_scales: &[Vec<Vec<f32>>],
     bridge: Option<&BridgeParams>,
     layer_filter: Option<&[usize]>,
     scales: &[CapturedLayerScales],
@@ -883,6 +986,25 @@ pub fn compute_shell_opening(
         }
         let idx = MatrixType::PER_LAYER.iter().position(|&m| m == mt).unwrap();
         weight_scales[layer][idx]
+    };
+
+    // Per-channel weight scale lookup. Returns None when model has no per-channel scales.
+    let pc_ws = |layer: usize, mt: MatrixType| -> Option<&[f32]> {
+        if per_channel_weight_scales.is_empty() || layer >= per_channel_weight_scales.len() {
+            return None;
+        }
+        let idx = MatrixType::PER_LAYER.iter().position(|&m| m == mt).unwrap();
+        let s = &per_channel_weight_scales[layer][idx];
+        if s.is_empty() { None } else { Some(s) }
+    };
+
+    // Dispatch dequant + residual add: per-channel when available, per-tensor fallback.
+    let dequant_add = |mt: MatrixType, layer: usize, acc: &[i32], scale_x: f32, res: &mut [f64]| {
+        if let Some(pc) = pc_ws(layer, mt) {
+            dequant_add_residual_per_channel(acc, pc, scale_x, res);
+        } else {
+            dequant_add_residual(acc, ws(layer, mt), scale_x, res);
+        }
     };
 
     // Full bridge: init residual from embedding and derive x_attn_0
@@ -921,10 +1043,9 @@ pub fn compute_shell_opening(
         // Post-attention bridge: derive x_ffn
         let x_ffn = if let (Some(ref mut res), Some(b)) = (&mut residual, bridge) {
             // Canonical: dequant → residual += attn_out → RMSNorm_ffn → quantize
-            bridge_residual_rmsnorm(
-                &attn_out, ws(layer_idx, MatrixType::Wo), rs.scale_a,
-                res, &b.rmsnorm_ffn_weights[layer_idx], b.rmsnorm_eps, scales[layer_idx].scale_x_ffn,
-            )
+            dequant_add(MatrixType::Wo, layer_idx, &attn_out, rs.scale_a, res);
+            let normed = rmsnorm_f64_input(res, &b.rmsnorm_ffn_weights[layer_idx], b.rmsnorm_eps);
+            quantize_f64_to_i8(&normed, scales[layer_idx].scale_x_ffn as f64)
         } else {
             // Toy-model fallback: no residual, no RMSNorm
             bridge_requantize(&attn_out, ws(layer_idx, MatrixType::Wo), rs.scale_a, scales[layer_idx].scale_x_ffn)
@@ -934,14 +1055,19 @@ pub fn compute_shell_opening(
         let g = matmul_i32(weights.weight(layer_idx, MatrixType::Wg), &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
         let u = matmul_i32(weights.weight(layer_idx, MatrixType::Wu), &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
 
-        // SiLU bridge (unchanged — no residual involved)
-        let h = verilm_core::silu::compute_h_scaled(
-            &g, &u,
-            ws(layer_idx, MatrixType::Wg),
-            ws(layer_idx, MatrixType::Wu),
-            scales[layer_idx].scale_x_ffn,
-            scales[layer_idx].scale_h,
-        );
+        // SiLU bridge: per-channel when available, per-tensor fallback.
+        let h = match (pc_ws(layer_idx, MatrixType::Wg), pc_ws(layer_idx, MatrixType::Wu)) {
+            (Some(pc_g), Some(pc_u)) => verilm_core::silu::compute_h_per_channel(
+                &g, &u, pc_g, pc_u, scales[layer_idx].scale_x_ffn, scales[layer_idx].scale_h,
+            ),
+            _ => verilm_core::silu::compute_h_scaled(
+                &g, &u,
+                ws(layer_idx, MatrixType::Wg),
+                ws(layer_idx, MatrixType::Wu),
+                scales[layer_idx].scale_x_ffn,
+                scales[layer_idx].scale_h,
+            ),
+        };
 
         // W_d @ h
         let ffn_out = matmul_i32(weights.weight(layer_idx, MatrixType::Wd), &h, cfg.hidden_dim, cfg.ffn_dim);
@@ -955,14 +1081,12 @@ pub fn compute_shell_opening(
         x_attn = if let (Some(ref mut res), Some(b)) = (&mut residual, bridge) {
             if layer_idx + 1 < b.rmsnorm_attn_weights.len() {
                 // Canonical: dequant → residual += ffn_out → RMSNorm_attn_{l+1} → quantize
-                Some(bridge_residual_rmsnorm(
-                    &ffn_out, ws(layer_idx, MatrixType::Wd), scales[layer_idx].scale_h,
-                    res, &b.rmsnorm_attn_weights[layer_idx + 1], b.rmsnorm_eps,
-                    next_scale_x_attn,
-                ))
+                dequant_add(MatrixType::Wd, layer_idx, &ffn_out, scales[layer_idx].scale_h, res);
+                let normed = rmsnorm_f64_input(res, &b.rmsnorm_attn_weights[layer_idx + 1], b.rmsnorm_eps);
+                Some(quantize_f64_to_i8(&normed, next_scale_x_attn as f64))
             } else {
                 // Last layer: update residual for final_hidden, no subsequent RMSNorm
-                dequant_add_residual(&ffn_out, ws(layer_idx, MatrixType::Wd), scales[layer_idx].scale_h, res);
+                dequant_add(MatrixType::Wd, layer_idx, &ffn_out, scales[layer_idx].scale_h, res);
                 Some(bridge_requantize(
                     &ffn_out, ws(layer_idx, MatrixType::Wd), scales[layer_idx].scale_h, next_scale_x_attn,
                 ))
@@ -1014,6 +1138,7 @@ pub fn open_v4(
     weights: &dyn ShellWeights,
     cfg: &verilm_core::constants::ModelConfig,
     weight_scales: &[Vec<f32>],
+    per_channel_weight_scales: &[Vec<Vec<f32>>],
     bridge: Option<&BridgeParams>,
     tail: Option<&TailParams>,
     layer_filter: Option<&[usize]>,
@@ -1021,12 +1146,14 @@ pub fn open_v4(
     deep_prefix: bool,
 ) -> V4AuditResponse {
     let mut response = open_v4_structural(state, token_index);
-    let x_attn_opened = state.captured_x_attn.as_ref()
-        .and_then(|cxa| cxa.get(token_index as usize));
+    // Shell opening uses bridge-derived x_attn (not GPU-captured) so that QKV
+    // accumulators match the verifier's own derivation for Freivalds checks.
+    // Captured x_attn is only for KV transcript computation (done at commit time).
     let mut shell = compute_shell_opening(
-        &state.all_retained[token_index as usize], weights, cfg, weight_scales, bridge,
+        &state.all_retained[token_index as usize], weights, cfg, weight_scales,
+        per_channel_weight_scales, bridge,
         layer_filter, &state.captured_scales[token_index as usize],
-        x_attn_opened.map(|v| v.as_slice()),
+        None,
     );
     // Attach captured final residual from GPU inference (if available).
     shell.final_residual = state.final_residuals
@@ -1079,12 +1206,10 @@ pub fn open_v4(
                         initial_residual: &emb_row,
                         embedding_proof: None, // prefix tokens don't carry individual proofs in shell
                     };
-                    let x_attn_j = state.captured_x_attn.as_ref()
-                        .and_then(|cxa| cxa.get(j));
                     let mut shell_j = compute_shell_opening(
-                        retained_j, weights, cfg, weight_scales,
+                        retained_j, weights, cfg, weight_scales, per_channel_weight_scales,
                         Some(&bridge_j), layer_filter, &state.captured_scales[j],
-                        x_attn_j.map(|v| v.as_slice()),
+                        None, // bridge-derived x_attn for Freivalds compatibility
                     );
                     shell_j.final_residual = state.final_residuals
                         .as_ref()
@@ -1207,10 +1332,10 @@ mod tests {
                 captures.push(MinimalCaptureEntry {
                     a_i8: vec![(t * n_layers + l) as i8; hidden],
                     x_attn_i8: None,
-                    scale_x_attn: 0.1 * (l + 1) as f32,
-                    scale_a: 0.2 * (l + 1) as f32,
-                    scale_x_ffn: 0.3 * (l + 1) as f32,
-                    scale_h: 0.4 * (l + 1) as f32,
+                    scale_x_attn: vec![0.1 * (l + 1) as f32],
+                    scale_a: vec![0.2 * (l + 1) as f32],
+                    scale_x_ffn: vec![0.3 * (l + 1) as f32],
+                    scale_h: vec![0.4 * (l + 1) as f32],
                 });
             }
         }
@@ -1245,19 +1370,90 @@ mod tests {
             captures.push(MinimalCaptureEntry {
                 a_i8: vec![(l + 1) as i8; 3 * hidden],
                 x_attn_i8: None,
-                scale_x_attn: 0.1,
-                scale_a: 0.2,
-                scale_x_ffn: 0.3,
-                scale_h: 0.4,
+                scale_x_attn: vec![0.1, 0.11, 0.12],
+                scale_a: vec![0.2, 0.21, 0.22],
+                scale_x_ffn: vec![0.3, 0.31, 0.32],
+                scale_h: vec![0.4, 0.41, 0.42],
             });
         }
         let fwd_batch_sizes = vec![3];
-        let (retained, _scales, _) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+        let (retained, scales, _) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
         assert_eq!(retained.len(), 3);
         for t in 0..3 {
             assert_eq!(retained[t].layers.len(), n_layers);
             assert_eq!(retained[t].layers[0].a.len(), hidden);
         }
+        // Per-token scales: each token gets its own row scale.
+        assert_eq!(retained[0].layers[0].scale_a, 0.2);
+        assert_eq!(retained[1].layers[0].scale_a, 0.21);
+        assert_eq!(retained[2].layers[0].scale_a, 0.22);
+        assert_eq!(scales[0][0].scale_x_attn, 0.1);
+        assert_eq!(scales[1][0].scale_x_attn, 0.11);
+        assert_eq!(scales[2][0].scale_x_attn, 0.12);
+    }
+
+    #[test]
+    fn test_per_token_prefill_scales() {
+        // Prefill batch of 3 + 2 decode steps. Each token gets a distinct
+        // scale_a that must survive through build_retained and commit.
+        let n_layers = 2;
+        let hidden = 4;
+        let fwd_batch_sizes = vec![3, 1, 1];
+
+        let mut captures = Vec::new();
+        let mut token_counter = 0;
+        for &batch_sz in &fwd_batch_sizes {
+            for l in 0..n_layers {
+                let mut a_i8 = Vec::new();
+                let mut s_qkv = Vec::new();
+                let mut s_o = Vec::new();
+                let mut s_gate = Vec::new();
+                let mut s_down = Vec::new();
+                for b in 0..batch_sz {
+                    let t = token_counter + b;
+                    a_i8.extend(std::iter::repeat((t * n_layers + l) as i8).take(hidden));
+                    // Distinct scale per token: 0.01 * (token + 1) + 0.001 * layer
+                    s_qkv.push(0.01 * (t + 1) as f32 + 0.001 * l as f32);
+                    s_o.push(0.02 * (t + 1) as f32 + 0.001 * l as f32);
+                    s_gate.push(0.03 * (t + 1) as f32 + 0.001 * l as f32);
+                    s_down.push(0.04 * (t + 1) as f32 + 0.001 * l as f32);
+                }
+                captures.push(MinimalCaptureEntry {
+                    a_i8,
+                    x_attn_i8: None,
+                    scale_x_attn: s_qkv,
+                    scale_a: s_o,
+                    scale_x_ffn: s_gate,
+                    scale_h: s_down,
+                });
+            }
+            token_counter += batch_sz;
+        }
+
+        let (retained, scales, _) = build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
+        assert_eq!(retained.len(), 5, "should have 5 tokens");
+
+        // Verify each token got its own distinct scale.
+        for t in 0..5 {
+            for l in 0..n_layers {
+                let expected_a = 0.02 * (t + 1) as f32 + 0.001 * l as f32;
+                let actual_a = retained[t].layers[l].scale_a;
+                assert!(
+                    (actual_a - expected_a).abs() < 1e-7,
+                    "token {t} layer {l}: expected scale_a={expected_a}, got {actual_a}"
+                );
+                let expected_xattn = 0.01 * (t + 1) as f32 + 0.001 * l as f32;
+                let actual_xattn = scales[t][l].scale_x_attn;
+                assert!(
+                    (actual_xattn - expected_xattn).abs() < 1e-7,
+                    "token {t} layer {l}: expected scale_x_attn={expected_xattn}, got {actual_xattn}"
+                );
+            }
+        }
+
+        // Verify prefill tokens have distinct scales (not the batch max).
+        assert_ne!(retained[0].layers[0].scale_a, retained[1].layers[0].scale_a);
+        assert_ne!(retained[1].layers[0].scale_a, retained[2].layers[0].scale_a);
     }
 
     #[test]
@@ -1426,7 +1622,6 @@ mod tests {
         n_layers: usize, n_tokens: usize, hidden: usize, fwd_batch_sizes: &[usize],
     ) -> (Vec<u8>, Vec<f32>) {
         let mut packed_a = Vec::new();
-        let mut packed_scales = Vec::new();
         let mut token_counter = 0;
 
         for &batch_sz in fwd_batch_sizes {
@@ -1437,15 +1632,21 @@ mod tests {
                     let val = ((t * n_layers + l) & 0xFF) as u8;
                     packed_a.extend(std::iter::repeat(val).take(hidden));
                 }
-                // 4 scales per (fwd, layer)
+            }
+            token_counter += batch_sz;
+        }
+        assert_eq!(token_counter, n_tokens);
+
+        // Per-token scales: 4 scales per (token, layer).
+        let mut packed_scales = Vec::new();
+        for _t in 0..n_tokens {
+            for l in 0..n_layers {
                 packed_scales.push(0.1 * (l + 1) as f32);  // scale_x_attn
                 packed_scales.push(0.2 * (l + 1) as f32);  // scale_a
                 packed_scales.push(0.3 * (l + 1) as f32);  // scale_x_ffn
                 packed_scales.push(0.4 * (l + 1) as f32);  // scale_h
             }
-            token_counter += batch_sz;
         }
-        assert_eq!(token_counter, n_tokens);
         (packed_a, packed_scales)
     }
 
@@ -1503,10 +1704,10 @@ mod tests {
                 captures.push(MinimalCaptureEntry {
                     a_i8,
                     x_attn_i8: None,
-                    scale_x_attn: 0.1 * (l + 1) as f32,
-                    scale_a: 0.2 * (l + 1) as f32,
-                    scale_x_ffn: 0.3 * (l + 1) as f32,
-                    scale_h: 0.4 * (l + 1) as f32,
+                    scale_x_attn: vec![0.1 * (l + 1) as f32; batch_sz],
+                    scale_a: vec![0.2 * (l + 1) as f32; batch_sz],
+                    scale_x_ffn: vec![0.3 * (l + 1) as f32; batch_sz],
+                    scale_h: vec![0.4 * (l + 1) as f32; batch_sz],
                 });
             }
             token_counter += batch_sz;

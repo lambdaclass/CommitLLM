@@ -483,6 +483,16 @@ impl WeightProvider {
     fn weight_hash_hex(&self) -> String {
         hex::encode(self.inner.weight_hash())
     }
+
+    /// Quantization family matching keygen vocabulary (e.g. "W8A8", "INT8").
+    fn quant_family(&self) -> Option<String> {
+        self.inner.quant_family()
+    }
+
+    /// Scale derivation matching keygen vocabulary (e.g. "per_channel_absmax").
+    fn scale_derivation(&self) -> Option<String> {
+        self.inner.scale_derivation()
+    }
 }
 
 /// Opaque handle to V4 minimal retained-state commitment.
@@ -545,7 +555,7 @@ impl MinimalBatchStateHandle {
     }
 
     fn kv_roots_hex(&self) -> Vec<String> {
-        Vec::new() // V4: prefix binding via retained Merkle tree
+        self.commitment.kv_roots.iter().map(hex::encode).collect()
     }
 
     /// Open a V4 audit response for a challenged token.
@@ -613,7 +623,7 @@ impl MinimalBatchStateHandle {
             if self.rich_prefix || self.deep_prefix { Some(provider.as_ref()) } else { None };
         Ok(verilm_prover::open_v4(
             &self.inner, token_index, provider.as_ref(), provider.config(),
-            provider.weight_scales(), bridge.as_ref(), tail.as_ref(), layer_filter,
+            provider.weight_scales(), provider.per_channel_weight_scales(), bridge.as_ref(), tail.as_ref(), layer_filter,
             emb_lookup, self.deep_prefix,
         ))
     }
@@ -662,36 +672,52 @@ fn commit_minimal_from_captures(
 ) -> PyResult<MinimalBatchStateHandle> {
     let scales = extract_f32_vec(scales)?;
     let n_entries = o_proj_inputs.len();
-    let expected_scales = n_entries * 4;
+
+    // Scales are per-row: for a prefill with batch_size=B, each of the 4
+    // projections contributes B scale values. Flat layout in call order:
+    //   for each fwd pass:
+    //     for each layer:
+    //       [B values for qkv_proj, B for o_proj, B for gate_up, B for down]
+    let expected_scales: usize = fwd_batch_sizes.iter()
+        .map(|&bs| bs * 4 * n_layers)
+        .sum();
     if scales.len() != expected_scales {
         return Err(PyValueError::new_err(format!(
-            "expected {} scales (4 per layer entry), got {}",
+            "expected {} scales (4 × batch_size per layer entry), got {}",
             expected_scales,
             scales.len()
         )));
     }
 
     let mut captures = Vec::with_capacity(n_entries);
-    for i in 0..n_entries {
-        let a_i8 = extract_i8_vec(&o_proj_inputs.get_item(i)?)?;
-        let base = i * 4;
-        let x_attn_i8 = if let Some(ref xa_list) = x_attn_inputs {
-            if i < xa_list.len() {
-                Some(extract_i8_vec(&xa_list.get_item(i)?)?)
+    let mut cursor = 0usize;
+    let mut entry_idx = 0usize;
+    for &batch_size in &fwd_batch_sizes {
+        for _l in 0..n_layers {
+            let a_i8 = extract_i8_vec(&o_proj_inputs.get_item(entry_idx)?)?;
+            let x_attn_i8 = if let Some(ref xa_list) = x_attn_inputs {
+                if entry_idx < xa_list.len() {
+                    Some(extract_i8_vec(&xa_list.get_item(entry_idx)?)?)
+                } else {
+                    None
+                }
             } else {
                 None
-            }
-        } else {
-            None
-        };
-        captures.push(verilm_prover::MinimalCaptureEntry {
-            a_i8,
-            x_attn_i8,
-            scale_x_attn: scales[base],
-            scale_a: scales[base + 1],
-            scale_x_ffn: scales[base + 2],
-            scale_h: scales[base + 3],
-        });
+            };
+            let s_qkv = scales[cursor..cursor + batch_size].to_vec(); cursor += batch_size;
+            let s_o   = scales[cursor..cursor + batch_size].to_vec(); cursor += batch_size;
+            let s_gate = scales[cursor..cursor + batch_size].to_vec(); cursor += batch_size;
+            let s_down = scales[cursor..cursor + batch_size].to_vec(); cursor += batch_size;
+            captures.push(verilm_prover::MinimalCaptureEntry {
+                a_i8,
+                x_attn_i8,
+                scale_x_attn: s_qkv,
+                scale_a: s_o,
+                scale_x_ffn: s_gate,
+                scale_h: s_down,
+            });
+            entry_idx += 1;
+        }
     }
 
     let (all_retained, captured_scales, captured_x_attn) = verilm_prover::build_retained_from_captures(
@@ -719,6 +745,24 @@ fn commit_minimal_from_captures(
         None
     };
 
+    // Compute KV transcript from captured x_attn + weights when both are available.
+    // This produces the committed KV entries that the verifier will replay against.
+    let kv_transcripts = if captured_x_attn.is_some() && weight_provider.is_some() {
+        let wp = weight_provider.unwrap();
+        let cfg = wp.inner.config();
+        let x_attn_ref = captured_x_attn.as_ref().unwrap();
+        Some(verilm_prover::compute_kv_transcript(
+            x_attn_ref,
+            wp.inner.as_ref(),
+            cfg,
+            &captured_scales,
+            wp.inner.weight_scales(),
+            wp.inner.per_channel_weight_scales(),
+        ))
+    } else {
+        None
+    };
+
     let (commitment, inner) = verilm_prover::commit_minimal(
         all_retained,
         &FullBindingParams {
@@ -731,7 +775,7 @@ fn commit_minimal_from_captures(
         final_res,
         captured_scales,
         captured_x_attn,
-        None,
+        kv_transcripts,
     );
 
     Ok(MinimalBatchStateHandle {
@@ -792,7 +836,7 @@ impl PackedBatchStateHandle {
     }
 
     fn kv_roots_hex(&self) -> Vec<String> {
-        Vec::new()
+        self.commitment.kv_roots.iter().map(hex::encode).collect()
     }
 
     #[pyo3(signature = (token_index, layer_indices=None, output_text=None))]
@@ -854,7 +898,7 @@ impl PackedBatchStateHandle {
             if self.rich_prefix || self.deep_prefix { Some(provider.as_ref()) } else { None };
         Ok(verilm_prover::open_v4_packed(
             &self.inner, token_index, provider.as_ref(), provider.config(),
-            provider.weight_scales(), bridge.as_ref(), tail.as_ref(), layer_filter,
+            provider.weight_scales(), provider.per_channel_weight_scales(), bridge.as_ref(), tail.as_ref(), layer_filter,
             emb_lookup, self.deep_prefix,
         ))
     }
@@ -932,7 +976,29 @@ fn commit_minimal_packed(
     }).transpose()?;
 
     // Extract scales via buffer protocol (numpy array → one bulk memcpy).
-    let packed_scales = extract_f32_vec(packed_scales)?;
+    // Drain output is in call order: for each (fwd, layer), 4 groups of
+    // batch_size values. Rearrange to per-token layout: (token, layer, proj).
+    let drain_scales = extract_f32_vec(packed_scales)?;
+    let n_tokens: usize = fwd_batch_sizes.iter().sum();
+    let mut packed_scales = vec![0f32; n_tokens * n_layers * 4];
+    {
+        let mut cursor = 0usize;
+        let mut token_offset = 0usize;
+        for &batch_size in &fwd_batch_sizes {
+            for l in 0..n_layers {
+                // 4 projections, each with batch_size values
+                for proj in 0..4usize {
+                    for b in 0..batch_size {
+                        let t = token_offset + b;
+                        packed_scales[(t * n_layers + l) * 4 + proj] = drain_scales[cursor];
+                        cursor += 1;
+                    }
+                }
+            }
+            token_offset += batch_size;
+        }
+        assert_eq!(cursor, drain_scales.len(), "scale rearrangement consumed wrong number of values");
+    }
 
     if sampling_seed.len() != 32 {
         return Err(PyValueError::new_err("sampling_seed must be exactly 32 bytes"));
@@ -1330,26 +1396,10 @@ impl CaptureHook {
             }
         };
 
-        // Handle multi-element prefill scales: reduce each to max.
-        let numel: usize = cat.call_method0("numel")?.extract()?;
-        let final_tensor = if numel != count {
-            let reduced = PyList::empty(py);
-            for item in list.iter() {
-                let n: usize = item.call_method0("numel")?.extract()?;
-                if n > 1 {
-                    let maxed = item.call_method0("max")?;
-                    reduced.append(maxed.call_method1("unsqueeze", (0i64,))?)?;
-                } else {
-                    reduced.append(item.call_method0("flatten")?)?;
-                }
-            }
-            torch_mod.call_method1("cat", (&reduced,))?
-        } else {
-            cat
-        };
-
         // GPU→CPU + numpy: one bulk transfer.
-        let numpy_arr = final_tensor
+        // Per-row scales are preserved (no .max() reduction) so that each
+        // token in a prefill batch gets its own scale_a.
+        let numpy_arr = cat
             .call_method0("cpu")?
             .call_method0("numpy")?;
 
@@ -1417,6 +1467,42 @@ fn measure_corridor(
         .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
 }
 
+/// Measure the attention corridor using committed KV entries.
+///
+/// Uses `kv_entries` from the audit response (committed under `kv_roots`)
+/// directly as the KV cache. This is the production measurement path —
+/// does NOT require deep_prefix data.
+///
+/// Args:
+///     audit_binary: bytes — V4 audit in canonical binary format.
+///     key_json: str — JSON-serialized VerifierKey.
+///     scale_overrides_json: Optional[str] — JSON-serialized CorridorScaleOverrides.
+///
+/// Returns:
+///     str — JSON-serialized CorridorReport.
+#[pyfunction]
+#[pyo3(signature = (audit_binary, key_json, scale_overrides_json=None))]
+fn measure_corridor_committed_kv(
+    audit_binary: &[u8],
+    key_json: &str,
+    scale_overrides_json: Option<&str>,
+) -> PyResult<String> {
+    let key: VerifierKey = serde_json::from_str(key_json)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize key: {}", e)))?;
+    let response = verilm_core::serialize::deserialize_v4_audit(audit_binary)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize audit: {}", e)))?;
+    let overrides = scale_overrides_json
+        .map(|json| {
+            serde_json::from_str::<verilm_verify::corridor::CorridorScaleOverrides>(json)
+                .map_err(|e| PyValueError::new_err(format!("failed to deserialize scale overrides: {}", e)))
+        })
+        .transpose()?;
+    let report = verilm_verify::corridor::measure_corridor_committed_kv(&key, &response, overrides.as_ref())
+        .map_err(|e| PyValueError::new_err(format!("corridor measurement failed: {}", e)))?;
+    serde_json::to_string(&report)
+        .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+}
+
 #[pymodule]
 fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(commit_minimal_from_captures, m)?)?;
@@ -1432,6 +1518,7 @@ fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(commit_minimal_packed, m)?)?;
     m.add_class::<PackedBatchStateHandle>()?;
     m.add_function(wrap_pyfunction!(measure_corridor, m)?)?;
+    m.add_function(wrap_pyfunction!(measure_corridor_committed_kv, m)?)?;
     m.add_class::<CaptureHook>()?;
     m.add_function(wrap_pyfunction!(verify_input_tokenization, m)?)?;
     Ok(())

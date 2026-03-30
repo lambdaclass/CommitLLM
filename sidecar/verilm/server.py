@@ -102,9 +102,8 @@ class VerifiedInferenceServer:
         self._adapter_hash = self._compute_adapter_hash(model)
         self._eos_token_id = self._extract_eos_token_id(llm)
 
-        # Quantization fields (#5-7).
-        self._quant_family = self._extract_quant_family(model)
-        self._scale_derivation = self._extract_scale_derivation(model)
+        # Quantization fields (#5-7) — quant_family/scale_derivation deferred
+        # until _weight_provider is available (initialized after this block).
         self._quant_block_size = self._extract_quant_block_size(model)
 
         # Architecture fields (#8).
@@ -117,6 +116,14 @@ class VerifiedInferenceServer:
         self._rope_theta = arch.get("rope_theta")
 
         self.buf = get_capture_buffer()
+
+        # x_attn capture for committed KV transcript derivation.
+        # When enabled, the QKV projection input (x_attn_i8) is captured
+        # per layer per forward pass, allowing the Rust commit engine to
+        # derive post-RoPE K/V via deterministic INT8 matmul + dequant.
+        # On by default — required for kv_roots in the commitment.
+        # Disable with VERILM_CAPTURE_X_ATTN=0.
+        self.buf._capture_x_attn = os.environ.get("VERILM_CAPTURE_X_ATTN", "1") == "1"
 
         # Initialize pinned CPU slab for o_proj D2H (minimal mode).
         if cap._hidden_size > 0:
@@ -154,6 +161,14 @@ class VerifiedInferenceServer:
                     f"manifest={self._weight_hash}. Model identity not bound."
                 )
             logger.info("WeightProvider R_W bound: %s", provider_rw)
+
+        # Quantization fields deferred from above — need _weight_provider.
+        if self._weight_provider is not None:
+            self._quant_family = self._weight_provider.quant_family()
+            self._scale_derivation = self._weight_provider.scale_derivation()
+        else:
+            self._quant_family = self._extract_quant_family(model)
+            self._scale_derivation = self._extract_scale_derivation(model)
 
     def _compute_tokenizer_hash(self, llm) -> str:
         """SHA-256 of full tokenizer identity (vocab + normalizer + pre-tokenizer + added tokens).
@@ -738,8 +753,11 @@ class VerifiedInferenceServer:
 
         n_prompt_tokens = len(prompt_token_ids)
 
+        # Packed commit is faster but does not support x_attn (KV transcript).
+        # Fall back to non-packed when x_attn is captured.
         use_packed = os.environ.get("VERILM_PACKED_COMMIT", "1") == "1"
-        if use_packed:
+        has_x_attn = bool(x_attn_inputs)
+        if use_packed and not has_x_attn:
             state = self._commit_minimal_packed(
                 o_inputs, scales, n_fwd, n_layers, fwd_batch_sizes,
                 all_token_ids, prompt, seed, manifest, final_residuals_raw,
@@ -812,9 +830,9 @@ class VerifiedInferenceServer:
 
         Args:
             o_inputs: list of CPU tensors (one per o_proj call, n_fwd * n_layers).
-            scales: numpy float32 array of pre-extracted scale values (one per
-                    matmul call, n_fwd * n_layers * 4). Already bulk-transferred
-                    from GPU at drain time.
+            scales: numpy float32 array of per-row scale values. Per-row means
+                    prefill calls contribute batch_size values per projection.
+                    Already bulk-transferred from GPU at drain time.
             x_attn_inputs: optional list of CPU tensors (one per qkv_proj call,
                     n_fwd * n_layers). Used for precision corridor measurement.
         """
@@ -865,9 +883,9 @@ class VerifiedInferenceServer:
 
         Args:
             o_inputs: list of CPU tensors (one per o_proj call, n_fwd * n_layers).
-            scales: numpy float32 array of pre-extracted scale values (one per
-                    matmul call, n_fwd * n_layers * 4). Already bulk-transferred
-                    from GPU at drain time — no per-element extraction needed.
+            scales: numpy float32 array of per-row scale values. Per-row means
+                    prefill calls contribute batch_size values per projection.
+                    Already bulk-transferred from GPU at drain time.
         """
         import numpy as np
         import verilm_rs
@@ -957,6 +975,7 @@ class VerifiedInferenceServer:
         layer_indices: List[int],
         tier: str = "routine",
         binary: bool = True,
+        deep_prefix: bool = False,
     ):
         """Open an audit proof.
 
@@ -969,6 +988,7 @@ class VerifiedInferenceServer:
             layer_indices: which layers to open. The verifier chooses.
             tier: "routine" (shell checks) or "full" (shell + attention replay).
             binary: if True (default), return bincode+zstd bytes. False for JSON debug.
+            deep_prefix: if True, open prefix tokens for deep-prefix replay.
         """
         entry = self._audit_store.get(request_id)
         if entry is None:
@@ -979,6 +999,7 @@ class VerifiedInferenceServer:
             raise KeyError(f"Audit state expired for: {request_id}")
 
         state = entry["state"]
+        state.deep_prefix = deep_prefix
         output_text = entry.get("output_text")
 
         if binary:
@@ -1049,6 +1070,7 @@ def create_app(llm, **kwargs):
                 layer_indices=request.get("layer_indices", []),
                 tier=request.get("tier", "routine"),
                 binary=use_binary,
+                deep_prefix=request.get("deep_prefix", False),
             )
             # Binary response returns bytes.
             if isinstance(result, (bytes, memoryview)):
@@ -1056,10 +1078,12 @@ def create_app(llm, **kwargs):
                     content=bytes(result),
                     media_type="application/octet-stream",
                 )
-            # JSON V4 returns string.
+            # JSON V4 returns a canonical JSON string produced by Rust.
+            # Keep it opaque here so verifier-facing JSON paths can consume
+            # the exact bytes instead of a Python parse/re-emit copy.
             if isinstance(result, str):
-                return JSONResponse(
-                    json.loads(result),
+                return Response(
+                    content=result,
                     media_type="application/json",
                 )
             return Response(
