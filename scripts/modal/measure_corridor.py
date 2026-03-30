@@ -244,6 +244,106 @@ def _diagnose_model_scales(llm, n_layers):
     print(f"\n{'='*70}\n")
 
 
+def _diagnose_scale_a_semantics(llm, n_layers, buf, server):
+    """One-shot diagnostic: capture the raw o_proj input + scale tensor.
+
+    Uses a module forward pre-hook on layer 0's o_proj to see the float
+    attention output, then manually quantizes it to check scale semantics.
+    Does NOT touch cutlass_scaled_mm or the capture pipeline.
+    """
+    import torch
+
+    print(f"\n{'='*70}")
+    print("DIAGNOSTIC: scale_a semantics for o_proj")
+    print(f"{'='*70}")
+
+    model = llm.llm_engine.model_executor.driver_worker.model_runner.model
+    layer0 = model.model.layers[0]
+    o_proj = layer0.self_attn.o_proj
+
+    print(f"  o_proj type: {type(o_proj).__name__}")
+    if hasattr(o_proj, 'input_scale'):
+        print(f"  o_proj.input_scale: {o_proj.input_scale}")
+    else:
+        print("  o_proj.input_scale: not present (dynamic)")
+    if hasattr(o_proj, 'weight_scale'):
+        ws = o_proj.weight_scale
+        print(f"  o_proj.weight_scale: shape={tuple(ws.shape)}, dtype={ws.dtype}")
+
+    # Check what quantization function the module uses.
+    # In vLLM, compressed-tensors W8A8 modules call ops.dynamic_scaled_int8_quant
+    # inside forward(). We hook the module to see the float input.
+    captured = {}
+
+    def pre_hook(module, args):
+        if "a_fp" not in captured:
+            x = args[0] if isinstance(args, tuple) else args
+            captured["a_fp"] = x.detach().clone()
+
+    handle = o_proj.register_forward_pre_hook(pre_hook)
+
+    # Also hook torch.ops._C.dynamic_scaled_int8_quant to see the raw scale.
+    orig_quant = None
+    if hasattr(torch.ops._C, 'dynamic_scaled_int8_quant'):
+        orig_quant = torch.ops._C.dynamic_scaled_int8_quant
+
+        def quant_hook(*args, **kwargs):
+            result = orig_quant(*args, **kwargs)
+            if "quant_result" not in captured:
+                # result is (i8_tensor, scale_tensor)
+                if isinstance(result, tuple) and len(result) == 2:
+                    captured["quant_result"] = (
+                        result[0].detach().clone(),
+                        result[1].detach().clone(),
+                    )
+                    print(f"\n  --- dynamic_scaled_int8_quant output ---")
+                    print(f"  i8 output: shape={tuple(result[0].shape)}, dtype={result[0].dtype}")
+                    print(f"  scale: shape={tuple(result[1].shape)}, dtype={result[1].dtype}, numel={result[1].numel()}")
+                    print(f"  scale values: {result[1].flatten().cpu().tolist()[:16]}")
+            return result
+
+        torch.ops._C.dynamic_scaled_int8_quant = quant_hook
+
+    try:
+        server.chat(prompt="Hi", max_tokens=4)
+    except Exception as e:
+        print(f"  WARN: diagnostic chat failed: {e}")
+    finally:
+        handle.remove()
+        if orig_quant is not None:
+            torch.ops._C.dynamic_scaled_int8_quant = orig_quant
+
+    n = 16
+    if "a_fp" in captured:
+        a_fp = captured["a_fp"]
+        print(f"\n  --- o_proj float input (pre-quant attention output) ---")
+        print(f"  shape: {tuple(a_fp.shape)}, dtype: {a_fp.dtype}")
+        print(f"  a_fp[0,:16]: {[f'{v:.6f}' for v in a_fp[0,:n].float().cpu().tolist()]}")
+        print(f"  max(|a_fp|): {a_fp.abs().max().item():.6f}")
+        print(f"  per-tensor scale = max/127: {a_fp.abs().max().item() / 127:.8f}")
+
+        if "quant_result" in captured:
+            a_i8, raw_scale = captured["quant_result"]
+            print(f"\n  --- Quantization check ---")
+            print(f"  a_i8[0,:16]: {a_i8[0,:n].cpu().tolist()}")
+            print(f"  raw_scale shape: {tuple(raw_scale.shape)}, numel: {raw_scale.numel()}")
+            print(f"  raw_scale values: {raw_scale.flatten().cpu().tolist()[:16]}")
+
+            # Reconstruct and compare.
+            a_recon = a_i8.float() * raw_scale.float()
+            print(f"  a_recon[0,:16] (i8 * raw_scale): {[f'{v:.6f}' for v in a_recon[0,:n].cpu().tolist()]}")
+
+            # How close is recon to original?
+            diff = (a_recon.float() - a_fp.float()).abs()
+            print(f"  max |a_recon - a_fp|: {diff.max().item():.6f}")
+            print(f"  max(|a_i8|): {a_i8.abs().max().item()}")
+    else:
+        print("  WARN: pre-hook did not fire")
+
+    buf.drain_minimal()
+    print(f"{'='*70}\n")
+
+
 def _measure_one(server, wl, dc, full_layers, key_json, model_id, corridor_mode, buf, scale_overrides_json):
     """Run one workload/decode_config and return results for all token positions."""
     import json
@@ -374,10 +474,10 @@ def _run_model(model_id: str):
     weight_scales = _extract_weight_scales(llm, n_layers, cfg_dict)
     scale_overrides_json = json.dumps(weight_scales)
 
-    # ── Diagnostic: inspect model scale attributes ──
-    _diagnose_model_scales(llm, n_layers)
-
     all_results = []
+
+    # ── Diagnostic: inspect raw scale_a shape/semantics for o_proj ──
+    _diagnose_scale_a_semantics(llm, n_layers, buf, server)
 
     # ── Phase 1: Precision corridor (GPU x_attn → accurate QKV accumulators) ──
     print(f"\n{'='*70}")

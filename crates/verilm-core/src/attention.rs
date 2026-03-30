@@ -196,6 +196,69 @@ pub fn replay_attention_roped(
     a
 }
 
+/// Like [`replay_attention_roped`] but also returns the pre-quantization f64 output.
+///
+/// Returns `(a_i8, a_f64)` where `a_f64` is the raw attention output before
+/// requantization. Used by corridor diagnostics to separate V-dequant bugs
+/// from output-quantization bugs.
+pub fn replay_attention_roped_raw(
+    q_roped: &[f64],
+    kv_cache_k_roped: &[Vec<f64>],
+    kv_cache_v_deq: &[Vec<f64>],
+    scale_a: f64,
+    cfg: &ModelConfig,
+) -> (Vec<i8>, Vec<f64>) {
+    let d_head = cfg.d_head;
+    let heads_per_kv = cfg.n_q_heads / cfg.n_kv_heads;
+    let inv_sqrt_d = 1.0 / (d_head as f64).sqrt();
+    let seq_len = kv_cache_k_roped.len();
+    let inv_scale = if scale_a.abs() > 1e-30 { 1.0 / scale_a } else { 1.0 };
+
+    let mut a_i8 = vec![0i8; cfg.hidden_dim];
+    let mut a_f64 = vec![0.0f64; cfg.hidden_dim];
+
+    for qh in 0..cfg.n_q_heads {
+        let kv_head = qh / heads_per_kv;
+
+        let q_head: Vec<f64> = (0..d_head)
+            .map(|i| q_roped[qh * d_head + i])
+            .collect();
+
+        let scores: Vec<f64> = (0..seq_len)
+            .map(|t| {
+                let k_t = &kv_cache_k_roped[t];
+                let dot: f64 = (0..d_head)
+                    .map(|i| q_head[i] * k_t[kv_head * d_head + i])
+                    .sum();
+                dot * inv_sqrt_d
+            })
+            .collect();
+
+        let max_score = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let exp_scores: Vec<f64> = scores.iter().map(|&s| (s - max_score).exp()).collect();
+        let sum_exp: f64 = exp_scores.iter().sum();
+        let weights: Vec<f64> = exp_scores.iter().map(|&e| e / sum_exp).collect();
+
+        let mut head_out = vec![0.0f64; d_head];
+        for t in 0..seq_len {
+            let v_t = &kv_cache_v_deq[t];
+            for i in 0..d_head {
+                head_out[i] += weights[t] * v_t[kv_head * d_head + i];
+            }
+        }
+
+        for i in 0..d_head {
+            let idx = qh * d_head + i;
+            a_f64[idx] = head_out[i];
+            a_i8[idx] = (head_out[i] * inv_scale)
+                .round()
+                .clamp(-128.0, 127.0) as i8;
+        }
+    }
+
+    (a_i8, a_f64)
+}
+
 /// Per-element diff statistics between claimed and replayed attention outputs.
 ///
 /// Used by corridor measurement to characterize the FP16-vs-f64 divergence

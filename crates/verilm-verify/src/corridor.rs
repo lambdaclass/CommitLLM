@@ -190,19 +190,61 @@ fn measure_roped(
 
             let (q_roped, _, _) =
                 dequant_rope_qkv(key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, j, scale_overrides);
-            let replayed = verilm_core::attention::replay_attention_roped(
-                &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
-            );
-            // Targeted diagnostic: layer 0 token 1 — claimed vs replayed
+
+            // Targeted diagnostic: layer 0 token 1 — V-bound check
             if layer_idx == 0 && j == 1 {
+                let (replayed, a_f64) = verilm_core::attention::replay_attention_roped_raw(
+                    &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
+                );
                 let n = 16;
-                eprintln!("[DIAG] layer=0 pos=1 scale_a={:.8} inv_scale={:.8}",
-                    rs.scale_a, if rs.scale_a.abs() > 1e-30 { 1.0 / rs.scale_a } else { 1.0 });
-                eprintln!("  claimed  a[..{}]: {:?}", n, &rs.a[..n]);
-                eprintln!("  replayed a[..{}]: {:?}", n, &replayed[..n]);
-                eprintln!("  q_roped[..8]: {:?}", &q_roped[..8]);
+                // V min/max across all KV cache entries for head 0 (first d_head dims)
+                let d_head = cfg.d_head;
+                let mut v_min = vec![f64::INFINITY; d_head];
+                let mut v_max = vec![f64::NEG_INFINITY; d_head];
+                for v_t in &kv_v {
+                    for i in 0..d_head.min(v_t.len()) {
+                        if v_t[i] < v_min[i] { v_min[i] = v_t[i]; }
+                        if v_t[i] > v_max[i] { v_max[i] = v_t[i]; }
+                    }
+                }
+                eprintln!("\n[DIAG-VBOUND] layer=0 pos=1 scale_a={:.8} kv_entries={}", rs.scale_a, kv_v.len());
+                eprintln!("  a_f64[..{}]:  {:?}", n, &a_f64[..n].iter().map(|v| format!("{:.6}", v)).collect::<Vec<_>>());
+                eprintln!("  a_i8_rep[..{}]: {:?}", n, &replayed[..n]);
+                eprintln!("  a_i8_gpu[..{}]: {:?}", n, &rs.a[..n]);
+                eprintln!("  V_min[..{}]:  {:?}", n, &v_min[..n].iter().map(|v| format!("{:.4}", v)).collect::<Vec<_>>());
+                eprintln!("  V_max[..{}]:  {:?}", n, &v_max[..n].iter().map(|v| format!("{:.4}", v)).collect::<Vec<_>>());
+                // Classification: does a_f64[i] lie within [V_min[i], V_max[i]]?
+                let mut oob = 0;
+                for i in 0..n {
+                    if a_f64[i] < v_min[i] || a_f64[i] > v_max[i] {
+                        oob += 1;
+                    }
+                }
+                eprintln!("  out-of-V-bound: {}/{} dims", oob, n);
+                // Also check: what scale_a would make replayed match claimed?
+                // For each element where claimed != 0: implied_scale = a_f64 / claimed
+                let mut implied_scales: Vec<f64> = Vec::new();
+                for i in 0..n {
+                    if rs.a[i] != 0 {
+                        implied_scales.push(a_f64[i] / rs.a[i] as f64);
+                    }
+                }
+                if !implied_scales.is_empty() {
+                    let median = {
+                        let mut s = implied_scales.clone();
+                        s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        s[s.len() / 2]
+                    };
+                    eprintln!("  implied_scale (median of a_f64/a_gpu): {:.8} vs actual scale_a: {:.8} (ratio: {:.4})",
+                        median, rs.scale_a as f64, median / rs.scale_a as f64);
+                }
+                all_stats.push(measure_attention_diff(&rs.a, &replayed, layer_idx, j)?);
+            } else {
+                let replayed = verilm_core::attention::replay_attention_roped(
+                    &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
+                );
+                all_stats.push(measure_attention_diff(&rs.a, &replayed, layer_idx, j)?);
             }
-            all_stats.push(measure_attention_diff(&rs.a, &replayed, layer_idx, j)?);
         }
 
         // Opened token
@@ -218,10 +260,53 @@ fn measure_roped(
             kv_k.push(k_roped);
             kv_v.push(v_deq);
 
-            let replayed = verilm_core::attention::replay_attention_roped(
-                &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
-            );
-            all_stats.push(measure_attention_diff(&rs.a, &replayed, layer_idx, pos)?);
+            // VBOUND diagnostic for opened token at layer 0
+            if layer_idx == 0 {
+                let (replayed, a_f64) = verilm_core::attention::replay_attention_roped_raw(
+                    &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
+                );
+                let n = 16;
+                let d_head = cfg.d_head;
+                let mut v_min = vec![f64::INFINITY; d_head];
+                let mut v_max = vec![f64::NEG_INFINITY; d_head];
+                for v_t in &kv_v {
+                    for i in 0..d_head.min(v_t.len()) {
+                        if v_t[i] < v_min[i] { v_min[i] = v_t[i]; }
+                        if v_t[i] > v_max[i] { v_max[i] = v_t[i]; }
+                    }
+                }
+                let mut oob = 0;
+                for i in 0..n {
+                    if a_f64[i] < v_min[i] || a_f64[i] > v_max[i] { oob += 1; }
+                }
+                let mut implied_scales: Vec<f64> = Vec::new();
+                for i in 0..n {
+                    if rs.a[i] != 0 {
+                        implied_scales.push(a_f64[i] / rs.a[i] as f64);
+                    }
+                }
+                let median = if !implied_scales.is_empty() {
+                    let mut s = implied_scales.clone();
+                    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    s[s.len() / 2]
+                } else { 0.0 };
+                eprintln!("\n[DIAG-VBOUND-OPENED] layer=0 pos={} scale_a={:.8} kv_entries={}",
+                    pos, rs.scale_a, kv_v.len());
+                eprintln!("  a_f64[..{}]:  {:?}", n, &a_f64[..n].iter().map(|v| format!("{:.6}", v)).collect::<Vec<_>>());
+                eprintln!("  a_i8_rep[..{}]: {:?}", n, &replayed[..n]);
+                eprintln!("  a_i8_gpu[..{}]: {:?}", n, &rs.a[..n]);
+                eprintln!("  out-of-V-bound: {}/{} dims", oob, n);
+                if !implied_scales.is_empty() {
+                    eprintln!("  implied_scale: {:.8} vs scale_a: {:.8} (ratio: {:.4})",
+                        median, rs.scale_a as f64, median / rs.scale_a as f64);
+                }
+                all_stats.push(measure_attention_diff(&rs.a, &replayed, layer_idx, pos)?);
+            } else {
+                let replayed = verilm_core::attention::replay_attention_roped(
+                    &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
+                );
+                all_stats.push(measure_attention_diff(&rs.a, &replayed, layer_idx, pos)?);
+            }
         }
     }
 
@@ -242,25 +327,7 @@ fn dequant_rope_qkv(
     position: usize,
     overrides: Option<&CorridorScaleOverrides>,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    // Targeted diagnostic: layer 0, position 1, first 8 channels.
-    // Prints multiple dequant formulas so one run identifies the right one.
-    let diag = layer_idx == 0 && position == 1 && overrides.is_some();
-
     let (q_f64, k_f64, v_f64) = if let Some(ovr) = overrides {
-        if diag {
-            let n = 8;
-            let sx = scale_x_attn as f64;
-            eprintln!("\n[DIAG] layer=0 pos=1 scale_x_attn={:.8}", scale_x_attn);
-            eprintln!("  q_acc[..{}]: {:?}", n, &q_acc[..n]);
-            eprintln!("  wq_scale[..{}]: {:?}", n, &ovr.wq[0][..n]);
-            eprintln!("  acc*sx*sw:  {:?}", (0..n).map(|i| q_acc[i] as f64 * sx * ovr.wq[0][i] as f64).collect::<Vec<_>>());
-            eprintln!("  acc*sx/sw:  {:?}", (0..n).map(|i| q_acc[i] as f64 * sx / ovr.wq[0][i] as f64).collect::<Vec<_>>());
-            eprintln!("  acc*sw:     {:?}", (0..n).map(|i| q_acc[i] as f64 * ovr.wq[0][i] as f64).collect::<Vec<_>>());
-            eprintln!("  acc/sw:     {:?}", (0..n).map(|i| q_acc[i] as f64 / ovr.wq[0][i] as f64).collect::<Vec<_>>());
-            eprintln!("  q_acc dims: {} (expect hidden_dim={})", q_acc.len(), key.config.hidden_dim);
-            eprintln!("  k_acc dims: {} (expect kv_dim={})", k_acc.len(), key.config.kv_dim);
-            eprintln!("  v_acc dims: {} (expect kv_dim={})", v_acc.len(), key.config.kv_dim);
-        }
         let q = verilm_core::rope::dequantize_acc_per_channel(
             q_acc, &ovr.wq[layer_idx], scale_x_attn,
         );
