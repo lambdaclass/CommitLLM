@@ -27,7 +27,6 @@ image = (
         "PATH": "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
         "VERILM_CAPTURE": "1",
-        "VERILM_PACKED_COMMIT": "0",  # Use unpacked path for x_attn capture
     })
     .pip_install("vllm>=0.8", "torch", "numpy", "fastapi", "maturin")
     .add_local_dir("sidecar", remote_path="/opt/verilm", copy=True)
@@ -361,12 +360,18 @@ def _measure_one(server, wl, dc, full_layers, key_json, model_id, corridor_mode,
     if entry is None:
         print(f"  WARN: no audit entry for {request_id}, skipping")
         return results
-    entry["state"].deep_prefix = True
 
+    # Indexing: committed tokens = all_token_ids[1:]
+    #   0 .. n_prompt-2         = prompt-side prefill (structurally incomplete KV)
+    #   n_prompt-1              = first generated token (last prefill row)
+    #   n_prompt .. n_tokens-1  = decode tokens (full KV context)
+    n_prompt = chat_r["commitment"]["n_prompt_tokens"]
     positions = sorted(set([
-        1,
-        max(1, n_tokens // 2),
-        max(1, n_tokens - 1),
+        n_prompt - 1,               # first generated token (last prefill row)
+        n_prompt,                   # first decode token
+        max(n_prompt, n_tokens // 4),   # early decode
+        max(n_prompt, n_tokens // 2),   # mid-sequence decode
+        max(n_prompt, n_tokens - 1),    # final decode
     ]))
 
     for pos in positions:
@@ -382,9 +387,6 @@ def _measure_one(server, wl, dc, full_layers, key_json, model_id, corridor_mode,
             )
         except KeyError:
             chat_r2 = server.chat(prompt=wl["prompt"], **params_kw)
-            entry2 = server._audit_store.get(chat_r2["request_id"])
-            if entry2:
-                entry2["state"].deep_prefix = True
             audit_binary = server.audit(
                 request_id=chat_r2["request_id"],
                 token_index=pos,
@@ -394,7 +396,7 @@ def _measure_one(server, wl, dc, full_layers, key_json, model_id, corridor_mode,
             )
 
         import verilm_rs
-        report_json = verilm_rs.measure_corridor(
+        report_json = verilm_rs.measure_corridor_committed_kv(
             audit_binary, key_json, scale_overrides_json,
         )
         report = json.loads(report_json)
@@ -406,6 +408,7 @@ def _measure_one(server, wl, dc, full_layers, key_json, model_id, corridor_mode,
             "decode_config": dc["name"],
             "max_tokens": wl["max_tokens"],
             "n_tokens": n_tokens,
+            "n_prompt_tokens": n_prompt,
             "token_position": pos,
             "global_linf": report["global_linf"],
             "n_measurements": len(report["measurements"]),
@@ -479,52 +482,49 @@ def _run_model(model_id: str):
     # ── Diagnostic: inspect raw scale_a shape/semantics for o_proj ──
     _diagnose_scale_a_semantics(llm, n_layers, buf, server)
 
-    # ── Phase 1: Precision corridor (GPU x_attn → accurate QKV accumulators) ──
+    # ── Measure attention corridor on committed-KV binary path ──
+    # x_attn capture is on by default, committed KV always present.
+    # Measures GPU FP16 a_i8 vs verifier f64 replay from committed KV.
     print(f"\n{'='*70}")
-    print("PHASE 1: Precision corridor (captured x_attn + per-channel scales)")
+    print("Committed-KV binary corridor (x_attn + per-channel scales)")
     print(f"{'='*70}")
-    buf._capture_x_attn = True
-    for wl in WORKLOADS[:3]:  # short, medium, long only
-        for dc in DECODE_CONFIGS[:1]:  # greedy only for precision
-            label = f"{wl['name']}/{dc['name']}"
-            print(f"\n--- {label} (max_tokens={wl['max_tokens']}) ---")
-            has_xa = hasattr(buf, '_capture_x_attn') and buf._capture_x_attn
-            print(f"  x_attn capture: {has_xa}")
-            results = _measure_one(
-                server, wl, dc, full_layers, key_json, model_id,
-                "precision", buf, scale_overrides_json,
-            )
-            all_results.extend(results)
-
-    # ── Phase 2: Verifier replay corridor (bridge-derived QKV accumulators) ──
-    print(f"\n{'='*70}")
-    print("PHASE 2: Verifier replay corridor (bridge-derived + per-channel scales)")
-    print(f"{'='*70}")
-    buf._capture_x_attn = False
-    for wl in WORKLOADS[:3]:  # short, medium, long
-        for dc in DECODE_CONFIGS[:1]:  # greedy only
+    for wl in WORKLOADS:
+        for dc in DECODE_CONFIGS[:1]:  # greedy only for corridor
             label = f"{wl['name']}/{dc['name']}"
             print(f"\n--- {label} (max_tokens={wl['max_tokens']}) ---")
             results = _measure_one(
                 server, wl, dc, full_layers, key_json, model_id,
-                "replay", buf, scale_overrides_json,
+                "committed_kv", buf, scale_overrides_json,
             )
             all_results.extend(results)
 
     # ── Summary ──
     print(f"\n{'='*70}")
-    print("COMPARISON SUMMARY")
+    print("CORRIDOR SUMMARY")
     print(f"{'='*70}")
-    for mode in ["precision", "replay"]:
-        mode_results = [r for r in all_results if r["corridor_mode"] == mode]
-        if mode_results:
-            max_linf = max(r["global_linf"] for r in mode_results)
-            print(f"\n  {mode:>10} corridor: max L-inf = {max_linf}")
-            for r in mode_results:
-                print(
-                    f"    {r['workload']:>8s} pos={r['token_position']:4d}  "
-                    f"L-inf={r['global_linf']:3d}"
-                )
+    if all_results:
+        max_linf = max(r["global_linf"] for r in all_results)
+        print(f"\n  Global max L-inf: {max_linf}")
+
+        # Category breakdown: first-gen vs decode
+        first_gen = [r for r in all_results
+                     if r["token_position"] == r.get("n_prompt_tokens", 1) - 1]
+        decode = [r for r in all_results
+                  if r["token_position"] >= r.get("n_prompt_tokens", 1)]
+        if first_gen:
+            print(f"\n  First generated token: max L-inf = {max(r['global_linf'] for r in first_gen)}")
+        if decode:
+            print(f"  Decode tokens:         max L-inf = {max(r['global_linf'] for r in decode)}")
+
+        # Per-workload
+        print(f"\n  Per-workload/position:")
+        for r in all_results:
+            pl = r.get("per_layer_max_linf", [])
+            worst_layer = max(range(len(pl)), key=lambda i: pl[i]) if pl else -1
+            print(
+                f"    {r['workload']:>12s} pos={r['token_position']:4d}  "
+                f"L-inf={r['global_linf']:3d}  worst_layer={worst_layer}"
+            )
 
     # ── Save structured artifacts ──
     artifact_path = "/tmp/corridor_results.json"
