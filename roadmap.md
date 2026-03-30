@@ -10,10 +10,11 @@ The kept canonical sampled path already exists in the live server. At this point
 
 Current release critical path:
 1. freeze the canonical verifier and key-provenance story
-2. close the remaining attention story and measure the attention corridor
-3. finish fail-closed prover/live-server hardening
-4. clean the public product/docs surface for the first release
-5. only then expand ecosystem and integrations
+2. close the attention protocol gap: committed KV transcript (#72), bridge trust boundary (#78), quantization metadata (#77), KV provenance checks (#76)
+3. measure the attention corridor with structurally complete replay (#28), then set evidence-based tau
+4. finish fail-closed prover/live-server hardening
+5. clean the public product/docs surface for the first release — including audit tier separation (#79) and guarantee language (#80)
+6. only then expand ecosystem and integrations
 
 ## Verifier Finalization
 
@@ -24,7 +25,13 @@ Current release critical path:
 6. [ ] Handle verifier-key rotation explicitly, done when key versions are tracked and old receipts remain auditable with the correct historical key.
 5. [ ] Use verifier-secret randomness in deep-audit batching, done when any deep-audit batching or compression uses verifier-only randomness that the prover cannot predict before commitment.
 7. [ ] Run an explicit hidden-trust-assumptions review, done when exact, approximate, statistical, fail-closed, and out-of-scope trust assumptions are enumerated and checked against the code and claims.
-72. [ ] Add bounded KV-cache commitment for arbitrary-token attention replay, done when the protocol supports committed/openable prior-token KV data so that any single token's attention can be replayed in routine audits, not just token 0 or deep-prefix co-opened tokens. This is a protocol extension requiring new wire format fields and prover-side KV provenance.
+72. [ ] Add committed KV transcript with kv_root covering full causal prefix, done when the protocol commits post-RoPE K/V for every (layer, position) including prompt and generated tokens under a separate kv_root, and audit openings can open the challenged token plus its causal K/V prefix for exact-attention replay. Current deep-prefix replay is structurally incomplete: `server.py` commits generated tokens only, `corridor.rs` and `canonical.rs` build kv_k/kv_v only from generated-prefix shell openings, so prompt/prefill KV is absent from replay. Partial short-term: add prompt KV capture for measurement-only path without changing the production commit format.
+76. [ ] Bind committed KV to real computation via provenance checks, done when the prover cannot commit arbitrary K/V — sampled or batched Freivalds checks verify that committed K/V are consistent with the committed Wk/Wv weights and the bridge inputs that feed them.
+77. [ ] Make quantization semantics first-class protocol data, done when the protocol commits quantization metadata (quant family, scale derivation, block/group size, exact scale layout for K/V and attention output) and the replay path uses it faithfully. Current replay treats scale_a as scalar-per-tensor; if the GPU uses per-token or grouped scales, the protocol must stop pretending otherwise.
+78. [ ] Fix the bridge trust boundary for attention, done when audited tokens/layers either commit and open actual bridge outputs (x_attn_i8, scale_x_attn) so the verifier can check them, or the protocol defines a canonical bridge so verifier and prover derive the same x_attn_i8. Without this, QKV can diverge before attention starts.
+79. [ ] Explicitly separate audit tiers in the protocol, done when the protocol defines distinct tiers — receipt-only, routine approximate, routine exact-attention, deep/full — with explicit coverage and cost for each, rather than blurring them.
+80. [ ] Update guarantee language to match actual verification boundaries, done when the protocol docs clearly separate exact (shell/tail/bindings), statistical (sampled provenance checks), approximate (FP attention replay), and fail-closed (versioning/unsupported paths) guarantees.
+81. [ ] Optional: canonical deterministic attention arithmetic, done when a canonical attention kernel or arithmetic specification removes the FP16-vs-replay corridor entirely. Without this, even perfect kv_root only fixes provenance, not FP precision mismatch.
 65. [ ] Remove the legacy verifier after a soak period, done when `verify_v4_legacy` and any rollback-only verifier scaffolding are deleted and the canonical verifier is the only maintained trusted verification path.
 3. [ ] Add at least one independent non-Rust verifier consumer, done when some non-Rust implementation can consume the golden vectors and reproduce expected verification results.
 
@@ -41,7 +48,7 @@ Current release critical path:
 ## Benchmarks / Performance
 
 16. [ ] Define a stable benchmark protocol, done when workload corpus, model/settings, warmup policy, hardware class, remote environment, and reporting format are fixed for milestone comparisons.
-28. [ ] Measure the attention corridor empirically, done when the FP16/BF16-versus-replay disagreement envelope is measured on real workloads and turned into an evidence-based acceptance threshold.
+28. [ ] Measure the attention corridor empirically, done when the FP16/BF16-versus-replay disagreement envelope is measured on real workloads and turned into an evidence-based acceptance threshold. Blocked: current corridor numbers are structurally invalid because the replay cache is missing prompt/prefill KV entries (only generated-token shells are committed). Short-term unblock: add prompt KV capture to the measurement-only path. Long-term: requires committed KV transcript (#72).
 17. [ ] Record benchmark baselines before and after each runtime-affecting milestone, done when every change to the live sampler, final-token boundary, deep-audit path, sync/capture behavior, or retained-state layout has a before/after benchmark entry.
 18. [ ] Run periodic remote-GPU benchmark checkpoints, done when milestone comparisons are repeated on the same representative remote GPU class rather than relying only on local numbers.
 19. [ ] Treat unexplained regressions as blockers, done when each regression is either explained or explicitly recorded as an accepted protocol-strengthening tradeoff before further work proceeds.
