@@ -660,14 +660,18 @@ class VerifiedInferenceServer:
                 f"({expected_o} = {n_fwd} fwd × {n_layers} layers). "
                 f"Counter drift or missed o_proj append."
             )
-        if len(scales) != call_count:
-            raise RuntimeError(
-                f"scales count ({len(scales)}) != call_count ({call_count}). "
-                f"Scale buffer out of sync."
-            )
         fwd_batch_sizes = [
             o_inputs[i * n_layers].shape[0] for i in range(n_fwd)
         ]
+        # Per-row scales: prefill calls contribute batch_size values each.
+        expected_scales = sum(
+            bs * cap.PROJS_PER_LAYER * n_layers for bs in fwd_batch_sizes
+        )
+        if len(scales) != expected_scales:
+            raise RuntimeError(
+                f"scales count ({len(scales)}) != expected ({expected_scales}). "
+                f"Scale buffer out of sync (fwd_batch_sizes={fwd_batch_sizes})."
+            )
         n_tokens = sum(fwd_batch_sizes)
 
         # EOS trailing forward pass trim.
