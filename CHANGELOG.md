@@ -2,6 +2,18 @@
 
 This changelog tracks the kept canonical VeriLM protocol and its major implementation milestones.
 
+Historical references below to “roadmap #N” refer to the pre-2026-03-30 roadmap numbering. On 2026-03-30 the roadmap was renumbered into a single linear open-items-only sequence.
+
+## 2026-03-30
+
+### Added
+
+- Production RoPE-aware deep-prefix attention replay landed in the canonical verifier and corridor tooling. `VerifierKey.rope_aware_replay` now dispatches between toy/reference replay and a production path that dequantizes Q/K/V accumulators with activation and weight scales, applies RoPE at each position, and replays attention in f64 post-RoPE space. The deep-prefix path covers both prefix tokens and the opened token, and tests cover honest pass plus fake-`a` rejection on the roped path.
+
+### Changed
+
+- The roadmap was renumbered into a single linear sequence of remaining tasks, and completed items were removed from `roadmap.md` so the roadmap is now strictly an open-items tracker while this changelog carries completed milestones.
+
 ## 2026-03-29
 
 ### Added
