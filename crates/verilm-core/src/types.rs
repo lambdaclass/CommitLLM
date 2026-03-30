@@ -548,6 +548,17 @@ pub struct VerifierKey {
     /// Empty for toy model (unit scale) or native INT8 weights.
     pub weight_scales: Vec<Vec<f32>>,
 
+    /// Per-channel weight scales for native INT8 (W8A8) models.
+    /// `per_channel_weight_scales[layer][matrix_type_idx]` is a Vec<f32> of
+    /// length `output_dim` for that matrix type. Each channel has its own scale:
+    /// `output_f64[i] = acc_i32[i] * scale_w[i] * scale_x`.
+    ///
+    /// Populated during keygen when `weight_scale` tensors are found alongside
+    /// INT8 weight tensors. Empty for keygen-quantized (BF16/FP16→INT8) models
+    /// and for toy models.
+    #[serde(default)]
+    pub per_channel_weight_scales: Vec<Vec<Vec<f32>>>,
+
     /// RMSNorm epsilon (e.g. 1e-5 for Llama-family models).
     pub rmsnorm_eps: f64,
 
@@ -603,8 +614,11 @@ impl VerifierKey {
         &self.v_vectors[layer][idx]
     }
 
-    /// Get the weight quantization scale for a given layer and matrix type.
+    /// Get the per-tensor weight quantization scale for a given layer and matrix type.
     /// Returns 0.0 if weight_scales is empty (native INT8 / toy model).
+    ///
+    /// For native INT8 (W8A8) models, prefer [`per_channel_scales_for`] which
+    /// returns per-channel scales when available.
     pub fn weight_scale_for(&self, layer: usize, mt: MatrixType) -> f32 {
         if self.weight_scales.is_empty() || layer >= self.weight_scales.len() {
             return 0.0;
@@ -615,6 +629,36 @@ impl VerifierKey {
             return 0.0;
         }
         self.weight_scales[layer][idx]
+    }
+
+    /// Get per-channel weight scales for a given layer and matrix type.
+    ///
+    /// Returns `Some(&[f32])` of length `output_dim` if per-channel scales
+    /// are available (W8A8 native INT8 models). Returns `None` if only
+    /// per-tensor scales exist (keygen-quantized BF16/FP16) or no scales
+    /// exist (toy model).
+    pub fn per_channel_scales_for(&self, layer: usize, mt: MatrixType) -> Option<&[f32]> {
+        if self.per_channel_weight_scales.is_empty()
+            || layer >= self.per_channel_weight_scales.len()
+        {
+            return None;
+        }
+        let idx = MatrixType::PER_LAYER.iter().position(|&m| m == mt)
+            .expect("per_channel_scales_for: not applicable for LmHead");
+        if idx >= self.per_channel_weight_scales[layer].len() {
+            return None;
+        }
+        let scales = &self.per_channel_weight_scales[layer][idx];
+        if scales.is_empty() {
+            None
+        } else {
+            Some(scales)
+        }
+    }
+
+    /// Returns true if this key has per-channel weight scales (W8A8 native INT8).
+    pub fn has_per_channel_scales(&self) -> bool {
+        !self.per_channel_weight_scales.is_empty()
     }
 }
 

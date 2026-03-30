@@ -82,6 +82,21 @@ pub fn dequant_add_residual(acc_i32: &[i32], scale_w: f32, scale_x: f32, residua
     }
 }
 
+/// Dequantize i32 accumulator with per-channel weight scales and add to residual.
+///
+/// Computes: `residual[i] += acc_i32[i] * scale_w[i] * scale_x`
+pub fn dequant_add_residual_per_channel(
+    acc_i32: &[i32],
+    scale_w: &[f32],
+    scale_x: f32,
+    residual: &mut [f64],
+) {
+    let sx = scale_x as f64;
+    for ((res, &acc), &sw) in residual.iter_mut().zip(acc_i32.iter()).zip(scale_w.iter()) {
+        *res += (acc as f64) * (sw as f64) * sx;
+    }
+}
+
 /// **Canonical bridge**: dequant → residual += → RMSNorm → quantize to i8.
 ///
 /// Updates residual **in place** and returns the requantized i8 output.

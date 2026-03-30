@@ -962,19 +962,31 @@ fn dequant_rope_qkv(
     scale_x_attn: f32,
     position: usize,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    let scale_wq = key.weight_scale_for(layer_idx, MatrixType::Wq);
-    let scale_wk = key.weight_scale_for(layer_idx, MatrixType::Wk);
-    let scale_wv = key.weight_scale_for(layer_idx, MatrixType::Wv);
-    let sx = Some(scale_x_attn);
-
-    let q_f64 = verilm_core::rope::dequantize_acc(q_acc, Some(scale_wq), sx);
-    let k_f64 = verilm_core::rope::dequantize_acc(k_acc, Some(scale_wk), sx);
-    let v_f64 = verilm_core::rope::dequantize_acc(v_acc, Some(scale_wv), sx);
+    // Use per-channel weight scales (W8A8) when available, else per-tensor.
+    let q_f64 = dequant_acc(key, layer_idx, MatrixType::Wq, q_acc, scale_x_attn);
+    let k_f64 = dequant_acc(key, layer_idx, MatrixType::Wk, k_acc, scale_x_attn);
+    let v_f64 = dequant_acc(key, layer_idx, MatrixType::Wv, v_acc, scale_x_attn);
 
     let q_roped = verilm_core::rope::apply_rope_q(&q_f64, position, &key.config);
     let k_roped = verilm_core::rope::apply_rope_k(&k_f64, position, &key.config);
 
     (q_roped, k_roped, v_f64)
+}
+
+/// Dequantize i32 accumulators using per-channel or per-tensor weight scales.
+fn dequant_acc(
+    key: &VerifierKey,
+    layer_idx: usize,
+    mt: MatrixType,
+    acc: &[i32],
+    scale_x: f32,
+) -> Vec<f64> {
+    if let Some(pc_scales) = key.per_channel_scales_for(layer_idx, mt) {
+        verilm_core::rope::dequantize_acc_per_channel(acc, pc_scales, scale_x)
+    } else {
+        let scale_w = key.weight_scale_for(layer_idx, mt);
+        verilm_core::rope::dequantize_acc(acc, Some(scale_w), Some(scale_x))
+    }
 }
 
 fn init_residual_chain(ir: &[f32], key: &VerifierKey, first_scale: f32) -> (Vec<f64>, Vec<i8>) {
@@ -1033,14 +1045,9 @@ fn bridge_attn_to_ffn(
     attn_out: &[i32],
     residual: &mut Vec<f64>,
 ) -> Vec<i8> {
-    verilm_core::rmsnorm::bridge_residual_rmsnorm(
-        attn_out,
-        key.weight_scale_for(layer_idx, MatrixType::Wo),
-        rs.scale_a,
-        residual,
-        &key.rmsnorm_ffn_weights[layer_idx],
-        key.rmsnorm_eps,
-        sl.scale_x_ffn,
+    bridge_dequant_rmsnorm(
+        key, layer_idx, MatrixType::Wo, attn_out, rs.scale_a,
+        residual, &key.rmsnorm_ffn_weights[layer_idx], sl.scale_x_ffn,
     )
 }
 
@@ -1053,14 +1060,20 @@ fn check_ffn(
 ) {
     verify_freivalds(key, st, layer_idx, MatrixType::Wg, x_ffn, &sl.g);
     verify_freivalds(key, st, layer_idx, MatrixType::Wu, x_ffn, &sl.u);
-    let h = verilm_core::silu::compute_h_scaled(
-        &sl.g,
-        &sl.u,
-        key.weight_scale_for(layer_idx, MatrixType::Wg),
-        key.weight_scale_for(layer_idx, MatrixType::Wu),
-        sl.scale_x_ffn,
-        sl.scale_h,
-    );
+    let h = match (
+        key.per_channel_scales_for(layer_idx, MatrixType::Wg),
+        key.per_channel_scales_for(layer_idx, MatrixType::Wu),
+    ) {
+        (Some(pc_g), Some(pc_u)) => verilm_core::silu::compute_h_per_channel(
+            &sl.g, &sl.u, pc_g, pc_u, sl.scale_x_ffn, sl.scale_h,
+        ),
+        _ => verilm_core::silu::compute_h_scaled(
+            &sl.g, &sl.u,
+            key.weight_scale_for(layer_idx, MatrixType::Wg),
+            key.weight_scale_for(layer_idx, MatrixType::Wu),
+            sl.scale_x_ffn, sl.scale_h,
+        ),
+    };
     verify_freivalds(key, st, layer_idx, MatrixType::Wd, &h, &sl.ffn_out);
 }
 
@@ -1073,24 +1086,48 @@ fn bridge_ffn_to_next(
     next_scale: f32,
 ) -> Vec<i8> {
     if layer_idx + 1 < key.rmsnorm_attn_weights.len() {
-        verilm_core::rmsnorm::bridge_residual_rmsnorm(
-            ffn_out,
-            key.weight_scale_for(layer_idx, MatrixType::Wd),
-            sl.scale_h,
-            residual,
-            &key.rmsnorm_attn_weights[layer_idx + 1],
-            key.rmsnorm_eps,
-            next_scale,
+        bridge_dequant_rmsnorm(
+            key, layer_idx, MatrixType::Wd, ffn_out, sl.scale_h,
+            residual, &key.rmsnorm_attn_weights[layer_idx + 1], next_scale,
         )
     } else {
         // Last layer: update residual, no next-layer RMSNorm
-        verilm_core::rmsnorm::dequant_add_residual(
-            ffn_out,
-            key.weight_scale_for(layer_idx, MatrixType::Wd),
-            sl.scale_h,
-            residual,
-        );
+        dequant_add_residual_dispatch(key, layer_idx, MatrixType::Wd, ffn_out, sl.scale_h, residual);
         Vec::new()
+    }
+}
+
+/// Bridge helper: dequant + residual += + RMSNorm + quantize.
+/// Dispatches to per-channel or per-tensor dequant based on VerifierKey.
+fn bridge_dequant_rmsnorm(
+    key: &VerifierKey,
+    layer_idx: usize,
+    mt: MatrixType,
+    acc: &[i32],
+    scale_x: f32,
+    residual: &mut Vec<f64>,
+    rmsnorm_weights: &[f32],
+    scale_next: f32,
+) -> Vec<i8> {
+    dequant_add_residual_dispatch(key, layer_idx, mt, acc, scale_x, residual);
+    let normed = verilm_core::rmsnorm::rmsnorm_f64_input(residual, rmsnorm_weights, key.rmsnorm_eps);
+    verilm_core::rmsnorm::quantize_f64_to_i8(&normed, scale_next as f64)
+}
+
+/// Dispatch dequant + residual add to per-channel or per-tensor path.
+fn dequant_add_residual_dispatch(
+    key: &VerifierKey,
+    layer_idx: usize,
+    mt: MatrixType,
+    acc: &[i32],
+    scale_x: f32,
+    residual: &mut Vec<f64>,
+) {
+    if let Some(pc_scales) = key.per_channel_scales_for(layer_idx, mt) {
+        verilm_core::rmsnorm::dequant_add_residual_per_channel(acc, pc_scales, scale_x, residual);
+    } else {
+        let scale_w = key.weight_scale_for(layer_idx, mt);
+        verilm_core::rmsnorm::dequant_add_residual(acc, scale_w, scale_x, residual);
     }
 }
 
@@ -1647,6 +1684,7 @@ mod tests {
             rmsnorm_attn_weights: vec![],
             rmsnorm_ffn_weights: vec![],
             weight_scales: vec![],
+            per_channel_weight_scales: vec![],
             rmsnorm_eps: 1e-5,
             rope_config_hash: None,
             embedding_merkle_root: None,

@@ -87,6 +87,21 @@ impl MatrixType {
             MatrixType::LmHead => "lm_head.weight",
         }
     }
+
+    /// Safetensors per-channel weight scale name pattern.
+    /// Present in W8A8 models with native INT8 weights. Shape = `[output_dim]`.
+    pub fn weight_scale_name(&self) -> &'static str {
+        match self {
+            MatrixType::Wq => "model.layers.{}.self_attn.q_proj.weight_scale",
+            MatrixType::Wk => "model.layers.{}.self_attn.k_proj.weight_scale",
+            MatrixType::Wv => "model.layers.{}.self_attn.v_proj.weight_scale",
+            MatrixType::Wo => "model.layers.{}.self_attn.o_proj.weight_scale",
+            MatrixType::Wg => "model.layers.{}.mlp.gate_proj.weight_scale",
+            MatrixType::Wu => "model.layers.{}.mlp.up_proj.weight_scale",
+            MatrixType::Wd => "model.layers.{}.mlp.down_proj.weight_scale",
+            MatrixType::LmHead => "lm_head.weight_scale",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

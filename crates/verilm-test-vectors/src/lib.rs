@@ -367,6 +367,7 @@ pub fn generate_key(cfg: &ModelConfig, model: &[LayerWeights], seed: [u8; 32]) -
         rmsnorm_attn_weights: Vec::new(),
         rmsnorm_ffn_weights: Vec::new(),
         weight_scales: Vec::new(),
+        per_channel_weight_scales: Vec::new(),
         rmsnorm_eps: 1e-5,
         rope_config_hash: None,
         embedding_merkle_root: None,

@@ -84,6 +84,39 @@ pub fn compute_h_scaled(
         .collect()
 }
 
+/// Per-channel SiLU bridge for W8A8 models with per-channel weight scales.
+///
+/// Same computation as `compute_h_scaled` but uses per-channel weight scales:
+///   g_f[i] = g_i32[i] * scale_w_g[i] * scale_x_ffn
+///   u_f[i] = u_i32[i] * scale_w_u[i] * scale_x_ffn
+///   h_f[i] = SiLU(g_f[i]) * u_f[i]
+///   h_i8[i] = round(h_f[i] / scale_h).clamp(-128, 127)
+pub fn compute_h_per_channel(
+    g_acc: &[i32],
+    u_acc: &[i32],
+    scale_w_g: &[f32],
+    scale_w_u: &[f32],
+    scale_x_ffn: f32,
+    scale_h: f32,
+) -> Vec<i8> {
+    assert_eq!(g_acc.len(), u_acc.len());
+    assert_eq!(g_acc.len(), scale_w_g.len());
+    assert_eq!(u_acc.len(), scale_w_u.len());
+    let sx = scale_x_ffn as f64;
+    let inv_scale_h = 1.0 / (scale_h as f64);
+    g_acc
+        .iter()
+        .zip(u_acc.iter())
+        .zip(scale_w_g.iter().zip(scale_w_u.iter()))
+        .map(|((&g, &u), (&swg, &swu))| {
+            let g_f = g as f64 * (swg as f64) * sx;
+            let u_f = u as f64 * (swu as f64) * sx;
+            let h_f = silu_f64(g_f) * u_f;
+            (h_f * inv_scale_h).round().clamp(-128.0, 127.0) as i8
+        })
+        .collect()
+}
+
 fn silu_f64(x: f64) -> f64 {
     x / (1.0 + (-x).exp())
 }

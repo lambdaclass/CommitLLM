@@ -323,8 +323,10 @@ fn measure_roped(
 
 /// Dequantize + RoPE for Q, K, V accumulators.
 ///
-/// When `overrides` is provided, uses per-channel weight scales for
-/// dequantization. Otherwise falls back to VerifierKey's per-tensor scales.
+/// Priority for weight scales:
+/// 1. Explicit `overrides` (measurement-time extraction, legacy path)
+/// 2. Key's per-channel scales (`per_channel_weight_scales`, W8A8 keygen)
+/// 3. Key's per-tensor scales (`weight_scales`, BF16/FP16 keygen)
 fn dequant_rope_qkv(
     key: &VerifierKey,
     layer_idx: usize,
@@ -335,32 +337,36 @@ fn dequant_rope_qkv(
     position: usize,
     overrides: Option<&CorridorScaleOverrides>,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    let (q_f64, k_f64, v_f64) = if let Some(ovr) = overrides {
-        let q = verilm_core::rope::dequantize_acc_per_channel(
-            q_acc, &ovr.wq[layer_idx], scale_x_attn,
-        );
-        let k = verilm_core::rope::dequantize_acc_per_channel(
-            k_acc, &ovr.wk[layer_idx], scale_x_attn,
-        );
-        let v = verilm_core::rope::dequantize_acc_per_channel(
-            v_acc, &ovr.wv[layer_idx], scale_x_attn,
-        );
-        (q, k, v)
-    } else {
-        let scale_wq = key.weight_scale_for(layer_idx, MatrixType::Wq);
-        let scale_wk = key.weight_scale_for(layer_idx, MatrixType::Wk);
-        let scale_wv = key.weight_scale_for(layer_idx, MatrixType::Wv);
-        let sx = Some(scale_x_attn);
-        let q = verilm_core::rope::dequantize_acc(q_acc, Some(scale_wq), sx);
-        let k = verilm_core::rope::dequantize_acc(k_acc, Some(scale_wk), sx);
-        let v = verilm_core::rope::dequantize_acc(v_acc, Some(scale_wv), sx);
-        (q, k, v)
-    };
+    let q_f64 = dequant_one(key, layer_idx, MatrixType::Wq, q_acc, scale_x_attn,
+        overrides.map(|o| o.wq[layer_idx].as_slice()));
+    let k_f64 = dequant_one(key, layer_idx, MatrixType::Wk, k_acc, scale_x_attn,
+        overrides.map(|o| o.wk[layer_idx].as_slice()));
+    let v_f64 = dequant_one(key, layer_idx, MatrixType::Wv, v_acc, scale_x_attn,
+        overrides.map(|o| o.wv[layer_idx].as_slice()));
 
     let q_roped = verilm_core::rope::apply_rope_q(&q_f64, position, &key.config);
     let k_roped = verilm_core::rope::apply_rope_k(&k_f64, position, &key.config);
 
     (q_roped, k_roped, v_f64)
+}
+
+/// Dequantize one accumulator with the best available scales.
+fn dequant_one(
+    key: &VerifierKey,
+    layer_idx: usize,
+    mt: MatrixType,
+    acc: &[i32],
+    scale_x: f32,
+    override_scales: Option<&[f32]>,
+) -> Vec<f64> {
+    if let Some(pc) = override_scales {
+        verilm_core::rope::dequantize_acc_per_channel(acc, pc, scale_x)
+    } else if let Some(pc) = key.per_channel_scales_for(layer_idx, mt) {
+        verilm_core::rope::dequantize_acc_per_channel(acc, pc, scale_x)
+    } else {
+        let scale_w = key.weight_scale_for(layer_idx, mt);
+        verilm_core::rope::dequantize_acc(acc, Some(scale_w), Some(scale_x))
+    }
 }
 
 /// Extract opened token's QKV accumulators from the response.

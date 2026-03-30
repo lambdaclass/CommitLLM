@@ -8,6 +8,8 @@ Historical references below to “roadmap #N” refer to the pre-2026-03-30 road
 
 ### Added
 
+- **Roadmap #1 closed: quantization semantics are now first-class protocol data.** Per-channel weight scales flow end-to-end from keygen through verification. Keygen discovers `weight_scale` tensors in W8A8 safetensors (handling both `[N]` and `[N,1]` shapes, BF16/FP16/F32 dtypes), populates `VerifierKey.per_channel_weight_scales`, and sets `quant_family` / `scale_derivation` metadata. The canonical verifier dispatches to per-channel dequant for QKV attention, bridge residual, and SiLU gate paths. Corridor tooling uses key-embedded scales instead of external overrides. Confirmed on real `neuralmagic/Qwen2.5-7B-Instruct-quantized.w8a8` via Modal smoke test: 28 layers × 7 matrices of per-channel scales loaded with correct shapes and realistic nonzero ranges. Formal worst-case attention corridor bounds derived in `bounds.rs`. Per-token prefill `scale_a` and grouped-quant `quant_block_size` are real issues tracked separately, not blocking #2.
+
 - Production RoPE-aware deep-prefix attention replay landed in the canonical verifier and corridor tooling. `VerifierKey.rope_aware_replay` now dispatches between toy/reference replay and a production path that dequantizes Q/K/V accumulators with activation and weight scales, applies RoPE at each position, and replays attention in f64 post-RoPE space. The deep-prefix path covers both prefix tokens and the opened token, and tests cover honest pass plus fake-`a` rejection on the roped path.
 
 ### Changed

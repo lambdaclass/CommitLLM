@@ -373,9 +373,10 @@ fn frozen_key_sha256_pinned() {
     let data = fixture("v4_key_canonical.bin");
     let hash = hex::encode(Sha256::digest(&data));
     // Pinned on first generation. Update ONLY on intentional format change.
+    // Updated: added per_channel_weight_scales field to VerifierKey (#1 quant semantics).
     assert_eq!(
         hash,
-        "d8fa0f945799cf180260d672f7d8b3f00f4b7cb3fea1871005e935f4b988ab9e",
+        "c1b5857e0f004dcb28a901e35c13efc3462bf8075ad30bc32459de3ffdbd9454",
         "key fixture checksum drifted — was the fixture silently regenerated?"
     );
 }

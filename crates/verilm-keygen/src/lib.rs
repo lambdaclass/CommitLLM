@@ -176,8 +176,10 @@ fn load_1d_f32(
     name: &str,
 ) -> Result<Vec<f32>> {
     let (data, shape, dtype) = find_tensor_raw(shards, name)?;
-    if shape.len() != 1 {
-        bail!("tensor {} has shape {:?}, expected 1D", name, shape);
+    // Accept 1D [N] or 2D [N,1] (common in W8A8 weight_scale tensors).
+    let is_1d = shape.len() == 1 || (shape.len() == 2 && shape[1] == 1);
+    if !is_1d {
+        bail!("tensor {} has shape {:?}, expected 1D or [N,1]", name, shape);
     }
     match dtype {
         Dtype::F32 => Ok(data
@@ -404,13 +406,16 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
     // Also collect all INT8 weights for the weight-chain hash.
     let mut v_vectors: Vec<Vec<Vec<Fp>>> = Vec::with_capacity(cfg.n_layers);
     let mut quantization_scales: Vec<Vec<f32>> = Vec::with_capacity(cfg.n_layers);
+    let mut per_channel_weight_scales: Vec<Vec<Vec<f32>>> = Vec::with_capacity(cfg.n_layers);
     let mut all_weights: Vec<Vec<Vec<i8>>> = Vec::with_capacity(cfg.n_layers);
     let mut rmsnorm_attn_weights: Vec<Vec<f32>> = Vec::with_capacity(cfg.n_layers);
     let mut rmsnorm_ffn_weights: Vec<Vec<f32>> = Vec::with_capacity(cfg.n_layers);
+    let mut found_per_channel = false;
 
     for layer_idx in 0..cfg.n_layers {
         let mut layer_vs = Vec::with_capacity(MatrixType::PER_LAYER.len());
         let mut layer_scales = Vec::with_capacity(MatrixType::PER_LAYER.len());
+        let mut layer_pc_scales = Vec::with_capacity(MatrixType::PER_LAYER.len());
         let mut layer_weights = Vec::with_capacity(MatrixType::PER_LAYER.len());
 
         for (j, mt) in MatrixType::PER_LAYER.iter().enumerate() {
@@ -429,10 +434,30 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
                 );
             }
 
+            // Try to load per-channel weight scales (W8A8 native INT8).
+            let scale_name = mt.weight_scale_name().replace("{}", &layer_idx.to_string());
+            let pc_scales = match load_1d_f32(&parsed, &scale_name) {
+                Ok(s) => {
+                    if s.len() != rows {
+                        bail!(
+                            "weight_scale {} has {} elements, expected {} (output_dim for {:?})",
+                            scale_name, s.len(), rows, mt
+                        );
+                    }
+                    if layer_idx == 0 && j == 0 {
+                        eprintln!("  found per-channel weight scales (W8A8)");
+                    }
+                    found_per_channel = true;
+                    s
+                }
+                Err(_) => Vec::new(),
+            };
+
             let r = &r_vectors[j];
             let v = freivalds::precompute_v(r, &weights, rows, cols);
             layer_vs.push(v);
             layer_scales.push(scale);
+            layer_pc_scales.push(pc_scales);
             layer_weights.push(weights);
         }
 
@@ -458,8 +483,14 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
 
         v_vectors.push(layer_vs);
         quantization_scales.push(layer_scales);
+        per_channel_weight_scales.push(layer_pc_scales);
         all_weights.push(layer_weights);
         eprintln!("  layer {}/{}", layer_idx + 1, cfg.n_layers);
+    }
+
+    // If no per-channel scales were found, keep the vec empty to save space.
+    if !found_per_channel {
+        per_channel_weight_scales.clear();
     }
 
     // Compute weight-chain hash
@@ -523,13 +554,33 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
 
     let config = cfg;
 
-    let rope_aware_replay = !quantization_scales.is_empty();
+    let rope_aware_replay = !quantization_scales.is_empty() || found_per_channel;
+
+    // Detect quantization family from source dtype and scale layout.
+    let quant_family = if found_per_channel {
+        Some("W8A8".to_string())
+    } else if source_dtype == "I8" {
+        Some("INT8".to_string())
+    } else {
+        // BF16/FP16 quantized to INT8 during keygen
+        Some(format!("{}-to-INT8", source_dtype))
+    };
+
+    let scale_derivation = if found_per_channel {
+        Some("per_channel_absmax".to_string())
+    } else if source_dtype != "I8" {
+        Some("per_tensor_absmax".to_string())
+    } else {
+        None
+    };
+
     Ok(VerifierKey {
         version: 1,
         config,
         seed,
         source_dtype,
         weight_scales: quantization_scales.clone(),
+        per_channel_weight_scales,
         quantization_scales,
         r_vectors,
         v_vectors,
@@ -544,8 +595,8 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         rope_config_hash: None,
         embedding_merkle_root,
         final_norm_weights,
-        quant_family: None,
-        scale_derivation: None,
+        quant_family,
+        scale_derivation,
         quant_block_size: None,
         rope_aware_replay,
     })
@@ -623,6 +674,50 @@ pub fn write_safetensors(
         .collect();
 
     let tensor_data: Vec<(String, safetensors::tensor::TensorView<'_>)> = views
+        .iter()
+        .map(|(name, dtype, shape, data)| {
+            (
+                name.clone(),
+                safetensors::tensor::TensorView::new(*dtype, shape.clone(), data).unwrap(),
+            )
+        })
+        .collect();
+
+    let bytes = safetensors::tensor::serialize(tensor_data, &None)?;
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+/// Typed tensor for writing mixed-dtype safetensors. Used for testing.
+pub enum TypedTensor<'a> {
+    I8(&'a [i8]),
+    F32(&'a [f32]),
+}
+
+/// Write a safetensors file from mixed-dtype tensors. Used for testing.
+pub fn write_safetensors_mixed(
+    path: &Path,
+    tensors: &[(&str, Vec<usize>, TypedTensor<'_>)],
+) -> Result<()> {
+    // Collect owned byte data so references outlive the loop.
+    let entries: Vec<(String, Dtype, Vec<usize>, Vec<u8>)> = tensors
+        .iter()
+        .map(|(name, shape, data)| {
+            let (dtype, bytes) = match data {
+                TypedTensor::I8(d) => {
+                    let b: Vec<u8> = d.iter().map(|&v| v as u8).collect();
+                    (Dtype::I8, b)
+                }
+                TypedTensor::F32(d) => {
+                    let b: Vec<u8> = d.iter().flat_map(|v| v.to_le_bytes()).collect();
+                    (Dtype::F32, b)
+                }
+            };
+            (name.to_string(), dtype, shape.clone(), bytes)
+        })
+        .collect();
+
+    let tensor_data: Vec<(String, safetensors::tensor::TensorView<'_>)> = entries
         .iter()
         .map(|(name, dtype, shape, data)| {
             (

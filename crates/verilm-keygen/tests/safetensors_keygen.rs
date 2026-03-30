@@ -430,3 +430,172 @@ fn test_weight_provider_freivalds_compatible() {
         }
     }
 }
+
+// -----------------------------------------------------------------------
+// W8A8 (INT8 weights + per-channel F32 weight_scale) keygen tests
+// -----------------------------------------------------------------------
+
+/// Build a synthetic W8A8 safetensors model: INT8 weight matrices plus
+/// per-channel F32 weight_scale tensors (shape [output_dim]).
+fn make_w8a8_safetensors() -> (TempDir, ModelConfig) {
+    use rand::Rng;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
+    use verilm_keygen::TypedTensor;
+
+    let cfg = ModelConfig::toy();
+    let dir = TempDir::new().unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(54321);
+
+    struct OwnedTensor {
+        name: String,
+        shape: Vec<usize>,
+        i8_data: Option<Vec<i8>>,
+        f32_data: Option<Vec<f32>>,
+    }
+
+    let mut owned: Vec<OwnedTensor> = Vec::new();
+
+    for layer in 0..cfg.n_layers {
+        for mt in &MatrixType::PER_LAYER {
+            let rows = mt.output_dim(&cfg);
+            let cols = mt.input_dim(&cfg);
+
+            // INT8 weight matrix
+            let w: Vec<i8> = (0..rows * cols).map(|_| rng.gen::<i8>()).collect();
+            let weight_name = mt.weight_name().replace("{}", &layer.to_string());
+            owned.push(OwnedTensor {
+                name: weight_name,
+                shape: vec![rows, cols],
+                i8_data: Some(w),
+                f32_data: None,
+            });
+
+            // Per-channel weight_scale (shape [output_dim])
+            let scales: Vec<f32> = (0..rows)
+                .map(|_| rng.gen::<f32>() * 0.01 + 0.001) // small positive scales
+                .collect();
+            let scale_name = mt.weight_scale_name().replace("{}", &layer.to_string());
+            owned.push(OwnedTensor {
+                name: scale_name,
+                shape: vec![rows],
+                i8_data: None,
+                f32_data: Some(scales),
+            });
+        }
+    }
+
+    let typed_tensors: Vec<(&str, Vec<usize>, TypedTensor<'_>)> = owned
+        .iter()
+        .map(|t| {
+            let data = if let Some(ref d) = t.i8_data {
+                TypedTensor::I8(d.as_slice())
+            } else {
+                TypedTensor::F32(t.f32_data.as_ref().unwrap().as_slice())
+            };
+            (t.name.as_str(), t.shape.clone(), data)
+        })
+        .collect();
+
+    let path = dir.path().join("model.safetensors");
+    verilm_keygen::write_safetensors_mixed(&path, &typed_tensors).unwrap();
+
+    (dir, cfg)
+}
+
+#[test]
+fn test_w8a8_keygen_detects_per_channel_scales() {
+    let (dir, cfg) = make_w8a8_safetensors();
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+
+    assert_eq!(key.source_dtype, "I8");
+    assert_eq!(key.quant_family.as_deref(), Some("W8A8"));
+    assert_eq!(key.scale_derivation.as_deref(), Some("per_channel_absmax"));
+    assert!(key.has_per_channel_scales());
+
+    // per_channel_weight_scales shape: [n_layers][7][output_dim]
+    assert_eq!(key.per_channel_weight_scales.len(), cfg.n_layers);
+    for (layer_idx, layer_scales) in key.per_channel_weight_scales.iter().enumerate() {
+        assert_eq!(layer_scales.len(), 7, "layer {} should have 7 matrices", layer_idx);
+        for (j, mt) in MatrixType::PER_LAYER.iter().enumerate() {
+            let expected_dim = mt.output_dim(&cfg);
+            assert_eq!(
+                layer_scales[j].len(),
+                expected_dim,
+                "layer {} {:?} scale length mismatch",
+                layer_idx, mt
+            );
+            for &s in &layer_scales[j] {
+                assert!(s > 0.0, "layer {} {:?} has non-positive scale", layer_idx, mt);
+            }
+        }
+    }
+}
+
+#[test]
+fn test_w8a8_keygen_legacy_scales_zero() {
+    let (dir, _cfg) = make_w8a8_safetensors();
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+
+    for layer_scales in &key.quantization_scales {
+        for &scale in layer_scales {
+            assert_eq!(scale, 0.0, "legacy per-tensor scale should be 0.0 for W8A8");
+        }
+    }
+}
+
+#[test]
+fn test_w8a8_key_roundtrip() {
+    let (dir, _cfg) = make_w8a8_safetensors();
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+
+    let data = serialize::serialize_key(&key);
+    let key2 = serialize::deserialize_key(&data).unwrap();
+
+    assert_eq!(key2.quant_family.as_deref(), Some("W8A8"));
+    assert_eq!(key2.scale_derivation.as_deref(), Some("per_channel_absmax"));
+    assert_eq!(key2.per_channel_weight_scales, key.per_channel_weight_scales);
+    assert!(key2.has_per_channel_scales());
+}
+
+#[test]
+fn test_w8a8_freivalds_still_works() {
+    let (dir, cfg) = make_w8a8_safetensors();
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+
+    use rand::Rng;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
+    let mut rng = ChaCha20Rng::seed_from_u64(3333);
+
+    use verilm_core::types::ShellWeights;
+    let provider = verilm_keygen::SafetensorsWeightProvider::load(dir.path()).unwrap();
+
+    for layer_idx in 0..cfg.n_layers {
+        for mt in MatrixType::PER_LAYER.iter() {
+            let cols = mt.input_dim(&cfg);
+            let rows = mt.output_dim(&cfg);
+            let x: Vec<i8> = (0..cols).map(|_| rng.gen::<i8>()).collect();
+            let w = provider.weight(layer_idx, *mt);
+
+            let z: Vec<i32> = (0..rows)
+                .map(|r| (0..cols).map(|c| w[r * cols + c] as i32 * x[c] as i32).sum())
+                .collect();
+
+            assert!(
+                freivalds::check(key.v_for(layer_idx, *mt), &x, key.r_for(*mt), &z),
+                "Freivalds failed: layer {} {:?}", layer_idx, mt
+            );
+        }
+    }
+}
+
+#[test]
+fn test_plain_int8_has_no_per_channel_scales() {
+    let (dir, _cfg, _) = make_toy_safetensors();
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+
+    assert!(!key.has_per_channel_scales());
+    assert_eq!(key.quant_family.as_deref(), Some("INT8"));
+    assert!(key.scale_derivation.is_none());
+}
