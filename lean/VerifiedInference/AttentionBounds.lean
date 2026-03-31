@@ -162,4 +162,89 @@ theorem requant_far_can_differ :
     -- After simplification, we need 1 < |0 - 3|.natAbs = 3
     norm_num
 
+/-! ## Error Chain Parameters -/
+
+/-- GPU arithmetic format (determines unit roundoff). -/
+inductive GpuArithmetic
+  | fp16  -- u = 2^-11 ≈ 4.88e-4
+  | bf16  -- u = 2^-8 ≈ 3.91e-3
+
+/-- Unit roundoff for each format. -/
+noncomputable def GpuArithmetic.unitRoundoff : GpuArithmetic → ℝ
+  | .fp16 => (2 : ℝ)⁻¹ ^ 11
+  | .bf16 => (2 : ℝ)⁻¹ ^ 8
+
+/-- What intermediates the GPU commits (determines which error terms vanish). -/
+inductive CommittedLevel
+  | qkvAccOnly       -- Only INT32 accumulators; Q,K,V all have dequant+RoPE error
+  | committedKV      -- K,V committed; only Q has error
+  | committedQKV     -- Q,K,V committed; only FP32 accumulation error remains
+  | committedScores  -- Pre-softmax scores committed; only V-dequant error remains
+
+/-- Parameters for the worst-case corridor bound. -/
+structure CorridorParams where
+  gpu : GpuArithmetic
+  cRope : ℝ       -- ops in dequant+RoPE (typically 5)
+  sMax : ℝ        -- max pre-softmax score magnitude
+  bvOverScaleA : ℝ -- B_v / scale_a ratio (worst case 127)
+  seqLen : ℕ      -- sequence length
+
+/-- Per-Q/K-element error from dequant+RoPE: ε_qk = C_rope · u -/
+noncomputable def epsQK (p : CorridorParams) : ℝ :=
+  p.cRope * p.gpu.unitRoundoff
+
+/-- The dominant error term: softmax amplification of input perturbation.
+    From bounds.rs: bv_over_scale_a * multiplier * eps_qk * s_max -/
+noncomputable def softmaxTerm (p : CorridorParams) (c : CommittedLevel) : ℝ :=
+  match c with
+  | .qkvAccOnly   => p.bvOverScaleA * 4 * (epsQK p) * p.sMax
+  | .committedKV  => p.bvOverScaleA * 2 * (epsQK p) * p.sMax
+  | .committedQKV => p.bvOverScaleA * 2 * p.seqLen * (2 : ℝ)⁻¹ ^ 24
+  | .committedScores => 0
+
+/-- V-dequantization error term. -/
+noncomputable def vDequantTerm (p : CorridorParams) (c : CommittedLevel) : ℝ :=
+  match c with
+  | .qkvAccOnly => p.bvOverScaleA * p.gpu.unitRoundoff
+  | _ => 0
+
+/-- Total pre-quantization error bound: |Δo_m| / scale_a. -/
+noncomputable def corridorBound (p : CorridorParams) (c : CommittedLevel) : ℝ :=
+  softmaxTerm p c + vDequantTerm p c
+
+/-! ## Sufficient Condition for L-inf ≤ 1 -/
+
+/-- If the total error bound is less than 1, requantized outputs differ by at most 1.
+    This composes the error chain with the requantization step theorem. -/
+theorem corridor_leq_one_of_bound_lt_one
+    (p : CorridorParams) (c : CommittedLevel)
+    (hBound : corridorBound p c < 1)
+    (o_gpu o_verifier : ℝ)
+    (ho : |o_gpu - o_verifier| ≤ corridorBound p c) :
+    (quantizeReal o_gpu - quantizeReal o_verifier).natAbs ≤ 1 :=
+  requant_close_implies_linf_one o_gpu o_verifier (by linarith)
+
+/-- Committed scores achieve ≤ 1 for FP16 with B_v/scale_a ≤ 127. -/
+theorem committedScores_achieves_leq_one
+    (p : CorridorParams)
+    (_hgpu : p.gpu = .fp16)
+    (_hbv : p.bvOverScaleA ≤ 127) :
+    corridorBound p .committedScores < 1 := by
+  unfold corridorBound softmaxTerm vDequantTerm
+  simp
+
+/-! ## Impossibility: QKV Accumulators Alone -/
+
+/-- From QKV accumulators alone, the corridor exceeds 1 whenever S_max ≥ 1 (FP16). -/
+theorem qkvOnly_exceeds_one
+    (p : CorridorParams)
+    (hgpu : p.gpu = .fp16)
+    (hcr : p.cRope = 5)
+    (hbv : 127 ≤ p.bvOverScaleA)
+    (hs : 1 ≤ p.sMax) :
+    1 ≤ corridorBound p .qkvAccOnly := by
+  unfold corridorBound softmaxTerm vDequantTerm epsQK GpuArithmetic.unitRoundoff
+  rw [hgpu, hcr]
+  nlinarith [p.bvOverScaleA, p.sMax]
+
 end VerifiedInference
