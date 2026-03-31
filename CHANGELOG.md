@@ -13,7 +13,9 @@ Historical references below to “roadmap #N” refer to the pre-2026-03-30 road
 
 ### Measured
 
-- **Attention corridor on Qwen2.5-7B-W8A8 (A100-80GB)**: 672 measurements across 6 workloads (short through 1164-token long_context), all 28 layers, all decode positions. Global max L-inf = 8. First generated token max L-inf = 5. >92% of elements are exact matches; >99.8% within ±1. No growth with sequence length. Worst layers spread across the stack (not concentrated). The ≤1 target for a formal single-step bound appears achievable — the real BF16-vs-f64 gap is small and stable. Llama-family control measurement pending.
+- **Attention corridor on Qwen2.5-7B-W8A8 (A100-80GB)**: 672 measurements across 6 workloads (short through 1164-token long_context), all 28 layers, all decode positions. Global max L-inf = 8. First generated token max L-inf = 5. >92% of elements are exact matches; >99.8% within ±1. No growth with sequence length. Worst layers spread across the stack (not concentrated).
+
+- **Attention corridor on Llama-3.1-8B-W8A8 (A100-80GB) — cross-family control**: Same 6 workloads, all 32 layers. K/Q reconstruction confirmed correct (K L-inf = 0.047, Q L-inf = 0.044 — both BF16-vs-f64 noise). Corridor is **materially wider at long context**: short workloads L-inf = 3–11 (comparable to Qwen), but long_context climbs to L-inf = 49 with frac≤1 dropping to ~81%. The gap is genuinely in FlashAttention softmax/V-weighted-sum accumulation, not in Q/K reconstruction. This means the empirical corridor is family-dependent: the ≤1 target is Qwen-plausible but not yet universal. Universal tight bounds require either family-specific validated tolerances, stronger committed intermediates (score anchoring #8), or a canonical deterministic attention kernel (#20).
 
 ## 2026-03-30
 

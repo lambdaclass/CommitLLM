@@ -260,13 +260,20 @@ fn load_2d_row_f32(
 }
 
 /// Read rms_norm_eps and rope_theta from the model's config.json.
-fn read_model_config_json(dir: &Path) -> (f64, f64) {
+/// Parsed model configuration from config.json.
+struct ModelJsonConfig {
+    rmsnorm_eps: f64,
+    rope_theta: f64,
+    model_type: Option<String>,
+}
+
+fn read_model_config_json(dir: &Path) -> ModelJsonConfig {
     let config_path = dir.join("config.json");
     let Ok(data) = std::fs::read_to_string(&config_path) else {
-        return (1e-5, 10000.0);
+        return ModelJsonConfig { rmsnorm_eps: 1e-5, rope_theta: 10000.0, model_type: None };
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else {
-        return (1e-5, 10000.0);
+        return ModelJsonConfig { rmsnorm_eps: 1e-5, rope_theta: 10000.0, model_type: None };
     };
     let eps = v.get("rms_norm_eps")
         .and_then(|v| v.as_f64())
@@ -274,7 +281,10 @@ fn read_model_config_json(dir: &Path) -> (f64, f64) {
     let rope_theta = v.get("rope_theta")
         .and_then(|v| v.as_f64())
         .unwrap_or(10000.0);
-    (eps, rope_theta)
+    let model_type = v.get("model_type")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    ModelJsonConfig { rmsnorm_eps: eps, rope_theta, model_type }
 }
 
 /// Detect model config by inspecting tensor shapes and config.json.
@@ -333,7 +343,8 @@ pub fn detect_config(dir: &Path) -> Result<ModelConfig> {
     let n_kv_heads = kv_dim / d_head;
 
     // Read rope_theta from config.json (model-specific, cannot be guessed)
-    let (_, rope_theta) = read_model_config_json(dir);
+    let json_cfg = read_model_config_json(dir);
+    let rope_theta = json_cfg.rope_theta;
 
     let config = ModelConfig {
         name: format!("detected-{}L-{}d", n_layers, hidden_dim),
@@ -370,7 +381,8 @@ fn gcd(a: usize, b: usize) -> usize {
 /// using absmax per-tensor quantization.
 pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
     let cfg = detect_config(dir)?;
-    let (rmsnorm_eps, _) = read_model_config_json(dir);
+    let json_cfg = read_model_config_json(dir);
+    let rmsnorm_eps = json_cfg.rmsnorm_eps;
     let mapped = open_shards(dir)?;
     let parsed: Vec<_> = mapped
         .iter()
@@ -592,6 +604,11 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         None
     };
 
+    let verification_profile = verilm_core::types::VerificationProfile::detect(
+        json_cfg.model_type.as_deref().unwrap_or(""),
+        quant_family.as_deref(),
+    );
+
     Ok(VerifierKey {
         version: 1,
         config,
@@ -618,6 +635,7 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         quant_block_size: None,
         rope_aware_replay,
         qkv_biases,
+        verification_profile,
     })
 }
 
@@ -905,7 +923,7 @@ impl SafetensorsWeightProvider {
             weight_hash,
             lm_head,
             final_norm_weights,
-            rmsnorm_eps_value: read_model_config_json(dir).0,
+            rmsnorm_eps_value: read_model_config_json(dir).rmsnorm_eps,
             source_dtype: source_dtype.to_string(),
             qkv_biases,
         })

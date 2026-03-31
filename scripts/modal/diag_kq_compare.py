@@ -67,7 +67,10 @@ def compare_kq():
     from verilm.capture import get_capture_buffer
     from verilm.server import VerifiedInferenceServer
 
-    model_id = "neuralmagic/Qwen2.5-7B-Instruct-quantized.w8a8"
+    model_id = os.environ.get(
+        "DIAG_MODEL_ID",
+        "neuralmagic/Meta-Llama-3.1-8B-Instruct-quantized.w8a8",
+    )
     buf = get_capture_buffer()
 
     print(f"\n{'='*70}")
@@ -81,11 +84,16 @@ def compare_kq():
     )
     server = VerifiedInferenceServer(llm)
     n_layers = cap._n_layers
-    d_head = 128
-    n_q_heads = 28
-    n_kv_heads = 4
-    hidden_dim = 3584
-    kv_dim = 512
+
+    # Read model dimensions from verifier key (works for any model family)
+    key_seed = hashlib.sha256(model_id.encode()).digest()
+    key_json = verilm_rs.generate_key(server._model_dir, key_seed)
+    key_cfg = json.loads(key_json)["config"]
+    d_head = key_cfg["d_head"]
+    n_q_heads = key_cfg["n_q_heads"]
+    n_kv_heads = key_cfg["n_kv_heads"]
+    hidden_dim = key_cfg["hidden_dim"]
+    kv_dim = n_kv_heads * d_head
 
     # Warmup
     cap._capture_mode = "minimal"
@@ -93,9 +101,6 @@ def compare_kq():
     buf.enabled = True
     for _ in range(3):
         server.chat(prompt="Hello", max_tokens=8)
-
-    key_seed = hashlib.sha256(model_id.encode()).digest()
-    key_json = verilm_rs.generate_key(server._model_dir, key_seed)
 
     # ── Hook rotary_emb to capture Q and K after RoPE ──
     model = llm.llm_engine.model_executor.driver_worker.model_runner.model
@@ -377,8 +382,6 @@ def compare_kq():
                         out[start + half + i] = vec[start + half + i] * cos_f + vec[start + i] * sin_f
                 return out
 
-            # Read rope_theta from key
-            key_cfg = json.loads(key_json)["config"]
             rope_theta = key_cfg.get("rope_theta", 10000.0)
             print(f"  rope_theta from key: {rope_theta}")
 

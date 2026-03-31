@@ -946,7 +946,7 @@ fn check_attention_token0(
         )
     };
 
-    let tolerance = verilm_core::attention::AttentionToleranceConfig::default();
+    let tolerance = attention_tolerance(key);
     if let Some(max_diff) = verilm_core::attention::compare_attention_output(
         &rs.a, &expected_a, &tolerance,
     ) {
@@ -1034,19 +1034,17 @@ fn dequant_acc(
 
 /// Per-step tolerance for bridge x_attn check-and-gate.
 ///
-/// Because check-and-gate resets to committed values at each layer, errors
-/// cannot compound. This tolerance accommodates BF16-vs-f64 differences in
-/// dequant, residual accumulation, RMSNorm, and requantization.
-///
-/// Placeholder: max_abs_diff = 1 (one INT8 bucket). Roadmap #4 will derive
-/// the analytical bound. Toy model (f64 everywhere) should see exact match.
+/// Delegates to `VerifierKey::bridge_tolerance()` which reads from the
+/// verification profile when present, or falls back to toy=0, production=1.
 fn bridge_x_attn_tolerance(key: &VerifierKey) -> u8 {
-    // Toy model: weights are empty or have no real quant scales — exact match expected.
-    if key.rmsnorm_attn_weights.is_empty() || key.weight_scales.is_empty() {
-        return 0;
+    key.bridge_tolerance()
+}
+
+/// Attention replay tolerance derived from the verifier key profile.
+fn attention_tolerance(key: &VerifierKey) -> verilm_core::attention::AttentionToleranceConfig {
+    verilm_core::attention::AttentionToleranceConfig {
+        max_abs_diff: key.attention_tolerance(),
     }
-    // TODO(roadmap#4): derive analytically
-    1
 }
 
 /// Check-and-gate: compare committed x_attn against canonical derivation.
@@ -1437,7 +1435,8 @@ fn replay_deep_prefix_toy(
     committed_kv: Option<&[Vec<KvEntry>]>,
     st: &mut St,
 ) {
-    let cfg = &ctx.key.config;
+    let key = &ctx.key;
+    let cfg = &key.config;
 
     for layer_idx in 0..n_layers {
         let mut kv_k: Vec<Vec<i8>> = Vec::new();
@@ -1477,7 +1476,7 @@ fn replay_deep_prefix_toy(
             let expected_a = verilm_core::attention::replay_attention_reference(
                 &q_i8, &kv_k, &kv_v, cfg,
             );
-            check_attention_result(st, &rs.a, &expected_a, "prefix token", j, layer_idx);
+            check_attention_result(ctx.key, st, &rs.a, &expected_a, "prefix token", j, layer_idx);
         }
 
         // Opened token replay
@@ -1498,7 +1497,7 @@ fn replay_deep_prefix_toy(
             let expected_a = verilm_core::attention::replay_attention_reference(
                 &q_i8, &kv_k, &kv_v, cfg,
             );
-            check_attention_result_opened(ctx, st, &rs.a, &expected_a, layer_idx);
+            check_attention_result_opened(ctx, ctx.key, st, &rs.a, &expected_a, layer_idx);
         }
     }
 }
@@ -1558,7 +1557,7 @@ fn replay_deep_prefix_roped(
             let expected_a = verilm_core::attention::replay_attention_roped(
                 &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
             );
-            check_attention_result(st, &rs.a, &expected_a, "prefix token", j, layer_idx);
+            check_attention_result(ctx.key, st, &rs.a, &expected_a, "prefix token", j, layer_idx);
         }
 
         // Opened token replay
@@ -1585,7 +1584,7 @@ fn replay_deep_prefix_roped(
             let expected_a = verilm_core::attention::replay_attention_roped(
                 &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
             );
-            check_attention_result_opened(ctx, st, &rs.a, &expected_a, layer_idx);
+            check_attention_result_opened(ctx, ctx.key, st, &rs.a, &expected_a, layer_idx);
         }
     }
 }
@@ -1613,6 +1612,7 @@ fn opened_token_qkv<'a>(
 /// committed/opened `claimed` value for downstream verification rather than the
 /// replayed `expected` value.
 fn check_attention_result(
+    key: &VerifierKey,
     st: &mut St,
     claimed: &[i8],
     expected: &[i8],
@@ -1620,7 +1620,7 @@ fn check_attention_result(
     token_j: usize,
     layer_idx: usize,
 ) {
-    let tolerance = verilm_core::attention::AttentionToleranceConfig::default();
+    let tolerance = attention_tolerance(key);
     if let Some(max_diff) =
         verilm_core::attention::compare_attention_output(claimed, expected, &tolerance)
     {
@@ -1646,12 +1646,13 @@ fn check_attention_result(
 /// comparison passes.
 fn check_attention_result_opened(
     ctx: &Ctx,
+    key: &VerifierKey,
     st: &mut St,
     claimed: &[i8],
     expected: &[i8],
     layer_idx: usize,
 ) {
-    let tolerance = verilm_core::attention::AttentionToleranceConfig::default();
+    let tolerance = attention_tolerance(key);
     if let Some(max_diff) =
         verilm_core::attention::compare_attention_output(claimed, expected, &tolerance)
     {
@@ -2022,6 +2023,7 @@ mod tests {
             quant_block_size: None,
             rope_aware_replay: false,
             qkv_biases: vec![],
+            verification_profile: None,
         }
     }
 

@@ -503,6 +503,14 @@ fn make_w8a8_safetensors() -> (TempDir, ModelConfig) {
     (dir, cfg)
 }
 
+fn write_model_config_json(dir: &TempDir, model_type: &str, rope_theta: f64) {
+    let data = format!(
+        "{{\"model_type\":\"{}\",\"rms_norm_eps\":1e-5,\"rope_theta\":{}}}",
+        model_type, rope_theta
+    );
+    std::fs::write(dir.path().join("config.json"), data).unwrap();
+}
+
 #[test]
 fn test_w8a8_keygen_detects_per_channel_scales() {
     let (dir, cfg) = make_w8a8_safetensors();
@@ -556,6 +564,40 @@ fn test_w8a8_key_roundtrip() {
     assert_eq!(key2.scale_derivation.as_deref(), Some("per_channel_absmax"));
     assert_eq!(key2.per_channel_weight_scales, key.per_channel_weight_scales);
     assert!(key2.has_per_channel_scales());
+}
+
+#[test]
+fn test_w8a8_qwen_profile_detected_and_roundtrips() {
+    let (dir, _cfg) = make_w8a8_safetensors();
+    write_model_config_json(&dir, "qwen2", 1_000_000.0);
+
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+    let profile = key.verification_profile.as_ref().expect("expected qwen profile");
+    assert_eq!(profile.name, "qwen-w8a8");
+    assert_eq!(profile.model_family, "qwen2");
+    assert_eq!(profile.bridge_tolerance, 1);
+    assert_eq!(profile.attention_tolerance, 8);
+    assert_eq!(profile.max_validated_context, 1164);
+    assert!(!profile.requires_score_anchoring);
+
+    let data = serialize::serialize_key(&key);
+    let key2 = serialize::deserialize_key(&data).unwrap();
+    assert_eq!(key2.verification_profile, key.verification_profile);
+}
+
+#[test]
+fn test_w8a8_llama_profile_detected() {
+    let (dir, _cfg) = make_w8a8_safetensors();
+    write_model_config_json(&dir, "llama", 500_000.0);
+
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+    let profile = key.verification_profile.as_ref().expect("expected llama profile");
+    assert_eq!(profile.name, "llama-w8a8");
+    assert_eq!(profile.model_family, "llama");
+    assert_eq!(profile.bridge_tolerance, 1);
+    assert_eq!(profile.attention_tolerance, 50);
+    assert_eq!(profile.max_validated_context, 1164);
+    assert!(profile.requires_score_anchoring);
 }
 
 #[test]

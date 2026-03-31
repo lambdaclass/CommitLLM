@@ -22,6 +22,90 @@ use crate::constants::{MatrixType, ModelConfig};
 use crate::field::Fp;
 use crate::merkle::MerkleProof;
 
+/// Verification profile: family-specific validated parameters.
+///
+/// Each supported model family gets a profile carrying empirically validated
+/// tolerances, context limits, and audit policy. The profile is set during
+/// keygen (inferred from `config.json` model_type) and stored in the verifier
+/// key so the verifier enforces the correct policy without family-specific
+/// code paths.
+///
+/// The core protocol, receipt format, and verifier architecture are identical
+/// across profiles — only the numerical parameters differ.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationProfile {
+    /// Profile identifier, e.g. "qwen-w8a8", "llama-w8a8".
+    pub name: String,
+
+    /// Model family, e.g. "qwen2", "llama".
+    pub model_family: String,
+
+    /// Maximum L-inf difference allowed for bridge x_attn check-and-gate
+    /// (committed vs derived, per element in i8 space).
+    pub bridge_tolerance: u8,
+
+    /// Maximum L-inf difference allowed for attention replay comparison
+    /// (claimed a_i8 vs replayed a_i8, per element in i8 space).
+    /// Set from corridor measurement: Qwen=8, Llama=50.
+    pub attention_tolerance: u8,
+
+    /// Maximum context length for which the corridor bound has been
+    /// empirically validated. Beyond this length, the tolerance may not hold.
+    pub max_validated_context: u32,
+
+    /// Whether this profile requires score anchoring for strong verification
+    /// claims at long context (roadmap #8).
+    pub requires_score_anchoring: bool,
+}
+
+impl VerificationProfile {
+    /// Qwen2 W8A8 profile: tight corridor, validated on Qwen2.5-7B-W8A8.
+    ///
+    /// Corridor: L-inf=8 stable across the measured workload set.
+    /// Bridge: 1 bucket tolerance (BF16-vs-f64).
+    pub fn qwen_w8a8() -> Self {
+        VerificationProfile {
+            name: "qwen-w8a8".into(),
+            model_family: "qwen2".into(),
+            bridge_tolerance: 1,
+            attention_tolerance: 8,
+            max_validated_context: 1164,
+            requires_score_anchoring: false,
+        }
+    }
+
+    /// Llama W8A8 profile: wider corridor at long context.
+    ///
+    /// Corridor: L-inf=11 short context, grows to L-inf=49 on the current
+    /// measured long-context workload.
+    /// K/Q reconstruction confirmed correct; gap is in FlashAttention
+    /// softmax/V-weighted-sum accumulation.
+    pub fn llama_w8a8() -> Self {
+        VerificationProfile {
+            name: "llama-w8a8".into(),
+            model_family: "llama".into(),
+            bridge_tolerance: 1,
+            attention_tolerance: 50,
+            max_validated_context: 1164,
+            requires_score_anchoring: true,
+        }
+    }
+
+    /// Detect profile from model family string (from config.json model_type).
+    /// Returns None for unrecognized families.
+    pub fn detect(model_type: &str, quant_family: Option<&str>) -> Option<Self> {
+        let is_w8a8 = quant_family.map_or(false, |q| q == "W8A8");
+        let family = model_type.to_lowercase();
+        if family.contains("qwen2") && is_w8a8 {
+            Some(Self::qwen_w8a8())
+        } else if family.contains("llama") && is_w8a8 {
+            Some(Self::llama_w8a8())
+        } else {
+            None
+        }
+    }
+}
+
 /// Abstraction for accessing public INT8 weight matrices.
 ///
 /// Used by the prover to compute shell openings at audit time,
@@ -603,9 +687,36 @@ pub struct VerifierKey {
     /// path where the forward pass does not apply RoPE).
     #[serde(default)]
     pub rope_aware_replay: bool,
+
+    /// Family-specific verification profile with validated tolerances.
+    /// Set during keygen from `config.json` model_type.
+    /// When `None`, the verifier falls back to hardcoded defaults.
+    #[serde(default)]
+    pub verification_profile: Option<VerificationProfile>,
 }
 
 impl VerifierKey {
+    /// Bridge x_attn tolerance from the verification profile.
+    /// Falls back to 0 for toy models, 1 for production without a profile.
+    pub fn bridge_tolerance(&self) -> u8 {
+        if let Some(ref profile) = self.verification_profile {
+            return profile.bridge_tolerance;
+        }
+        // Toy model: no rmsnorm weights or weight scales → exact match.
+        if self.rmsnorm_attn_weights.is_empty() || self.weight_scales.is_empty() {
+            return 0;
+        }
+        1
+    }
+
+    /// Attention replay tolerance from the verification profile.
+    /// Falls back to 0 (exact match, appropriate for toy model).
+    pub fn attention_tolerance(&self) -> u8 {
+        if let Some(ref profile) = self.verification_profile {
+            return profile.attention_tolerance;
+        }
+        0
+    }
     /// Random vector r for any matrix type (including LmHead).
     pub fn r_for(&self, mt: MatrixType) -> &[Fp] {
         let idx = MatrixType::ALL.iter().position(|&m| m == mt).unwrap();
@@ -1238,4 +1349,3 @@ pub struct AuditChallenge {
     /// Audit tier that produced this challenge.
     pub tier: AuditTier,
 }
-
