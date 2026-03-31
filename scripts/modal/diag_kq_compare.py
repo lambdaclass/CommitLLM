@@ -95,6 +95,62 @@ def compare_kq():
     hidden_dim = key_cfg["hidden_dim"]
     kv_dim = n_kv_heads * d_head
 
+    # ── RoPE helpers (used for both prefill Q comparison and decode diagnostics) ──
+    def compute_scaled_inv_freq(theta, d_head_local, rope_scaling_cfg):
+        """Compute (possibly scaled) inverse frequencies."""
+        half = d_head_local // 2
+        base_inv_freq = np.array([
+            1.0 / (theta ** (2.0 * k / d_head_local))
+            for k in range(half)
+        ])
+        if rope_scaling_cfg is None:
+            return base_inv_freq
+
+        rope_type = rope_scaling_cfg.get("rope_type", "")
+        if rope_type == "llama3":
+            factor = rope_scaling_cfg["factor"]
+            low_freq_factor = rope_scaling_cfg.get("low_freq_factor", 1.0)
+            high_freq_factor = rope_scaling_cfg.get("high_freq_factor", 4.0)
+            old_ctx = rope_scaling_cfg["original_max_position_embeddings"]
+
+            low_freq_wavelen = old_ctx / low_freq_factor
+            high_freq_wavelen = old_ctx / high_freq_factor
+
+            scaled = np.zeros_like(base_inv_freq)
+            for k in range(half):
+                wavelen = 2.0 * np.pi / base_inv_freq[k]
+                if wavelen < high_freq_wavelen:
+                    scaled[k] = base_inv_freq[k]
+                elif wavelen > low_freq_wavelen:
+                    scaled[k] = base_inv_freq[k] / factor
+                else:
+                    smooth = (old_ctx / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
+                    scaled[k] = base_inv_freq[k] * ((1.0 - smooth) / factor + smooth)
+            return scaled
+        elif rope_type == "linear":
+            return base_inv_freq / rope_scaling_cfg["factor"]
+        else:
+            return base_inv_freq
+
+    def apply_rope_half(vec, position, inv_freq_arr, d_head_local, n_heads):
+        out = np.zeros_like(vec)
+        half = d_head_local // 2
+        for h in range(n_heads):
+            start = h * d_head_local
+            for i in range(half):
+                angle = position * inv_freq_arr[i]
+                cos_f = np.cos(angle)
+                sin_f = np.sin(angle)
+                out[start + i] = vec[start + i] * cos_f - vec[start + half + i] * sin_f
+                out[start + half + i] = vec[start + half + i] * cos_f + vec[start + i] * sin_f
+        return out
+
+    rope_theta = key_cfg.get("rope_theta", 10000.0)
+    rope_scaling_cfg = key_cfg.get("rope_scaling")
+    inv_freq = compute_scaled_inv_freq(rope_theta, d_head, rope_scaling_cfg)
+    print(f"  rope_theta from key: {rope_theta}")
+    print(f"  rope_scaling from key: {rope_scaling_cfg}")
+
     # Warmup
     cap._capture_mode = "minimal"
     buf.set_sync_mode("global")
@@ -141,10 +197,38 @@ def compare_kq():
     # Also capture pre-RoPE K and V by hooking qkv_proj output
     # Not needed — we get pre-RoPE Q/K from the wrapper above
 
+    # ── Workload selection via env ──
+    WORKLOAD = os.environ.get("DIAG_WORKLOAD", "long_context")
+    WORKLOADS = {
+        "short": {
+            "prompt": "What is 2+2?",
+            "max_tokens": 32,
+        },
+        "long_context": {
+            "prompt": (
+                "You are a senior software architect writing a comprehensive design "
+                "document. Cover the following topics in depth with concrete examples: "
+                "(1) microservices vs monolithic architecture trade-offs, including "
+                "failure modes, deployment complexity, and data consistency; "
+                "(2) event-driven systems with Kafka or similar message brokers, "
+                "covering exactly-once semantics, consumer group rebalancing, and "
+                "schema evolution; (3) database sharding strategies including "
+                "consistent hashing, range partitioning, and cross-shard transactions; "
+                "(4) observability infrastructure including structured logging, "
+                "distributed tracing with OpenTelemetry, and SLO-based alerting; "
+                "(5) CI/CD pipeline design for zero-downtime deployments with "
+                "canary releases and automated rollbacks."
+            ),
+            "max_tokens": 1024,
+        },
+    }
+    wl = WORKLOADS[WORKLOAD]
+    print(f"\n--- Workload: {WORKLOAD} (max_tokens={wl['max_tokens']}) ---")
+
     # ── Run inference with capture ──
     print(f"\n--- Running inference ---")
     rotary_wrapper.enabled = True
-    chat_r = server.chat(prompt="What is 2+2?", max_tokens=32, temperature=0.0)
+    chat_r = server.chat(prompt=wl["prompt"], max_tokens=wl["max_tokens"], temperature=0.0)
     rotary_wrapper.enabled = False
 
     n_tokens = chat_r["n_tokens"]
@@ -190,7 +274,7 @@ def compare_kq():
     print(f"\n--- Running second inference (prefill capture) ---")
     rotary_prefill.enabled = True
     call_counter[0] = 0
-    chat_r2 = server.chat(prompt="What is 2+2?", max_tokens=32, temperature=0.0)
+    chat_r2 = server.chat(prompt=wl["prompt"], max_tokens=wl["max_tokens"], temperature=0.0)
     rotary_prefill.enabled = False
     request_id2 = chat_r2["request_id"]
     n_tokens2 = chat_r2["n_tokens"]
@@ -368,62 +452,7 @@ def compare_kq():
                 q_bias = bias_np[:hidden_dim].astype(np.float64)
                 q_f64 = q_f64 + q_bias
 
-            # Apply RoPE (half convention) with optional Llama3 frequency scaling
-            def compute_scaled_inv_freq(theta, d_head_local, rope_scaling_cfg):
-                """Compute (possibly scaled) inverse frequencies."""
-                half = d_head_local // 2
-                base_inv_freq = np.array([
-                    1.0 / (theta ** (2.0 * k / d_head_local))
-                    for k in range(half)
-                ])
-                if rope_scaling_cfg is None:
-                    return base_inv_freq
-
-                rope_type = rope_scaling_cfg.get("rope_type", "")
-                if rope_type == "llama3":
-                    factor = rope_scaling_cfg["factor"]
-                    low_freq_factor = rope_scaling_cfg.get("low_freq_factor", 1.0)
-                    high_freq_factor = rope_scaling_cfg.get("high_freq_factor", 4.0)
-                    old_ctx = rope_scaling_cfg["original_max_position_embeddings"]
-
-                    low_freq_wavelen = old_ctx / low_freq_factor
-                    high_freq_wavelen = old_ctx / high_freq_factor
-
-                    scaled = np.zeros_like(base_inv_freq)
-                    for k in range(half):
-                        wavelen = 2.0 * np.pi / base_inv_freq[k]
-                        if wavelen < high_freq_wavelen:
-                            scaled[k] = base_inv_freq[k]
-                        elif wavelen > low_freq_wavelen:
-                            scaled[k] = base_inv_freq[k] / factor
-                        else:
-                            smooth = (old_ctx / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
-                            scaled[k] = base_inv_freq[k] * ((1.0 - smooth) / factor + smooth)
-                    return scaled
-                elif rope_type == "linear":
-                    return base_inv_freq / rope_scaling_cfg["factor"]
-                else:
-                    return base_inv_freq
-
-            def apply_rope_half(vec, position, inv_freq, d_head_local, n_heads):
-                out = np.zeros_like(vec)
-                half = d_head_local // 2
-                for h in range(n_heads):
-                    start = h * d_head_local
-                    for i in range(half):
-                        angle = position * inv_freq[i]
-                        cos_f = np.cos(angle)
-                        sin_f = np.sin(angle)
-                        out[start + i] = vec[start + i] * cos_f - vec[start + half + i] * sin_f
-                        out[start + half + i] = vec[start + half + i] * cos_f + vec[start + i] * sin_f
-                return out
-
-            rope_theta = key_cfg.get("rope_theta", 10000.0)
-            rope_scaling_cfg = key_cfg.get("rope_scaling")
-            inv_freq = compute_scaled_inv_freq(rope_theta, d_head, rope_scaling_cfg)
-            print(f"  rope_theta from key: {rope_theta}")
-            print(f"  rope_scaling from key: {rope_scaling_cfg}")
-
+            # Apply RoPE using outer-scope helpers
             committed_q_roped = apply_rope_half(q_f64, DIAG_POS, inv_freq, d_head, n_q_heads)
 
             if DIAG_POS < n_prefill:
@@ -526,6 +555,91 @@ def compare_kq():
             print("  → +1 offset does NOT fix — problem is elsewhere")
     else:
         print("  → K match is good — no RoPE offset detected")
+
+    # ── Multi-position decode diagnostics (growth vs context length) ──
+    if n_tokens2 > n_prompt2 + 4:
+        print(f"\n{'='*70}")
+        print(f"DECODE POSITION K/Q DIAGNOSTICS (growth vs context length)")
+        print(f"{'='*70}")
+
+        # Pick ~5 decode positions spread across the generation
+        n_decode = n_tokens2 - n_prompt2
+        if n_decode <= 6:
+            decode_positions = list(range(n_prompt2, n_tokens2))
+        else:
+            step = max(1, n_decode // 5)
+            decode_positions = list(range(n_prompt2, n_tokens2, step))
+            if n_tokens2 - 1 not in decode_positions:
+                decode_positions.append(n_tokens2 - 1)
+
+        print(f"  Total tokens: {n_tokens2}, prompt: {n_prompt2}, decode: {n_decode}")
+        print(f"  Sampling decode positions: {decode_positions}")
+        print(f"  {'pos':>6s}  {'K L-inf':>8s}  {'K mean':>8s}  {'K frac_eq':>10s}  {'K frac<=1':>10s}")
+
+        for dec_pos in decode_positions:
+            try:
+                dec_audit_json_str = server.audit(
+                    request_id=request_id2,
+                    token_index=dec_pos,
+                    layer_indices=[TARGET_LAYER],
+                    tier="full",
+                    binary=False,
+                    use_captured_x_attn=True,
+                )
+                dec_audit = json.loads(dec_audit_json_str)
+                dec_kv = dec_audit.get("kv_entries", [])
+                if not dec_kv or len(dec_kv) == 0:
+                    print(f"  {dec_pos:6d}  (no kv_entries)")
+                    continue
+
+                # Compare committed K at the opened position vs what the verifier would produce
+                # For decode tokens the committed K IS the GPU K (captured during decode)
+                # What we want: the committed K at position dec_pos should be self-consistent
+                # with the RoPE scaling applied at that position
+                dec_layer_kv = dec_kv[0]  # layer TARGET_LAYER
+                n_kv_entries = len(dec_layer_kv)
+
+                # The last KV entry is the opened token's K
+                opened_k = np.array(dec_layer_kv[-1]["k_roped"])
+
+                # Reconstruct verifier K from shell opening Q accumulator
+                dec_shell = dec_audit.get("shell_opening", {})
+                dec_shell_layers = dec_shell.get("layers", [])
+
+                if len(dec_shell_layers) > 0:
+                    dsl = dec_shell_layers[0]
+                    k_acc_raw = dsl.get("k")
+                    if k_acc_raw is not None:
+                        k_acc = np.array(k_acc_raw, dtype=np.int64)
+                        # Get K weight scales
+                        model_obj = llm.llm_engine.model_executor.driver_worker.model_runner.model
+                        ws = model_obj.model.layers[TARGET_LAYER].self_attn.qkv_proj.weight_scale
+                        ws_np = ws.detach().cpu().float().numpy().flatten()
+                        wk_scale = ws_np[hidden_dim:hidden_dim + kv_dim].astype(np.float64)
+
+                        scale_x_attn_dec = dsl.get("scale_x_attn", 1.0)
+                        k_f64 = k_acc.astype(np.float64) * wk_scale * float(scale_x_attn_dec)
+
+                        # Apply RoPE at position dec_pos
+                        k_roped_verifier = apply_rope_half(k_f64, dec_pos, inv_freq, d_head, n_kv_heads)
+
+                        diff = np.abs(opened_k - k_roped_verifier)
+                        k_linf = diff.max()
+                        k_mean = diff.mean()
+                        n_el = len(diff)
+                        frac_eq = np.sum(diff == 0.0) / n_el
+                        frac_le1 = np.sum(diff <= 1.0) / n_el
+                        print(f"  {dec_pos:6d}  {k_linf:8.4f}  {k_mean:8.6f}  {frac_eq:10.4f}  {frac_le1:10.4f}")
+                    else:
+                        print(f"  {dec_pos:6d}  (no k accumulator in shell)")
+                else:
+                    print(f"  {dec_pos:6d}  (no shell layers)")
+            except Exception as e:
+                print(f"  {dec_pos:6d}  ERROR: {e}")
+
+    print(f"\n{'='*70}")
+    print(f"rope_scaling: {rope_scaling_cfg}")
+    print(f"{'='*70}")
 
 
 @app.local_entrypoint()
