@@ -375,10 +375,10 @@ fn frozen_key_sha256_pinned() {
     let data = fixture("v4_key_canonical.bin");
     let hash = hex::encode(Sha256::digest(&data));
     // Pinned on first generation. Update ONLY on intentional format change.
-    // Updated: added verification_profile field to VerifierKey.
+    // Updated: added rope_scaling field to ModelConfig.
     assert_eq!(
         hash,
-        "2d91db7b5ef8d07a8f8bad16614bd9596e07a38877aa813704fb4b4f0af7c1d8",
+        "14a3bcdb963c2d5580dff284d49aefe08c4e29a508ca58c9a894ffcb97a4ad38",
         "key fixture checksum drifted — was the fixture silently regenerated?"
     );
 }

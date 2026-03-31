@@ -259,21 +259,21 @@ fn load_2d_row_f32(
     }
 }
 
-/// Read rms_norm_eps and rope_theta from the model's config.json.
 /// Parsed model configuration from config.json.
 struct ModelJsonConfig {
     rmsnorm_eps: f64,
     rope_theta: f64,
     model_type: Option<String>,
+    rope_scaling: Option<verilm_core::constants::RopeScaling>,
 }
 
 fn read_model_config_json(dir: &Path) -> ModelJsonConfig {
     let config_path = dir.join("config.json");
     let Ok(data) = std::fs::read_to_string(&config_path) else {
-        return ModelJsonConfig { rmsnorm_eps: 1e-5, rope_theta: 10000.0, model_type: None };
+        return ModelJsonConfig { rmsnorm_eps: 1e-5, rope_theta: 10000.0, model_type: None, rope_scaling: None };
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else {
-        return ModelJsonConfig { rmsnorm_eps: 1e-5, rope_theta: 10000.0, model_type: None };
+        return ModelJsonConfig { rmsnorm_eps: 1e-5, rope_theta: 10000.0, model_type: None, rope_scaling: None };
     };
     let eps = v.get("rms_norm_eps")
         .and_then(|v| v.as_f64())
@@ -284,7 +284,30 @@ fn read_model_config_json(dir: &Path) -> ModelJsonConfig {
     let model_type = v.get("model_type")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    ModelJsonConfig { rmsnorm_eps: eps, rope_theta, model_type }
+
+    // Read rope_scaling block if present
+    let rope_scaling = v.get("rope_scaling").and_then(|rs| {
+        let rope_type = rs.get("rope_type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let factor = rs.get("factor").and_then(|v| v.as_f64()).unwrap_or(1.0);
+        let low_freq_factor = rs.get("low_freq_factor").and_then(|v| v.as_f64()).unwrap_or(1.0);
+        let high_freq_factor = rs.get("high_freq_factor").and_then(|v| v.as_f64()).unwrap_or(4.0);
+        let original_max = rs.get("original_max_position_embeddings")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(8192) as usize;
+        if rope_type.is_empty() {
+            None
+        } else {
+            Some(verilm_core::constants::RopeScaling {
+                rope_type,
+                factor,
+                low_freq_factor,
+                high_freq_factor,
+                original_max_position_embeddings: original_max,
+            })
+        }
+    });
+
+    ModelJsonConfig { rmsnorm_eps: eps, rope_theta, model_type, rope_scaling }
 }
 
 /// Detect model config by inspecting tensor shapes and config.json.
@@ -342,9 +365,10 @@ pub fn detect_config(dir: &Path) -> Result<ModelConfig> {
     let n_q_heads = hidden_dim / d_head;
     let n_kv_heads = kv_dim / d_head;
 
-    // Read rope_theta from config.json (model-specific, cannot be guessed)
+    // Read rope_theta and rope_scaling from config.json
     let json_cfg = read_model_config_json(dir);
     let rope_theta = json_cfg.rope_theta;
+    let rope_scaling = json_cfg.rope_scaling;
 
     let config = ModelConfig {
         name: format!("detected-{}L-{}d", n_layers, hidden_dim),
@@ -357,6 +381,7 @@ pub fn detect_config(dir: &Path) -> Result<ModelConfig> {
         n_kv_heads,
         vocab_size,
         rope_theta,
+        rope_scaling,
     };
 
     eprintln!(

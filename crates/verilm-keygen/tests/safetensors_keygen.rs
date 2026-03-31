@@ -511,6 +511,22 @@ fn write_model_config_json(dir: &TempDir, model_type: &str, rope_theta: f64) {
     std::fs::write(dir.path().join("config.json"), data).unwrap();
 }
 
+fn write_llama3_config_json(dir: &TempDir) {
+    let data = r#"{
+        "model_type": "llama",
+        "rms_norm_eps": 1e-5,
+        "rope_theta": 500000.0,
+        "rope_scaling": {
+            "rope_type": "llama3",
+            "factor": 8.0,
+            "low_freq_factor": 1.0,
+            "high_freq_factor": 4.0,
+            "original_max_position_embeddings": 8192
+        }
+    }"#;
+    std::fs::write(dir.path().join("config.json"), data).unwrap();
+}
+
 #[test]
 fn test_w8a8_keygen_detects_per_channel_scales() {
     let (dir, cfg) = make_w8a8_safetensors();
@@ -630,6 +646,34 @@ fn test_w8a8_freivalds_still_works() {
             );
         }
     }
+}
+
+#[test]
+fn test_llama3_rope_scaling_stored_in_key() {
+    let (dir, _cfg) = make_w8a8_safetensors();
+    write_llama3_config_json(&dir);
+
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+    let scaling = key.config.rope_scaling.as_ref().expect("expected rope_scaling");
+    assert_eq!(scaling.rope_type, "llama3");
+    assert_eq!(scaling.factor, 8.0);
+    assert_eq!(scaling.low_freq_factor, 1.0);
+    assert_eq!(scaling.high_freq_factor, 4.0);
+    assert_eq!(scaling.original_max_position_embeddings, 8192);
+    assert_eq!(key.config.rope_theta, 500000.0);
+
+    // Verify it roundtrips through serialization
+    let data = serialize::serialize_key(&key);
+    let key2 = serialize::deserialize_key(&data).unwrap();
+    assert_eq!(key2.config.rope_scaling, key.config.rope_scaling);
+}
+
+#[test]
+fn test_no_rope_scaling_when_absent() {
+    let (dir, _cfg, _) = make_toy_safetensors();
+    // No config.json → no rope_scaling
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+    assert!(key.config.rope_scaling.is_none());
 }
 
 #[test]

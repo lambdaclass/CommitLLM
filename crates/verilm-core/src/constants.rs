@@ -116,6 +116,26 @@ impl MatrixType {
     }
 }
 
+/// RoPE scaling configuration for extended-context models.
+///
+/// Llama 3.1 uses `rope_type = "llama3"` with frequency-dependent scaling:
+/// high-frequency dimensions (short wavelength) are unchanged, low-frequency
+/// dimensions (long wavelength) are divided by `factor`, and medium-frequency
+/// dimensions are smoothly interpolated between scaled and unscaled.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RopeScaling {
+    /// Scaling type, e.g. "llama3", "linear", "dynamic".
+    pub rope_type: String,
+    /// Position scaling factor (e.g. 8.0 for Llama 3.1).
+    pub factor: f64,
+    /// Low frequency factor for band boundary (default 1.0).
+    pub low_freq_factor: f64,
+    /// High frequency factor for band boundary (default 4.0).
+    pub high_freq_factor: f64,
+    /// Original training context length before scaling (e.g. 8192).
+    pub original_max_position_embeddings: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
     pub name: String,
@@ -130,6 +150,10 @@ pub struct ModelConfig {
     pub vocab_size: usize,
     /// RoPE base frequency (theta), e.g. 10000.0 for Llama-family models.
     pub rope_theta: f64,
+    /// RoPE scaling for extended-context models (e.g. Llama 3.1).
+    /// None for models with no position scaling (e.g. Qwen2.5).
+    #[serde(default)]
+    pub rope_scaling: Option<RopeScaling>,
 }
 
 impl ModelConfig {
@@ -145,6 +169,7 @@ impl ModelConfig {
             n_kv_heads: 8,
             vocab_size: 128256,
             rope_theta: 500000.0,
+            rope_scaling: None,
         }
     }
 
@@ -160,6 +185,30 @@ impl ModelConfig {
             n_kv_heads: 8,
             vocab_size: 128256,
             rope_theta: 500000.0,
+            rope_scaling: None,
+        }
+    }
+
+    /// Llama 3.1 8B with rope_scaling (extended context to 128K).
+    pub fn llama_3_1_8b() -> Self {
+        ModelConfig {
+            name: "Llama-3.1-8B".into(),
+            hidden_dim: 4096,
+            kv_dim: 1024,     // 8 KV heads * 128
+            ffn_dim: 14336,
+            d_head: 128,
+            n_layers: 32,
+            n_q_heads: 32,
+            n_kv_heads: 8,
+            vocab_size: 128256,
+            rope_theta: 500000.0,
+            rope_scaling: Some(RopeScaling {
+                rope_type: "llama3".into(),
+                factor: 8.0,
+                low_freq_factor: 1.0,
+                high_freq_factor: 4.0,
+                original_max_position_embeddings: 8192,
+            }),
         }
     }
 
@@ -175,6 +224,7 @@ impl ModelConfig {
             n_kv_heads: 8,
             vocab_size: 128256,
             rope_theta: 500000.0,
+            rope_scaling: None,
         }
     }
 
@@ -191,6 +241,59 @@ impl ModelConfig {
             n_kv_heads: 2,
             vocab_size: 64,
             rope_theta: 10000.0,
+            rope_scaling: None,
+        }
+    }
+
+    /// Compute scaled inverse frequencies for this config.
+    ///
+    /// Returns `d_head / 2` inverse frequency values. When `rope_scaling`
+    /// is `None`, these are the standard RoPE frequencies. When present,
+    /// frequencies are modified according to the scaling type.
+    pub fn scaled_inv_freq(&self) -> Vec<f64> {
+        let half = self.d_head / 2;
+        let base_inv_freq: Vec<f64> = (0..half)
+            .map(|k| 1.0 / self.rope_theta.powf((2 * k) as f64 / self.d_head as f64))
+            .collect();
+
+        let scaling = match &self.rope_scaling {
+            Some(s) => s,
+            None => return base_inv_freq,
+        };
+
+        match scaling.rope_type.as_str() {
+            "llama3" => {
+                let old_ctx = scaling.original_max_position_embeddings as f64;
+                let low_freq_wavelen = old_ctx / scaling.low_freq_factor;
+                let high_freq_wavelen = old_ctx / scaling.high_freq_factor;
+
+                base_inv_freq
+                    .iter()
+                    .map(|&f| {
+                        let wavelen = 2.0 * std::f64::consts::PI / f;
+                        if wavelen < high_freq_wavelen {
+                            // High frequency: no scaling
+                            f
+                        } else if wavelen > low_freq_wavelen {
+                            // Low frequency: full scaling
+                            f / scaling.factor
+                        } else {
+                            // Medium: smooth interpolation
+                            let smooth = (old_ctx / wavelen - scaling.low_freq_factor)
+                                / (scaling.high_freq_factor - scaling.low_freq_factor);
+                            f * ((1.0 - smooth) / scaling.factor + smooth)
+                        }
+                    })
+                    .collect()
+            }
+            "linear" => {
+                // Linear scaling: divide all frequencies by factor
+                base_inv_freq.iter().map(|&f| f / scaling.factor).collect()
+            }
+            _ => {
+                // Unknown scaling type: fall back to unscaled
+                base_inv_freq
+            }
         }
     }
 }
