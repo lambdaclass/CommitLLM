@@ -4,6 +4,17 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 
 Historical references below to “roadmap #N” refer to the pre-2026-03-30 roadmap numbering. On 2026-03-30 the roadmap was renumbered into a single linear open-items-only sequence.
 
+## 2026-03-31
+
+### Fixed
+
+- **RoPE convention**: `apply_rope_head` used interleaved pairing `[2i, 2i+1]` but vLLM/Qwen/LLaMA use half-rotary `[i, i+half]`. K corridor dropped from L-inf=255 to <0.5 after fix.
+- **Q/KV input boundary asymmetry in corridor measurement**: shell opening Q was computed from bridge-derived x_attn while committed K/V used GPU-captured x_attn. Added `use_captured_x_attn` flag to `open_v4` so corridor measurement uses the same authoritative boundary for Q and K/V. Corridor dropped from L-inf=67–117 to L-inf=8.
+
+### Measured
+
+- **Attention corridor on Qwen2.5-7B-W8A8 (A100-80GB)**: 672 measurements across 6 workloads (short through 1164-token long_context), all 28 layers, all decode positions. Global max L-inf = 8. First generated token max L-inf = 5. >92% of elements are exact matches; >99.8% within ±1. No growth with sequence length. Worst layers spread across the stack (not concentrated). The ≤1 target for a formal single-step bound appears achievable — the real BF16-vs-f64 gap is small and stable. Llama-family control measurement pending.
+
 ## 2026-03-30
 
 ### Added
