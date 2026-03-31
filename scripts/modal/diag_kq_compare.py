@@ -368,24 +368,63 @@ def compare_kq():
                 q_bias = bias_np[:hidden_dim].astype(np.float64)
                 q_f64 = q_f64 + q_bias
 
-            # Apply RoPE (half convention)
-            def apply_rope_half(vec, position, theta, d_head_local, n_heads):
+            # Apply RoPE (half convention) with optional Llama3 frequency scaling
+            def compute_scaled_inv_freq(theta, d_head_local, rope_scaling_cfg):
+                """Compute (possibly scaled) inverse frequencies."""
+                half = d_head_local // 2
+                base_inv_freq = np.array([
+                    1.0 / (theta ** (2.0 * k / d_head_local))
+                    for k in range(half)
+                ])
+                if rope_scaling_cfg is None:
+                    return base_inv_freq
+
+                rope_type = rope_scaling_cfg.get("rope_type", "")
+                if rope_type == "llama3":
+                    factor = rope_scaling_cfg["factor"]
+                    low_freq_factor = rope_scaling_cfg.get("low_freq_factor", 1.0)
+                    high_freq_factor = rope_scaling_cfg.get("high_freq_factor", 4.0)
+                    old_ctx = rope_scaling_cfg["original_max_position_embeddings"]
+
+                    low_freq_wavelen = old_ctx / low_freq_factor
+                    high_freq_wavelen = old_ctx / high_freq_factor
+
+                    scaled = np.zeros_like(base_inv_freq)
+                    for k in range(half):
+                        wavelen = 2.0 * np.pi / base_inv_freq[k]
+                        if wavelen < high_freq_wavelen:
+                            scaled[k] = base_inv_freq[k]
+                        elif wavelen > low_freq_wavelen:
+                            scaled[k] = base_inv_freq[k] / factor
+                        else:
+                            smooth = (old_ctx / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
+                            scaled[k] = base_inv_freq[k] * ((1.0 - smooth) / factor + smooth)
+                    return scaled
+                elif rope_type == "linear":
+                    return base_inv_freq / rope_scaling_cfg["factor"]
+                else:
+                    return base_inv_freq
+
+            def apply_rope_half(vec, position, inv_freq, d_head_local, n_heads):
                 out = np.zeros_like(vec)
+                half = d_head_local // 2
                 for h in range(n_heads):
                     start = h * d_head_local
-                    half = d_head_local // 2
                     for i in range(half):
-                        freq = position * (theta ** (-2.0 * i / d_head_local))
-                        cos_f = np.cos(freq)
-                        sin_f = np.sin(freq)
+                        angle = position * inv_freq[i]
+                        cos_f = np.cos(angle)
+                        sin_f = np.sin(angle)
                         out[start + i] = vec[start + i] * cos_f - vec[start + half + i] * sin_f
                         out[start + half + i] = vec[start + half + i] * cos_f + vec[start + i] * sin_f
                 return out
 
             rope_theta = key_cfg.get("rope_theta", 10000.0)
+            rope_scaling_cfg = key_cfg.get("rope_scaling")
+            inv_freq = compute_scaled_inv_freq(rope_theta, d_head, rope_scaling_cfg)
             print(f"  rope_theta from key: {rope_theta}")
+            print(f"  rope_scaling from key: {rope_scaling_cfg}")
 
-            committed_q_roped = apply_rope_half(q_f64, DIAG_POS, rope_theta, d_head, n_q_heads)
+            committed_q_roped = apply_rope_half(q_f64, DIAG_POS, inv_freq, d_head, n_q_heads)
 
             if DIAG_POS < n_prefill:
                 gpu_q_diag = gpu_q_flat[DIAG_POS, :hidden_dim].astype(np.float64)
