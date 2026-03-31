@@ -490,7 +490,17 @@ def _run_model(model_id: str):
     print(f"\n{'='*70}")
     print("Committed-KV binary corridor (x_attn + per-channel scales)")
     print(f"{'='*70}")
-    for wl in WORKLOADS:
+
+    # Filter workloads if CORRIDOR_WORKLOADS is set
+    workload_filter = os.environ.get("CORRIDOR_WORKLOADS", "")
+    if workload_filter:
+        allowed = {w.strip() for w in workload_filter.split(",")}
+        active_workloads = [w for w in WORKLOADS if w["name"] in allowed]
+        print(f"  Filtered to workloads: {[w['name'] for w in active_workloads]}")
+    else:
+        active_workloads = WORKLOADS
+
+    for wl in active_workloads:
         for dc in DECODE_CONFIGS[:1]:  # greedy only for corridor
             label = f"{wl['name']}/{dc['name']}"
             print(f"\n--- {label} (max_tokens={wl['max_tokens']}) ---")
@@ -569,12 +579,20 @@ def measure_llama():
 @app.local_entrypoint()
 def main():
     import json
+    import os
 
-    print("Launching corridor measurement on two models...")
+    # CORRIDOR_MODELS: comma-separated list of models to run (default: both)
+    # CORRIDOR_WORKLOADS: comma-separated list of workload names (default: all)
+    models_env = os.environ.get("CORRIDOR_MODELS", "qwen,llama")
+    run_qwen = "qwen" in models_env
+    run_llama = "llama" in models_env
+
+    print("Launching corridor measurement...")
+    print(f"  Models: qwen={run_qwen}, llama={run_llama}")
     print("Results will be saved to Modal volume 'corridor-results'.\n")
 
-    qwen_results = measure_qwen.remote()
-    llama_results = measure_llama.remote()
+    qwen_results = measure_qwen.remote() if run_qwen else []
+    llama_results = measure_llama.remote() if run_llama else []
 
     # Combined summary
     print("\n" + "=" * 70)
