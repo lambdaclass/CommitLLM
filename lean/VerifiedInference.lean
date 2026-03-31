@@ -29,3 +29,5 @@ import VerifiedInference.CanonicalOps
 import VerifiedInference.CrossLayerConstraint
 import VerifiedInference.EndToEnd
 import VerifiedInference.IndependentChecks
+import VerifiedInference.AttentionBounds
+import VerifiedInference.SoftmaxBound
