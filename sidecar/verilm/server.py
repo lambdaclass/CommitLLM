@@ -980,6 +980,7 @@ class VerifiedInferenceServer:
         tier: str = "routine",
         binary: bool = True,
         deep_prefix: bool = False,
+        use_captured_x_attn: bool = False,
     ):
         """Open an audit proof.
 
@@ -993,6 +994,8 @@ class VerifiedInferenceServer:
             tier: "routine" (shell checks) or "full" (shell + attention replay).
             binary: if True (default), return bincode+zstd bytes. False for JSON debug.
             deep_prefix: if True, open prefix tokens for deep-prefix replay.
+            use_captured_x_attn: if True, shell opening QKV uses GPU-captured
+                x_attn instead of bridge-derived (for corridor measurement).
         """
         entry = self._audit_store.get(request_id)
         if entry is None:
@@ -1004,6 +1007,7 @@ class VerifiedInferenceServer:
 
         state = entry["state"]
         state.deep_prefix = deep_prefix
+        state.use_captured_x_attn = use_captured_x_attn
         output_text = entry.get("output_text")
 
         if binary:

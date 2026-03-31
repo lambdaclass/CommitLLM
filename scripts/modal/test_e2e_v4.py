@@ -147,6 +147,49 @@ def _run_e2e():
     assert_true(cf_full is not None, "classified_failures field present")
     assert_true(len(cf_full) == 0, f"no classified failures on pass (got {len(cf_full)})")
 
+    # ── Step 3c: Verify committed KV transcript ──
+    print("\n3c. Committed KV transcript (kv_roots)...")
+    kv_roots = commitment.get("kv_roots", [])
+    assert_true(len(kv_roots) > 0, f"commitment has kv_roots ({len(kv_roots)} entries)")
+    assert_true(len(kv_roots) == n_layers, f"kv_roots count matches n_layers ({len(kv_roots)}/{n_layers})")
+    # Verify KV entries present in the audit response with real data.
+    kv_entries = audit_full.get("kv_entries")
+    kv_proofs = audit_full.get("kv_proofs")
+    assert_true(kv_entries is not None, "full audit has kv_entries")
+    assert_true(kv_proofs is not None, "full audit has kv_proofs")
+    if kv_entries and kv_proofs:
+        assert_true(
+            len(kv_entries) == n_layers,
+            f"kv_entries has {len(kv_entries)} layer groups (expected {n_layers})"
+        )
+        # First layer should have entries for positions 0..=token_index (token 0 → 1 entry).
+        assert_true(
+            len(kv_entries[0]) >= 1,
+            f"kv_entries layer 0 has {len(kv_entries[0])} entries"
+        )
+        # Entries must have real float data, not empty placeholders.
+        entry0 = kv_entries[0][0]
+        assert_true(
+            isinstance(entry0, dict) and len(entry0.get("k_roped", [])) > 0,
+            f"kv_entries[0][0] has non-empty k_roped ({len(entry0.get('k_roped', []))} elements)"
+        )
+        assert_true(
+            len(entry0.get("v_deq", [])) > 0,
+            f"kv_entries[0][0] has non-empty v_deq ({len(entry0.get('v_deq', []))} elements)"
+        )
+        # Proofs must have real proof data matching entry count.
+        assert_true(
+            len(kv_proofs) == n_layers,
+            f"kv_proofs has {len(kv_proofs)} layer groups (expected {n_layers})"
+        )
+        assert_true(
+            len(kv_proofs[0]) == len(kv_entries[0]),
+            f"kv_proofs[0] count ({len(kv_proofs[0])}) matches kv_entries[0] count ({len(kv_entries[0])})"
+        )
+    # The full verification already passed (step 3b), which includes phase_kv_transcript.
+    # So the KV Merkle proofs are verified against kv_roots.
+    print(f"  kv_roots: {len(kv_roots)} layers, verification included in {report_full['checks_run']} checks")
+
     # ── Step 4a: Audit (routine tier — contiguous prefix) ──
     # Need a fresh chat since audit consumes state
     print("\n4a. Chat again for routine audit...")
@@ -283,6 +326,40 @@ def _run_e2e():
     assert_true(eos_report["passed"], f"EOS trim: verify passed ({eos_report['checks_passed']}/{eos_report['checks_run']} checks)")
     if not eos_report["passed"]:
         print(f"  failures: {eos_report['failures']}")
+
+    # ── Step 8: Deep-prefix replay with committed KV (binary path) ──
+    # x_attn capture is now on by default, so committed KV is always
+    # present. Test deep-prefix on the canonical binary wire format.
+    print("\n8. Deep-prefix replay with committed KV (binary path)...")
+    dp_result = server.chat(prompt=PROMPT, max_tokens=MAX_TOKENS)
+    dp_rid = dp_result["request_id"]
+    dp_commitment = dp_result["commitment"]
+    dp_kv_roots = dp_commitment.get("kv_roots", [])
+    assert_true(len(dp_kv_roots) == n_layers, f"deep-prefix chat has kv_roots ({len(dp_kv_roots)})")
+
+    dp_audit_binary = server.audit(
+        request_id=dp_rid,
+        token_index=0,
+        layer_indices=full_layers,
+        tier="full",
+        binary=True,
+        deep_prefix=True,
+    )
+    assert_true(isinstance(dp_audit_binary, (bytes, memoryview)), "binary deep-prefix returns bytes")
+    print(f"  binary deep-prefix payload: {len(dp_audit_binary)} bytes")
+
+    # Verify on the canonical binary path — f64 round-trip is exact via bincode.
+    dp_report = verilm_rs.verify_v4_binary(bytes(dp_audit_binary), key_json)
+    dp_failures = dp_report.get("failures", [])
+    kv_failures = [f for f in dp_failures if "KV Merkle proof" in f]
+    assert_true(
+        len(kv_failures) == 0,
+        f"KV Merkle proofs pass on binary path ({len(kv_failures)} failures)"
+    )
+    if kv_failures:
+        print(f"  KV failures: {kv_failures[:3]}...")
+    dp_checks = dp_report["checks_run"]
+    print(f"  checks: {dp_checks}, passed: {dp_report['checks_passed']}, KV proof failures: {len(kv_failures)}")
 
     # ── Summary ──
     print(f"\n{'='*60}")

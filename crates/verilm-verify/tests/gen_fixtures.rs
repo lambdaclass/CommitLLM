@@ -270,7 +270,7 @@ fn generate_frozen_fixtures() {
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)], None, None);
     let response = open_v4(
-        &state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false,
+        &state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false,
     );
 
     let audit_binary = verilm_core::serialize::serialize_v4_audit(&response);
@@ -317,7 +317,7 @@ fn generate_frozen_fixtures() {
     let (_commitment_fb, state_fb) = commit_minimal(vec![retained_fb], &params_fb, None, vec![captured_scales_fb], None, None);
     let response_fb = open_v4(
         &state_fb, 0, &ToyWeights(&model_fb), &cfg_fb, &ws,
-        Some(&bridge), None, None, None, false,
+        &[], Some(&bridge), None, None, None, false, false,
     );
 
     let audit_fb_binary = verilm_core::serialize::serialize_v4_audit(&response_fb);

@@ -990,4 +990,5 @@ mod tests {
         assert_ne!(hash_model_spec(&with_bs), hash_model_spec(&other_bs),
             "different quant_block_size values must produce different hashes");
     }
+
 }

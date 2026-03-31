@@ -559,6 +559,12 @@ pub struct VerifierKey {
     #[serde(default)]
     pub per_channel_weight_scales: Vec<Vec<Vec<f32>>>,
 
+    /// Per-layer QKV projection biases (model-dependent, e.g. Qwen2).
+    /// `qkv_biases[layer]` = `[q_bias, k_bias, v_bias]` where each is `Vec<f32>`.
+    /// Empty if the model has no QKV biases.
+    #[serde(default)]
+    pub qkv_biases: Vec<[Vec<f32>; 3]>,
+
     /// RMSNorm epsilon (e.g. 1e-5 for Llama-family models).
     pub rmsnorm_eps: f64,
 
@@ -659,6 +665,22 @@ impl VerifierKey {
     /// Returns true if this key has per-channel weight scales (W8A8 native INT8).
     pub fn has_per_channel_scales(&self) -> bool {
         !self.per_channel_weight_scales.is_empty()
+    }
+
+    /// Get the QKV projection bias for a given layer and matrix type.
+    /// Returns `None` if the model has no QKV biases or the matrix type has no bias.
+    pub fn qkv_bias_for(&self, layer: usize, mt: MatrixType) -> Option<&[f32]> {
+        if self.qkv_biases.is_empty() || layer >= self.qkv_biases.len() {
+            return None;
+        }
+        let idx = match mt {
+            MatrixType::Wq => 0,
+            MatrixType::Wk => 1,
+            MatrixType::Wv => 2,
+            _ => return None,
+        };
+        let bias = &self.qkv_biases[layer][idx];
+        if bias.is_empty() { None } else { Some(bias) }
     }
 }
 

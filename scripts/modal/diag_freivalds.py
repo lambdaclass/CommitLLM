@@ -131,9 +131,10 @@ def _run_diag():
         "binary": False,
     })
     assert resp.status_code == 200, f"audit failed: {resp.status_code}"
-    audit = resp.json()
+    audit_json = resp.text
+    audit = json.loads(audit_json)
 
-    report = verilm_rs.verify_v4(json.dumps(audit), key_json)
+    report = verilm_rs.verify_v4(audit_json, key_json)
     results["checks_run"] = report["checks_run"]
     results["checks_passed"] = report["checks_passed"]
     results["passed"] = report["passed"]

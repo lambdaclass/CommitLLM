@@ -206,7 +206,7 @@ fn golden_e2e_verify() {
     };
     let (commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)], None, None);
     let response = open_v4(
-        &state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false,
+        &state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false,
     );
 
     // Pin commitment roots
@@ -259,7 +259,7 @@ fn binary_v4_audit_roundtrip() {
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)], None, None);
     let response = open_v4(
-        &state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false,
+        &state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false,
     );
 
     let binary = verilm_core::serialize::serialize_v4_audit(&response);
@@ -327,7 +327,7 @@ fn binary_commitment_version_preserved() {
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)], None, None);
     let response = open_v4(
-        &state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false,
+        &state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false,
     );
 
     let binary = verilm_core::serialize::serialize_v4_audit(&response);

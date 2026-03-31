@@ -26,6 +26,7 @@
 //!        ├─ phase_deep_prefix
 //!        │    ├─ replay_deep_prefix_attention (prefix tokens j≥1)
 //!        │    └─ replay_opened_token_layer    (opened token via prefix KV)
+//!        ├─ phase_kv_transcript    (verify KV Merkle proofs against kv_roots)
 //!        ├─ phase_tokenization   (reads SpecState.input_spec)
 //!        └─ phase_detokenization (reads SpecState.detok_policy)
 //! ```
@@ -34,7 +35,7 @@ use std::time::Instant;
 
 use verilm_core::constants::MatrixType;
 use verilm_core::types::{
-    CommitmentVersion, InputSpec, OutputSpec, RetainedLayerState, RetainedTokenState,
+    CommitmentVersion, InputSpec, KvEntry, OutputSpec, RetainedLayerState, RetainedTokenState,
     ShellTokenOpening, V4AuditResponse, VerifierKey,
 };
 use verilm_core::{freivalds, merkle, serialize};
@@ -163,6 +164,7 @@ fn run(ctx: &Ctx) -> V4VerifyReport {
     }
 
     phase_deep_prefix(ctx, &mut st);
+    phase_kv_transcript(ctx, &mut st);
     phase_tokenization(ctx, &specs, &mut st);
     phase_detokenization(ctx, &specs, &mut st);
 
@@ -979,10 +981,39 @@ fn dequant_rope_qkv(
     let k_f64 = dequant_acc(key, layer_idx, MatrixType::Wk, k_acc, scale_x_attn);
     let v_f64 = dequant_acc(key, layer_idx, MatrixType::Wv, v_acc, scale_x_attn);
 
+    // Add projection biases (model-dependent, e.g. Qwen2)
+    let q_f64 = add_qkv_bias(key, layer_idx, MatrixType::Wq, q_f64);
+    let k_f64 = add_qkv_bias(key, layer_idx, MatrixType::Wk, k_f64);
+    let v_f64 = add_qkv_bias(key, layer_idx, MatrixType::Wv, v_f64);
+
     let q_roped = verilm_core::rope::apply_rope_q(&q_f64, position, &key.config);
     let k_roped = verilm_core::rope::apply_rope_k(&k_f64, position, &key.config);
 
     (q_roped, k_roped, v_f64)
+}
+
+/// Dequantize Q accumulators and apply RoPE. Used when K/V comes from
+/// committed KV transcript and only Q needs reconstruction.
+fn dequant_rope_q(
+    key: &VerifierKey,
+    layer_idx: usize,
+    q_acc: &[i32],
+    scale_x_attn: f32,
+    position: usize,
+) -> Vec<f64> {
+    let q_f64 = dequant_acc(key, layer_idx, MatrixType::Wq, q_acc, scale_x_attn);
+    let q_f64 = add_qkv_bias(key, layer_idx, MatrixType::Wq, q_f64);
+    verilm_core::rope::apply_rope_q(&q_f64, position, &key.config)
+}
+
+/// Add QKV projection bias if the model has one for this matrix type.
+fn add_qkv_bias(key: &VerifierKey, layer_idx: usize, mt: MatrixType, mut v: Vec<f64>) -> Vec<f64> {
+    if let Some(bias) = key.qkv_bias_for(layer_idx, mt) {
+        for (x, &b) in v.iter_mut().zip(bias) {
+            *x += b as f64;
+        }
+    }
+    v
 }
 
 /// Dequantize i32 accumulators using per-channel or per-tensor weight scales.
@@ -1382,19 +1413,28 @@ fn replay_deep_prefix_attention(
             .unwrap_or(0),
     );
 
+    // Use committed KV entries (already verified by phase_kv_transcript)
+    // instead of reconstructing K/V from shell accumulators.
+    let committed_kv = ctx.r.kv_entries.as_deref();
+
     if ctx.key.rope_aware_replay {
-        replay_deep_prefix_roped(ctx, prefix_ret, prefix_shells, n_layers, st);
+        replay_deep_prefix_roped(ctx, prefix_ret, prefix_shells, n_layers, committed_kv, st);
     } else {
-        replay_deep_prefix_toy(ctx, prefix_ret, prefix_shells, n_layers, st);
+        replay_deep_prefix_toy(ctx, prefix_ret, prefix_shells, n_layers, committed_kv, st);
     }
 }
 
 /// Toy/reference path: raw i8 requantize, no RoPE.
+///
+/// When `committed_kv` is `Some`, K/V cache entries come from the committed
+/// KV transcript (already verified by `phase_kv_transcript`). Otherwise,
+/// K/V is reconstructed from shell QKV accumulators (legacy path).
 fn replay_deep_prefix_toy(
     ctx: &Ctx,
     prefix_ret: &[RetainedTokenState],
     prefix_shells: &[ShellTokenOpening],
     n_layers: usize,
+    committed_kv: Option<&[Vec<KvEntry>]>,
     st: &mut St,
 ) {
     let cfg = &ctx.key.config;
@@ -1407,15 +1447,30 @@ fn replay_deep_prefix_toy(
             if layer_idx >= ret_j.layers.len() { break; }
             let sl = &shell_j.layers[layer_idx];
             let rs = &ret_j.layers[layer_idx];
-            let (q_acc, k_acc, v_acc) = match (&sl.q, &sl.k, &sl.v) {
-                (Some(q), Some(k), Some(v)) => (q, k, v),
-                _ => break,
-            };
 
-            kv_k.push(verilm_core::requantize(k_acc));
-            kv_v.push(verilm_core::requantize(v_acc));
+            // Populate KV cache: committed entries if available, else reconstruct.
+            if let Some(entry) = committed_kv
+                .and_then(|kv| kv.get(layer_idx))
+                .and_then(|layer| layer.get(j))
+            {
+                kv_k.push(entry.k_roped.iter().map(|&x| x as i8).collect());
+                kv_v.push(entry.v_deq.iter().map(|&x| x as i8).collect());
+            } else {
+                let (_, k_acc, v_acc) = match (&sl.q, &sl.k, &sl.v) {
+                    (Some(q), Some(k), Some(v)) => (q, k, v),
+                    _ => break,
+                };
+                kv_k.push(verilm_core::requantize(k_acc));
+                kv_v.push(verilm_core::requantize(v_acc));
+            }
 
             if j == 0 { continue; } // token 0 handled by check_attention_token0
+
+            // Q always comes from shell accumulators.
+            let q_acc = match &sl.q {
+                Some(q) => q,
+                None => break,
+            };
 
             st.check();
             let q_i8 = verilm_core::requantize(q_acc);
@@ -1427,8 +1482,17 @@ fn replay_deep_prefix_toy(
 
         // Opened token replay
         if let Some((q_acc, k_acc, v_acc, rs)) = opened_token_qkv(ctx, layer_idx) {
-            kv_k.push(verilm_core::requantize(k_acc));
-            kv_v.push(verilm_core::requantize(v_acc));
+            let pos = ctx.r.token_index as usize;
+            if let Some(entry) = committed_kv
+                .and_then(|kv| kv.get(layer_idx))
+                .and_then(|layer| layer.get(pos))
+            {
+                kv_k.push(entry.k_roped.iter().map(|&x| x as i8).collect());
+                kv_v.push(entry.v_deq.iter().map(|&x| x as i8).collect());
+            } else {
+                kv_k.push(verilm_core::requantize(k_acc));
+                kv_v.push(verilm_core::requantize(v_acc));
+            }
             st.check();
             let q_i8 = verilm_core::requantize(q_acc);
             let expected_a = verilm_core::attention::replay_attention_reference(
@@ -1440,11 +1504,16 @@ fn replay_deep_prefix_toy(
 }
 
 /// Production path: dequantize + RoPE + f64 replay.
+///
+/// When `committed_kv` is `Some`, K/V cache entries come from the committed
+/// KV transcript (already verified by `phase_kv_transcript`). Otherwise,
+/// K/V is reconstructed via dequant + RoPE from shell QKV accumulators.
 fn replay_deep_prefix_roped(
     ctx: &Ctx,
     prefix_ret: &[RetainedTokenState],
     prefix_shells: &[ShellTokenOpening],
     n_layers: usize,
+    committed_kv: Option<&[Vec<KvEntry>]>,
     st: &mut St,
 ) {
     let cfg = &ctx.key.config;
@@ -1457,21 +1526,35 @@ fn replay_deep_prefix_roped(
             if layer_idx >= ret_j.layers.len() { break; }
             let sl = &shell_j.layers[layer_idx];
             let rs = &ret_j.layers[layer_idx];
-            let (q_acc, k_acc, v_acc) = match (&sl.q, &sl.k, &sl.v) {
-                (Some(q), Some(k), Some(v)) => (q, k, v),
-                _ => break,
-            };
 
-            let (_, k_roped, v_deq) =
-                dequant_rope_qkv(ctx.key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, j);
-            kv_k.push(k_roped);
-            kv_v.push(v_deq);
+            // Populate KV cache: committed entries if available, else reconstruct.
+            if let Some(entry) = committed_kv
+                .and_then(|kv| kv.get(layer_idx))
+                .and_then(|layer| layer.get(j))
+            {
+                kv_k.push(entry.k_roped.clone());
+                kv_v.push(entry.v_deq.clone());
+            } else {
+                let (q_acc, k_acc, v_acc) = match (&sl.q, &sl.k, &sl.v) {
+                    (Some(q), Some(k), Some(v)) => (q, k, v),
+                    _ => break,
+                };
+                let (_, k_roped, v_deq) =
+                    dequant_rope_qkv(ctx.key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, j);
+                kv_k.push(k_roped);
+                kv_v.push(v_deq);
+            }
 
             if j == 0 { continue; }
 
+            // Q always comes from shell accumulators.
+            let q_acc = match &sl.q {
+                Some(q) => q,
+                None => break,
+            };
+
             st.check();
-            let (q_roped, _, _) =
-                dequant_rope_qkv(ctx.key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, j);
+            let q_roped = dequant_rope_q(ctx.key, layer_idx, q_acc, sl.scale_x_attn, j);
             let expected_a = verilm_core::attention::replay_attention_roped(
                 &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
             );
@@ -1484,12 +1567,21 @@ fn replay_deep_prefix_roped(
             let sl = &shell.layers[layer_idx];
             let pos = ctx.r.token_index as usize;
 
-            let (q_roped, k_roped, v_deq) =
-                dequant_rope_qkv(ctx.key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, pos);
-            kv_k.push(k_roped);
-            kv_v.push(v_deq);
+            if let Some(entry) = committed_kv
+                .and_then(|kv| kv.get(layer_idx))
+                .and_then(|layer| layer.get(pos))
+            {
+                kv_k.push(entry.k_roped.clone());
+                kv_v.push(entry.v_deq.clone());
+            } else {
+                let (_, k_roped, v_deq) =
+                    dequant_rope_qkv(ctx.key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, pos);
+                kv_k.push(k_roped);
+                kv_v.push(v_deq);
+            }
 
             st.check();
+            let q_roped = dequant_rope_q(ctx.key, layer_idx, q_acc, sl.scale_x_attn, pos);
             let expected_a = verilm_core::attention::replay_attention_roped(
                 &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
             );
@@ -1575,6 +1667,140 @@ fn check_attention_result_opened(
                 ..Default::default()
             },
         );
+    }
+}
+
+// --- Phase 7b: KV transcript verification
+
+/// Verify committed KV transcript Merkle proofs against `kv_roots`.
+///
+/// If the response includes `kv_entries` and `kv_proofs`, each entry is
+/// re-hashed with `hash_kv_entry` and the Merkle proof is verified against
+/// the corresponding `kv_roots[layer]`. This establishes that the KV values
+/// opened during audit are exactly the values committed at generation time.
+///
+/// Skipped silently when `kv_roots` is empty (legacy / no KV commitment).
+fn phase_kv_transcript(ctx: &Ctx, st: &mut St) {
+    let kv_roots = &ctx.r.commitment.kv_roots;
+    if kv_roots.is_empty() {
+        return; // Legacy response without KV commitment — nothing to verify.
+    }
+
+    let n_layers = ctx.key.config.n_layers;
+
+    // kv_roots length must match model layer count.
+    st.check();
+    if kv_roots.len() != n_layers {
+        st.fail_ctx(
+            FailureCode::KvRootsCountMismatch,
+            format!(
+                "kv_roots has {} entries, expected {} (n_layers)",
+                kv_roots.len(),
+                n_layers
+            ),
+            FailureContext {
+                expected: Some(n_layers.to_string()),
+                actual: Some(kv_roots.len().to_string()),
+                ..Default::default()
+            },
+        );
+        return;
+    }
+
+    // If there are no opened KV entries, nothing more to verify — the roots
+    // are committed but the audit did not open any KV positions (e.g. the
+    // verifier didn't request deep-prefix KV opening for this token).
+    let (entries, proofs) = match (&ctx.r.kv_entries, &ctx.r.kv_proofs) {
+        (Some(e), Some(p)) => (e, p),
+        (None, None) => return,
+        _ => {
+            // One is present but not the other — structural error.
+            st.check();
+            st.fail(
+                FailureCode::KvProofCountMismatch,
+                "kv_entries and kv_proofs must both be present or both absent",
+            );
+            return;
+        }
+    };
+
+    // Outer vec is per challenged layer. Lengths must match.
+    st.check();
+    if entries.len() != proofs.len() {
+        st.fail(
+            FailureCode::KvProofCountMismatch,
+            format!(
+                "kv_entries has {} layer groups, kv_proofs has {}",
+                entries.len(),
+                proofs.len()
+            ),
+        );
+        return;
+    }
+
+    for (group_idx, (layer_entries, layer_proofs)) in
+        entries.iter().zip(proofs.iter()).enumerate()
+    {
+        // Entries and proofs must be paired.
+        st.check();
+        if layer_entries.len() != layer_proofs.len() {
+            st.fail_ctx(
+                FailureCode::KvProofCountMismatch,
+                format!(
+                    "layer group {}: {} entries but {} proofs",
+                    group_idx,
+                    layer_entries.len(),
+                    layer_proofs.len()
+                ),
+                FailureContext {
+                    layer: Some(group_idx),
+                    ..Default::default()
+                },
+            );
+            continue;
+        }
+
+        for (pos, (entry, proof)) in
+            layer_entries.iter().zip(layer_proofs.iter()).enumerate()
+        {
+            // Determine the actual layer index from the proof's leaf_index
+            // domain separator. The prover opens layers in order, so
+            // group_idx maps to challenged layers. For now, the prover opens
+            // all layers in order (0..n_layers), so group_idx == layer_idx.
+            // When selective layer opening is implemented, this mapping will
+            // need to come from the challenge specification.
+            let layer_idx = group_idx;
+            if layer_idx >= kv_roots.len() {
+                st.check();
+                st.fail_ctx(
+                    FailureCode::KvEntriesCountMismatch,
+                    format!("layer group {} exceeds kv_roots count {}", group_idx, kv_roots.len()),
+                    FailureContext {
+                        layer: Some(group_idx),
+                        ..Default::default()
+                    },
+                );
+                break;
+            }
+
+            st.check();
+            let leaf_hash =
+                merkle::hash_kv_entry(layer_idx, pos, &entry.k_roped, &entry.v_deq);
+            if !merkle::verify(&kv_roots[layer_idx], &leaf_hash, proof) {
+                st.fail_ctx(
+                    FailureCode::KvProofInvalid,
+                    format!(
+                        "KV Merkle proof failed: layer {} position {}",
+                        layer_idx, pos
+                    ),
+                    FailureContext {
+                        layer: Some(layer_idx),
+                        token_index: Some(pos as u32),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
     }
 }
 
@@ -1795,6 +2021,7 @@ mod tests {
             scale_derivation: None,
             quant_block_size: None,
             rope_aware_replay: false,
+            qkv_biases: vec![],
         }
     }
 

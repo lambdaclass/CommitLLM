@@ -192,6 +192,7 @@ pub fn compute_kv_transcript(
     captured_scales: &[Vec<CapturedLayerScales>],
     per_tensor_scales: &[Vec<f32>],
     per_channel_scales: &[Vec<Vec<f32>>],
+    qkv_biases: &[[Vec<f32>; 3]],
 ) -> Vec<Vec<KvEntry>> {
     let n_layers = cfg.n_layers;
     let n_tokens = captured_x_attn.len();
@@ -245,6 +246,18 @@ pub fn compute_kv_transcript(
                 } else {
                     let sw = per_tensor_scales.get(layer_idx).and_then(|s| s.get(v_mt_idx)).copied().unwrap_or(0.0);
                     verilm_core::rope::dequantize_acc(&v_acc, Some(sw), Some(scale_x))
+                };
+
+                // Add projection biases (model-dependent, e.g. Qwen2)
+                let k_f64 = if layer_idx < qkv_biases.len() && !qkv_biases[layer_idx][1].is_empty() {
+                    k_f64.iter().zip(&qkv_biases[layer_idx][1]).map(|(&x, &b)| x + b as f64).collect()
+                } else {
+                    k_f64
+                };
+                let v_f64 = if layer_idx < qkv_biases.len() && !qkv_biases[layer_idx][2].is_empty() {
+                    v_f64.iter().zip(&qkv_biases[layer_idx][2]).map(|(&x, &b)| x + b as f64).collect()
+                } else {
+                    v_f64
                 };
 
                 let k_roped = verilm_core::rope::apply_rope_k(&k_f64, token_pos, cfg);
@@ -1144,16 +1157,25 @@ pub fn open_v4(
     layer_filter: Option<&[usize]>,
     embedding_lookup: Option<&dyn EmbeddingLookup>,
     deep_prefix: bool,
+    use_captured_x_attn: bool,
 ) -> V4AuditResponse {
     let mut response = open_v4_structural(state, token_index);
-    // Shell opening uses bridge-derived x_attn (not GPU-captured) so that QKV
-    // accumulators match the verifier's own derivation for Freivalds checks.
-    // Captured x_attn is only for KV transcript computation (done at commit time).
+    // When use_captured_x_attn is false (default / Freivalds path), the shell
+    // opening uses bridge-derived x_attn so QKV accumulators match the
+    // verifier's own derivation.  When true (corridor measurement), GPU-captured
+    // x_attn is used so Q matches the same boundary as committed K/V.
+    let cxa = if use_captured_x_attn {
+        state.captured_x_attn.as_ref()
+            .and_then(|all| all.get(token_index as usize))
+            .map(|v| v.as_slice())
+    } else {
+        None
+    };
     let mut shell = compute_shell_opening(
         &state.all_retained[token_index as usize], weights, cfg, weight_scales,
         per_channel_weight_scales, bridge,
         layer_filter, &state.captured_scales[token_index as usize],
-        None,
+        cxa,
     );
     // Attach captured final residual from GPU inference (if available).
     shell.final_residual = state.final_residuals
@@ -1206,10 +1228,17 @@ pub fn open_v4(
                         initial_residual: &emb_row,
                         embedding_proof: None, // prefix tokens don't carry individual proofs in shell
                     };
+                    let cxa_j = if use_captured_x_attn {
+                        state.captured_x_attn.as_ref()
+                            .and_then(|all| all.get(j))
+                            .map(|v| v.as_slice())
+                    } else {
+                        None
+                    };
                     let mut shell_j = compute_shell_opening(
                         retained_j, weights, cfg, weight_scales, per_channel_weight_scales,
                         Some(&bridge_j), layer_filter, &state.captured_scales[j],
-                        None, // bridge-derived x_attn for Freivalds compatibility
+                        cxa_j,
                     );
                     shell_j.final_residual = state.final_residuals
                         .as_ref()

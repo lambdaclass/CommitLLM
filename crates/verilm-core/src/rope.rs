@@ -21,6 +21,10 @@ use crate::constants::ModelConfig;
 /// `head_vec` has length `d_head`. RoPE rotates pairs of elements
 /// using position-dependent frequencies.
 ///
+/// Uses the **half-rotary** convention (GPT-NeoX / LLaMA / Qwen style):
+/// pair `(head_vec[i], head_vec[i + half])` is rotated by
+/// `position * theta^(-2i / d_head)`.
+///
 /// Returns the rotated vector in f64.
 pub fn apply_rope_head(head_vec: &[f64], position: usize, d_head: usize, theta: f64) -> Vec<f64> {
     assert_eq!(head_vec.len(), d_head);
@@ -31,8 +35,8 @@ pub fn apply_rope_head(head_vec: &[f64], position: usize, d_head: usize, theta: 
         let freq = (position as f64) * theta.powf(-((2 * i) as f64) / (d_head as f64));
         let cos_f = freq.cos();
         let sin_f = freq.sin();
-        out[2 * i] = head_vec[2 * i] * cos_f - head_vec[2 * i + 1] * sin_f;
-        out[2 * i + 1] = head_vec[2 * i] * sin_f + head_vec[2 * i + 1] * cos_f;
+        out[i]        = head_vec[i] * cos_f - head_vec[i + half] * sin_f;
+        out[i + half] = head_vec[i + half] * cos_f + head_vec[i] * sin_f;
     }
 
     out
@@ -180,18 +184,19 @@ mod tests {
     #[test]
     fn test_rope_preserves_norm() {
         // RoPE is a rotation — it preserves the L2 norm of each pair.
+        // Half convention: pairs are (0, 2) and (1, 3) for d_head=4.
         let head = vec![3.0, 4.0, 1.0, 2.0];
         let out = apply_rope_head(&head, 5, 4, 10000.0);
 
-        let norm_before_0 = (head[0] * head[0] + head[1] * head[1]).sqrt();
-        let norm_after_0 = (out[0] * out[0] + out[1] * out[1]).sqrt();
+        let norm_before_0 = (head[0] * head[0] + head[2] * head[2]).sqrt();
+        let norm_after_0 = (out[0] * out[0] + out[2] * out[2]).sqrt();
         assert!(
             (norm_before_0 - norm_after_0).abs() < 1e-10,
             "RoPE should preserve pair norm"
         );
 
-        let norm_before_1 = (head[2] * head[2] + head[3] * head[3]).sqrt();
-        let norm_after_1 = (out[2] * out[2] + out[3] * out[3]).sqrt();
+        let norm_before_1 = (head[1] * head[1] + head[3] * head[3]).sqrt();
+        let norm_after_1 = (out[1] * out[1] + out[3] * out[3]).sqrt();
         assert!(
             (norm_before_1 - norm_after_1).abs() < 1e-10,
             "RoPE should preserve pair norm"

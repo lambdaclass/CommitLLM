@@ -109,6 +109,7 @@ mod tests {
             scale_derivation: None,
             quant_block_size: None,
             rope_aware_replay: false,
+            qkv_biases: Vec::new(),
         };
         let data = serialize_key(&key);
         let key2 = deserialize_key(&data).unwrap();

@@ -143,7 +143,7 @@ def _run_test():
             "tier": "full", "binary": False,
         })
         ok(resp.status_code == 200, f"greedy audit status={resp.status_code}")
-        report = verilm_rs.verify_v4(json.dumps(resp.json()), key_json)
+        report = verilm_rs.verify_v4(resp.text, key_json)
         ok(report["passed"], f"greedy verify passed ({report['checks_passed']}/{report['checks_run']})")
         if not report["passed"]:
             print(f"    failures: {report['failures'][:3]}")
@@ -166,7 +166,7 @@ def _run_test():
             "tier": "full", "binary": False,
         })
         ok(resp.status_code == 200, f"sampled audit status={resp.status_code}")
-        report_s = verilm_rs.verify_v4(json.dumps(resp.json()), key_json)
+        report_s = verilm_rs.verify_v4(resp.text, key_json)
         ok(report_s["passed"], f"sampled verify passed ({report_s['checks_passed']}/{report_s['checks_run']})")
         if not report_s["passed"]:
             print(f"    failures: {report_s['failures'][:3]}")

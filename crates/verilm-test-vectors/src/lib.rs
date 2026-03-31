@@ -401,6 +401,7 @@ pub fn generate_key(cfg: &ModelConfig, model: &[LayerWeights], seed: [u8; 32]) -
         scale_derivation: None,
         quant_block_size: None,
         rope_aware_replay: false,
+        qkv_biases: Vec::new(),
     }
 }
 

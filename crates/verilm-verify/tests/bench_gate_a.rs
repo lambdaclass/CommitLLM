@@ -231,7 +231,7 @@ fn bench_gate_a() {
     let mut response_simple = None;
     for _ in 0..ITERS {
         let start = Instant::now();
-        let r = open_v4(&state, 5, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+        let r = open_v4(&state, 5, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
         open_simple_times.push(start.elapsed());
         response_simple = Some(r);
     }
@@ -281,7 +281,7 @@ fn bench_gate_a() {
     let mut response_full = None;
     for _ in 0..ITERS {
         let start = Instant::now();
-        let r = open_v4(&fb_state, 0, &ToyWeights(&fb_model), &fb_cfg, &fb_ws, Some(&fb_bridge), None, None, None, false);
+        let r = open_v4(&fb_state, 0, &ToyWeights(&fb_model), &fb_cfg, &fb_ws, &[], Some(&fb_bridge), None, None, None, false, false);
         open_full_times.push(start.elapsed());
         response_full = Some(r);
     }

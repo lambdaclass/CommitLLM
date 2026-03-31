@@ -266,7 +266,7 @@ fn build_audit() -> (
     let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales], None, None);
     let response = open_v4(
         &state, 0, &ToyWeights(&model), &cfg, &ws,
-        Some(&bridge), None, None, None, false,
+        &[], Some(&bridge), None, None, None, false, false,
     );
 
     let binary = verilm_core::serialize::serialize_v4_audit(&response);

@@ -150,7 +150,7 @@ fn v4_protocol_single_token_pass() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
@@ -182,7 +182,7 @@ fn v4_protocol_multi_token_pass() {
     };
     let (_commitment, state) = commit_toy(all_retained, &params, None, cfg.n_layers);
 
-    let response = open_v4(&state, 2, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 2, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
     // Structural + shell Freivalds for challenged token only
@@ -204,7 +204,7 @@ fn v4_protocol_token_zero_pass() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
@@ -237,7 +237,7 @@ fn v4_tampered_io_chain_detected() {
     };
     let (_commitment, state) = commit_toy(all_retained, &params, None, cfg.n_layers);
 
-    let mut response = open_v4(&state, 1, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 1, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     response.prev_io_hash[0] ^= 0xff;
 
     let report = verify_v4(&key, &response, None);
@@ -264,7 +264,7 @@ fn v4_wrong_seed_detected() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     response.revealed_seed[0] ^= 0xff;
 
     let report = verify_v4(&key, &response, None);
@@ -295,7 +295,7 @@ fn v4_wrong_shell_opening_detected() {
     // Prover opens with WRONG weights — shell intermediates are inconsistent
     // with the keygen weights. Freivalds catches this.
     let wrong_model = generate_model(&cfg, 99999);
-    let response = open_v4(&state, 0, &ToyWeights(&wrong_model), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&wrong_model), &cfg, &[], &[], None, None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
@@ -352,7 +352,7 @@ fn v4_weights_single_token_pass() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     let report = verify_v4_with_weights(&key, &response, &ToyWeights(&model));
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
@@ -384,7 +384,7 @@ fn v4_weights_multi_token_pass() {
     };
     let (_commitment, state) = commit_toy(all_retained, &params, None, cfg.n_layers);
 
-    let response = open_v4(&state, 2, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 2, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     let report = verify_v4_with_weights(&key, &response, &ToyWeights(&model));
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
     // Structural checks + challenged token replay only (prefix tokens are
@@ -407,7 +407,7 @@ fn v4_weights_wrong_weights_detected() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     // Debug verifier replays with WRONG weights — Freivalds catches mismatch.
     let wrong_model = generate_model(&cfg, 99999);
@@ -490,7 +490,7 @@ fn v4_scale_aware_single_token_pass() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![rscales], None, None);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, &[], None, None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
@@ -516,7 +516,7 @@ fn v4_scale_aware_multi_token_pass() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None);
-    let response = open_v4(&state, 2, &ToyWeights(&model), &cfg, &ws, None, None, None, None, false);
+    let response = open_v4(&state, 2, &ToyWeights(&model), &cfg, &ws, &[], None, None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
@@ -545,7 +545,7 @@ fn v4_scale_mismatch_detected() {
     let wrong_ws: Vec<Vec<f32>> = (0..cfg.n_layers)
         .map(|_| vec![1.0; verilm_core::constants::MatrixType::PER_LAYER.len()])
         .collect();
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &wrong_ws, None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &wrong_ws, &[], None, None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "scale mismatch should cause failure");
@@ -719,7 +719,7 @@ fn v4_full_bridge_single_token_pass() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales], None, None);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, &[], Some(&bridge), None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
@@ -777,7 +777,7 @@ fn v4_full_bridge_cross_layer_chain() {
         initial_residual: &residuals[2],
         embedding_proof: Some(proof),
     };
-    let response = open_v4(&state, 2, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None, None, false);
+    let response = open_v4(&state, 2, &ToyWeights(&model), &cfg, &ws, &[], Some(&bridge), None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
@@ -814,7 +814,7 @@ fn v4_full_bridge_wrong_residual_detected() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()], None, None);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, &[], Some(&bridge), None, None, None, false, false);
 
     // Tamper: change initial_residual in the shell opening after prover built it.
     // The embedding proof was computed for the original residual, so hash won't match.
@@ -867,7 +867,7 @@ fn v4_full_bridge_qkv_layer0() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()], None, None);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, &[], Some(&bridge), None, None, None, false, false);
 
     // Verify shell has QKV at layer 0
     let shell = response.shell_opening.as_ref().unwrap();
@@ -936,7 +936,7 @@ fn v4_embedding_proof_pass() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()], None, None);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, &[], Some(&bridge), None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
@@ -978,7 +978,7 @@ fn v4_embedding_proof_tampered_residual_detected() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()], None, None);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, &[], Some(&bridge), None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "tampered residual should be caught");
@@ -1015,7 +1015,7 @@ fn v4_embedding_proof_missing_when_root_present() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()], None, None);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, &[], Some(&bridge), None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "missing proof should be caught");
@@ -1054,7 +1054,7 @@ fn v4_embedding_proof_wrong_token_id_detected() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()], None, None);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, &[], Some(&bridge), None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "wrong token_id should be caught");
@@ -1086,7 +1086,7 @@ fn v4_downgrade_omit_initial_residual_detected() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()], None, None);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, &[], None, None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "omitted initial_residual should be caught");
@@ -1122,7 +1122,7 @@ fn v4_unbound_initial_residual_rejected() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales.clone()], None, None);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &ws, &[], Some(&bridge), None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail, "unbound initial_residual should be rejected");
@@ -1179,7 +1179,7 @@ fn v4_lm_head_greedy_pass() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &lm_head, &cfg);
 
     let report = verify_v4(&key, &response, None);
@@ -1204,7 +1204,7 @@ fn v4_lm_head_wrong_token_detected() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &lm_head, &cfg);
 
     let report = verify_v4(&key, &response, None);
@@ -1254,7 +1254,7 @@ fn v4_lm_head_multi_token_pass() {
 
     // Verify each token
     for i in 0..3 {
-        let mut response = open_v4(&state, i, &ToyWeights(&toy.layers), &cfg, &[], None, None, None, None, false);
+        let mut response = open_v4(&state, i, &ToyWeights(&toy.layers), &cfg, &[], &[], None, None, None, None, false, false);
         attach_toy_logits(&mut response, &toy.lm_head, &cfg);
         let report = verify_v4(&key, &response, None);
         assert_eq!(report.verdict, Verdict::Pass,
@@ -1296,7 +1296,7 @@ fn v4_lm_head_freivalds_catches_tampered_logits() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], &[], None, None, None, None, false, false);
 
     // Attach honest logits — should pass.
     attach_toy_logits(&mut response, &toy.lm_head, &cfg);
@@ -1384,7 +1384,7 @@ fn v4_manifest_greedy_sampling_replay_pass() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
 
     let report = verify_v4(&key, &response, None);
@@ -1427,7 +1427,7 @@ fn v4_manifest_sampled_replay_pass() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], &[], None, None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
@@ -1471,7 +1471,7 @@ fn v4_manifest_wrong_sampled_token_detected() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &toy.lm_head, &cfg);
 
     let report = verify_v4(&key, &response, None);
@@ -1496,7 +1496,7 @@ fn v4_manifest_hash_mismatch_detected() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     // Tamper with the manifest in the response (different temperature).
     response.manifest = Some(make_manifest(1.0, 0, 1.0));
@@ -1535,7 +1535,7 @@ fn setup_manifest_crosscheck() -> (
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     (cfg, model, key, manifest, response)
 }
@@ -1556,7 +1556,7 @@ fn v4_manifest_n_layers_mismatch_rejected() {
     let traces = forward_pass(&_cfg, &_model, &input);
     let retained = retained_from_traces(&traces);
     let (_commitment, state) = commit_toy(vec![retained], &params, None, _cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], &[], None, None, None, None, false, false);
     response.manifest = Some(manifest);
 
     let report = verify_v4(&key, &response, None);
@@ -1580,7 +1580,7 @@ fn v4_manifest_hidden_dim_mismatch_rejected() {
     let traces = forward_pass(&_cfg, &_model, &input);
     let retained = retained_from_traces(&traces);
     let (_commitment, state) = commit_toy(vec![retained], &params, None, _cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], &[], None, None, None, None, false, false);
     response.manifest = Some(manifest);
 
     let report = verify_v4(&key, &response, None);
@@ -1604,7 +1604,7 @@ fn v4_manifest_vocab_size_mismatch_rejected() {
     let traces = forward_pass(&_cfg, &_model, &input);
     let retained = retained_from_traces(&traces);
     let (_commitment, state) = commit_toy(vec![retained], &params, None, _cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], &[], None, None, None, None, false, false);
     response.manifest = Some(manifest);
 
     let report = verify_v4(&key, &response, None);
@@ -1630,7 +1630,7 @@ fn v4_manifest_embedding_root_mismatch_rejected() {
     let traces = forward_pass(&_cfg, &_model, &input);
     let retained = retained_from_traces(&traces);
     let (_commitment, state) = commit_toy(vec![retained], &params, None, _cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], &[], None, None, None, None, false, false);
     response.manifest = Some(manifest);
 
     let report = verify_v4(&key, &response, None);
@@ -1657,7 +1657,7 @@ fn v4_manifest_architecture_fields_pass() {
     let traces = forward_pass(&cfg, &model, &input);
     let retained = retained_from_traces(&traces);
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
@@ -1685,7 +1685,7 @@ fn v4_decode_mode_greedy_with_nonzero_temp_rejected() {
     let traces = forward_pass(&_cfg, &_model, &input);
     let retained = retained_from_traces(&traces);
     let (_commitment, state) = commit_toy(vec![retained], &params, None, _cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], &[], None, None, None, None, false, false);
     response.manifest = Some(manifest);
 
     let report = verify_v4(&key, &response, None);
@@ -1710,7 +1710,7 @@ fn v4_decode_mode_sampled_with_zero_temp_rejected() {
     let traces = forward_pass(&_cfg, &_model, &input);
     let retained = retained_from_traces(&traces);
     let (_commitment, state) = commit_toy(vec![retained], &params, None, _cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], &[], None, None, None, None, false, false);
     response.manifest = Some(manifest);
 
     let report = verify_v4(&key, &response, None);
@@ -1734,7 +1734,7 @@ fn v4_decode_mode_unknown_rejected() {
     let traces = forward_pass(&_cfg, &_model, &input);
     let retained = retained_from_traces(&traces);
     let (_commitment, state) = commit_toy(vec![retained], &params, None, _cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], &[], None, None, None, None, false, false);
     response.manifest = Some(manifest);
 
     let report = verify_v4(&key, &response, None);
@@ -1759,7 +1759,7 @@ fn v4_decode_mode_greedy_consistent_pass() {
     let traces = forward_pass(&cfg, &model, &input);
     let retained = retained_from_traces(&traces);
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
@@ -1782,7 +1782,7 @@ fn v4_manifest_quant_family_mismatch_rejected() {
     let traces = forward_pass(&_cfg, &_model, &input);
     let retained = retained_from_traces(&traces);
     let (_commitment, state) = commit_toy(vec![retained], &params, None, _cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], &[], None, None, None, None, false, false);
     response.manifest = Some(manifest);
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
@@ -1803,7 +1803,7 @@ fn v4_manifest_scale_derivation_mismatch_rejected() {
     let traces = forward_pass(&_cfg, &_model, &input);
     let retained = retained_from_traces(&traces);
     let (_commitment, state) = commit_toy(vec![retained], &params, None, _cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], &[], None, None, None, None, false, false);
     response.manifest = Some(manifest);
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
@@ -1824,7 +1824,7 @@ fn v4_manifest_quant_block_size_mismatch_rejected() {
     let traces = forward_pass(&_cfg, &_model, &input);
     let retained = retained_from_traces(&traces);
     let (_commitment, state) = commit_toy(vec![retained], &params, None, _cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], &[], None, None, None, None, false, false);
     response.manifest = Some(manifest);
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
@@ -1850,7 +1850,7 @@ fn v4_manifest_quant_fields_consistent_pass() {
     let traces = forward_pass(&_cfg, &_model, &input);
     let retained = retained_from_traces(&traces);
     let (_commitment, state) = commit_toy(vec![retained], &params, None, _cfg.n_layers);
-    let response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], &[], None, None, None, None, false, false);
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
 }
@@ -1871,7 +1871,7 @@ fn v4_manifest_kv_dim_mismatch_rejected() {
     let traces = forward_pass(&_cfg, &_model, &input);
     let retained = retained_from_traces(&traces);
     let (_commitment, state) = commit_toy(vec![retained], &params, None, _cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], &[], None, None, None, None, false, false);
     response.manifest = Some(manifest);
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
@@ -1891,7 +1891,7 @@ fn v4_manifest_ffn_dim_mismatch_rejected() {
     let traces = forward_pass(&_cfg, &_model, &input);
     let retained = retained_from_traces(&traces);
     let (_commitment, state) = commit_toy(vec![retained], &params, None, _cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], &[], None, None, None, None, false, false);
     response.manifest = Some(manifest);
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
@@ -1911,7 +1911,7 @@ fn v4_manifest_d_head_mismatch_rejected() {
     let traces = forward_pass(&_cfg, &_model, &input);
     let retained = retained_from_traces(&traces);
     let (_commitment, state) = commit_toy(vec![retained], &params, None, _cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], &[], None, None, None, None, false, false);
     response.manifest = Some(manifest);
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
@@ -1931,7 +1931,7 @@ fn v4_manifest_n_q_heads_mismatch_rejected() {
     let traces = forward_pass(&_cfg, &_model, &input);
     let retained = retained_from_traces(&traces);
     let (_commitment, state) = commit_toy(vec![retained], &params, None, _cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], &[], None, None, None, None, false, false);
     response.manifest = Some(manifest);
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
@@ -1951,7 +1951,7 @@ fn v4_manifest_n_kv_heads_mismatch_rejected() {
     let traces = forward_pass(&_cfg, &_model, &input);
     let retained = retained_from_traces(&traces);
     let (_commitment, state) = commit_toy(vec![retained], &params, None, _cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], &[], None, None, None, None, false, false);
     response.manifest = Some(manifest);
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
@@ -1971,7 +1971,7 @@ fn v4_manifest_rope_theta_mismatch_rejected() {
     let traces = forward_pass(&_cfg, &_model, &input);
     let retained = retained_from_traces(&traces);
     let (_commitment, state) = commit_toy(vec![retained], &params, None, _cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&_model), &_cfg, &[], &[], None, None, None, None, false, false);
     response.manifest = Some(manifest);
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
@@ -2000,7 +2000,7 @@ fn v4_manifest_full_architecture_pass() {
     let traces = forward_pass(&cfg, &model, &input);
     let retained = retained_from_traces(&traces);
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
     // 3 original + 4 arch + 6 new arch + 1 manifest + 1 sampler + 1 decode params = many checks
@@ -2099,7 +2099,7 @@ fn v4_captured_final_residual_pass() {
         Some(vec![final_residual]),
         cfg.n_layers,
     );
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     // Verify: lm_head check uses captured final_residual, not shell replay.
     assert!(response.shell_opening.as_ref().unwrap().final_residual.is_some(),
@@ -2132,7 +2132,7 @@ fn v4_captured_final_residual_wrong_token_detected() {
         Some(vec![final_residual]),
         cfg.n_layers,
     );
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     let fnw = key.final_norm_weights.as_ref().unwrap();
     let lm = key.lm_head.as_ref().unwrap();
     attach_tail_logits(&mut response, lm, fnw, &cfg);
@@ -2168,7 +2168,7 @@ fn v4_captured_final_residual_tampered_residual_detected() {
         Some(vec![final_residual]),
         cfg.n_layers,
     );
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     let fnw = key.final_norm_weights.as_ref().unwrap();
     let lm = key.lm_head.as_ref().unwrap();
     attach_tail_logits(&mut response, lm, fnw, &cfg);
@@ -2197,7 +2197,7 @@ fn v4_final_residual_fail_closed_missing() {
     };
     // Commit WITHOUT final_residuals — shell.final_residual will be None.
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     assert!(response.shell_opening.as_ref().unwrap().final_residual.is_none());
     let report = verify_v4(&key, &response, None);
@@ -2228,7 +2228,7 @@ fn v4_lm_head_fail_closed_missing_logits() {
         cfg.n_layers,
     );
     // open_v4 without tail → logits_i32 = None
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     assert!(response.shell_opening.as_ref().unwrap().logits_i32.is_none());
 
     let report = verify_v4(&key, &response, None);
@@ -2258,7 +2258,7 @@ fn v4_final_residual_commitment_binding() {
         Some(vec![final_residual]),
         cfg.n_layers,
     );
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     // Tamper: swap the final_residual in the response AFTER commitment.
     // This should break the Merkle proof because the leaf hash changed.
@@ -2307,7 +2307,7 @@ fn verify_with_manifest(manifest: DeploymentManifest) -> verilm_verify::V4Verify
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained_from_traces(&traces)], &params, None, cfg.n_layers);
-    let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], &[], None, None, None, None, false, false);
 
     verify_v4(&key, &response, None)
 }
@@ -2419,7 +2419,7 @@ fn v4_manifest_rejects_exceeded_max_tokens() {
         cfg.n_layers,
     );
     // Open token_index 1 — exceeds max_tokens=1
-    let response = open_v4(&state, 1, &ToyWeights(&toy.layers), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 1, &ToyWeights(&toy.layers), &cfg, &[], &[], None, None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
@@ -2465,7 +2465,7 @@ fn v4_manifest_rejects_overlong_transcript() {
         cfg.n_layers,
     );
     // Open token_index 0 — valid per-token, but generation count exceeds max_tokens
-    let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], &[], None, None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
@@ -2512,7 +2512,7 @@ fn v4_manifest_rejects_missing_spec_hashes() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
 
     // Wipe all four spec hashes from the commitment — verifier should fail-closed.
@@ -2590,7 +2590,7 @@ fn v4_rope_config_hash_mismatch_detected() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained_from_traces(&traces)], &params, None, cfg.n_layers);
-    let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], &[], None, None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
@@ -2628,7 +2628,7 @@ fn v4_weight_hash_mismatch_detected() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained_from_traces(&traces)], &params, None, cfg.n_layers);
-    let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&toy.layers), &cfg, &[], &[], None, None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
@@ -2676,7 +2676,7 @@ fn v4_prompt_hash_binding() {
         n_prompt_tokens: Some(2),
     };
     let (_commitment, state) = commit_toy(vec![retained.clone()], &params, None, cfg.n_layers);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     // Response should carry prompt and n_prompt_tokens.
     assert_eq!(response.prompt.as_deref(), Some(b"the real prompt".as_slice()));
@@ -2703,7 +2703,7 @@ fn v4_prompt_hash_tamper_detected() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     // Tamper the prompt.
     response.prompt = Some(b"different prompt".to_vec());
@@ -2732,7 +2732,7 @@ fn v4_verify_input_tokenization_pass() {
         n_prompt_tokens: Some(2),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     // expected_prompt_token_ids = [100, token_id]: first is embedding input, second in chain
     let expected = vec![100, token_id];
@@ -2754,7 +2754,7 @@ fn v4_verify_input_tokenization_mismatch() {
         n_prompt_tokens: Some(2),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     // Wrong second token → mismatch.
     let wrong = vec![100, token_id + 1];
@@ -2806,8 +2806,8 @@ fn v4_cross_request_splice_shell_opening() {
     let (_commit_a, state_a) = commit_toy(vec![retained_a], &params_a, None, cfg.n_layers);
     let (_commit_b, state_b) = commit_toy(vec![retained_b], &params_b, None, cfg.n_layers);
 
-    let mut response_a = open_v4(&state_a, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
-    let response_b = open_v4(&state_b, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response_a = open_v4(&state_a, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
+    let response_b = open_v4(&state_b, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     // SPLICE: graft B's shell opening + retained state into A's response,
     // keeping A's commitment (merkle root, io root, seed, prompt hash).
@@ -2859,8 +2859,8 @@ fn v4_cross_request_splice_with_manifest() {
     let (_commit_a, state_a) = commit_toy(vec![retained_a], &params_a, None, cfg.n_layers);
     let (_commit_b, state_b) = commit_toy(vec![retained_b], &params_b, None, cfg.n_layers);
 
-    let mut response_a = open_v4(&state_a, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
-    let response_b = open_v4(&state_b, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response_a = open_v4(&state_a, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
+    let response_b = open_v4(&state_b, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     // SPLICE: graft B's shell + retained + manifest into A's response,
     // keeping A's commitment.
@@ -2918,8 +2918,8 @@ fn v4_cross_request_splice_token_id_swap() {
     let (_commit_a, state_a) = commit_toy(all_retained_a, &params_a, None, cfg.n_layers);
     let (_commit_b, state_b) = commit_toy(all_retained_b, &params_b, None, cfg.n_layers);
 
-    let mut response_a = open_v4(&state_a, 1, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
-    let response_b = open_v4(&state_b, 1, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response_a = open_v4(&state_a, 1, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
+    let response_b = open_v4(&state_b, 1, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     // SPLICE: replace token 1's retained state and shell from B into A
     response_a.retained = response_b.retained.clone();
@@ -2953,7 +2953,7 @@ fn v4_integrated_tokenization_pass() {
         n_prompt_tokens: Some(2),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
 
     // expected: [100, token_id] — first is embedding input, second is in the chain.
@@ -2976,7 +2976,7 @@ fn v4_integrated_tokenization_mismatch_detected() {
         n_prompt_tokens: Some(2),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
 
     // Wrong token ID in expected prompt.
@@ -3010,7 +3010,7 @@ fn v4_min_tokens_pass_when_respected() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
 
     let report = verify_v4(&key, &response, None);
@@ -3038,7 +3038,7 @@ fn v4_min_tokens_rejects_early_eos() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
 
     let report = verify_v4(&key, &response, None);
@@ -3066,7 +3066,7 @@ fn v4_min_tokens_rejects_short_generation() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
 
     let report = verify_v4(&key, &response, None);
@@ -3095,7 +3095,7 @@ fn v4_ignore_eos_rejects_eos_token() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
 
     let report = verify_v4(&key, &response, None);
@@ -3123,7 +3123,7 @@ fn v4_output_policy_fails_closed_without_eos_token_id() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
 
     let report = verify_v4(&key, &response, None);
@@ -3157,7 +3157,7 @@ fn v4_eos_policy_stop_allows_eos_as_last_token() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
 
     let report = verify_v4(&key, &response, None);
@@ -3189,7 +3189,7 @@ fn v4_eos_policy_stop_rejects_eos_mid_sequence() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained0, retained1], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
 
     let report = verify_v4(&key, &response, None);
@@ -3216,7 +3216,7 @@ fn v4_unknown_eos_policy_rejected() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
 
     let report = verify_v4(&key, &response, None);
@@ -3256,7 +3256,7 @@ fn v4_tokenizer_trait_reconstruction_pass() {
         n_prompt_tokens: Some(2),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
 
     // Tokenizer returns [100, token_id]: first is embedding input, second in chain.
@@ -3281,7 +3281,7 @@ fn v4_tokenizer_trait_reconstruction_mismatch() {
         n_prompt_tokens: Some(2),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
 
     // Tokenizer returns wrong second token.
@@ -3308,7 +3308,7 @@ fn v4_tokenizer_trait_error_reported() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
 
     struct FailingTokenizer;
@@ -3340,7 +3340,7 @@ fn v4_tokenizer_fallback_to_caller_supplied() {
         n_prompt_tokens: Some(2),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
 
     // Tokenizer provided but no manifest → falls back to caller-supplied IDs.
@@ -3391,7 +3391,7 @@ fn v4_detokenization_pass_last_token() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
     response.output_text = Some("hello world".into());
 
@@ -3420,7 +3420,7 @@ fn v4_detokenization_mismatch_detected() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
     response.output_text = Some("claimed text".into());
 
@@ -3451,7 +3451,7 @@ fn v4_detokenization_error_reported() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
     response.output_text = Some("some text".into());
 
@@ -3481,7 +3481,7 @@ fn v4_detokenization_fails_closed_without_output_text() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
     // response.output_text is None — fail-closed should reject.
 
@@ -3511,7 +3511,7 @@ fn v4_detokenization_not_checked_without_detokenizer() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     attach_toy_logits(&mut response, &_lm_head, &cfg);
     response.output_text = Some("some text".into());
 
@@ -3607,8 +3607,8 @@ fn v4_rich_prefix_embedding_pass() {
         embedding_proof: Some(proof),
     };
     let response = open_v4(
-        &state, 2, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None,
-        Some(&lookup as &dyn EmbeddingLookup), false,
+        &state, 2, &ToyWeights(&model), &cfg, &ws, &[], Some(&bridge), None, None,
+        Some(&lookup as &dyn EmbeddingLookup), false, false,
     );
 
     // Verify prefix embedding data is populated
@@ -3667,8 +3667,8 @@ fn v4_rich_prefix_tampered_embedding_detected() {
         embedding_proof: Some(proof),
     };
     let mut response = open_v4(
-        &state, 2, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None,
-        Some(&lookup as &dyn EmbeddingLookup), false,
+        &state, 2, &ToyWeights(&model), &cfg, &ws, &[], Some(&bridge), None, None,
+        Some(&lookup as &dyn EmbeddingLookup), false, false,
     );
 
     // Tamper: corrupt the first prefix embedding row
@@ -3722,8 +3722,8 @@ fn v4_compact_prefix_still_works() {
         embedding_proof: Some(proof),
     };
     let response = open_v4(
-        &state, 2, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None,
-        None, false, // no embedding_lookup → compact
+        &state, 2, &ToyWeights(&model), &cfg, &ws, &[], Some(&bridge), None, None,
+        None, false, false, // no embedding_lookup → compact
     );
 
     assert!(response.prefix_embedding_rows.is_none(), "compact mode should not have prefix rows");
@@ -3777,8 +3777,8 @@ fn v4_deep_prefix_pass() {
         embedding_proof: Some(proof),
     };
     let response = open_v4(
-        &state, 2, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None,
-        Some(&lookup as &dyn EmbeddingLookup), true, // deep_prefix
+        &state, 2, &ToyWeights(&model), &cfg, &ws, &[], Some(&bridge), None, None,
+        Some(&lookup as &dyn EmbeddingLookup), true, false, // deep_prefix
     );
 
     // Verify deep prefix data is populated
@@ -3840,8 +3840,8 @@ fn v4_deep_prefix_tampered_retained_detected() {
         embedding_proof: Some(proof),
     };
     let mut response = open_v4(
-        &state, 2, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None,
-        Some(&lookup as &dyn EmbeddingLookup), true,
+        &state, 2, &ToyWeights(&model), &cfg, &ws, &[], Some(&bridge), None, None,
+        Some(&lookup as &dyn EmbeddingLookup), true, false,
     );
 
     // Tamper: corrupt prefix retained state (changes hash)
@@ -3893,8 +3893,8 @@ fn v4_deep_prefix_tampered_shell_detected() {
         embedding_proof: Some(proof),
     };
     let mut response = open_v4(
-        &state, 2, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None,
-        Some(&lookup as &dyn EmbeddingLookup), true,
+        &state, 2, &ToyWeights(&model), &cfg, &ws, &[], Some(&bridge), None, None,
+        Some(&lookup as &dyn EmbeddingLookup), true, false,
     );
 
     // Tamper shell accumulator — retained stays correct, so hash passes
@@ -3946,8 +3946,8 @@ fn v4_deep_prefix_compact_mode_unaffected() {
         embedding_proof: Some(proof),
     };
     let response = open_v4(
-        &state, 2, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None,
-        Some(&lookup as &dyn EmbeddingLookup), false, // NOT deep
+        &state, 2, &ToyWeights(&model), &cfg, &ws, &[], Some(&bridge), None, None,
+        Some(&lookup as &dyn EmbeddingLookup), false, false, // NOT deep
     );
 
     // Tier A data present, Tier B absent
@@ -3998,8 +3998,8 @@ fn v4_deep_prefix_count_mismatch_rejected() {
         embedding_proof: Some(proof),
     };
     let mut response = open_v4(
-        &state, 2, &ToyWeights(&model), &cfg, &ws, Some(&bridge), None, None,
-        Some(&lookup as &dyn EmbeddingLookup), true,
+        &state, 2, &ToyWeights(&model), &cfg, &ws, &[], Some(&bridge), None, None,
+        Some(&lookup as &dyn EmbeddingLookup), true, false,
     );
 
     // Sabotage: truncate prefix_retained to 1 entry (should be 2)
@@ -4031,7 +4031,7 @@ fn v4_full_audit_reports_full_coverage() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
@@ -4062,7 +4062,7 @@ fn v4_routine_audit_reports_routine_coverage() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     // Trim shell to first layer only (routine-audit prefix).
     let shell = response.shell_opening.as_mut().unwrap();
@@ -4097,7 +4097,7 @@ fn v4_non_contiguous_layer_indices_rejected() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     // Keep 2 layers but claim non-contiguous indices [0, 2] (gap at 1).
     let shell = response.shell_opening.as_mut().unwrap();
@@ -4126,7 +4126,7 @@ fn v4_no_shell_opening_reports_unknown_coverage() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     // Remove shell opening entirely.
     response.shell_opening = None;
@@ -4164,7 +4164,7 @@ fn v4_pass_display_includes_coverage() {
         n_prompt_tokens: Some(1),
     };
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
 
     let report = verify_v4(&key, &response, None);
     let display = format!("{}", report);
@@ -4192,11 +4192,11 @@ fn v4_routine_audit_not_mistaken_for_full() {
     let (_commitment, state) = commit_toy(vec![retained], &params, None, cfg.n_layers);
 
     // Full audit
-    let response_full = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let response_full = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     let report_full = verify_v4(&key, &response_full, None);
 
     // Routine audit (trim to 1 layer)
-    let mut response_routine = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false);
+    let mut response_routine = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
     let shell = response_routine.shell_opening.as_mut().unwrap();
     shell.layers.truncate(1);
     shell.layer_indices = Some(vec![0]);

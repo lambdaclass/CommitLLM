@@ -410,7 +410,9 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
     let mut all_weights: Vec<Vec<Vec<i8>>> = Vec::with_capacity(cfg.n_layers);
     let mut rmsnorm_attn_weights: Vec<Vec<f32>> = Vec::with_capacity(cfg.n_layers);
     let mut rmsnorm_ffn_weights: Vec<Vec<f32>> = Vec::with_capacity(cfg.n_layers);
+    let mut qkv_biases: Vec<[Vec<f32>; 3]> = Vec::with_capacity(cfg.n_layers);
     let mut found_per_channel = false;
+    let mut found_any_bias = false;
 
     for layer_idx in 0..cfg.n_layers {
         let mut layer_vs = Vec::with_capacity(MatrixType::PER_LAYER.len());
@@ -481,6 +483,19 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
             }
         }
 
+        // QKV projection biases (model-dependent, e.g. Qwen2)
+        let mut layer_biases: [Vec<f32>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        for (i, mt) in [MatrixType::Wq, MatrixType::Wk, MatrixType::Wv].iter().enumerate() {
+            if let Some(bias_pattern) = mt.bias_name() {
+                let bias_name = bias_pattern.replace("{}", &layer_idx.to_string());
+                if let Ok(b) = load_1d_f32(&parsed, &bias_name) {
+                    found_any_bias = true;
+                    layer_biases[i] = b;
+                }
+            }
+        }
+        qkv_biases.push(layer_biases);
+
         v_vectors.push(layer_vs);
         quantization_scales.push(layer_scales);
         per_channel_weight_scales.push(layer_pc_scales);
@@ -491,6 +506,9 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
     // If no per-channel scales were found, keep the vec empty to save space.
     if !found_per_channel {
         per_channel_weight_scales.clear();
+    }
+    if !found_any_bias {
+        qkv_biases.clear();
     }
 
     // Compute weight-chain hash
@@ -599,6 +617,7 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         scale_derivation,
         quant_block_size: None,
         rope_aware_replay,
+        qkv_biases,
     })
 }
 
@@ -743,6 +762,9 @@ pub struct SafetensorsWeightProvider {
     /// scales[layer][matrix_type_idx] = per-tensor quantization scale.
     /// 0.0 for native INT8 tensors.
     scales: Vec<Vec<f32>>,
+    /// Per-channel weight scales: `[layer][matrix_type_idx][output_dim]`.
+    /// Empty outer vec when model has no per-channel scales.
+    per_channel_weight_scales: Vec<Vec<Vec<f32>>>,
     /// Per-layer RMSNorm attention weights.
     rmsnorm_attn_weights: Vec<Vec<f32>>,
     /// Per-layer RMSNorm FFN weights.
@@ -759,6 +781,11 @@ pub struct SafetensorsWeightProvider {
     final_norm_weights: Option<Vec<f32>>,
     /// RMSNorm epsilon from config.
     rmsnorm_eps_value: f64,
+    /// Source dtype of weight tensors (e.g. "I8", "BF16").
+    source_dtype: String,
+    /// QKV projection biases per layer: `[layer]([q_bias, k_bias, v_bias])`.
+    /// Empty when model has no QKV biases.
+    qkv_biases: Vec<[Vec<f32>; 3]>,
 }
 
 impl SafetensorsWeightProvider {
@@ -777,26 +804,64 @@ impl SafetensorsWeightProvider {
 
         let mut weights = Vec::with_capacity(config.n_layers);
         let mut scales = Vec::with_capacity(config.n_layers);
+        let mut per_channel_weight_scales = Vec::with_capacity(config.n_layers);
+        let mut found_per_channel = false;
         let mut rmsnorm_attn_weights = Vec::with_capacity(config.n_layers);
         let mut rmsnorm_ffn_weights = Vec::with_capacity(config.n_layers);
+        let mut qkv_biases: Vec<[Vec<f32>; 3]> = Vec::with_capacity(config.n_layers);
+        let mut found_any_bias = false;
 
         for layer_idx in 0..config.n_layers {
             let mut layer_weights = Vec::with_capacity(MatrixType::PER_LAYER.len());
             let mut layer_scales = Vec::with_capacity(MatrixType::PER_LAYER.len());
+            let mut layer_pc_scales = Vec::with_capacity(MatrixType::PER_LAYER.len());
             for mt in MatrixType::PER_LAYER {
                 let name = mt.weight_name().replace("{}", &layer_idx.to_string());
                 let (w, scale) = load_weights_as_i8(&parsed, &name)?;
+
+                // Try to load per-channel weight scales (W8A8 native INT8).
+                let scale_name = mt.weight_scale_name().replace("{}", &layer_idx.to_string());
+                let pc_scales = match load_1d_f32(&parsed, &scale_name) {
+                    Ok(s) => {
+                        found_per_channel = true;
+                        s
+                    }
+                    Err(_) => Vec::new(),
+                };
+
                 layer_weights.push(w);
                 layer_scales.push(scale);
+                layer_pc_scales.push(pc_scales);
             }
             weights.push(layer_weights);
             scales.push(layer_scales);
+            per_channel_weight_scales.push(layer_pc_scales);
 
             // RMSNorm weights
             let attn_norm = format!("model.layers.{}.input_layernorm.weight", layer_idx);
             rmsnorm_attn_weights.push(load_1d_f32(&parsed, &attn_norm).unwrap_or_default());
             let ffn_norm = format!("model.layers.{}.post_attention_layernorm.weight", layer_idx);
             rmsnorm_ffn_weights.push(load_1d_f32(&parsed, &ffn_norm).unwrap_or_default());
+
+            // QKV projection biases (model-dependent, e.g. Qwen2)
+            let mut layer_biases: [Vec<f32>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+            for (i, mt) in [MatrixType::Wq, MatrixType::Wk, MatrixType::Wv].iter().enumerate() {
+                if let Some(bias_pattern) = mt.bias_name() {
+                    let bias_name = bias_pattern.replace("{}", &layer_idx.to_string());
+                    if let Ok(b) = load_1d_f32(&parsed, &bias_name) {
+                        found_any_bias = true;
+                        layer_biases[i] = b;
+                    }
+                }
+            }
+            qkv_biases.push(layer_biases);
+        }
+
+        if !found_per_channel {
+            per_channel_weight_scales.clear();
+        }
+        if !found_any_bias {
+            qkv_biases.clear();
         }
 
         // Build embedding Merkle tree for proof generation at audit time
@@ -832,6 +897,7 @@ impl SafetensorsWeightProvider {
             config,
             weights,
             scales,
+            per_channel_weight_scales,
             rmsnorm_attn_weights,
             rmsnorm_ffn_weights,
             embedding_tree,
@@ -840,6 +906,8 @@ impl SafetensorsWeightProvider {
             lm_head,
             final_norm_weights,
             rmsnorm_eps_value: read_model_config_json(dir).0,
+            source_dtype: source_dtype.to_string(),
+            qkv_biases,
         })
     }
 
@@ -856,6 +924,46 @@ impl SafetensorsWeightProvider {
     /// 0.0 for native INT8 tensors. Same layout as `VerifierKey.weight_scales`.
     pub fn weight_scales(&self) -> &[Vec<f32>] {
         &self.scales
+    }
+
+    /// Per-channel weight scales: `[layer][matrix_type_idx][output_dim]`.
+    /// Empty when model has no per-channel scales (toy / keygen-quantized).
+    pub fn per_channel_weight_scales(&self) -> &[Vec<Vec<f32>>] {
+        &self.per_channel_weight_scales
+    }
+
+    /// Whether this model has per-channel weight scales (W8A8 native INT8).
+    pub fn has_per_channel_scales(&self) -> bool {
+        !self.per_channel_weight_scales.is_empty()
+    }
+
+    /// QKV projection biases: `[layer]([q_bias, k_bias, v_bias])`.
+    /// Empty when model has no QKV biases.
+    pub fn qkv_biases(&self) -> &[[Vec<f32>; 3]] {
+        &self.qkv_biases
+    }
+
+    /// Quantization family string matching keygen vocabulary.
+    /// Same logic as `generate_key()` to ensure manifest/key agreement.
+    pub fn quant_family(&self) -> Option<String> {
+        if self.has_per_channel_scales() {
+            Some("W8A8".to_string())
+        } else if self.source_dtype == "I8" {
+            Some("INT8".to_string())
+        } else {
+            Some(format!("{}-to-INT8", self.source_dtype))
+        }
+    }
+
+    /// Scale derivation string matching keygen vocabulary.
+    pub fn scale_derivation(&self) -> Option<String> {
+        if self.has_per_channel_scales() {
+            Some("per_channel_absmax".to_string())
+        } else if self.source_dtype != "I8" {
+            Some("per_tensor_absmax".to_string())
+        } else {
+            None
+        }
     }
 
     pub fn rmsnorm_attn_weights(&self) -> &[Vec<f32>] {

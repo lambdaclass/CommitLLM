@@ -128,7 +128,7 @@ def diag():
             proj_name = cap.PROJ_SEQUENCE[proj_idx]
             if layer == 0:
                 s = scale_a.detach().cpu().float().flatten()
-                scale_log.append({
+                entry = {
                     "counter": hook.call_counter,
                     "layer": layer,
                     "proj": proj_name,
@@ -136,7 +136,11 @@ def diag():
                     "scale_a_shape": tuple(scale_a.shape),
                     "scale_a_numel": scale_a.numel(),
                     "scale_a_vals": s.tolist()[:16],
-                })
+                }
+                # Save raw a_i8 for o_proj prefill (first call) for head mapping
+                if proj_name == "o_proj" and a.shape[0] > 1:
+                    entry["a_i8_rows"] = a.detach().cpu().to(torch.int8).numpy().tolist()
+                scale_log.append(entry)
         # Call the REAL kernel (not the wrapper)
         return real_kernel(a, b, scale_a, scale_b, out_dtype, bias)
 
@@ -242,8 +246,49 @@ def diag():
             print(f"    a_shape = {decode_call['a_shape']}")
             print(f"    scale_a values = {[f'{v:.8f}' for v in decode_call['scale_a_vals']]}")
 
+    # ── Phase 4: Python-side per-head check using raw GPU a_i8 ──
     print(f"\n{'='*70}")
-    print("DONE — compare scale_a values with DIAG-CKV output above")
+    print("Phase 4: Per-head comparison from raw GPU capture")
+    print(f"{'='*70}")
+
+    if o_proj_calls and "a_i8_rows" in o_proj_calls[0]:
+        a_i8_gpu = o_proj_calls[0]["a_i8_rows"]  # list of lists
+        row0 = np.array(a_i8_gpu[0], dtype=np.int8)  # batch row 0 = token 0
+        hidden_dim = cfg["hidden_dim"]
+        d_head = cfg["d_head"]
+        n_q = cfg["n_q_heads"]
+        n_kv = cfg["n_kv_heads"]
+        heads_per_kv = n_q // n_kv
+
+        print(f"\n  GPU a_i8 row 0: shape={row0.shape}, first 16 = {row0[:16].tolist()}")
+
+        # Check: are Q heads within the same GQA group identical?
+        # For n_kv=1, all Q heads sharing a KV head should produce the same V.
+        print(f"\n  Intra-GQA-group consistency (n_kv=1 → should be identical):")
+        for kvg in range(n_kv):
+            ref_qh = kvg * heads_per_kv
+            ref_slice = row0[ref_qh * d_head : (ref_qh + 1) * d_head]
+            max_diff = 0
+            for offset in range(1, heads_per_kv):
+                qh = ref_qh + offset
+                s = row0[qh * d_head : (qh + 1) * d_head]
+                diff = int(np.max(np.abs(s.astype(np.int16) - ref_slice.astype(np.int16))))
+                if diff > max_diff:
+                    max_diff = diff
+            print(f"    KV group {kvg} (Q heads {ref_qh}-{ref_qh + heads_per_kv - 1}): "
+                  f"max intra-group diff = {max_diff}")
+
+        # Show first 16 vals of a few Q heads
+        print(f"\n  Head slices (first 8 elements):")
+        for qh in [0, 1, 7, 14, 21]:
+            if (qh + 1) * d_head <= len(row0):
+                s = row0[qh * d_head : qh * d_head + 8]
+                print(f"    qh={qh:>2} (kvg={qh // heads_per_kv}): {s.tolist()}")
+    else:
+        print("  (no raw a_i8 captured)")
+
+    print(f"\n{'='*70}")
+    print("DONE — compare DIAG-HEAD-MAP, GQA group consistency, and raw head slices")
     print(f"{'='*70}")
 
 

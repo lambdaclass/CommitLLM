@@ -267,7 +267,7 @@ fn build_canonical_audit(
     let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales], None, None);
     let response = open_v4(
         &state, 0, &ToyWeights(&model), &cfg, &ws,
-        Some(&bridge), None, None, None, false,
+        &[], Some(&bridge), None, None, None, false, false,
     );
 
     let binary = verilm_core::serialize::serialize_v4_audit(&response);
@@ -312,7 +312,7 @@ fn build_canonical_audit_with_response(
     let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales], None, None);
     let response = open_v4(
         &state, 0, &ToyWeights(&model), &cfg, &ws,
-        Some(&bridge), None, None, None, false,
+        &[], Some(&bridge), None, None, None, false, false,
     );
 
     (key, response)
@@ -1525,11 +1525,13 @@ fn build_deep_prefix_audit() -> (
         &ToyWeights(&model),
         &cfg,
         &ws,
+        &[],
         Some(&bridge),
         None,
         None,
         Some(&lookup),
         true, // deep_prefix
+        false, // use_captured_x_attn
     );
 
     (key, response)
@@ -1660,7 +1662,7 @@ fn build_routine_audit_with_fake_a() -> (
     };
     let response = open_v4(
         &state, 1, &ToyWeights(&model), &cfg, &ws,
-        Some(&bridge), None, None, None, false,
+        &[], Some(&bridge), None, None, None, false, false,
     );
 
     (key, response, honest_a_layer0, fake_a_layer0)
@@ -1832,7 +1834,7 @@ fn build_deep_prefix_audit_fake_opened_a() -> (
     };
     let response = open_v4(
         &state, 2, &ToyWeights(&model), &cfg, &ws,
-        Some(&bridge), None, None, Some(&lookup), true,
+        &[], Some(&bridge), None, None, Some(&lookup), true, false,
     );
 
     (key, response, honest_a_layer0, fake_a_layer0)
@@ -1932,7 +1934,7 @@ fn build_deep_prefix_audit_roped() -> (
     };
     let response = open_v4(
         &state, 2, &ToyWeights(&model), &cfg, &ws,
-        Some(&bridge), None, None, Some(&lookup), true,
+        &[], Some(&bridge), None, None, Some(&lookup), true, false,
     );
 
     (key, response)
@@ -2042,7 +2044,7 @@ fn build_deep_prefix_audit_roped_fake_a() -> (
     };
     let response = open_v4(
         &state, 2, &ToyWeights(&model), &cfg, &ws,
-        Some(&bridge), None, None, Some(&lookup), true,
+        &[], Some(&bridge), None, None, Some(&lookup), true, false,
     );
 
     (key, response, honest_a_layer0, fake_a_layer0)
@@ -2544,7 +2546,7 @@ fn kv_open_produces_valid_merkle_proofs() {
 
     // Open audit for token 2 (last token) — should include KV for positions 0..=2.
     let response = verilm_prover::open_v4(
-        &state, 2, &ToyWeights(&model), &cfg, &[], None, None, None, None, false,
+        &state, 2, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false,
     );
 
     // Verify KV entries and proofs are present.
@@ -2607,7 +2609,7 @@ fn kv_tampered_entry_fails_proof() {
     );
 
     let mut response = verilm_prover::open_v4(
-        &state, 1, &ToyWeights(&model), &cfg, &[], None, None, None, None, false,
+        &state, 1, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false,
     );
 
     // Tamper with KV entry at layer 0, position 0.
@@ -2620,5 +2622,407 @@ fn kv_tampered_entry_fails_proof() {
     let root = response.commitment.kv_roots[0];
     assert!(!merkle::verify(&root, &tampered_leaf, &proofs[0][0]),
         "tampered KV entry must fail Merkle proof");
+}
+
+// ===========================================================================
+// Canonical verifier: phase_kv_transcript
+// ===========================================================================
+
+/// Helper: produce a toy audit response with KV entries committed and opened.
+fn kv_toy_response(
+    n_tokens: usize,
+) -> (verilm_core::types::VerifierKey, verilm_core::types::V4AuditResponse) {
+    let cfg = ModelConfig::toy();
+    let model = generate_model(&cfg, 42);
+    let key = generate_key(&cfg, &model, [1u8; 32]);
+    let initial: Vec<i8> = (0..cfg.hidden_dim as i8).collect();
+
+    let traces =
+        verilm_test_vectors::forward_pass_autoregressive(&cfg, &model, &initial, n_tokens);
+    let kv_entries = verilm_test_vectors::kv_entries_from_traces(&cfg, &traces);
+
+    let all_retained: Vec<_> = traces
+        .iter()
+        .map(|token_traces| RetainedTokenState {
+            layers: token_traces
+                .iter()
+                .map(|lt| RetainedLayerState {
+                    a: lt.a.clone(),
+                    scale_a: lt.scale_a.unwrap_or(1.0),
+                    x_attn_i8: None,
+                    scale_x_attn: None,
+                })
+                .collect(),
+        })
+        .collect();
+
+    let token_ids: Vec<u32> = (0..n_tokens as u32).map(|i| i + 10).collect();
+    let params = FullBindingParams {
+        token_ids: &token_ids,
+        prompt: b"kv canonical test",
+        sampling_seed: [9u8; 32],
+        manifest: None,
+        n_prompt_tokens: Some(1),
+    };
+    let scales = vec![
+        vec![
+            CapturedLayerScales {
+                scale_x_attn: 1.0,
+                scale_x_ffn: 1.0,
+                scale_h: 1.0,
+            };
+            cfg.n_layers
+        ];
+        n_tokens
+    ];
+
+    let (_commitment, state) =
+        commit_minimal(all_retained, &params, None, scales, None, Some(kv_entries));
+
+    let last_token = n_tokens - 1;
+    let response =
+        open_v4(&state, last_token as u32, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
+
+    (key, response)
+}
+
+#[test]
+fn kv_canonical_valid_proofs_pass() {
+    let (key, response) = kv_toy_response(3);
+    assert!(!response.commitment.kv_roots.is_empty());
+    assert!(response.kv_entries.is_some());
+    assert!(response.kv_proofs.is_some());
+
+    let report = verify_response(&key, &response, None, None);
+    // No KV-related failures.
+    let kv_failures: Vec<_> = report
+        .failures
+        .iter()
+        .filter(|f| matches!(
+            f.code,
+            FailureCode::KvRootsCountMismatch
+                | FailureCode::KvEntriesCountMismatch
+                | FailureCode::KvProofInvalid
+                | FailureCode::KvProofCountMismatch
+        ))
+        .collect();
+    assert!(kv_failures.is_empty(), "unexpected KV failures: {:?}", kv_failures);
+}
+
+#[test]
+fn kv_canonical_tampered_entry_fails() {
+    let (key, mut response) = kv_toy_response(3);
+
+    // Tamper with a KV entry — the Merkle proof should fail.
+    response.kv_entries.as_mut().unwrap()[0][0].k_roped[0] += 999.0;
+
+    let report = verify_response(&key, &response, None, None);
+    let kv_proof_failures: Vec<_> = report
+        .failures
+        .iter()
+        .filter(|f| f.code == FailureCode::KvProofInvalid)
+        .collect();
+    assert!(
+        !kv_proof_failures.is_empty(),
+        "tampered KV entry should produce KvProofInvalid failure"
+    );
+}
+
+#[test]
+fn kv_canonical_roots_count_mismatch() {
+    let (key, mut response) = kv_toy_response(3);
+
+    // Remove one kv_root to trigger count mismatch.
+    response.commitment.kv_roots.pop();
+
+    let report = verify_response(&key, &response, None, None);
+    let mismatch: Vec<_> = report
+        .failures
+        .iter()
+        .filter(|f| f.code == FailureCode::KvRootsCountMismatch)
+        .collect();
+    assert!(
+        !mismatch.is_empty(),
+        "kv_roots count mismatch should produce KvRootsCountMismatch failure"
+    );
+}
+
+#[test]
+fn kv_canonical_entries_without_proofs_rejected() {
+    let (key, mut response) = kv_toy_response(3);
+
+    // Remove proofs but keep entries — structural error.
+    response.kv_proofs = None;
+
+    let report = verify_response(&key, &response, None, None);
+    let mismatch: Vec<_> = report
+        .failures
+        .iter()
+        .filter(|f| f.code == FailureCode::KvProofCountMismatch)
+        .collect();
+    assert!(
+        !mismatch.is_empty(),
+        "entries without proofs should produce KvProofCountMismatch"
+    );
+}
+
+#[test]
+fn kv_canonical_legacy_no_kv_roots_skipped() {
+    let (key, mut response) = kv_toy_response(3);
+
+    // Clear KV data to simulate legacy response.
+    response.commitment.kv_roots.clear();
+    response.kv_entries = None;
+    response.kv_proofs = None;
+
+    let report = verify_response(&key, &response, None, None);
+    // No KV-related failures — phase is silently skipped.
+    let kv_failures: Vec<_> = report
+        .failures
+        .iter()
+        .filter(|f| matches!(
+            f.code,
+            FailureCode::KvRootsCountMismatch
+                | FailureCode::KvEntriesCountMismatch
+                | FailureCode::KvProofInvalid
+                | FailureCode::KvProofCountMismatch
+        ))
+        .collect();
+    assert!(kv_failures.is_empty(), "legacy (no kv_roots) should skip KV phase");
+}
+
+/// compute_kv_transcript produces the same KV entries as kv_entries_from_traces
+/// for the toy model (validates that commit-time derivation from x_attn + weights
+/// matches the reference path).
+#[test]
+fn kv_compute_transcript_matches_traces() {
+    let cfg = ModelConfig::toy();
+    let model = generate_model(&cfg, 42);
+    let initial: Vec<i8> = (0..cfg.hidden_dim as i8).collect();
+
+    let traces =
+        verilm_test_vectors::forward_pass_autoregressive(&cfg, &model, &initial, 3);
+
+    // Reference: KV entries from traces (the test-vectors path).
+    let reference_kv = verilm_test_vectors::kv_entries_from_traces(&cfg, &traces);
+
+    // Build x_attn per token/layer from traces (simulates GPU capture).
+    let captured_x_attn: Vec<Vec<Vec<i8>>> = traces
+        .iter()
+        .map(|token_traces| {
+            token_traces.iter().map(|lt| lt.x_attn.clone()).collect()
+        })
+        .collect();
+
+    // Build captured scales (toy model uses unit scales).
+    let captured_scales: Vec<Vec<CapturedLayerScales>> = traces
+        .iter()
+        .map(|token_traces| {
+            token_traces
+                .iter()
+                .map(|_| CapturedLayerScales {
+                    scale_x_attn: 1.0,
+                    scale_x_ffn: 1.0,
+                    scale_h: 1.0,
+                })
+                .collect()
+        })
+        .collect();
+
+    // Compute KV transcript from x_attn + weights (the production commit-time path).
+    let computed_kv = verilm_prover::compute_kv_transcript(
+        &captured_x_attn,
+        &ToyWeights(&model),
+        &cfg,
+        &captured_scales,
+        &[], // no per-tensor scales (toy)
+        &[], // no per-channel scales (toy)
+        &[], // no QKV biases (toy)
+    );
+
+    // Both should have n_layers entries.
+    assert_eq!(computed_kv.len(), reference_kv.len());
+
+    // Each layer should have n_tokens entries, with identical KV values.
+    for (layer_idx, (computed, reference)) in
+        computed_kv.iter().zip(reference_kv.iter()).enumerate()
+    {
+        assert_eq!(
+            computed.len(),
+            reference.len(),
+            "layer {} token count mismatch",
+            layer_idx
+        );
+        for (pos, (c, r)) in computed.iter().zip(reference.iter()).enumerate() {
+            assert_eq!(
+                c.k_roped, r.k_roped,
+                "layer {} pos {} k_roped mismatch",
+                layer_idx, pos
+            );
+            assert_eq!(
+                c.v_deq, r.v_deq,
+                "layer {} pos {} v_deq mismatch",
+                layer_idx, pos
+            );
+        }
+    }
+}
+
+/// KV transcript derived from x_attn at commit time produces valid Merkle proofs
+/// that the canonical verifier accepts.
+#[test]
+fn kv_derived_transcript_passes_canonical_verification() {
+    let cfg = ModelConfig::toy();
+    let model = generate_model(&cfg, 42);
+    let key = generate_key(&cfg, &model, [1u8; 32]);
+    let initial: Vec<i8> = (0..cfg.hidden_dim as i8).collect();
+
+    let traces =
+        verilm_test_vectors::forward_pass_autoregressive(&cfg, &model, &initial, 3);
+
+    // Build x_attn and retained states from traces.
+    let captured_x_attn: Vec<Vec<Vec<i8>>> = traces
+        .iter()
+        .map(|token_traces| {
+            token_traces.iter().map(|lt| lt.x_attn.clone()).collect()
+        })
+        .collect();
+
+    let all_retained: Vec<_> = traces
+        .iter()
+        .map(|token_traces| RetainedTokenState {
+            layers: token_traces
+                .iter()
+                .map(|lt| RetainedLayerState {
+                    a: lt.a.clone(),
+                    scale_a: lt.scale_a.unwrap_or(1.0),
+                    x_attn_i8: None,
+                    scale_x_attn: None,
+                })
+                .collect(),
+        })
+        .collect();
+
+    let captured_scales: Vec<Vec<CapturedLayerScales>> = traces
+        .iter()
+        .map(|token_traces| {
+            token_traces
+                .iter()
+                .map(|_| CapturedLayerScales {
+                    scale_x_attn: 1.0,
+                    scale_x_ffn: 1.0,
+                    scale_h: 1.0,
+                })
+                .collect()
+        })
+        .collect();
+
+    // Compute KV transcript from x_attn + weights.
+    let kv_transcripts = verilm_prover::compute_kv_transcript(
+        &captured_x_attn,
+        &ToyWeights(&model),
+        &cfg,
+        &captured_scales,
+        &[],
+        &[],
+        &[], // no QKV biases (toy)
+    );
+
+    let params = FullBindingParams {
+        token_ids: &[10, 20, 30],
+        prompt: b"kv derived test",
+        sampling_seed: [9u8; 32],
+        manifest: None,
+        n_prompt_tokens: Some(1),
+    };
+    let scales_for_commit = captured_scales;
+
+    let (_commitment, state) = commit_minimal(
+        all_retained, &params, None, scales_for_commit, Some(captured_x_attn), Some(kv_transcripts),
+    );
+
+    // Open audit for last token.
+    let response = open_v4(
+        &state, 2, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false,
+    );
+
+    // Verify: KV roots present, entries + proofs present.
+    assert!(!response.commitment.kv_roots.is_empty());
+    assert!(response.kv_entries.is_some());
+    assert!(response.kv_proofs.is_some());
+
+    // Canonical verifier should accept.
+    let report = verify_response(&key, &response, None, None);
+    let kv_failures: Vec<_> = report
+        .failures
+        .iter()
+        .filter(|f| matches!(
+            f.code,
+            FailureCode::KvRootsCountMismatch
+                | FailureCode::KvEntriesCountMismatch
+                | FailureCode::KvProofInvalid
+                | FailureCode::KvProofCountMismatch
+        ))
+        .collect();
+    assert!(
+        kv_failures.is_empty(),
+        "derived KV transcript should pass canonical verification, failures: {:?}",
+        kv_failures
+    );
+}
+
+/// Reproduce the GPU KV proof bug: hash_kv_entry uses raw f64 bytes,
+/// so JSON round-trip must preserve bit-exact f64 values.
+#[test]
+fn kv_entry_json_round_trip_hash_stability() {
+    use verilm_core::merkle;
+    use verilm_core::types::KvEntry;
+
+    // Simulate dequant+RoPE values: i32 * f32_scale → f64
+    let k: Vec<f64> = (0..512)
+        .map(|i| (i as i32 * 17 - 4000) as f64 * 0.0078125_f32 as f64)
+        .collect();
+    let v: Vec<f64> = (0..512)
+        .map(|i| (i as i32 * 23 + 100) as f64 * 0.00390625_f32 as f64)
+        .collect();
+
+    let entry = KvEntry {
+        k_roped: k,
+        v_deq: v,
+    };
+
+    let hash_before = merkle::hash_kv_entry(0, 0, &entry.k_roped, &entry.v_deq);
+
+    // JSON round-trip (this is what happens on the audit_v4 → verify_v4 path)
+    let json = serde_json::to_string(&entry).unwrap();
+    let restored: KvEntry = serde_json::from_str(&json).unwrap();
+
+    // Check bit-exact preservation of every f64
+    for (i, (orig, rt)) in entry.k_roped.iter().zip(restored.k_roped.iter()).enumerate() {
+        assert_eq!(
+            orig.to_bits(),
+            rt.to_bits(),
+            "k_roped[{}]: bits differ: {:016x} vs {:016x}",
+            i,
+            orig.to_bits(),
+            rt.to_bits()
+        );
+    }
+    for (i, (orig, rt)) in entry.v_deq.iter().zip(restored.v_deq.iter()).enumerate() {
+        assert_eq!(
+            orig.to_bits(),
+            rt.to_bits(),
+            "v_deq[{}]: bits differ: {:016x} vs {:016x}",
+            i,
+            orig.to_bits(),
+            rt.to_bits()
+        );
+    }
+
+    let hash_after = merkle::hash_kv_entry(0, 0, &restored.k_roped, &restored.v_deq);
+    assert_eq!(
+        hash_before, hash_after,
+        "KV entry hash must survive JSON round-trip"
+    );
 }
 

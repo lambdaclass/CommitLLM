@@ -384,6 +384,7 @@ def _measure_one(server, wl, dc, full_layers, key_json, model_id, corridor_mode,
                 layer_indices=full_layers,
                 tier="full",
                 binary=True,
+                use_captured_x_attn=True,
             )
         except KeyError:
             chat_r2 = server.chat(prompt=wl["prompt"], **params_kw)
@@ -393,6 +394,7 @@ def _measure_one(server, wl, dc, full_layers, key_json, model_id, corridor_mode,
                 layer_indices=full_layers,
                 tier="full",
                 binary=True,
+                use_captured_x_attn=True,
             )
 
         import verilm_rs

@@ -131,8 +131,8 @@ def _run_test():
         "binary": False,
     })
     assert resp.status_code == 200, f"audit failed: {resp.status_code}"
-    honest_audit = resp.json()
-    honest_json = json.dumps(honest_audit)
+    honest_json = resp.text
+    honest_audit = json.loads(honest_json)
 
     report = verilm_rs.verify_v4(honest_json, key_json)
     assert report["passed"], f"honest greedy audit must pass: {report['failures']}"
@@ -154,8 +154,8 @@ def _run_test():
         "binary": False,
     })
     assert resp_sa.status_code == 200
-    sampled_audit = resp_sa.json()
-    sampled_json = json.dumps(sampled_audit)
+    sampled_json = resp_sa.text
+    sampled_audit = json.loads(sampled_json)
     report_s = verilm_rs.verify_v4(sampled_json, key_json)
     assert report_s["passed"], f"honest sampled audit must pass: {report_s['failures']}"
     print(f"  baseline: {report_s['checks_passed']}/{report_s['checks_run']} checks passed")

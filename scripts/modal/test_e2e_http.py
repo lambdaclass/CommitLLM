@@ -133,14 +133,14 @@ def _run_test():
         "binary": False,
     })
     ok(resp.status_code == 200, f"audit status={resp.status_code}")
-    audit_greedy = resp.json()
+    audit_greedy_json = resp.text
+    audit_greedy = json.loads(audit_greedy_json)
     ok("shell_opening" in audit_greedy, "audit has shell_opening")
     ok(audit_greedy.get("shell_opening", {}).get("initial_residual") is not None,
        "audit has initial_residual (full bridge)")
 
     # ── 4. Verify greedy audit ──
     print("\n4. Verify greedy (JSON)")
-    audit_greedy_json = json.dumps(audit_greedy)
     report = verilm_rs.verify_v4(audit_greedy_json, key_json)
     ok(report["passed"], f"greedy verify passed ({report['checks_passed']}/{report['checks_run']})")
     if not report["passed"]:
@@ -170,8 +170,9 @@ def _run_test():
         "binary": False,
     })
     ok(resp.status_code == 200, f"sampled audit status={resp.status_code}")
-    audit_sampled = resp.json()
-    report_s = verilm_rs.verify_v4(json.dumps(audit_sampled), key_json)
+    audit_sampled_json = resp.text
+    audit_sampled = json.loads(audit_sampled_json)
+    report_s = verilm_rs.verify_v4(audit_sampled_json, key_json)
     ok(report_s["passed"], f"sampled verify passed ({report_s['checks_passed']}/{report_s['checks_run']})")
     if not report_s["passed"]:
         print(f"    failures: {report_s['failures'][:3]}")
@@ -223,7 +224,8 @@ def _run_test():
         "binary": False,
     })
     ok(resp_routine.status_code == 200, f"routine audit status={resp_routine.status_code}")
-    report_routine = verilm_rs.verify_v4(json.dumps(resp_routine.json()), key_json)
+    audit_routine_json = resp_routine.text
+    report_routine = verilm_rs.verify_v4(audit_routine_json, key_json)
     ok(report_routine["passed"],
        f"routine verify passed ({report_routine['checks_passed']}/{report_routine['checks_run']})")
     if not report_routine["passed"]:
@@ -247,7 +249,8 @@ def _run_test():
         "binary": False,
     })
     ok(resp_multi.status_code == 200, f"token[{token_idx}] audit status={resp_multi.status_code}")
-    report_multi = verilm_rs.verify_v4(json.dumps(resp_multi.json()), key_json)
+    audit_multi_json = resp_multi.text
+    report_multi = verilm_rs.verify_v4(audit_multi_json, key_json)
     ok(report_multi["passed"],
        f"token[{token_idx}] verify passed ({report_multi['checks_passed']}/{report_multi['checks_run']})")
     if not report_multi["passed"]:
@@ -289,7 +292,8 @@ def _run_test():
         "binary": False,
     })
     ok(resp_eos_audit.status_code == 200, "EOS audit status=200")
-    report_eos = verilm_rs.verify_v4(json.dumps(resp_eos_audit.json()), key_json)
+    audit_eos_json = resp_eos_audit.text
+    report_eos = verilm_rs.verify_v4(audit_eos_json, key_json)
     ok(report_eos["passed"],
        f"EOS verify passed ({report_eos['checks_passed']}/{report_eos['checks_run']})")
     if not report_eos["passed"]:

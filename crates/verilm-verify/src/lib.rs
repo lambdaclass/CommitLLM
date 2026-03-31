@@ -157,6 +157,12 @@ pub enum FailureCode {
     BridgeXAttnMismatch,
     BridgeScaleMismatch,
 
+    // -- KV transcript --
+    KvRootsCountMismatch,
+    KvEntriesCountMismatch,
+    KvProofInvalid,
+    KvProofCountMismatch,
+
     // -- Semantic violation --
     TokenSelectionMismatch,
     ExceedsMaxTokens,
@@ -197,6 +203,8 @@ impl FailureCode {
             | AttentionReplayMismatch
             | ChallengeTokenMismatch | ChallengeLayerMismatch
             | BridgeXAttnMismatch | BridgeScaleMismatch
+            | KvRootsCountMismatch | KvEntriesCountMismatch
+            | KvProofInvalid | KvProofCountMismatch
                 => FailureCategory::CryptographicBinding,
 
             SpecFieldMismatch => FailureCategory::SpecMismatch,

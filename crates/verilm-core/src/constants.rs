@@ -88,6 +88,18 @@ impl MatrixType {
         }
     }
 
+    /// Safetensors bias name pattern for this projection.
+    /// Only Q, K, V projections may have bias terms (model-dependent).
+    /// Returns `None` for projections that never have bias.
+    pub fn bias_name(&self) -> Option<&'static str> {
+        match self {
+            MatrixType::Wq => Some("model.layers.{}.self_attn.q_proj.bias"),
+            MatrixType::Wk => Some("model.layers.{}.self_attn.k_proj.bias"),
+            MatrixType::Wv => Some("model.layers.{}.self_attn.v_proj.bias"),
+            _ => None,
+        }
+    }
+
     /// Safetensors per-channel weight scale name pattern.
     /// Present in W8A8 models with native INT8 weights. Shape = `[output_dim]`.
     pub fn weight_scale_name(&self) -> &'static str {

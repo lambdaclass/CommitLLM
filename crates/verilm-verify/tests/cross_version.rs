@@ -139,7 +139,7 @@ fn frozen_v4_audit_byte_stable() {
     };
     let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)], None, None);
     let response = open_v4(
-        &state, 0, &ToyWeights(&model), &cfg, &[], None, None, None, None, false,
+        &state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false,
     );
     let fresh_binary = serialize::serialize_v4_audit(&response);
     let frozen = fixture("v4_audit_canonical.bin");
@@ -375,10 +375,10 @@ fn frozen_key_sha256_pinned() {
     let data = fixture("v4_key_canonical.bin");
     let hash = hex::encode(Sha256::digest(&data));
     // Pinned on first generation. Update ONLY on intentional format change.
-    // Updated: added per_channel_weight_scales field to VerifierKey (#1 quant semantics).
+    // Updated: added qkv_biases field to VerifierKey (QKV projection bias support).
     assert_eq!(
         hash,
-        "c1b5857e0f004dcb28a901e35c13efc3462bf8075ad30bc32459de3ffdbd9454",
+        "adef47749267ce442b8897825bac2e56188b1e7fdaf10fcf08fec85f22ef6545",
         "key fixture checksum drifted — was the fixture silently regenerated?"
     );
 }

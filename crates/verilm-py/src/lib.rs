@@ -509,6 +509,9 @@ struct MinimalBatchStateHandle {
     rich_prefix: bool,
     /// Whether to include full retained state + shell openings for prefix tokens (deep audit).
     deep_prefix: bool,
+    /// When true, shell opening QKV uses GPU-captured x_attn instead of bridge-derived.
+    /// For corridor measurement only — makes Q match the same boundary as committed K/V.
+    use_captured_x_attn: bool,
 }
 
 #[pymethods]
@@ -521,6 +524,16 @@ impl MinimalBatchStateHandle {
     #[getter]
     fn get_deep_prefix(&self) -> bool {
         self.deep_prefix
+    }
+
+    #[setter]
+    fn set_use_captured_x_attn(&mut self, val: bool) {
+        self.use_captured_x_attn = val;
+    }
+
+    #[getter]
+    fn get_use_captured_x_attn(&self) -> bool {
+        self.use_captured_x_attn
     }
 
     /// Check if captured x_attn data is available for precision corridor.
@@ -624,7 +637,7 @@ impl MinimalBatchStateHandle {
         Ok(verilm_prover::open_v4(
             &self.inner, token_index, provider.as_ref(), provider.config(),
             provider.weight_scales(), provider.per_channel_weight_scales(), bridge.as_ref(), tail.as_ref(), layer_filter,
-            emb_lookup, self.deep_prefix,
+            emb_lookup, self.deep_prefix, self.use_captured_x_attn,
         ))
     }
 }
@@ -758,6 +771,7 @@ fn commit_minimal_from_captures(
             &captured_scales,
             wp.inner.weight_scales(),
             wp.inner.per_channel_weight_scales(),
+            wp.inner.qkv_biases(),
         ))
     } else {
         None
@@ -784,6 +798,7 @@ fn commit_minimal_from_captures(
         provider: weight_provider.map(|wp| Arc::clone(&wp.inner)),
         rich_prefix: false,
         deep_prefix: false,
+        use_captured_x_attn: false,
     })
 }
 
