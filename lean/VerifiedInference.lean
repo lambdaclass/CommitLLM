@@ -31,3 +31,4 @@ import VerifiedInference.EndToEnd
 import VerifiedInference.IndependentChecks
 import VerifiedInference.AttentionBounds
 import VerifiedInference.SoftmaxBound
+import VerifiedInference.AuditTiers

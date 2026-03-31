@@ -1,5 +1,6 @@
 import VerifiedInference.Basic
 import VerifiedInference.Requantization
+import VerifiedInference.AttentionBounds
 import Mathlib.Analysis.SpecialFunctions.Pow.Real
 
 /-!
@@ -33,11 +34,9 @@ noncomputable def canonicalRMSNorm (gamma : List ℝ) (x : List ℤ) (eps : ℝ)
 
 /-! ## Precision Assumption for RMSNorm -/
 
-/-- Round a real number to the nearest integer (round-half-up). -/
-noncomputable def roundReal (r : ℝ) : ℤ := ⌊r + (1 / 2 : ℝ)⌋
-
-/-- Requantize a real value to INT8 via rounding and clamping. -/
-noncomputable def requantizeReal (r : ℝ) : ℤ := clampI8 (roundReal r)
+/-- Requantize a real value to INT8 via rounding and clamping.
+    Alias for `quantizeReal` from AttentionBounds. -/
+noncomputable abbrev requantizeReal (r : ℝ) : ℤ := quantizeReal r
 
 /-- **RMSNorm Precision Assumption**: The canonical real-valued RMSNorm output,
     after scaling by the output scale factor and requantizing to INT8, agrees
