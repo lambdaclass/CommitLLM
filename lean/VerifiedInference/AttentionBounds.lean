@@ -92,19 +92,35 @@ private theorem floor_close (a b : ℝ) (h : |a - b| < 1) :
 `|max(lo, min(hi, a)) - max(lo, min(hi, b))| ≤ |a - b|`.
 
 This is the 1-Lipschitz property of projection onto `[lo, hi]`. -/
-private theorem clamp_nonexpansive (a b lo hi : ℤ) (hlohi : lo ≤ hi) :
+private theorem clamp_nonexpansive (a b lo hi : ℤ) (_hlohi : lo ≤ hi) :
     |max lo (min hi a) - max lo (min hi b)| ≤ |a - b| := by
-  -- Clamp is 1-Lipschitz. We prove it by showing the clamped difference
-  -- is between -(|a-b|) and |a-b|, i.e., |clamp(a) - clamp(b)| ≤ |a-b|.
-  -- Direct omega on integers after converting abs to ± form.
-  simp only [max_def, min_def]
-  -- Clamp is 1-Lipschitz: |clamp(a) - clamp(b)| ≤ |a - b|.
-  -- Proof: 9-way case split on regions of a and b relative to [lo, hi].
-  sorry
-  -- TODO: Close this sorry. The proof strategy is correct (split_ifs on
-  -- max_def/min_def, then linarith with abs_nonneg/le_abs_self).
-  -- One branch needs nlinarith or manual manipulation to close.
-  -- The main theorem (requant_close_implies_linf_one) depends on this.
+  -- Clamp(x) = max(lo, min(hi, x)). We reduce to linear arithmetic via
+  -- the identity: max(c, d) = c + (d - c) if d ≥ c, else c.
+  -- Approach: use omega on the cases by providing linear bounds on max and min.
+  have hmin_a : min hi a ≤ a := min_le_right _ _
+  have hmin_a2 : min hi a ≤ hi := min_le_left _ _
+  have hmin_b : min hi b ≤ b := min_le_right _ _
+  have hmin_b2 : min hi b ≤ hi := min_le_left _ _
+  have hmax_a : lo ≤ max lo (min hi a) := le_max_left _ _
+  have hmax_a2 : min hi a ≤ max lo (min hi a) := le_max_right _ _
+  have hmax_b : lo ≤ max lo (min hi b) := le_max_left _ _
+  have hmax_b2 : min hi b ≤ max lo (min hi b) := le_max_right _ _
+  -- max is one of the two arguments
+  have hmax_a_cases : max lo (min hi a) = lo ∨ max lo (min hi a) = min hi a :=
+    max_choice lo (min hi a)
+  have hmax_b_cases : max lo (min hi b) = lo ∨ max lo (min hi b) = min hi b :=
+    max_choice lo (min hi b)
+  have hmin_a_cases : min hi a = hi ∨ min hi a = a := min_choice hi a
+  have hmin_b_cases : min hi b = hi ∨ min hi b = b := min_choice hi b
+  -- 2 × 2 × 2 × 2 = 16 cases, each linear. omega handles them all.
+  -- Convert |x - y| ≤ |a - b| to -|a-b| ≤ x - y ∧ x - y ≤ |a-b|
+  rw [abs_le]
+  have hab1 : a - b ≤ |a - b| := le_abs_self _
+  have hab2 : -(a - b) ≤ |a - b| := neg_le_abs (a - b)
+  -- 16 cases, each linear after substitution
+  rcases hmax_a_cases with ha | ha <;> rcases hmax_b_cases with hb | hb <;>
+  rcases hmin_a_cases with hma | hma <;> rcases hmin_b_cases with hmb | hmb <;>
+  (simp only [ha, hb, hma, hmb] at *; constructor <;> omega)
 
 /-! ## The key theorem -/
 
@@ -202,11 +218,15 @@ noncomputable def softmaxTerm (p : CorridorParams) (c : CommittedLevel) : ℝ :=
   | .committedQKV => p.bvOverScaleA * 2 * p.seqLen * (2 : ℝ)⁻¹ ^ 24
   | .committedScores => 0
 
-/-- V-dequantization error term. -/
+/-- V-dequantization error term.
+    V has dequant error (no RoPE) when not committed.
+    Committed K,V eliminates V error. Committed QKV eliminates V error.
+    Committed scores does NOT eliminate V error — scores are committed but
+    V still has dequant perturbation. Matches bounds.rs. -/
 noncomputable def vDequantTerm (p : CorridorParams) (c : CommittedLevel) : ℝ :=
   match c with
-  | .qkvAccOnly => p.bvOverScaleA * p.gpu.unitRoundoff
-  | _ => 0
+  | .committedKV | .committedQKV => 0  -- V is committed, no error
+  | .qkvAccOnly | .committedScores => p.bvOverScaleA * p.gpu.unitRoundoff
 
 /-- Total pre-quantization error bound: |Δo_m| / scale_a. -/
 noncomputable def corridorBound (p : CorridorParams) (c : CommittedLevel) : ℝ :=
@@ -224,14 +244,20 @@ theorem corridor_leq_one_of_bound_lt_one
     (quantizeReal o_gpu - quantizeReal o_verifier).natAbs ≤ 1 :=
   requant_close_implies_linf_one o_gpu o_verifier (by linarith)
 
-/-- Committed scores achieve ≤ 1 for FP16 with B_v/scale_a ≤ 127. -/
+/-- Committed scores achieve ≤ 1 for FP16 with B_v/scale_a ≤ 127.
+    The bound is 127 · 2^-11 ≈ 0.062 < 1. -/
 theorem committedScores_achieves_leq_one
     (p : CorridorParams)
-    (_hgpu : p.gpu = .fp16)
-    (_hbv : p.bvOverScaleA ≤ 127) :
+    (hgpu : p.gpu = .fp16)
+    (hbv : p.bvOverScaleA ≤ 127) :
     corridorBound p .committedScores < 1 := by
-  unfold corridorBound softmaxTerm vDequantTerm
+  unfold corridorBound softmaxTerm vDequantTerm epsQK GpuArithmetic.unitRoundoff
+  rw [hgpu]
   simp
+  -- Need: bvOverScaleA * (2⁻¹ ^ 11) < 1
+  -- Since bvOverScaleA ≤ 127 and 2⁻¹^11 = 1/2048:
+  -- 127/2048 ≈ 0.062 < 1
+  nlinarith
 
 /-! ## Impossibility: QKV Accumulators Alone -/
 
