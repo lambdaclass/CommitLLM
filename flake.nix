@@ -26,6 +26,9 @@
             # Lean
             pkgs.elan
 
+            # Site
+            pkgs.zola
+
             pkgs.git
           ];
         };

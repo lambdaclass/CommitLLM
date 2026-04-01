@@ -1,0 +1,8 @@
+base_url = "https://lambdaclass.github.io/CommitLLM"
+title = "CommitLLM"
+description = "Cryptographic commit-and-audit protocol for open-weight LLM inference"
+compile_sass = true
+build_search_index = false
+generate_feeds = false
+
+[markdown]

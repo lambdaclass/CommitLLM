@@ -1,0 +1,726 @@
+// ── Tokens ──────────────────────────────────────────
+$bg:         #fffdf9;
+$bg-warm:    #faf6ee;
+$bg-card:    #f5f1e8;
+$bg-dark:    #1c1915;
+$bg-dark2:   #2a2520;
+$border:     #e8e2d4;
+$border-hi:  #d4ccba;
+$text:       #433d33;
+$text-dim:   #8a8070;
+$text-bright:#1a1714;
+$accent:     #b8860b;
+$accent2:    #d4a024;
+$green:      #2d7a4f;
+$red:        #a63d3d;
+$blue:       #3b6b96;
+$orange:     #b87333;
+
+@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,300;0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+$serif: 'Source Serif 4', Georgia, serif;
+$mono: 'IBM Plex Mono', 'Menlo', monospace;
+
+// ── Reset ───────────────────────────────────────────
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { font-size: 17px; scroll-behavior: smooth; }
+
+body {
+  font-family: $serif;
+  background: $bg;
+  color: $text;
+  line-height: 1.7;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: $accent; text-decoration: none; transition: color .15s; }
+a:hover { color: darken($accent, 12%); }
+::selection { background: rgba($accent, 0.2); }
+
+code {
+  font-family: $mono;
+  font-size: 0.85em;
+  background: $bg-card;
+  padding: 0.15em 0.4em;
+  border-radius: 3px;
+  color: $text-bright;
+}
+
+// ── Layout ──────────────────────────────────────────
+.container { max-width: 1080px; margin: 0 auto; padding: 0 2rem; }
+.container--narrow { max-width: 720px; margin: 0 auto; padding: 0 2rem; }
+
+.section { padding: 5.5rem 0; position: relative; }
+.section--dark {
+  background: $bg-dark;
+  color: #d8d0c4;
+  .section-label { color: $accent2; }
+  .section-title { color: #f0ebe0; }
+  .section-sub { color: #a09888; }
+  code { background: $bg-dark2; color: #d8d0c4; }
+}
+
+.section-label {
+  font-family: $mono;
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: $accent;
+  margin-bottom: 0.75rem;
+}
+
+.section-title {
+  font-size: 2rem;
+  font-weight: 700;
+  color: $text-bright;
+  line-height: 1.25;
+  margin-bottom: 1rem;
+  letter-spacing: -0.01em;
+}
+
+.section-sub {
+  font-size: 1.05rem;
+  color: $text-dim;
+  max-width: 580px;
+  line-height: 1.7;
+}
+
+// ── Reveal ──────────────────────────────────────────
+.reveal {
+  opacity: 0;
+  transform: translateY(16px);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+  &.visible { opacity: 1; transform: none; }
+}
+
+// ── Canvas ──────────────────────────────────────────
+#geo-canvas {
+  position: fixed; top: 0; left: 0;
+  width: 100%; height: 100%;
+  z-index: 0; pointer-events: none;
+  opacity: 0.4;
+}
+main { position: relative; z-index: 1; }
+
+// ── Nav ─────────────────────────────────────────────
+.nav {
+  position: fixed; top: 0; left: 0; right: 0;
+  z-index: 100;
+  padding: 0.85rem 2rem;
+  display: flex; align-items: center; justify-content: space-between;
+  background: rgba($bg, 0.92);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid $border;
+
+  &-logo {
+    font-family: $mono;
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: $text-bright;
+    letter-spacing: -0.02em;
+    span { color: $accent; }
+  }
+
+  &-links {
+    display: flex; gap: 1.75rem; list-style: none;
+    a {
+      font-family: $mono;
+      font-size: 0.72rem;
+      font-weight: 500;
+      color: $text-dim;
+      letter-spacing: 0.03em;
+      &:hover { color: $text-bright; }
+    }
+  }
+}
+
+// ── Hero ────────────────────────────────────────────
+.hero {
+  min-height: 100vh;
+  display: flex; align-items: center;
+  padding-top: 4rem;
+  background: linear-gradient(180deg, $bg-warm 0%, $bg 100%);
+
+  &-grid {
+    display: grid;
+    grid-template-columns: 1fr 380px;
+    gap: 4rem;
+    align-items: center;
+    @media (max-width: 900px) { grid-template-columns: 1fr; }
+  }
+
+  &-badge {
+    display: inline-block;
+    font-family: $mono;
+    font-size: 0.68rem;
+    font-weight: 500;
+    color: $accent;
+    border: 1px solid rgba($accent, 0.3);
+    border-radius: 3px;
+    padding: 0.25rem 0.65rem;
+    margin-bottom: 1.75rem;
+    letter-spacing: 0.06em;
+  }
+
+  h1 {
+    font-size: 3.2rem;
+    font-weight: 700;
+    color: $text-bright;
+    line-height: 1.1;
+    margin-bottom: 1.25rem;
+    letter-spacing: -0.025em;
+    em {
+      font-style: normal;
+      color: $accent;
+      text-decoration: underline;
+      text-decoration-color: rgba($accent, 0.3);
+      text-underline-offset: 4px;
+      text-decoration-thickness: 2px;
+    }
+    @media (max-width: 600px) { font-size: 2.2rem; }
+  }
+
+  &-desc {
+    font-size: 1.15rem;
+    color: $text-dim;
+    max-width: 520px;
+    line-height: 1.75;
+    margin-bottom: 2rem;
+  }
+
+  &-actions {
+    display: flex; gap: 0.75rem; flex-wrap: wrap;
+  }
+
+  &-aside {
+    background: $bg-card;
+    border: 1px solid $border;
+    border-radius: 8px;
+    padding: 1.75rem;
+    @media (max-width: 900px) { display: none; }
+  }
+}
+
+// ── Stat list in hero aside ─────────────────────────
+.stat-list {
+  list-style: none;
+  .stat-row {
+    display: flex; align-items: baseline; justify-content: space-between;
+    padding: 0.65rem 0;
+    border-bottom: 1px solid $border;
+    &:last-child { border-bottom: none; }
+  }
+  .stat-key {
+    font-size: 0.85rem;
+    color: $text-dim;
+  }
+  .stat-val {
+    font-family: $mono;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: $text-bright;
+  }
+  .stat-val--accent { color: $accent; }
+}
+
+// ── Buttons ─────────────────────────────────────────
+.btn {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  font-family: $mono;
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.65rem 1.35rem;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all .2s;
+  text-decoration: none;
+
+  &-primary {
+    background: $text-bright;
+    color: $bg;
+    &:hover { background: lighten($text-bright, 10%); color: $bg; }
+  }
+  &-ghost {
+    background: transparent;
+    color: $text;
+    border-color: $border-hi;
+    &:hover { border-color: $text-bright; color: $text-bright; }
+  }
+}
+
+// ── Horizontal rule ─────────────────────────────────
+.rule {
+  border: none;
+  height: 1px;
+  background: $border;
+  margin: 0;
+}
+
+// ── Three-column problem ────────────────────────────
+.three-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0;
+  margin-top: 2.5rem;
+  border: 1px solid $border;
+  border-radius: 8px;
+  overflow: hidden;
+
+  @media (max-width: 768px) { grid-template-columns: 1fr; }
+}
+
+.three-col-item {
+  padding: 2rem 1.75rem;
+  border-right: 1px solid $border;
+  &:last-child { border-right: none; }
+  @media (max-width: 768px) {
+    border-right: none;
+    border-bottom: 1px solid $border;
+    &:last-child { border-bottom: none; }
+  }
+
+  &--highlight { background: $bg-warm; }
+
+  .col-label {
+    font-family: $mono;
+    font-size: 0.65rem;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 0.5rem;
+  }
+  .col-label--red { color: $red; }
+  .col-label--green { color: $green; }
+  .col-label--orange { color: $orange; }
+
+  h3 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: $text-bright;
+    margin-bottom: 0.5rem;
+  }
+  p {
+    font-size: 0.88rem;
+    color: $text-dim;
+    line-height: 1.65;
+  }
+}
+
+// ── Protocol timeline ───────────────────────────────
+.timeline {
+  margin-top: 2.5rem;
+  position: relative;
+  padding-left: 2rem;
+
+  &::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0.5rem;
+    bottom: 0.5rem;
+    width: 2px;
+    background: $border;
+  }
+}
+
+.timeline-step {
+  position: relative;
+  padding: 0 0 2.5rem 1.5rem;
+  &:last-child { padding-bottom: 0; }
+
+  &::before {
+    content: '';
+    position: absolute;
+    left: -2rem;
+    top: 0.45rem;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: $bg;
+    border: 2px solid $accent;
+  }
+
+  &-label {
+    font-family: $mono;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: $accent;
+    margin-bottom: 0.25rem;
+  }
+
+  h3 {
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: $text-bright;
+    margin-bottom: 0.35rem;
+  }
+
+  p {
+    font-size: 0.92rem;
+    color: $text-dim;
+    line-height: 1.7;
+    max-width: 600px;
+  }
+}
+
+// ── Guarantee boundary — horizontal pipeline ────────
+.pipeline-wrap {
+  margin-top: 2.5rem;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.pipeline {
+  display: flex;
+  min-width: 800px;
+  border: 1px solid $border;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.pipe {
+  flex: 1;
+  padding: 1rem 0.6rem;
+  text-align: center;
+  border-right: 1px solid $border;
+  transition: background .2s;
+  &:last-child { border-right: none; }
+  &:hover { background: $bg-warm; }
+
+  &-name {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: $text-bright;
+    margin-bottom: 0.25rem;
+    white-space: nowrap;
+  }
+
+  &-tag {
+    font-family: $mono;
+    font-size: 0.6rem;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  &--exact .pipe-tag { color: $green; }
+  &--approx .pipe-tag { color: $orange; }
+  &--stat .pipe-tag { color: $blue; }
+}
+
+.pipeline-legend {
+  display: flex;
+  gap: 1.5rem;
+  margin-top: 1rem;
+  font-size: 0.75rem;
+  color: $text-dim;
+
+  span {
+    display: flex; align-items: center; gap: 0.35rem;
+    &::before {
+      content: '';
+      width: 8px; height: 8px;
+      border-radius: 2px;
+    }
+  }
+  .legend-exact::before { background: $green; }
+  .legend-approx::before { background: $orange; }
+  .legend-stat::before { background: $blue; }
+}
+
+// ── Freivalds ───────────────────────────────────────
+.freivalds-grid {
+  margin-top: 2.5rem;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2.5rem;
+  align-items: start;
+  @media (max-width: 768px) { grid-template-columns: 1fr; }
+}
+
+.freivalds-text {
+  p {
+    font-size: 0.95rem;
+    color: $text-dim;
+    line-height: 1.75;
+    margin-bottom: 1rem;
+  }
+}
+
+.matrix-tags {
+  display: flex; flex-wrap: wrap; gap: 0.4rem;
+  margin-top: 1.25rem;
+  .tag {
+    font-family: $mono;
+    font-size: 0.7rem;
+    font-weight: 500;
+    padding: 0.2rem 0.55rem;
+    border: 1px solid $border;
+    border-radius: 3px;
+    color: $text;
+    background: $bg-warm;
+  }
+}
+
+.demo-box {
+  background: $bg-dark;
+  border-radius: 8px;
+  padding: 1.75rem;
+  color: #d8d0c4;
+
+  .demo-header {
+    font-family: $mono;
+    font-size: 0.65rem;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #a09888;
+    margin-bottom: 1rem;
+  }
+
+  .demo-output {
+    font-family: $mono;
+    font-size: 0.82rem;
+    line-height: 1.8;
+    padding: 1rem;
+    background: rgba(0,0,0,0.3);
+    border-radius: 5px;
+    margin-bottom: 1rem;
+    min-height: 80px;
+    .val { color: $accent2; font-weight: 600; }
+    .dim { color: #706858; }
+    .ok { color: #5dac78; }
+    .err { color: #d46b6b; }
+  }
+
+  .demo-result {
+    font-family: $mono;
+    font-size: 0.78rem;
+    font-weight: 600;
+    padding: 0.6rem 1rem;
+    border-radius: 4px;
+    text-align: center;
+    margin-bottom: 0.75rem;
+
+    &.pass { background: rgba(#5dac78, 0.15); color: #5dac78; }
+    &.fail { background: rgba(#d46b6b, 0.15); color: #d46b6b; }
+  }
+
+  .demo-btns {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;
+  }
+
+  .demo-btn {
+    font-family: $mono;
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 0.55rem;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 4px;
+    color: #d8d0c4;
+    cursor: pointer;
+    transition: all .15s;
+    &:hover { background: rgba(255,255,255,0.12); border-color: rgba(255,255,255,0.2); }
+  }
+}
+
+// ── Benchmarks ──────────────────────────────────────
+.bench-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2rem;
+  margin-top: 2.5rem;
+  @media (max-width: 768px) { grid-template-columns: 1fr; }
+}
+
+.bench-panel {
+  h3 {
+    font-family: $mono;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: $text-bright;
+    letter-spacing: 0.02em;
+    margin-bottom: 1.25rem;
+  }
+}
+
+.metric-row {
+  display: flex; align-items: center; gap: 0.75rem;
+  margin-bottom: 0.75rem;
+
+  &-label {
+    font-family: $mono;
+    font-size: 0.7rem;
+    color: $text-dim;
+    min-width: 55px;
+    text-align: right;
+    flex-shrink: 0;
+  }
+  &-bar {
+    flex: 1;
+    height: 24px;
+    background: $bg-card;
+    border-radius: 3px;
+    overflow: hidden;
+    position: relative;
+  }
+  &-fill {
+    height: 100%;
+    border-radius: 3px;
+    width: 0;
+    transition: width 1s cubic-bezier(0.22, 1, 0.36, 1);
+    &--gold { background: $accent; }
+    &--blue { background: $blue; }
+    &--green { background: $green; }
+    &--orange { background: $orange; }
+  }
+  &-val {
+    font-family: $mono;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: $text;
+    min-width: 55px;
+    flex-shrink: 0;
+  }
+}
+
+// ── Specs table ─────────────────────────────────────
+.specs-table {
+  margin-top: 2.5rem;
+  width: 100%;
+  border-collapse: collapse;
+
+  th, td {
+    padding: 0.85rem 1rem;
+    text-align: left;
+    border-bottom: 1px solid $border;
+  }
+  th {
+    font-family: $mono;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: $text-dim;
+  }
+  td { font-size: 0.9rem; color: $text; }
+  td:first-child {
+    font-family: $mono;
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: $text-bright;
+    white-space: nowrap;
+  }
+  tr:hover td { background: $bg-warm; }
+}
+
+// ── Use cases ───────────────────────────────────────
+.cases-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  margin-top: 2.5rem;
+  background: $border;
+  border: 1px solid $border;
+  border-radius: 8px;
+  overflow: hidden;
+
+  @media (max-width: 768px) { grid-template-columns: 1fr; }
+}
+
+.case-item {
+  background: $bg;
+  padding: 1.75rem;
+  transition: background .2s;
+  &:hover { background: $bg-warm; }
+
+  h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: $text-bright;
+    margin-bottom: 0.35rem;
+  }
+  p {
+    font-size: 0.85rem;
+    color: $text-dim;
+    line-height: 1.65;
+  }
+}
+
+// ── Comparison table ────────────────────────────────
+.cmp-table {
+  margin-top: 2.5rem;
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  overflow-x: auto;
+  display: block;
+
+  th, td { padding: 0.8rem 0.9rem; text-align: left; border-bottom: 1px solid $border; }
+  th {
+    font-family: $mono;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: $text-dim;
+    position: sticky;
+    top: 0;
+    background: $bg;
+  }
+  td { color: $text; }
+  tr:hover td { background: $bg-warm; }
+  .yes { color: $green; font-weight: 600; }
+  .no { color: $red; }
+  .mid { color: $orange; }
+}
+
+// ── CTA ─────────────────────────────────────────────
+.cta-section {
+  text-align: center;
+  padding: 5rem 0;
+  background: $bg-warm;
+  border-top: 1px solid $border;
+  border-bottom: 1px solid $border;
+
+  h2 {
+    font-size: 2rem;
+    font-weight: 700;
+    color: $text-bright;
+    margin-bottom: 0.75rem;
+  }
+  p {
+    font-size: 1rem;
+    color: $text-dim;
+    margin-bottom: 1.75rem;
+  }
+  .cta-btns {
+    display: flex; justify-content: center; gap: 0.75rem; flex-wrap: wrap;
+  }
+}
+
+// ── Footer ──────────────────────────────────────────
+.footer {
+  padding: 1.75rem 0;
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 1rem;
+
+  &-left {
+    font-family: $mono;
+    font-size: 0.75rem;
+    color: $text-dim;
+    a { color: $text-dim; &:hover { color: $text-bright; } }
+  }
+  &-right {
+    display: flex; gap: 1.5rem;
+    a { font-family: $mono; font-size: 0.75rem; color: $text-dim; &:hover { color: $text-bright; } }
+  }
+}
