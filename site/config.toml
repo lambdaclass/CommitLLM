@@ -1,4 +1,4 @@
-base_url = "https://lambdaclass.github.io/CommitLLM"
+base_url = "https://commitllm.com"
 title = "CommitLLM"
 description = "Cryptographic commit-and-audit protocol for open-weight LLM inference"
 compile_sass = true
