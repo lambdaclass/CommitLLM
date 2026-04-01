@@ -1,0 +1,44 @@
+═══════════════════════════════════════════════════════════════
+  Verifier Benchmark — Real Model Dimensions
+═══════════════════════════════════════════════════════════════
+
+Measures per-token verification cost (Freivalds + SiLU).
+Uses random data at real dimensions (no actual weights needed).
+Merkle/IO proof checks add ~1µs and are omitted.
+
+
+─── Llama-3-8B (hidden=4096, kv=1024, ffn=14336, layers=32) ───
+  Generating random data for 32 layers... done (0.0s)
+  Single layer (7 Freivalds checks): 60 µs
+
+        layers    Freivalds          +SiLU      per-layer
+             1        59 µs          65 µs          65 µs
+            10       619 µs         656 µs          65 µs
+            32      1.89 ms        1.98 ms          61 µs
+
+─── Llama-3-70B (hidden=8192, kv=1024, ffn=28672, layers=80) ───
+  Generating random data for 80 layers... done (0.2s)
+  Single layer (7 Freivalds checks): 106 µs
+
+        layers    Freivalds          +SiLU      per-layer
+             1       103 µs         120 µs         120 µs
+            10      1.07 ms        1.27 ms         126 µs
+            80      8.71 ms       10.09 ms         126 µs
+
+─── Llama-3-405B (hidden=16384, kv=1024, ffn=53248, layers=126) ───
+  Generating random data for 126 layers... done (0.5s)
+  Single layer (7 Freivalds checks): 202 µs
+
+        layers    Freivalds          +SiLU      per-layer
+             1       211 µs         228 µs         228 µs
+            10      2.10 ms        2.33 ms         233 µs
+           126     26.56 ms       29.76 ms         236 µs
+
+═══════════════════════════════════════════════════════════════
+  Notes:
+  - Freivalds: 7 dot-product checks per layer (v·x == r·z in F_p)
+  - SiLU: recompute h = SiLU(g) ⊙ u and compare
+  - Merkle/IO proof verification adds ~1 µs (omitted)
+  - 'Routine audit' = 10 sampled layers; 'Full audit' = all layers
+  - These are per-token costs; multiply by S for S challenged tokens
+═══════════════════════════════════════════════════════════════

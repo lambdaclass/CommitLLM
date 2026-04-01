@@ -1,0 +1,11 @@
+[workspace]
+members = [
+    "crates/verilm-core",
+    "crates/verilm-keygen",
+    "crates/verilm-prover",
+    "crates/verilm-verify",
+    "crates/verilm-test-vectors",
+    "crates/verilm-py",
+]
+exclude = ["crates/verilm-core/fuzz"]
+resolver = "2"

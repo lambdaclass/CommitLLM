@@ -1,0 +1,15 @@
+[package]
+name = "verilm-test-vectors"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+verilm-core = { path = "../verilm-core" }
+verilm-prover = { path = "../verilm-prover" }
+rand = "0.8"
+rand_chacha = "0.3"
+
+[dev-dependencies]
+verilm-verify = { path = "../verilm-verify" }
+proptest = "1"
+hex = "0.4"
