@@ -1,283 +1,263 @@
 // ── Tokens ──────────────────────────────────────────
-$bg:         #fffdf9;
-$bg-warm:    #faf6ee;
-$bg-card:    #f5f1e8;
-$bg-dark:    #1c1915;
-$bg-dark2:   #2a2520;
-$border:     #e8e2d4;
-$border-hi:  #d4ccba;
-$text:       #433d33;
-$text-dim:   #8a8070;
-$text-bright:#1a1714;
-$accent:     #b8860b;
-$accent2:    #d4a024;
+// Practical Typography: dark gray body text, not pure black.
+// Reserve color for links only.
+$bg:         #fffff8;
+$bg-warm:    #faf7f0;
+$bg-card:    #f4f1e8;
+$bg-dark:    #1e1b16;
+$bg-dark2:   #28241e;
+$border:     #e0dace;
+$text:       #353230;
+$text-dim:   #70695e;
+$text-bright:#1a1816;
+$link:       #96700a;
 $green:      #2d7a4f;
 $red:        #a63d3d;
 $blue:       #3b6b96;
-$orange:     #b87333;
+$orange:     #b07030;
 
-@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,300;0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+// Practical Typography: use professional fonts.
+// Source Serif 4: optical sizing, good for body + display.
+// IBM Plex Mono: technical labels.
+@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,300;0,8..60,400;0,8..60,500;0,8..60,600;0,8..60,700;1,8..60,400&family=IBM+Plex+Mono:wght@400;500&display=swap');
 
 $serif: 'Source Serif 4', Georgia, serif;
-$mono: 'IBM Plex Mono', 'Menlo', monospace;
+$mono: 'IBM Plex Mono', Menlo, monospace;
 
 // ── Reset ───────────────────────────────────────────
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-html { font-size: 17px; scroll-behavior: smooth; }
+html { scroll-behavior: smooth; }
 
 body {
   font-family: $serif;
+  // Practical Typography: 15–25px body text on web.
+  font-size: 18px;
   background: $bg;
   color: $text;
-  line-height: 1.7;
-  overflow-x: hidden;
+  // Practical Typography: 120–145% line spacing.
+  line-height: 1.45;
   -webkit-font-smoothing: antialiased;
 }
 
-a { color: $accent; text-decoration: none; transition: color .15s; }
-a:hover { color: darken($accent, 12%); }
-::selection { background: rgba($accent, 0.2); }
+// Practical Typography: color means "clickable" on the web.
+a { color: $link; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+::selection { background: rgba($link, 0.18); }
 
 code {
   font-family: $mono;
-  font-size: 0.85em;
+  font-size: 0.84em;
   background: $bg-card;
-  padding: 0.15em 0.4em;
-  border-radius: 3px;
-  color: $text-bright;
+  padding: 0.1em 0.35em;
+  border-radius: 2px;
 }
 
 // ── Layout ──────────────────────────────────────────
-.container { max-width: 1080px; margin: 0 auto; padding: 0 2rem; }
-.container--narrow { max-width: 720px; margin: 0 auto; padding: 0 2rem; }
-
-.section { padding: 5.5rem 0; position: relative; }
-.section--dark {
-  background: $bg-dark;
-  color: #d8d0c4;
-  .section-label { color: $accent2; }
-  .section-title { color: #f0ebe0; }
-  .section-sub { color: #a09888; }
-  code { background: $bg-dark2; color: #d8d0c4; }
+// Practical Typography: 45–90 characters per line.
+// At 18px Source Serif, ~620px gives ~70 chars.
+.container {
+  max-width: 960px;
+  margin: 0 auto;
+  // Practical Typography: generous margins, don't fear whitespace.
+  padding: 0 2.5rem;
 }
 
+.section {
+  // Practical Typography: space between sections, not decoration.
+  padding: 4rem 0;
+}
+
+.section--dark {
+  background: $bg-dark;
+  color: #ccc5b8;
+  .section-label { color: #b09860; }
+  .section-title { color: #ece5d8; }
+  .section-sub { color: #908878; }
+  code { background: $bg-dark2; color: #ccc5b8; }
+}
+
+// Practical Typography: headings — bold, minimal size increase,
+// emphasis through space above/below, not through bigness.
 .section-label {
   font-family: $mono;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 500;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: $accent;
-  margin-bottom: 0.75rem;
+  color: $text-dim;
+  margin-bottom: 0.5rem;
 }
 
 .section-title {
-  font-size: 2rem;
-  font-weight: 700;
+  font-size: 1.6rem;
+  font-weight: 600;
   color: $text-bright;
-  line-height: 1.25;
-  margin-bottom: 1rem;
-  letter-spacing: -0.01em;
+  line-height: 1.3;
+  margin-bottom: 0.75rem;
 }
 
 .section-sub {
-  font-size: 1.05rem;
+  font-size: 1rem;
   color: $text-dim;
-  max-width: 580px;
-  line-height: 1.7;
+  // Practical Typography: line length 45–90 chars.
+  max-width: 36em;
+  line-height: 1.5;
 }
-
-// ── Reveal ──────────────────────────────────────────
-.reveal {
-  opacity: 0;
-  transform: translateY(16px);
-  transition: opacity 0.6s ease, transform 0.6s ease;
-  &.visible { opacity: 1; transform: none; }
-}
-
-// ── Canvas ──────────────────────────────────────────
-#geo-canvas {
-  position: fixed; top: 0; left: 0;
-  width: 100%; height: 100%;
-  z-index: 0; pointer-events: none;
-  opacity: 0.4;
-}
-main { position: relative; z-index: 1; }
 
 // ── Nav ─────────────────────────────────────────────
 .nav {
   position: fixed; top: 0; left: 0; right: 0;
   z-index: 100;
-  padding: 0.85rem 2rem;
+  padding: 0.7rem 2.5rem;
   display: flex; align-items: center; justify-content: space-between;
-  background: rgba($bg, 0.92);
-  backdrop-filter: blur(12px);
+  background: rgba($bg, 0.95);
+  backdrop-filter: blur(8px);
   border-bottom: 1px solid $border;
 
   &-logo {
     font-family: $mono;
-    font-weight: 600;
-    font-size: 0.95rem;
+    font-weight: 500;
+    font-size: 0.88rem;
     color: $text-bright;
-    letter-spacing: -0.02em;
-    span { color: $accent; }
+    span { color: $link; }
   }
 
   &-links {
-    display: flex; gap: 1.75rem; list-style: none;
+    display: flex; gap: 1.5rem; list-style: none;
     a {
       font-family: $mono;
       font-size: 0.72rem;
-      font-weight: 500;
+      font-weight: 400;
       color: $text-dim;
-      letter-spacing: 0.03em;
-      &:hover { color: $text-bright; }
+      &:hover { color: $text-bright; text-decoration: none; }
     }
   }
 }
 
 // ── Hero ────────────────────────────────────────────
 .hero {
-  min-height: 100vh;
+  min-height: 92vh;
   display: flex; align-items: center;
-  padding-top: 4rem;
-  background: linear-gradient(180deg, $bg-warm 0%, $bg 100%);
+  padding-top: 3.5rem;
 
   &-grid {
     display: grid;
-    grid-template-columns: 1fr 380px;
-    gap: 4rem;
+    grid-template-columns: 1fr 320px;
+    gap: 3.5rem;
     align-items: center;
-    @media (max-width: 900px) { grid-template-columns: 1fr; }
+    @media (max-width: 860px) { grid-template-columns: 1fr; }
+  }
+
+  // Practical Typography: heading size — smallest effective increment.
+  h1 {
+    font-size: 2.4rem;
+    font-weight: 600;
+    color: $text-bright;
+    line-height: 1.18;
+    margin-bottom: 1.2rem;
+    letter-spacing: -0.015em;
+    em {
+      font-style: italic;
+      color: $text-bright;
+    }
+    @media (max-width: 600px) { font-size: 1.8rem; }
   }
 
   &-badge {
     display: inline-block;
     font-family: $mono;
     font-size: 0.68rem;
-    font-weight: 500;
-    color: $accent;
-    border: 1px solid rgba($accent, 0.3);
-    border-radius: 3px;
-    padding: 0.25rem 0.65rem;
-    margin-bottom: 1.75rem;
-    letter-spacing: 0.06em;
-  }
-
-  h1 {
-    font-size: 3.2rem;
-    font-weight: 700;
-    color: $text-bright;
-    line-height: 1.1;
-    margin-bottom: 1.25rem;
-    letter-spacing: -0.025em;
-    em {
-      font-style: normal;
-      color: $accent;
-      text-decoration: underline;
-      text-decoration-color: rgba($accent, 0.3);
-      text-underline-offset: 4px;
-      text-decoration-thickness: 2px;
-    }
-    @media (max-width: 600px) { font-size: 2.2rem; }
+    font-weight: 400;
+    color: $text-dim;
+    border: 1px solid $border;
+    border-radius: 2px;
+    padding: 0.2rem 0.6rem;
+    margin-bottom: 1.5rem;
   }
 
   &-desc {
-    font-size: 1.15rem;
+    font-size: 1.05rem;
     color: $text-dim;
-    max-width: 520px;
-    line-height: 1.75;
-    margin-bottom: 2rem;
+    // Practical Typography: line length.
+    max-width: 32em;
+    line-height: 1.55;
+    margin-bottom: 1.75rem;
   }
 
-  &-actions {
-    display: flex; gap: 0.75rem; flex-wrap: wrap;
-  }
+  &-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; }
 
   &-aside {
-    background: $bg-card;
+    background: $bg-warm;
     border: 1px solid $border;
-    border-radius: 8px;
-    padding: 1.75rem;
-    @media (max-width: 900px) { display: none; }
+    border-radius: 4px;
+    padding: 1.25rem 1.5rem;
+    @media (max-width: 860px) { display: none; }
   }
 }
 
-// ── Stat list in hero aside ─────────────────────────
 .stat-list {
   list-style: none;
   .stat-row {
     display: flex; align-items: baseline; justify-content: space-between;
-    padding: 0.65rem 0;
+    padding: 0.45rem 0;
     border-bottom: 1px solid $border;
     &:last-child { border-bottom: none; }
   }
-  .stat-key {
-    font-size: 0.85rem;
-    color: $text-dim;
-  }
+  .stat-key { font-size: 0.88rem; color: $text-dim; }
   .stat-val {
     font-family: $mono;
-    font-size: 0.9rem;
-    font-weight: 600;
+    font-size: 0.82rem;
+    font-weight: 500;
     color: $text-bright;
   }
-  .stat-val--accent { color: $accent; }
 }
 
 // ── Buttons ─────────────────────────────────────────
 .btn {
-  display: inline-flex; align-items: center; gap: 0.4rem;
+  display: inline-flex; align-items: center; gap: 0.35rem;
   font-family: $mono;
-  font-size: 0.78rem;
-  font-weight: 600;
-  padding: 0.65rem 1.35rem;
-  border-radius: 5px;
+  font-size: 0.76rem;
+  font-weight: 500;
+  padding: 0.55rem 1.15rem;
+  border-radius: 3px;
   border: 1px solid transparent;
   cursor: pointer;
-  transition: all .2s;
   text-decoration: none;
 
   &-primary {
     background: $text-bright;
     color: $bg;
-    &:hover { background: lighten($text-bright, 10%); color: $bg; }
+    &:hover { text-decoration: none; opacity: 0.85; }
   }
   &-ghost {
     background: transparent;
     color: $text;
-    border-color: $border-hi;
-    &:hover { border-color: $text-bright; color: $text-bright; }
+    border-color: $border;
+    &:hover { text-decoration: none; border-color: $text-dim; }
   }
 }
 
 // ── Horizontal rule ─────────────────────────────────
-.rule {
-  border: none;
-  height: 1px;
-  background: $border;
-  margin: 0;
-}
+.rule { border: none; height: 1px; background: $border; margin: 0; }
 
-// ── Three-column problem ────────────────────────────
+// ── Three-column ────────────────────────────────────
 .three-col {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
   gap: 0;
-  margin-top: 2.5rem;
+  margin-top: 2rem;
   border: 1px solid $border;
-  border-radius: 8px;
+  border-radius: 4px;
   overflow: hidden;
-
-  @media (max-width: 768px) { grid-template-columns: 1fr; }
+  @media (max-width: 700px) { grid-template-columns: 1fr; }
 }
 
 .three-col-item {
-  padding: 2rem 1.75rem;
+  padding: 1.5rem;
   border-right: 1px solid $border;
   &:last-child { border-right: none; }
-  @media (max-width: 768px) {
+  @media (max-width: 700px) {
     border-right: none;
     border-bottom: 1px solid $border;
     &:last-child { border-bottom: none; }
@@ -287,125 +267,115 @@ main { position: relative; z-index: 1; }
 
   .col-label {
     font-family: $mono;
-    font-size: 0.65rem;
+    font-size: 0.62rem;
     font-weight: 500;
     letter-spacing: 0.1em;
     text-transform: uppercase;
-    margin-bottom: 0.5rem;
+    margin-bottom: 0.35rem;
   }
   .col-label--red { color: $red; }
   .col-label--green { color: $green; }
   .col-label--orange { color: $orange; }
 
+  // Practical Typography: bold for headings, no size inflation.
   h3 {
-    font-size: 1.1rem;
+    font-size: 1.05rem;
     font-weight: 600;
     color: $text-bright;
-    margin-bottom: 0.5rem;
+    margin-bottom: 0.35rem;
   }
-  p {
-    font-size: 0.88rem;
-    color: $text-dim;
-    line-height: 1.65;
-  }
+  p { font-size: 0.9rem; color: $text-dim; line-height: 1.55; }
 }
 
 // ── Protocol timeline ───────────────────────────────
 .timeline {
-  margin-top: 2.5rem;
+  margin-top: 2rem;
   position: relative;
-  padding-left: 2rem;
+  padding-left: 1.5rem;
 
   &::before {
     content: '';
     position: absolute;
-    left: 0;
-    top: 0.5rem;
-    bottom: 0.5rem;
-    width: 2px;
+    left: 0; top: 0.4rem; bottom: 0.4rem;
+    width: 1px;
     background: $border;
   }
 }
 
 .timeline-step {
   position: relative;
-  padding: 0 0 2.5rem 1.5rem;
+  padding: 0 0 2rem 1.25rem;
   &:last-child { padding-bottom: 0; }
 
   &::before {
     content: '';
     position: absolute;
-    left: -2rem;
-    top: 0.45rem;
-    width: 10px;
-    height: 10px;
+    left: -1.5rem; top: 0.45rem;
+    width: 7px; height: 7px;
     border-radius: 50%;
     background: $bg;
-    border: 2px solid $accent;
+    border: 1.5px solid $text-dim;
   }
 
   &-label {
     font-family: $mono;
     font-size: 0.65rem;
-    font-weight: 600;
-    letter-spacing: 0.1em;
+    font-weight: 500;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: $accent;
-    margin-bottom: 0.25rem;
+    color: $text-dim;
+    margin-bottom: 0.15rem;
   }
 
   h3 {
-    font-size: 1.15rem;
+    font-size: 1.05rem;
     font-weight: 600;
     color: $text-bright;
-    margin-bottom: 0.35rem;
+    margin-bottom: 0.25rem;
   }
 
   p {
     font-size: 0.92rem;
     color: $text-dim;
-    line-height: 1.7;
-    max-width: 600px;
+    line-height: 1.55;
+    max-width: 34em;
   }
 }
 
-// ── Guarantee boundary — horizontal pipeline ────────
+// ── Pipeline ────────────────────────────────────────
 .pipeline-wrap {
-  margin-top: 2.5rem;
+  margin-top: 2rem;
   overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
 }
 
 .pipeline {
   display: flex;
-  min-width: 800px;
+  min-width: 720px;
   border: 1px solid $border;
-  border-radius: 6px;
+  border-radius: 3px;
   overflow: hidden;
 }
 
 .pipe {
   flex: 1;
-  padding: 1rem 0.6rem;
+  padding: 0.75rem 0.4rem;
   text-align: center;
   border-right: 1px solid $border;
-  transition: background .2s;
   &:last-child { border-right: none; }
-  &:hover { background: $bg-warm; }
 
   &-name {
     font-size: 0.78rem;
     font-weight: 600;
     color: $text-bright;
-    margin-bottom: 0.25rem;
+    margin-bottom: 0.15rem;
     white-space: nowrap;
   }
 
   &-tag {
     font-family: $mono;
-    font-size: 0.6rem;
+    font-size: 0.58rem;
     font-weight: 500;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.04em;
     text-transform: uppercase;
     white-space: nowrap;
   }
@@ -417,17 +387,17 @@ main { position: relative; z-index: 1; }
 
 .pipeline-legend {
   display: flex;
-  gap: 1.5rem;
-  margin-top: 1rem;
+  gap: 1.25rem;
+  margin-top: 0.75rem;
   font-size: 0.75rem;
   color: $text-dim;
 
   span {
-    display: flex; align-items: center; gap: 0.35rem;
+    display: flex; align-items: center; gap: 0.3rem;
     &::before {
       content: '';
-      width: 8px; height: 8px;
-      border-radius: 2px;
+      width: 7px; height: 7px;
+      border-radius: 1px;
     }
   }
   .legend-exact::before { background: $green; }
@@ -437,64 +407,65 @@ main { position: relative; z-index: 1; }
 
 // ── Freivalds ───────────────────────────────────────
 .freivalds-grid {
-  margin-top: 2.5rem;
+  margin-top: 2rem;
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 2.5rem;
   align-items: start;
-  @media (max-width: 768px) { grid-template-columns: 1fr; }
+  @media (max-width: 700px) { grid-template-columns: 1fr; }
 }
 
 .freivalds-text {
   p {
     font-size: 0.95rem;
     color: $text-dim;
-    line-height: 1.75;
-    margin-bottom: 1rem;
+    line-height: 1.55;
+    margin-bottom: 0.85rem;
+    max-width: 34em;
   }
 }
 
 .matrix-tags {
-  display: flex; flex-wrap: wrap; gap: 0.4rem;
-  margin-top: 1.25rem;
+  display: flex; flex-wrap: wrap; gap: 0.35rem;
+  margin-top: 1rem;
   .tag {
     font-family: $mono;
-    font-size: 0.7rem;
-    font-weight: 500;
-    padding: 0.2rem 0.55rem;
+    font-size: 0.68rem;
+    font-weight: 400;
+    padding: 0.15rem 0.45rem;
     border: 1px solid $border;
-    border-radius: 3px;
+    border-radius: 2px;
     color: $text;
-    background: $bg-warm;
   }
 }
 
 .demo-box {
   background: $bg-dark;
-  border-radius: 8px;
-  padding: 1.75rem;
-  color: #d8d0c4;
+  border-radius: 4px;
+  padding: 1.5rem;
+  color: #ccc5b8;
 
   .demo-header {
     font-family: $mono;
-    font-size: 0.65rem;
+    font-size: 0.62rem;
     font-weight: 500;
-    letter-spacing: 0.1em;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: #a09888;
-    margin-bottom: 1rem;
+    color: #908878;
+    margin-bottom: 0.75rem;
   }
 
   .demo-output {
     font-family: $mono;
-    font-size: 0.82rem;
-    line-height: 1.8;
-    padding: 1rem;
+    font-size: 0.78rem;
+    line-height: 1.7;
+    padding: 0.85rem;
     background: rgba(0,0,0,0.3);
-    border-radius: 5px;
-    margin-bottom: 1rem;
-    min-height: 80px;
-    .val { color: $accent2; font-weight: 600; }
+    border-radius: 3px;
+    margin-bottom: 0.75rem;
+    min-height: 70px;
+    white-space: pre;
+    .val { color: #d4a024; font-weight: 500; }
     .dim { color: #706858; }
     .ok { color: #5dac78; }
     .err { color: #d46b6b; }
@@ -502,33 +473,29 @@ main { position: relative; z-index: 1; }
 
   .demo-result {
     font-family: $mono;
-    font-size: 0.78rem;
-    font-weight: 600;
-    padding: 0.6rem 1rem;
-    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    padding: 0.5rem 0.85rem;
+    border-radius: 3px;
     text-align: center;
-    margin-bottom: 0.75rem;
-
-    &.pass { background: rgba(#5dac78, 0.15); color: #5dac78; }
-    &.fail { background: rgba(#d46b6b, 0.15); color: #d46b6b; }
+    margin-bottom: 0.6rem;
+    &.pass { background: rgba(#5dac78, 0.12); color: #5dac78; }
+    &.fail { background: rgba(#d46b6b, 0.12); color: #d46b6b; }
   }
 
-  .demo-btns {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;
-  }
+  .demo-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem; }
 
   .demo-btn {
     font-family: $mono;
-    font-size: 0.72rem;
-    font-weight: 600;
-    padding: 0.55rem;
-    background: rgba(255,255,255,0.06);
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 4px;
-    color: #d8d0c4;
+    font-size: 0.7rem;
+    font-weight: 500;
+    padding: 0.45rem;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 3px;
+    color: #ccc5b8;
     cursor: pointer;
-    transition: all .15s;
-    &:hover { background: rgba(255,255,255,0.12); border-color: rgba(255,255,255,0.2); }
+    &:hover { background: rgba(255,255,255,0.1); }
   }
 }
 
@@ -537,147 +504,119 @@ main { position: relative; z-index: 1; }
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 2rem;
-  margin-top: 2.5rem;
-  @media (max-width: 768px) { grid-template-columns: 1fr; }
+  margin-top: 2rem;
+  @media (max-width: 700px) { grid-template-columns: 1fr; }
 }
 
 .bench-panel {
   h3 {
     font-family: $mono;
-    font-size: 0.75rem;
-    font-weight: 600;
-    color: $text-bright;
-    letter-spacing: 0.02em;
-    margin-bottom: 1.25rem;
+    font-size: 0.72rem;
+    font-weight: 500;
+    color: inherit;
+    margin-bottom: 1rem;
   }
 }
 
 .metric-row {
-  display: flex; align-items: center; gap: 0.75rem;
-  margin-bottom: 0.75rem;
+  display: flex; align-items: center; gap: 0.6rem;
+  margin-bottom: 0.6rem;
 
   &-label {
     font-family: $mono;
-    font-size: 0.7rem;
+    font-size: 0.68rem;
     color: $text-dim;
-    min-width: 55px;
+    min-width: 50px;
     text-align: right;
     flex-shrink: 0;
   }
   &-bar {
     flex: 1;
-    height: 24px;
+    height: 20px;
     background: $bg-card;
-    border-radius: 3px;
+    border-radius: 2px;
     overflow: hidden;
-    position: relative;
   }
   &-fill {
     height: 100%;
-    border-radius: 3px;
+    border-radius: 2px;
     width: 0;
-    transition: width 1s cubic-bezier(0.22, 1, 0.36, 1);
-    &--gold { background: $accent; }
+    &--gold { background: #b8860b; }
     &--blue { background: $blue; }
     &--green { background: $green; }
     &--orange { background: $orange; }
   }
   &-val {
     font-family: $mono;
-    font-size: 0.7rem;
-    font-weight: 600;
-    color: $text;
-    min-width: 55px;
+    font-size: 0.68rem;
+    font-weight: 500;
+    min-width: 50px;
     flex-shrink: 0;
   }
 }
 
 // ── Specs table ─────────────────────────────────────
 .specs-table {
-  margin-top: 2.5rem;
+  margin-top: 2rem;
   width: 100%;
   border-collapse: collapse;
 
-  th, td {
-    padding: 0.85rem 1rem;
-    text-align: left;
-    border-bottom: 1px solid $border;
-  }
+  th, td { padding: 0.6rem 0.75rem; text-align: left; border-bottom: 1px solid $border; }
   th {
     font-family: $mono;
-    font-size: 0.68rem;
-    font-weight: 600;
-    letter-spacing: 0.08em;
+    font-size: 0.65rem;
+    font-weight: 500;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
     color: $text-dim;
   }
-  td { font-size: 0.9rem; color: $text; }
+  td { font-size: 0.9rem; }
   td:first-child {
     font-family: $mono;
-    font-size: 0.82rem;
+    font-size: 0.8rem;
     font-weight: 500;
     color: $text-bright;
     white-space: nowrap;
   }
-  tr:hover td { background: $bg-warm; }
 }
 
 // ── Use cases ───────────────────────────────────────
 .cases-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: 1fr 1fr;
   gap: 1px;
-  margin-top: 2.5rem;
+  margin-top: 2rem;
   background: $border;
   border: 1px solid $border;
-  border-radius: 8px;
+  border-radius: 4px;
   overflow: hidden;
-
-  @media (max-width: 768px) { grid-template-columns: 1fr; }
+  @media (max-width: 600px) { grid-template-columns: 1fr; }
 }
 
 .case-item {
   background: $bg;
-  padding: 1.75rem;
-  transition: background .2s;
-  &:hover { background: $bg-warm; }
+  padding: 1.35rem 1.5rem;
 
-  h3 {
-    font-size: 1rem;
-    font-weight: 600;
-    color: $text-bright;
-    margin-bottom: 0.35rem;
-  }
-  p {
-    font-size: 0.85rem;
-    color: $text-dim;
-    line-height: 1.65;
-  }
+  h3 { font-size: 1rem; font-weight: 600; color: $text-bright; margin-bottom: 0.25rem; }
+  p { font-size: 0.88rem; color: $text-dim; line-height: 1.5; }
 }
 
 // ── Comparison table ────────────────────────────────
 .cmp-table {
-  margin-top: 2.5rem;
+  margin-top: 2rem;
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.85rem;
-  overflow-x: auto;
-  display: block;
+  font-size: 0.88rem;
 
-  th, td { padding: 0.8rem 0.9rem; text-align: left; border-bottom: 1px solid $border; }
+  th, td { padding: 0.6rem 0.75rem; text-align: left; border-bottom: 1px solid $border; }
   th {
     font-family: $mono;
-    font-size: 0.68rem;
-    font-weight: 600;
+    font-size: 0.65rem;
+    font-weight: 500;
     letter-spacing: 0.06em;
     text-transform: uppercase;
     color: $text-dim;
-    position: sticky;
-    top: 0;
-    background: $bg;
   }
-  td { color: $text; }
-  tr:hover td { background: $bg-warm; }
   .yes { color: $green; font-weight: 600; }
   .no { color: $red; }
   .mid { color: $orange; }
@@ -686,41 +625,30 @@ main { position: relative; z-index: 1; }
 // ── CTA ─────────────────────────────────────────────
 .cta-section {
   text-align: center;
-  padding: 5rem 0;
+  padding: 4rem 0;
   background: $bg-warm;
   border-top: 1px solid $border;
   border-bottom: 1px solid $border;
 
-  h2 {
-    font-size: 2rem;
-    font-weight: 700;
-    color: $text-bright;
-    margin-bottom: 0.75rem;
-  }
-  p {
-    font-size: 1rem;
-    color: $text-dim;
-    margin-bottom: 1.75rem;
-  }
-  .cta-btns {
-    display: flex; justify-content: center; gap: 0.75rem; flex-wrap: wrap;
-  }
+  h2 { font-size: 1.6rem; font-weight: 600; color: $text-bright; margin-bottom: 0.5rem; }
+  p { font-size: 1rem; color: $text-dim; margin-bottom: 1.5rem; }
+  .cta-btns { display: flex; justify-content: center; gap: 0.6rem; flex-wrap: wrap; }
 }
 
 // ── Footer ──────────────────────────────────────────
 .footer {
-  padding: 1.75rem 0;
+  padding: 1.5rem 0;
   display: flex; align-items: center; justify-content: space-between;
-  flex-wrap: wrap; gap: 1rem;
+  flex-wrap: wrap; gap: 0.75rem;
 
   &-left {
     font-family: $mono;
-    font-size: 0.75rem;
+    font-size: 0.72rem;
     color: $text-dim;
-    a { color: $text-dim; &:hover { color: $text-bright; } }
+    a { color: $text-dim; }
   }
   &-right {
-    display: flex; gap: 1.5rem;
-    a { font-family: $mono; font-size: 0.75rem; color: $text-dim; &:hover { color: $text-bright; } }
+    display: flex; gap: 1.25rem;
+    a { font-family: $mono; font-size: 0.72rem; color: $text-dim; }
   }
 }

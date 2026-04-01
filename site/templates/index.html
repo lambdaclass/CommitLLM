@@ -3,13 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CommitLLM — Cryptographic Provenance for LLM Inference</title>
-  <meta name="description" content="A commit-and-audit protocol for open-weight LLM inference. CPU-only verification, ~12% overhead, no ZK proving circuit.">
+  <title>CommitLLM</title>
+  <meta name="description" content="A cryptographic commit-and-audit protocol for open-weight LLM inference.">
   <link rel="stylesheet" href="{{ get_url(path='style.css') | safe }}">
 </head>
 <body>
-
-<canvas id="geo-canvas"></canvas>
 
 <nav class="nav">
   <div class="nav-logo">Commit<span>LLM</span></div>
@@ -28,12 +26,12 @@
 <!-- ── Hero ──────────────────────────────────────── -->
 <section class="hero section">
   <div class="container">
-    <div class="hero-grid reveal">
+    <div class="hero-grid">
       <div>
         <div class="hero-badge">Active development &middot; Lean 4 formalization in progress</div>
-        <h1>Cryptographic provenance for <em>LLM inference</em></h1>
+        <h1>Cryptographic provenance for <em>LLM&nbsp;inference</em></h1>
         <p class="hero-desc">
-          When you call an LLM provider, you have no proof they ran the model they claim, with the configuration they advertise, or that the output wasn't tampered with. CommitLLM closes that gap: the provider serves responses normally on GPU and returns a compact receipt. A verifier checks the opening on CPU against committed model weights, deployment configuration, and decode policy.
+          When you call an LLM provider, you have no proof they ran the model they claim, with the configuration they advertise, or that the output wasn&rsquo;t tampered with. CommitLLM closes that gap: the provider serves responses normally on GPU and returns a compact receipt. A verifier checks the opening on CPU against committed model weights, deployment configuration, and decode policy.
         </p>
         <div class="hero-actions">
           <a href="https://github.com/lambdaclass/CommitLLM" class="btn btn-primary">View source</a>
@@ -44,19 +42,19 @@
         <ul class="stat-list">
           <li class="stat-row">
             <span class="stat-key">Online tracing overhead</span>
-            <span class="stat-val stat-val--accent">~12&ndash;14%</span>
+            <span class="stat-val">~12&ndash;14%</span>
           </li>
           <li class="stat-row">
-            <span class="stat-key">Routine audit (Llama 70B)</span>
-            <span class="stat-val">1.3 ms/tok</span>
+            <span class="stat-key">Routine audit (Llama&nbsp;70B)</span>
+            <span class="stat-val">1.3&nbsp;ms/tok</span>
           </li>
           <li class="stat-row">
-            <span class="stat-key">Full audit (1 tok, 70B)</span>
-            <span class="stat-val">~10 ms</span>
+            <span class="stat-key">Full audit (1&nbsp;tok, 70B)</span>
+            <span class="stat-val">~10&nbsp;ms</span>
           </li>
           <li class="stat-row">
-            <span class="stat-key">Elements within 1 quant bucket</span>
-            <span class="stat-val stat-val--accent">&gt;99.8%</span>
+            <span class="stat-key">Within 1&nbsp;quant bucket</span>
+            <span class="stat-val">&gt;99.8%</span>
           </li>
           <li class="stat-row">
             <span class="stat-key">Verifier hardware</span>
@@ -77,13 +75,12 @@
 <!-- ── Problem ───────────────────────────────────── -->
 <section class="section" id="problem">
   <div class="container">
-    <div class="section-label reveal">The gap</div>
-    <h2 class="section-title reveal">Between fingerprints and zero-knowledge proofs</h2>
-    <p class="section-sub reveal">
+    <div class="section-label">The gap</div>
+    <h2 class="section-title">Between fingerprints and zero-knowledge proofs</h2>
+    <p class="section-sub">
       Two unsatisfying extremes&mdash;and a design point between them where real deployments need to live.
     </p>
-
-    <div class="three-col reveal">
+    <div class="three-col">
       <div class="three-col-item">
         <div class="col-label col-label--red">Insufficient</div>
         <h3>Fingerprinting</h3>
@@ -108,13 +105,12 @@
 <!-- ── Protocol ──────────────────────────────────── -->
 <section class="section" id="protocol">
   <div class="container">
-    <div class="section-label reveal">Protocol</div>
-    <h2 class="section-title reveal">Setup once. Commit every response. Verify on challenge.</h2>
-    <p class="section-sub reveal">
+    <div class="section-label">Protocol</div>
+    <h2 class="section-title">Setup once. Commit every response. Verify on challenge.</h2>
+    <p class="section-sub">
       The verifier holds a secret key derived from public weights. The provider commits during normal inference. Expensive work happens only when challenged.
     </p>
-
-    <div class="timeline reveal">
+    <div class="timeline">
       <div class="timeline-step">
         <div class="timeline-step-label">Phase 0 &middot; Setup</div>
         <h3>Build the verifier key</h3>
@@ -132,7 +128,7 @@
       </div>
       <div class="timeline-step">
         <div class="timeline-step-label">Phase 3 &middot; Verify</div>
-        <h3>CPU-only, algebraic and canonical checks</h3>
+        <h3>CPU-only checks</h3>
         <p>Embedding Merkle proof. Freivalds on shell matmuls. Exact INT8 bridge recomputation. KV provenance. Attention replay against committed post-attention output. Final-token tail from captured residual. LM-head binding. Decode and output policy replay.</p>
       </div>
     </div>
@@ -144,55 +140,27 @@
 <!-- ── Guarantee boundary ────────────────────────── -->
 <section class="section" id="guarantees">
   <div class="container">
-    <div class="section-label reveal">Guarantee boundary</div>
-    <h2 class="section-title reveal">What is exact, approximate, and statistical</h2>
-    <p class="section-sub reveal">
-      Commitment-bound end-to-end, with explicit boundaries. Not "uniformly exact"&mdash;honestly delineated.
+    <div class="section-label">Guarantee boundary</div>
+    <h2 class="section-title">What is exact, approximate, and statistical</h2>
+    <p class="section-sub">
+      Commitment-bound end-to-end, with explicit boundaries for each verification class. Not &ldquo;uniformly exact&rdquo;&mdash;honestly delineated.
     </p>
-
-    <div class="pipeline-wrap reveal">
+    <div class="pipeline-wrap">
       <div class="pipeline">
-        <div class="pipe pipe--exact">
-          <div class="pipe-name">Input</div>
-          <div class="pipe-tag">Exact</div>
-        </div>
-        <div class="pipe pipe--exact">
-          <div class="pipe-name">Embedding</div>
-          <div class="pipe-tag">Exact</div>
-        </div>
-        <div class="pipe pipe--exact">
-          <div class="pipe-name">Shell matmuls</div>
-          <div class="pipe-tag">Freivalds</div>
-        </div>
-        <div class="pipe pipe--exact">
-          <div class="pipe-name">INT8 bridges</div>
-          <div class="pipe-tag">Exact</div>
-        </div>
-        <div class="pipe pipe--stat">
-          <div class="pipe-name">Prefix / KV</div>
-          <div class="pipe-tag">Statistical*</div>
-        </div>
-        <div class="pipe pipe--approx">
-          <div class="pipe-name">Attention</div>
-          <div class="pipe-tag">Approximate</div>
-        </div>
-        <div class="pipe pipe--exact">
-          <div class="pipe-name">Final tail</div>
-          <div class="pipe-tag">Exact</div>
-        </div>
-        <div class="pipe pipe--exact">
-          <div class="pipe-name">LM head</div>
-          <div class="pipe-tag">Freivalds</div>
-        </div>
-        <div class="pipe pipe--exact">
-          <div class="pipe-name">Decode</div>
-          <div class="pipe-tag">Fail-closed</div>
-        </div>
+        <div class="pipe pipe--exact"><div class="pipe-name">Input</div><div class="pipe-tag">Exact</div></div>
+        <div class="pipe pipe--exact"><div class="pipe-name">Embedding</div><div class="pipe-tag">Exact</div></div>
+        <div class="pipe pipe--exact"><div class="pipe-name">Shell matmuls</div><div class="pipe-tag">Freivalds</div></div>
+        <div class="pipe pipe--exact"><div class="pipe-name">INT8 bridges</div><div class="pipe-tag">Exact</div></div>
+        <div class="pipe pipe--stat"><div class="pipe-name">Prefix/KV</div><div class="pipe-tag">Statistical*</div></div>
+        <div class="pipe pipe--approx"><div class="pipe-name">Attention</div><div class="pipe-tag">Approximate</div></div>
+        <div class="pipe pipe--exact"><div class="pipe-name">Final tail</div><div class="pipe-tag">Exact</div></div>
+        <div class="pipe pipe--exact"><div class="pipe-name">LM head</div><div class="pipe-tag">Freivalds</div></div>
+        <div class="pipe pipe--exact"><div class="pipe-name">Decode</div><div class="pipe-tag">Fail-closed</div></div>
       </div>
     </div>
-    <div class="pipeline-legend reveal">
+    <div class="pipeline-legend">
       <span class="legend-exact">Exact / information-theoretic</span>
-      <span class="legend-approx">Approximate (FP16/BF16 attention)</span>
+      <span class="legend-approx">Approximate (FP16/BF16)</span>
       <span class="legend-stat">Statistical &rarr; exact in deep audit</span>
     </div>
   </div>
@@ -203,23 +171,22 @@
 <!-- ── Freivalds ─────────────────────────────────── -->
 <section class="section" id="freivalds">
   <div class="container">
-    <div class="section-label reveal">Core mechanism</div>
-    <h2 class="section-title reveal">Verify huge matrix multiplies cheaply</h2>
-
-    <div class="freivalds-grid reveal">
+    <div class="section-label">Core mechanism</div>
+    <h2 class="section-title">Verify huge matrix multiplies cheaply</h2>
+    <div class="freivalds-grid">
       <div class="freivalds-text">
         <p>
           The provider claims <code>z = W @ x</code> for a public weight matrix <code>W</code>.
-          Recomputing the full product is expensive. Freivalds' algorithm gives a much cheaper check:
-          the verifier precomputes <code>v = r<sup>T</sup>W</code> with a secret random vector <code>r</code>,
-          then checks <code>v&middot;x =? r<sup>T</sup>&middot;z</code> in the finite field
+          Recomputing the full product is expensive. Freivalds&rsquo; algorithm gives a much cheaper check:
+          the verifier precomputes <code>v&nbsp;=&nbsp;r<sup>T</sup>W</code> with a secret random vector <code>r</code>,
+          then checks <code>v&middot;x&nbsp;=?&nbsp;r<sup>T</sup>&middot;z</code> in the finite field
           F<sub>p</sub> where p&nbsp;=&nbsp;2<sup>32</sup>&minus;5.
         </p>
         <p>
-          If <code>z &ne; Wx</code>, the check fails with probability &ge;&nbsp;1&minus;1/p.
-          This is information-theoretically sound&mdash;no computational assumptions needed.
-          Transformers are mostly matrix multiplication. Once those multiplies are cheap to audit,
-          the verifier can check model identity without rerunning the full model.
+          If <code>z&nbsp;&ne;&nbsp;Wx</code>, the check fails with probability &ge;&nbsp;1&minus;1/p.
+          This is information-theoretically sound. Transformers are mostly matrix multiplication;
+          once those multiplies are cheap to audit, the verifier can check model identity
+          without rerunning the full model.
         </p>
         <div class="matrix-tags">
           <span class="tag">W<sub>q</sub></span>
@@ -232,10 +199,9 @@
           <span class="tag">LM<sub>head</sub></span>
         </div>
       </div>
-
       <div class="demo-box" id="freivalds-demo">
         <div class="demo-header">Interactive demo &middot; 3&times;3 over F<sub>p</sub></div>
-        <div class="demo-output" id="demo-eq"><span class="dim">Click a button below to run Freivalds' check</span></div>
+        <div class="demo-output" id="demo-eq"><span class="dim">Click a button to run Freivalds&rsquo; check</span></div>
         <div class="demo-result" id="demo-result" style="display:none;"></div>
         <div class="demo-btns">
           <button class="demo-btn" onclick="runFreivalds(true)">Honest provider</button>
@@ -251,110 +217,74 @@
 <!-- ── Benchmarks ─────────────────────────────────── -->
 <section class="section section--dark" id="benchmarks">
   <div class="container">
-    <div class="section-label reveal">Measurements</div>
-    <h2 class="section-title reveal">Performance on the corrected replay path</h2>
-    <p class="section-sub reveal">
+    <div class="section-label">Measurements</div>
+    <h2 class="section-title">Performance on the corrected replay path</h2>
+    <p class="section-sub">
       Measured on Qwen2.5-7B-W8A8 and Llama-3.1-8B-W8A8. Attention mismatch is single-digit and bounded.
     </p>
-
-    <div class="bench-cols reveal">
+    <div class="bench-cols">
       <div class="bench-panel">
         <h3>Verifier cost &middot; Llama 70B</h3>
         <div class="metric-row">
           <span class="metric-row-label">Routine</span>
-          <div class="metric-row-bar">
-            <div class="metric-row-fill metric-row-fill--gold" data-width="13"></div>
-          </div>
-          <span class="metric-row-val" style="color:#d8d0c4;">1.3 ms</span>
+          <div class="metric-row-bar"><div class="metric-row-fill metric-row-fill--gold" data-width="13"></div></div>
+          <span class="metric-row-val" style="color:#ccc5b8;">1.3&nbsp;ms</span>
         </div>
         <div class="metric-row">
-          <span class="metric-row-label" style="color:#a09888;">Full</span>
-          <div class="metric-row-bar" style="background:#2a2520;">
-            <div class="metric-row-fill metric-row-fill--blue" data-width="100"></div>
-          </div>
-          <span class="metric-row-val" style="color:#d8d0c4;">10 ms</span>
+          <span class="metric-row-label" style="color:#908878;">Full</span>
+          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--blue" data-width="100"></div></div>
+          <span class="metric-row-val" style="color:#ccc5b8;">10&nbsp;ms</span>
         </div>
       </div>
       <div class="bench-panel">
         <h3>Online tracing overhead</h3>
         <div class="metric-row">
-          <span class="metric-row-label" style="color:#a09888;">Base</span>
-          <div class="metric-row-bar" style="background:#2a2520;">
-            <div class="metric-row-fill metric-row-fill--gold" data-width="78"></div>
-          </div>
-          <span class="metric-row-val" style="color:#d8d0c4;">baseline</span>
+          <span class="metric-row-label" style="color:#908878;">Base</span>
+          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--gold" data-width="78"></div></div>
+          <span class="metric-row-val" style="color:#ccc5b8;">baseline</span>
         </div>
         <div class="metric-row">
-          <span class="metric-row-label" style="color:#a09888;">+Trace</span>
-          <div class="metric-row-bar" style="background:#2a2520;">
-            <div class="metric-row-fill metric-row-fill--orange" data-width="90"></div>
-          </div>
-          <span class="metric-row-val" style="color:#d8d0c4;">+12&ndash;14%</span>
+          <span class="metric-row-label" style="color:#908878;">+Trace</span>
+          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--orange" data-width="90"></div></div>
+          <span class="metric-row-val" style="color:#ccc5b8;">+12&ndash;14%</span>
         </div>
       </div>
     </div>
-
-    <div class="bench-cols reveal" style="margin-top: 1.5rem;">
+    <div class="bench-cols" style="margin-top: 1.25rem;">
       <div class="bench-panel">
         <h3>Attention corridor &middot; Qwen2.5-7B-W8A8</h3>
         <div class="metric-row">
-          <span class="metric-row-label" style="color:#a09888;">L&#8734; global</span>
-          <div class="metric-row-bar" style="background:#2a2520;">
-            <div class="metric-row-fill metric-row-fill--orange" data-width="32"></div>
-          </div>
-          <span class="metric-row-val" style="color:#d8d0c4;">8</span>
+          <span class="metric-row-label" style="color:#908878;">L&#8734;</span>
+          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--orange" data-width="32"></div></div>
+          <span class="metric-row-val" style="color:#ccc5b8;">8</span>
         </div>
         <div class="metric-row">
-          <span class="metric-row-label" style="color:#a09888;">L&#8734; first</span>
-          <div class="metric-row-bar" style="background:#2a2520;">
-            <div class="metric-row-fill metric-row-fill--blue" data-width="20"></div>
-          </div>
-          <span class="metric-row-val" style="color:#d8d0c4;">5</span>
+          <span class="metric-row-label" style="color:#908878;">frac_eq</span>
+          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--green" data-width="92"></div></div>
+          <span class="metric-row-val" style="color:#ccc5b8;">&gt;92%</span>
         </div>
         <div class="metric-row">
-          <span class="metric-row-label" style="color:#a09888;">frac_eq</span>
-          <div class="metric-row-bar" style="background:#2a2520;">
-            <div class="metric-row-fill metric-row-fill--green" data-width="92"></div>
-          </div>
-          <span class="metric-row-val" style="color:#d8d0c4;">&gt;92%</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-row-label" style="color:#a09888;">frac&#8804;1</span>
-          <div class="metric-row-bar" style="background:#2a2520;">
-            <div class="metric-row-fill metric-row-fill--green" data-width="99"></div>
-          </div>
-          <span class="metric-row-val" style="color:#d8d0c4;">&gt;99.8%</span>
+          <span class="metric-row-label" style="color:#908878;">frac&#8804;1</span>
+          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--green" data-width="99"></div></div>
+          <span class="metric-row-val" style="color:#ccc5b8;">&gt;99.8%</span>
         </div>
       </div>
       <div class="bench-panel">
         <h3>Attention corridor &middot; Llama-3.1-8B-W8A8</h3>
         <div class="metric-row">
-          <span class="metric-row-label" style="color:#a09888;">L&#8734; global</span>
-          <div class="metric-row-bar" style="background:#2a2520;">
-            <div class="metric-row-fill metric-row-fill--orange" data-width="36"></div>
-          </div>
-          <span class="metric-row-val" style="color:#d8d0c4;">9</span>
+          <span class="metric-row-label" style="color:#908878;">L&#8734;</span>
+          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--orange" data-width="36"></div></div>
+          <span class="metric-row-val" style="color:#ccc5b8;">9</span>
         </div>
         <div class="metric-row">
-          <span class="metric-row-label" style="color:#a09888;">L&#8734; first</span>
-          <div class="metric-row-bar" style="background:#2a2520;">
-            <div class="metric-row-fill metric-row-fill--blue" data-width="20"></div>
-          </div>
-          <span class="metric-row-val" style="color:#d8d0c4;">5</span>
+          <span class="metric-row-label" style="color:#908878;">frac_eq</span>
+          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--green" data-width="95"></div></div>
+          <span class="metric-row-val" style="color:#ccc5b8;">94&ndash;96%</span>
         </div>
         <div class="metric-row">
-          <span class="metric-row-label" style="color:#a09888;">frac_eq</span>
-          <div class="metric-row-bar" style="background:#2a2520;">
-            <div class="metric-row-fill metric-row-fill--green" data-width="95"></div>
-          </div>
-          <span class="metric-row-val" style="color:#d8d0c4;">94&ndash;96%</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-row-label" style="color:#a09888;">frac&#8804;1</span>
-          <div class="metric-row-bar" style="background:#2a2520;">
-            <div class="metric-row-fill metric-row-fill--green" data-width="99"></div>
-          </div>
-          <span class="metric-row-val" style="color:#d8d0c4;">&gt;99.9%</span>
+          <span class="metric-row-label" style="color:#908878;">frac&#8804;1</span>
+          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--green" data-width="99"></div></div>
+          <span class="metric-row-val" style="color:#ccc5b8;">&gt;99.9%</span>
         </div>
       </div>
     </div>
@@ -364,36 +294,18 @@
 <!-- ── What it binds ─────────────────────────────── -->
 <section class="section" id="binding">
   <div class="container">
-    <div class="section-label reveal">Commitment scope</div>
-    <h2 class="section-title reveal">Four specs, one receipt</h2>
-    <p class="section-sub reveal">
-      CommitLLM binds the entire deployment surface that affects outputs&mdash;not just "some model ran."
+    <div class="section-label">Commitment scope</div>
+    <h2 class="section-title">Four specs, one receipt</h2>
+    <p class="section-sub">
+      CommitLLM binds the entire deployment surface that affects outputs&mdash;not just &ldquo;some model ran.&rdquo;
     </p>
-
-    <table class="specs-table reveal">
-      <thead>
-        <tr>
-          <th>Spec</th>
-          <th>What it binds</th>
-        </tr>
-      </thead>
+    <table class="specs-table">
+      <thead><tr><th>Spec</th><th>What it binds</th></tr></thead>
       <tbody>
-        <tr>
-          <td>input_spec_hash</td>
-          <td>Tokenizer, chat template, BOS/EOS, truncation, padding, system prompt semantics</td>
-        </tr>
-        <tr>
-          <td>model_spec_hash</td>
-          <td>Checkpoint identity R<sub>W</sub>, quantization scheme, LoRA/adapter identity, RoPE config, RMSNorm &epsilon;</td>
-        </tr>
-        <tr>
-          <td>decode_spec_hash</td>
-          <td>Sampler, temperature, top-k/p, penalties, logit bias, grammar constraints, stop rules, tie-breaking</td>
-        </tr>
-        <tr>
-          <td>output_spec_hash</td>
-          <td>Detokenization, cleanup, whitespace normalization</td>
-        </tr>
+        <tr><td>input_spec_hash</td><td>Tokenizer, chat template, BOS/EOS, truncation, padding, system prompt</td></tr>
+        <tr><td>model_spec_hash</td><td>Checkpoint identity R<sub>W</sub>, quantization, LoRA/adapter, RoPE config, RMSNorm&nbsp;&epsilon;</td></tr>
+        <tr><td>decode_spec_hash</td><td>Sampler, temperature, top-k/p, penalties, logit bias, grammar, stop rules</td></tr>
+        <tr><td>output_spec_hash</td><td>Detokenization, cleanup, whitespace normalization</td></tr>
       </tbody>
     </table>
   </div>
@@ -404,17 +316,12 @@
 <!-- ── Use cases ──────────────────────────────────── -->
 <section class="section" id="usecases">
   <div class="container">
-    <div class="section-label reveal">Why it matters</div>
-    <h2 class="section-title reveal">Provenance for every deployment</h2>
-
-    <div class="cases-grid reveal">
+    <div class="section-label">Why it matters</div>
+    <h2 class="section-title">Provenance for every deployment</h2>
+    <div class="cases-grid">
       <div class="case-item">
         <h3>Enterprise procurement</h3>
         <p>Paying for Llama 70B? Get proof the provider actually served that checkpoint, not a smaller distillation.</p>
-      </div>
-      <div class="case-item">
-        <h3>Benchmarking</h3>
-        <p>A benchmarker needs to know the claimed model actually ran. CommitLLM turns trust into verification.</p>
       </div>
       <div class="case-item">
         <h3>Regulated deployments</h3>
@@ -422,15 +329,11 @@
       </div>
       <div class="case-item">
         <h3>Decentralized compute</h3>
-        <p>Networks like Gensyn, Ritual, or Bittensor cannot rely on "trust the node." CommitLLM provides the missing layer.</p>
+        <p>Networks like Gensyn, Ritual, or Bittensor cannot rely on &ldquo;trust the node.&rdquo; CommitLLM provides the missing layer.</p>
       </div>
       <div class="case-item">
         <h3>Agent systems</h3>
         <p>When an agent takes action, which model produced the decision becomes a liability and governance question.</p>
-      </div>
-      <div class="case-item">
-        <h3>Evaluation integrity</h3>
-        <p>Model evaluation labs and API providers can prove evaluation results were produced by the exact claimed configuration.</p>
       </div>
     </div>
   </div>
@@ -441,55 +344,19 @@
 <!-- ── Comparison ─────────────────────────────────── -->
 <section class="section" id="comparison">
   <div class="container">
-    <div class="section-label reveal">Design space</div>
-    <h2 class="section-title reveal">CommitLLM vs. alternatives</h2>
-
-    <table class="cmp-table reveal">
+    <div class="section-label">Design space</div>
+    <h2 class="section-title">CommitLLM vs. alternatives</h2>
+    <table class="cmp-table">
       <thead>
-        <tr>
-          <th>Property</th>
-          <th>Fingerprinting</th>
-          <th>ZK proofs</th>
-          <th>CommitLLM</th>
-        </tr>
+        <tr><th>Property</th><th>Fingerprinting</th><th>ZK proofs</th><th>CommitLLM</th></tr>
       </thead>
       <tbody>
-        <tr>
-          <td>Per-response verification</td>
-          <td class="no">Statistical</td>
-          <td class="yes">Exact</td>
-          <td class="yes">Exact (linear) + bounded (attention)</td>
-        </tr>
-        <tr>
-          <td>Provider overhead</td>
-          <td class="yes">Minimal</td>
-          <td class="no">Very high</td>
-          <td class="yes">~12&ndash;14%</td>
-        </tr>
-        <tr>
-          <td>CPU-only verifier</td>
-          <td class="yes">Yes</td>
-          <td class="yes">Yes</td>
-          <td class="yes">Yes</td>
-        </tr>
-        <tr>
-          <td>Third-party transferable</td>
-          <td class="no">No</td>
-          <td class="yes">Succinct proof</td>
-          <td class="mid">Via disclosed audit transcript</td>
-        </tr>
-        <tr>
-          <td>Production serving</td>
-          <td class="yes">Yes</td>
-          <td class="no">Circuit overhead</td>
-          <td class="yes">Normal GPU path</td>
-        </tr>
-        <tr>
-          <td>Model identity binding</td>
-          <td class="no">Indirect</td>
-          <td class="yes">Full</td>
-          <td class="yes">Merkle + Freivalds</td>
-        </tr>
+        <tr><td>Per-response verification</td><td class="no">Statistical</td><td class="yes">Exact</td><td class="yes">Exact + bounded</td></tr>
+        <tr><td>Provider overhead</td><td class="yes">Minimal</td><td class="no">Very high</td><td class="yes">~12&ndash;14%</td></tr>
+        <tr><td>CPU-only verifier</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+        <tr><td>Third-party transferable</td><td class="no">No</td><td class="yes">Succinct proof</td><td class="mid">Disclosed transcript</td></tr>
+        <tr><td>Production serving</td><td class="yes">Yes</td><td class="no">Circuit overhead</td><td class="yes">Normal GPU path</td></tr>
+        <tr><td>Model identity binding</td><td class="no">Indirect</td><td class="yes">Full</td><td class="yes">Merkle + Freivalds</td></tr>
       </tbody>
     </table>
   </div>
@@ -499,7 +366,7 @@
 
 <!-- ── CTA ────────────────────────────────────────── -->
 <section class="cta-section">
-  <div class="container reveal">
+  <div class="container">
     <h2>Read the paper, try the code</h2>
     <p>The protocol is open source. The paper is available. Lean 4 formalization is in progress.</p>
     <div class="cta-btns">
