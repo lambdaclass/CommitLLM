@@ -16,7 +16,8 @@
     <li><a href="#guarantees">Guarantees</a></li>
     <li><a href="#benchmarks">Benchmarks</a></li>
     <li><a href="#usecases">Use cases</a></li>
-    <li><a href="https://github.com/lambdaclass/CommitLLM/blob/main/paper/main.pdf">Paper</a></li>
+    <li><a href="#abstract">Paper</a></li>
+    <li><a href="#code">Code</a></li>
     <li><a href="https://github.com/lambdaclass/CommitLLM">GitHub</a></li>
   </ul>
 </nav>
@@ -162,6 +163,12 @@
       <span class="legend-exact">Exact / information-theoretic</span>
       <span class="legend-approx">Approximate (FP16/BF16)</span>
       <span class="legend-stat">Statistical &rarr; exact in deep audit</span>
+    </div>
+
+    <div class="approx-note">
+      <p>
+        The attention interior remains approximate because native GPU FP16/BF16 attention is not bit-reproducible across devices or even across runs. CommitLLM constrains it strongly&mdash;shell-verified Q, K, and V on both sides, commitment-verified prefix state, independent verifier replay, cross-layer consistency through the residual stream&mdash;but does not pretend it is exact. In routine audit mode, prefix/KV provenance is statistical: Merkle binding is exact, sampled positions are shell-verified exactly, but unopened positions are covered probabilistically. Deep audit upgrades this to exact full-prefix verification. The honest claim is not &ldquo;uniformly exact end-to-end&rdquo; but a precisely delineated guarantee boundary.
+      </p>
     </div>
   </div>
 </section>
@@ -357,6 +364,55 @@
         <tr><td>Third-party transferable</td><td class="no">No</td><td class="yes">Succinct proof</td><td class="mid">Disclosed transcript</td></tr>
         <tr><td>Production serving</td><td class="yes">Yes</td><td class="no">Circuit overhead</td><td class="yes">Normal GPU path</td></tr>
         <tr><td>Model identity binding</td><td class="no">Indirect</td><td class="yes">Full</td><td class="yes">Merkle + Freivalds</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<hr class="rule">
+
+<!-- ── Abstract ───────────────────────────────────── -->
+<section class="section" id="abstract">
+  <div class="container">
+    <div class="section-label">Abstract</div>
+    <h2 class="section-title">Paper summary</h2>
+    <div class="authors">
+      Federico Carrone, Diego Kingston, Manuel Puebla, Mauro Toscano<br>
+      <a href="https://lambdaclass.com">Lambda Class</a> &middot; <a href="https://ccsd.uba.ar/">Centro de Criptograf&iacute;a y Seguridad Digital, UBA</a>
+    </div>
+    <div class="abstract-text">
+      <p>
+        Large language models are increasingly used in settings where integrity matters, but users still lack technical assurance that a provider actually ran the claimed model, decode policy, and output behavior. Fingerprinting and statistical heuristics can provide signals, but not exact per-response verification. Zero-knowledge proof systems provide stronger guarantees, but at prover costs that remain impractical for production LLM serving.
+      </p>
+      <p>
+        We present CommitLLM, a cryptographic commit-and-audit protocol for open-weight LLM inference. CommitLLM keeps the provider on the normal serving path and keeps verifier work fast and CPU-only. It combines commitment binding, direct audit, and randomized algebraic fingerprints, including Freivalds-style checks for large matrix products, rather than per-response proof generation or full re-execution. Its main costs are retained-state memory over the audit window and audit bandwidth, not per-response proving.
+      </p>
+      <p>
+        The protocol is commitment-bound end-to-end. Within that binding, large linear layers are verified by verifier-secret, information-theoretically sound algebraic checks, quantization/dequantization boundaries and supported nonlinear subcomputations are checked by canonical re-execution, attention is verified by bounded approximate replay, and routine prefix-state provenance is statistical unless deep audit is used. Unsupported semantics fail closed.
+      </p>
+    </div>
+  </div>
+</section>
+
+<hr class="rule">
+
+<!-- ── Repository layout ─────────────────────────── -->
+<section class="section" id="code">
+  <div class="container">
+    <div class="section-label">Repository</div>
+    <h2 class="section-title">Code layout</h2>
+    <table class="specs-table">
+      <thead><tr><th>Component</th><th>Path</th></tr></thead>
+      <tbody>
+        <tr><td>Core types and traits</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-core">crates/verilm-core</a></td></tr>
+        <tr><td>Key generation</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-keygen">crates/verilm-keygen</a></td></tr>
+        <tr><td>Verifier</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-verify">crates/verilm-verify</a></td></tr>
+        <tr><td>Prover (Rust)</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-prover">crates/verilm-prover</a></td></tr>
+        <tr><td>Python sidecar</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/sidecar">sidecar/</a></td></tr>
+        <tr><td>Python bindings</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-py">crates/verilm-py</a></td></tr>
+        <tr><td>Test vectors</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-test-vectors">crates/verilm-test-vectors</a></td></tr>
+        <tr><td>Lean formalization</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/lean">lean/</a></td></tr>
+        <tr><td>Paper</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/paper">paper/</a></td></tr>
       </tbody>
     </table>
   </div>

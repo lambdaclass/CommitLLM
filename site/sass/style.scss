@@ -405,6 +405,44 @@ code {
   .legend-stat::before { background: $blue; }
 }
 
+// ── Approximate note ────────────────────────────────
+.approx-note {
+  margin-top: 1.5rem;
+  padding: 1.25rem 1.5rem;
+  background: $bg-warm;
+  border-left: 3px solid $border;
+  border-radius: 0 3px 3px 0;
+
+  p {
+    font-size: 0.9rem;
+    color: $text-dim;
+    line-height: 1.6;
+    max-width: 38em;
+  }
+}
+
+// ── Abstract ────────────────────────────────────────
+.abstract-text {
+  margin-top: 1.25rem;
+  p {
+    font-size: 0.95rem;
+    color: $text;
+    line-height: 1.6;
+    max-width: 38em;
+    margin-bottom: 0.85rem;
+    &:last-child { margin-bottom: 0; }
+  }
+}
+
+// ── Authors ─────────────────────────────────────────
+.authors {
+  margin-top: 1rem;
+  font-size: 0.88rem;
+  color: $text-dim;
+  line-height: 1.6;
+  a { color: $link; }
+}
+
 // ── Freivalds ───────────────────────────────────────
 .freivalds-grid {
   margin-top: 2rem;
