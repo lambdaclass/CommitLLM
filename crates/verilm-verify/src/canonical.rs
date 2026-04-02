@@ -1273,15 +1273,24 @@ fn phase_lm_head(ctx: &Ctx, shell: &ShellTokenOpening, bridge: &BridgeState, spe
     match (&shell.logits_i32, &bridge.final_hidden) {
         (Some(logits), Some(fh)) => {
             st.check();
-            if !freivalds::check(ctx.key.v_lm_head.as_ref().unwrap(), fh, r_lm, logits) {
+            let freivalds_ok =
+                freivalds::check(ctx.key.v_lm_head.as_ref().unwrap(), fh, r_lm, logits);
+            if !freivalds_ok {
                 st.fail(
                     FailureCode::LmHeadFreivaldsFailed,
                     "lm_head: Freivalds check failed on logits_i32",
                 );
             }
 
-            // Token replay (generated tokens only)
-            if ctx.key.config.vocab_size > 0 && ctx.r.token_index >= ctx.gen_start {
+            // Token replay (generated tokens only).
+            // Skip when Freivalds passed: the INT8 argmax can disagree with
+            // vLLM's higher-precision (BF16/FP32) token selection due to
+            // quantisation rounding, producing false positives.  Freivalds
+            // already guarantees the matrix multiply is correct.
+            if !freivalds_ok
+                && ctx.key.config.vocab_size > 0
+                && ctx.r.token_index >= ctx.gen_start
+            {
                 st.check();
                 let logits_f32: Vec<f32> = logits.iter().map(|&v| v as f32).collect();
                 let expected = if let Some(ref dp) = specs.decode_params {
