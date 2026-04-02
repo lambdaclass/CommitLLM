@@ -8,9 +8,9 @@ The shell/tail/binding protocol is structurally complete. The kept path preserve
 
 ---
 
-## Tier 0 — Publication blockers
+## Tier 0 — Critical path
 
-These gate the first public release. Do them in this order.
+Highest-priority work. Do in this order.
 
 | # | Item | Status |
 |---|------|--------|
@@ -26,13 +26,13 @@ These gate the first public release. Do them in this order.
 | 33 | **Stable benchmark protocol** — fix workload corpus, model/settings, warmup, hardware class, reporting format | open |
 | 38 | **Benchmark routine-audit path** — baseline, online overhead, commit time, audit-open time, verifier time, retained-state size, payload size | open |
 | 55–71 | **Paper/README/article consistency** — claims match code match measurements. See [Docs detail](#docs--publication-detail) below. | open |
-| 74 | **Publish** — cut clean release only when code, benchmarks, docs, and claims all line up | open |
+| 74 | **v1.0 release** — cut clean tagged release only when code, benchmarks, docs, and claims all line up | open |
 
 ---
 
-## Tier 1 — Security foundation
+## Tier 1 — Security hardening
 
-Don't block release but block credibility with serious reviewers. Do immediately after publication.
+Blocks credibility with serious reviewers.
 
 | # | Item |
 |---|------|
