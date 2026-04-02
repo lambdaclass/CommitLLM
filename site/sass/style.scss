@@ -26,7 +26,12 @@ $mono: 'IBM Plex Mono', Menlo, monospace;
 
 // ── Reset ───────────────────────────────────────────
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-html { scroll-behavior: smooth; }
+html {
+  scroll-behavior: smooth;
+  // Offset for fixed navbar so anchors don't hide under it.
+  scroll-padding-top: 4rem;
+  @media (max-width: 900px) { scroll-padding-top: 6.5rem; }
+}
 
 body {
   font-family: $serif;
@@ -37,6 +42,10 @@ body {
   // Practical Typography: 120–145% line spacing.
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
+  // Practical Typography: always enable kerning.
+  font-kerning: normal;
+  text-rendering: optimizeLegibility;
+  @media (max-width: 600px) { font-size: 16px; }
 }
 
 // Practical Typography: color means "clickable" on the web.
@@ -61,6 +70,7 @@ code {
   margin: 0 auto;
   // Practical Typography: generous margins, don't fear whitespace.
   padding: 0 2.5rem;
+  @media (max-width: 600px) { padding: 0 1.25rem; }
 }
 
 .section {
@@ -95,6 +105,7 @@ code {
   color: $text-bright;
   line-height: 1.3;
   margin-bottom: 0.75rem;
+  @media (max-width: 600px) { font-size: 1.35rem; }
 }
 
 .section-sub {
@@ -116,9 +127,10 @@ code {
   backdrop-filter: blur(8px);
   border-bottom: 1px solid $border;
   @media (max-width: 900px) {
-    padding: 0.8rem 1rem;
+    padding: 0.65rem 1rem;
     align-items: flex-start;
     flex-direction: column;
+    gap: 0.5rem;
   }
 
   &-logo {
@@ -212,7 +224,7 @@ code {
   min-height: auto;
   display: flex; align-items: flex-start;
   padding: 5.5rem 0 3.5rem;
-  @media (max-width: 900px) { padding: 6rem 0 3rem; }
+  @media (max-width: 900px) { padding: 8rem 0 2.5rem; }
 
   &-grid {
     display: grid;
@@ -277,17 +289,19 @@ code {
   display: inline-flex;
   align-items: center;
   min-height: 2rem;
-  padding: 0.32rem 0.7rem;
+  padding: 0.35rem 0.75rem;
   border-radius: 999px;
   border: 1px solid $border;
   background: $bg-warm;
   font-family: $mono;
-  font-size: 0.68rem;
+  font-size: 0.72rem;
+  font-weight: 500;
   line-height: 1.35;
 
-  &--exact { color: $green; }
-  &--approx { color: $orange; }
-  &--stat { color: $blue; }
+  &--exact { color: darken($green, 5%); border-color: rgba($green, 0.25); }
+  &--alg { color: darken($link, 5%); border-color: rgba($link, 0.25); }
+  &--approx { color: darken($orange, 5%); border-color: rgba($orange, 0.25); }
+  &--stat { color: darken($blue, 5%); border-color: rgba($blue, 0.25); }
 }
 
 .aside-kicker {
@@ -307,8 +321,11 @@ code {
     padding: 0.45rem 0;
     border-bottom: 1px solid $border;
     &:last-child { border-bottom: none; }
+    &:first-child {
+      .stat-val { font-size: 0.95rem; font-weight: 600; }
+    }
   }
-  .stat-key { font-size: 0.88rem; color: $text-dim; }
+  .stat-key { font-size: 0.85rem; color: $text-dim; }
   .stat-val {
     font-family: $mono;
     font-size: 0.82rem;
@@ -612,6 +629,7 @@ code {
     margin-bottom: 0.75rem;
     min-height: 70px;
     white-space: pre;
+    overflow-x: auto;
     .val { color: #d4a024; font-weight: 500; }
     .dim { color: #706858; }
     .ok { color: #5dac78; }
@@ -751,41 +769,6 @@ code {
 
   h3 { font-size: 1rem; font-weight: 600; color: $text-bright; margin-bottom: 0.25rem; }
   p { font-size: 0.88rem; color: $text-dim; line-height: 1.5; }
-}
-
-// ── Comparison table ────────────────────────────────
-.cmp-table {
-  margin-top: 2rem;
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.88rem;
-  min-width: 700px;
-
-  th, td { padding: 0.6rem 0.75rem; text-align: left; border-bottom: 1px solid $border; }
-  th {
-    font-family: $mono;
-    font-size: 0.65rem;
-    font-weight: 500;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: $text-dim;
-  }
-  .yes { color: $green; font-weight: 600; }
-  .no { color: $red; }
-  .mid { color: $orange; }
-}
-
-// ── CTA ─────────────────────────────────────────────
-.cta-section {
-  text-align: center;
-  padding: 4rem 0;
-  background: $bg-warm;
-  border-top: 1px solid $border;
-  border-bottom: 1px solid $border;
-
-  h2 { font-size: 1.6rem; font-weight: 600; color: $text-bright; margin-bottom: 0.5rem; }
-  p { font-size: 1rem; color: $text-dim; margin-bottom: 1.5rem; }
-  .cta-btns { display: flex; justify-content: center; gap: 0.6rem; flex-wrap: wrap; }
 }
 
 // ── Footer ──────────────────────────────────────────

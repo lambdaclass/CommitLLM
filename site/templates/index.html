@@ -3,8 +3,50 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CommitLLM</title>
-  <meta name="description" content="A cryptographic commit-and-audit protocol for open-weight LLM inference.">
+  <title>CommitLLM — Cryptographic provenance for LLM inference</title>
+  <meta name="description" content="CommitLLM is a cryptographic commit-and-audit protocol for open-weight LLM inference. The provider serves normally on GPU and returns a compact receipt. A verifier checks it on CPU. ~12-14% overhead, 1.3 ms/tok routine audit.">
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="CommitLLM — Cryptographic provenance for LLM inference">
+  <meta property="og:description" content="A cryptographic commit-and-audit protocol for open-weight LLM inference. Freivalds-based algebraic checks, CPU-only verification, ~12-14% online overhead.">
+  <meta property="og:url" content="https://commitllm.com">
+  <meta property="og:site_name" content="CommitLLM">
+
+  <!-- Twitter -->
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="CommitLLM — Cryptographic provenance for LLM inference">
+  <meta name="twitter:description" content="Cryptographic commit-and-audit protocol for open-weight LLM inference. Provider serves on GPU, verifier checks on CPU.">
+
+  <!-- Canonical -->
+  <link rel="canonical" href="https://commitllm.com">
+
+  <!-- Schema.org structured data -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareSourceCode",
+    "name": "CommitLLM",
+    "description": "A cryptographic commit-and-audit protocol for open-weight LLM inference. Combines Freivalds-style algebraic checks for large matrix products, canonical replay for nonlinear components, and bounded approximate replay for attention — with CPU-only verification.",
+    "url": "https://commitllm.com",
+    "codeRepository": "https://github.com/lambdaclass/CommitLLM",
+    "programmingLanguage": ["Rust", "Python", "Lean 4"],
+    "author": [
+      {
+        "@type": "Organization",
+        "name": "Lambda Class",
+        "url": "https://lambdaclass.com"
+      },
+      {
+        "@type": "Organization",
+        "name": "Centro de Criptografía y Seguridad Digital, UBA",
+        "url": "https://ccsd.uba.ar/"
+      }
+    ],
+    "license": "https://github.com/lambdaclass/CommitLLM/blob/main/LICENSE"
+  }
+  </script>
+
   <link rel="stylesheet" href="{{ get_url(path='style.css') | safe }}">
 </head>
 <body id="top">
@@ -20,7 +62,7 @@
       <li><a href="#usecases">Use cases</a></li>
     </ul>
     <div class="nav-cta">
-      <a class="nav-btn nav-btn--paper" href="https://github.com/lambdaclass/CommitLLM/blob/main/paper/main.pdf">Paper</a>
+      <a class="nav-btn nav-btn--paper" href="https://raw.githubusercontent.com/lambdaclass/CommitLLM/main/paper/main.pdf">Paper</a>
       <a class="nav-btn nav-btn--ghost" href="https://github.com/lambdaclass/CommitLLM">GitHub</a>
     </div>
   </div>
@@ -36,29 +78,29 @@
         <div class="hero-badge">Active development &middot; Lean 4 formalization in progress</div>
         <h1>Cryptographic provenance for <em>LLM&nbsp;inference</em></h1>
         <p class="hero-desc">
-          You have no proof your LLM provider ran the model they claim. CommitLLM is a cryptographic commit-and-audit protocol that closes that gap: the provider serves normally on GPU and returns a compact receipt. A verifier checks it on CPU.
+          You have no proof your LLM provider ran the model they claim. CommitLLM is a cryptographic commit-and-audit protocol that closes that gap: the provider serves normally on GPU and returns a compact receipt. A verifier checks the receipt and opened trace on CPU.
         </p>
         <div class="hero-proofline">
-          <span class="proof-chip proof-chip--exact">Linear shell: algebraic checks</span>
+          <span class="proof-chip proof-chip--alg">Linear shell: algebraic checks</span>
           <span class="proof-chip proof-chip--exact">Nonlinear shell: canonical replay</span>
           <span class="proof-chip proof-chip--approx">Attention: bounded approximate replay</span>
           <span class="proof-chip proof-chip--stat">Prefix/KV: statistical unless deep audit</span>
         </div>
         <div class="hero-actions">
           <a href="https://github.com/lambdaclass/CommitLLM" class="btn btn-primary">GitHub</a>
-          <a href="https://github.com/lambdaclass/CommitLLM/blob/main/paper/main.pdf" class="btn btn-ghost">Paper (PDF)</a>
+          <a href="https://raw.githubusercontent.com/lambdaclass/CommitLLM/main/paper/main.pdf" class="btn btn-ghost">Paper (PDF)</a>
         </div>
       </div>
       <div class="hero-aside">
         <div class="aside-kicker">Measured on the kept path</div>
         <ul class="stat-list">
           <li class="stat-row">
-            <span class="stat-key">Online tracing overhead</span>
-            <span class="stat-val">~12&ndash;14%</span>
-          </li>
-          <li class="stat-row">
             <span class="stat-key">Routine audit (Llama&nbsp;70B)</span>
             <span class="stat-val">1.3&nbsp;ms/tok</span>
+          </li>
+          <li class="stat-row">
+            <span class="stat-key">Online tracing overhead</span>
+            <span class="stat-val">~12&ndash;14%</span>
           </li>
           <li class="stat-row">
             <span class="stat-key">Full audit (1&nbsp;tok, 70B)</span>
@@ -69,11 +111,11 @@
             <span class="stat-val">&gt;99.8%</span>
           </li>
           <li class="stat-row">
-            <span class="stat-key">Verifier hardware</span>
+            <span class="stat-key">Verifier</span>
             <span class="stat-val">CPU only</span>
           </li>
           <li class="stat-row">
-            <span class="stat-key">Provider path</span>
+            <span class="stat-key">Provider</span>
             <span class="stat-val">Normal GPU</span>
           </li>
         </ul>
@@ -405,7 +447,7 @@
           <tr><td>Python bindings</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-py">crates/verilm-py</a></td></tr>
           <tr><td>Test vectors</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-test-vectors">crates/verilm-test-vectors</a></td></tr>
           <tr><td>Lean formalization</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/lean">lean/</a></td></tr>
-          <tr><td>Paper</td><td><a href="https://github.com/lambdaclass/CommitLLM/blob/main/paper/main.pdf">paper/main.pdf</a></td></tr>
+          <tr><td>Paper</td><td><a href="https://raw.githubusercontent.com/lambdaclass/CommitLLM/main/paper/main.pdf">paper/main.pdf</a></td></tr>
         </tbody>
       </table>
     </div>
@@ -420,7 +462,7 @@
       <div class="footer-left">CommitLLM &middot; <a href="https://lambdaclass.com">Lambda Class</a> &middot; <a href="https://ccsd.uba.ar/">CCSD&nbsp;UBA</a></div>
       <div class="footer-right">
         <a href="https://github.com/lambdaclass/CommitLLM">GitHub</a>
-        <a href="https://github.com/lambdaclass/CommitLLM/blob/main/paper/main.pdf">Paper</a>
+        <a href="https://raw.githubusercontent.com/lambdaclass/CommitLLM/main/paper/main.pdf">Paper</a>
       </div>
     </div>
   </div>

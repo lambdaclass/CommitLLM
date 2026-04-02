@@ -1,0 +1,66 @@
+# CommitLLM
+
+> A cryptographic commit-and-audit protocol for open-weight LLM inference.
+
+CommitLLM provides cryptographic provenance for LLM inference. When you call an LLM provider, you have no proof they ran the model they claim. CommitLLM closes that gap: the provider serves normally on GPU and returns a compact receipt. A verifier checks it on CPU.
+
+## Key properties
+
+- Online tracing overhead: ~12-14%
+- Routine audit cost (Llama 70B): 1.3 ms/tok
+- Full audit cost (1 token, 70B): ~10 ms
+- Attention outputs within 1 quant bucket: >99.8%
+- Verifier hardware: CPU only
+- Provider path: Normal GPU serving
+
+## Protocol
+
+The protocol has four phases:
+
+1. **Setup**: From a public checkpoint, the verifier computes a Merkle root over weights, secret Freivalds vectors for eight matrix families (Wq, Wk, Wv, Wo, Wgate, Wup, Wdown, LM_head), and model configuration for canonical replay.
+2. **Commit**: The provider runs inference on the normal GPU path with a tracing sidecar. It returns the response plus a compact receipt binding the execution trace, KV state, deployment manifest, prompt, sampling randomness, and token count.
+3. **Audit**: The verifier challenges token positions and layers after the commitment. The provider opens the requested region.
+4. **Verify**: CPU-only checks — embedding Merkle proof, Freivalds on shell matmuls, exact INT8 bridge recomputation, KV provenance, attention replay, final-token tail, LM-head binding, decode and output policy replay.
+
+## Guarantee boundary
+
+The protocol is commitment-bound end-to-end, with explicit boundaries for each verification class:
+
+- **Exact / canonical replay**: Input binding, embedding lookup, INT8 bridges, final tail
+- **Algebraic checks (Freivalds)**: Shell matmuls (all 8 weight families), LM head
+- **Approximate (FP16/BF16)**: Attention interior (not bit-reproducible across GPUs)
+- **Statistical → exact in deep audit**: Prefix/KV provenance
+- **Fail-closed**: Decode policy, unsupported semantics
+
+The attention interior remains approximate because native GPU FP16/BF16 attention is not bit-reproducible across devices or runs. CommitLLM constrains it strongly — shell-verified Q, K, V on both sides, commitment-verified prefix state, independent verifier replay — but does not pretend it is exact.
+
+## Core mechanism: Freivalds' algorithm
+
+The provider claims z = W @ x for a public weight matrix W. Recomputing the full product is expensive. Freivalds' algorithm: the verifier precomputes v = r^T W with a secret random vector r, then checks v·x =? r^T·z in the finite field F_p (p = 2^32 - 5). If z ≠ Wx, the check fails with probability ≥ 1 - 1/p. This is information-theoretically sound.
+
+## Commitment scope
+
+CommitLLM binds four deployment specs into one receipt:
+
+- **input_spec_hash**: Tokenizer, chat template, BOS/EOS, truncation, padding, system prompt
+- **model_spec_hash**: Checkpoint identity R_W, quantization, LoRA/adapter, RoPE config, RMSNorm ε
+- **decode_spec_hash**: Sampler, temperature, top-k/p, penalties, logit bias, grammar, stop rules
+- **output_spec_hash**: Detokenization, cleanup, whitespace normalization
+
+## Use cases
+
+- **Enterprise procurement**: Proof the provider served the claimed checkpoint, not a smaller distillation
+- **Regulated deployments**: Auditable chain from decision to model version, decode policy, and output
+- **Decentralized compute**: Trustless verification for networks like Gensyn, Ritual, or Bittensor
+- **Agent systems**: Provenance for which model produced an agent's decision
+
+## Authors
+
+Federico Carrone, Diego Kingston, Manuel Puebla, Mauro Toscano
+Lambda Class (https://lambdaclass.com) · Centro de Criptografía y Seguridad Digital, UBA (https://ccsd.uba.ar/)
+
+## Links
+
+- Website: https://commitllm.com
+- GitHub: https://github.com/lambdaclass/CommitLLM
+- Paper: https://raw.githubusercontent.com/lambdaclass/CommitLLM/main/paper/main.pdf
