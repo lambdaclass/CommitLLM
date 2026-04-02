@@ -1,252 +1,198 @@
 # Roadmap
 
-This roadmap tracks all remaining work for CommitLLM. The top section is the prioritized execution order; the detailed sections below expand each item by subsystem.
+All remaining work for CommitLLM, organized by priority. Item numbers are stable identifiers — they don't change when priority changes.
 
-Mark a task done only when the sentence is true in code, tests, docs, and operational behavior. Completed milestones live in [CHANGELOG.md](./CHANGELOG.md).
+Mark a task done only when it is true in code, tests, docs, and operational behavior. Completed milestones live in [CHANGELOG.md](./CHANGELOG.md).
 
-The kept canonical sampled path already exists in the live server. The shell/tail/binding protocol is structurally complete. The kept path preserves the full exact 7-matrix Freivalds shell (`Wq/Wk/Wv/Wo/Wg/Wu/Wd`) across maintained audit tiers; tiers differ in attention evidence and payload cost, not in whether the exact linear shell is checked.
+The shell/tail/binding protocol is structurally complete. The kept path preserves the full exact 7-matrix Freivalds shell (`Wq/Wk/Wv/Wo/Wg/Wu/Wd`) across all audit tiers; tiers differ in attention evidence and payload cost, not in whether the exact linear shell is checked.
 
 ---
 
-## Priority Map
-
-### Tier 0 — Publication blockers
+## Tier 0 — Publication blockers
 
 These gate the first public release. Do them in this order.
 
-1. **Rename to CommitLLM** (#49, #50) — do first so everything else lands under the final name
-2. ~~Settle attention replay inputs~~ — done (#3)
-3. ~~Clean old attention-gap strategy~~ — done (#4)
-4. **Unify attention path** (#6) — one `x_attn` boundary, one QKV replay story across prover/verifier/corridor
-5. **Clean repo** (#11) — quarantine experiments, delete stale paths
-6. **GPU smoke tests for attention replay** (#14) — confirm token-0 and deep-prefix on real GPU
-7. **Freeze canonical verifier** (#13, #15, #16, #17, #19, #20, #24, #25) — verifier is the trust root; it must be frozen before publication
-8. **Adversarial testing campaign** (#97) — IN PROGRESS — prove that dishonest providers fail, not just that honest ones pass
-9. **Binary parser fuzzing** (#99) — malformed receipts must not crash the verifier
-10. **Benchmark hygiene** (#33, #34, #38, #72) — stable protocol, baselines, routine-audit path measured
-11. **Paper/README/article consistency** (#55–#71, #73) — claims match code match measurements
-12. **Publish** (#74) — cut clean release only when story is coherent
-
-### Tier 1 — Security foundation
-
-Don't block the release but block credibility with serious reviewers. Do immediately after publication.
-
-- **Formal security argument** (#98) — write down the cheating game, soundness bound, detection probability
-- **Hidden trust assumptions review** (#18) — enumerate what is exact, approximate, statistical, trusted, out-of-scope
-- **Freshness / temporal binding** (#106) — without this, providers can replay cached honest responses
-- **Tolerance bounds** (#5) — derive the analytical attention corridor bound; empirical data exists, formal bound does not
-- **KV provenance** (#12) — without this, providers can commit arbitrary K/V not derived from real weights
-- **Audit tiers** (#19) — formalize receipt-only / routine / deep / full with explicit coverage and cost
-
-### Tier 2 — Model breadth
-
-Without broader model support, CommitLLM is a Qwen+Llama demo, not a product.
-
-- **MoE support** (#100) — Mixtral, DeepSeek-V2/V3, Qwen-MoE are dominant large architectures
-- **FP8 quantization** (#101) — default precision on H100/H200/B200; blocks next-gen GPU deployments
-- **Third family** (#8) — Mistral or Gemma; proves not overfit to two architectures
-- **Larger model** (#7) — 30B/70B-class datapoint on the corrected path
-- **Long-context 128K+** (#103) — validate corridor at production context lengths
-- **GPTQ/AWQ/grouped quant** (#95) — broaden quantization support beyond W8A8
-
-### Tier 3 — Performance & serving compatibility
-
-Determine whether CommitLLM is deployable at production throughput.
-
-- **Native capture backend** (#113) — C++/CUDA/Triton hot path; concrete path to lower ~12–14% overhead and enable CUDA graphs
-- **Cross-request prefix caching** (#92) — highest-impact unsupported optimization (~2-5x TTFT)
-- **Serving-optimization integration tests** (#86–#91) — validate continuous batching, paged attention, TP, fused kernels, FlashAttention
-- **CUDA graph compatibility** (#93) — 10-30% decode latency; largely solved by #113
-- **Speculative decoding** (#94) — 2-3x generation latency; requires new sub-protocol
-- **LoRA/adapter verification** (#96/#80) — needed for fine-tuned model deployments
-- **Pipeline parallelism** (#102) — needed for very large models across many GPUs
-
-### Tier 4 — Production infrastructure
-
-Needed for real multi-tenant deployment, not for the protocol itself.
-
-- **Streaming / SSE** (#104) — production APIs stream tokens; need incremental commitments
-- **Multi-turn binding** (#105) — chain receipts across conversation turns
-- **Monitoring / observability** (#107) — metrics, dashboards, alerting for verified mode
-- **Receipt storage** (#108) — indexing, querying, retrieval for auditors
-- **Verifier deployment** (#109) — how verifiers actually run (hosted, client-side, hybrid)
-- **Receipt compression** (#110) — needed at thousands of req/sec
-- **Audit delegation** (#111) — verification-as-a-service
-- **OpenAI-compatible proxy** (#78) — standard API with receipt metadata
-- **Client SDKs** (#77) — Python and TypeScript wrappers
-- **Reference client flow** (#54) — one canonical CLI verification path
-- **Prover ops** (#26–#32) — startup checks, buffer pressure, health checks, abuse protection
-
-### Tier 5 — Strengthening & research
-
-Important for the long-term story but not blocking anything above.
-
-- **Score witnessing** (#9) — optional deep-audit tightening
-- **W_o conditioning analysis** (#10) — quantify adversary freedom in routine audits
-- **Deterministic attention kernel** (#22, #23) — eliminates approximate region entirely (may be slower)
-- **Verification profiles** (#21) — per-family configuration if tolerance diverges
-- **Economic / game-theoretic analysis** (#112) — cheating incentives, equilibrium conditions
-- **Lean formalization** (#84) — machine-checked core claims
-- **Non-Rust verifier** (#25) — independent implementation for cross-validation
-- **llama.cpp plugin** (#79) — alternative serving backend
-- **Marketplace integration** (#83) — marketplace providers attach receipts
-- **Receipt encryption** (#81) — verifier-targeted privacy
-- **Generalized retained state** (#82) — beyond constant-width decoder models
-- **Full shell recomputation** (#85) — bandwidth-light, verifier-heavy alternative mode
+| # | Item | Status |
+|---|------|--------|
+| 49 | **Rename to CommitLLM** — all docs, APIs, CLI, scripts, packages use `CommitLLM`. Do first. | open |
+| 50 | **Remove V4/V5 naming** — public surface uses one canonical release name, not internal version numbers | open |
+| 6 | **Unify attention path** — one `x_attn` boundary, one QKV replay story across prover/verifier/corridor. No silent mixing of bridge-derived Q with committed K/V. | open |
+| 11 | **Clean repo** — delete stale corridor/debug paths, one-off hooks, duplicate helpers, obsolete protocol-era code. Repo should reflect the kept path, not an archaeology of experiments. | open |
+| 14 | **GPU smoke tests** — maintained GPU tests exercise token-0 attention replay and deep-prefix on the canonical verifier | open |
+| 13 | **Freeze canonical verifier** — canonical verifier is the frozen trusted path; legacy verifier no longer needed. Fresh real-GPU confirmation via `test_e2e_v4.py` and `test_adversarial.py`. | partial |
+| 97 | **Adversarial testing** — cheating-provider test suite: receipt forgery, transcript splicing, intermediate tampering, model substitution, selective layer cheating, KV injection. Every attack must fail verification or be documented as accepted gap. | **in progress** |
+| 99 | **Fuzz binary parsers** — coverage-guided fuzzing (cargo-fuzz) on verifier's binary deserialization. Malformed receipts fail closed, never panic. | open |
+| 33 | **Stable benchmark protocol** — fix workload corpus, model/settings, warmup, hardware class, reporting format | open |
+| 38 | **Benchmark routine-audit path** — baseline, online overhead, commit time, audit-open time, verifier time, retained-state size, payload size | open |
+| 55–71 | **Paper/README/article consistency** — claims match code match measurements. See [Docs detail](#docs--publication-detail) below. | open |
+| 74 | **Publish** — cut clean release only when code, benchmarks, docs, and claims all line up | open |
 
 ---
 
-The detailed sections below expand each item. Item numbers are stable identifiers — they do not change when priority changes.
+## Tier 1 — Security foundation
 
-## Verifier Finalization
+Don't block release but block credibility with serious reviewers. Do immediately after publication.
 
-1. [x] Make quantization semantics first-class protocol data — closed. See CHANGELOG.
-2. [x] Fix the bridge trust boundary for attention — closed. `RetainedLayerState` now commits the bridge boundary (`x_attn_i8`, `scale_x_attn`) alongside `a`, the retained hash domain is bumped to `vi-retained-v3`, and the canonical verifier enforces check-and-gate on the opened bridge input before downstream replay. If canonical recomputation matches within tolerance, verification continues from the committed bridge value, not the verifier's replayed value, so approximation error does not propagate. Dedicated tamper/missing-data tests cover bridge-vector mismatch, bridge-scale mismatch, presence-marker hashing, and fail-closed behavior. See CHANGELOG.
-3. [x] Add committed KV transcript with kv_root covering full causal prefix — closed. See CHANGELOG.
-4. [x] Clean the old attention-gap measurement strategy — closed. All four criteria met: (1) no confounded L_inf=127/255 claims remain in code or output — the only 127/255 references are legitimate i8 quantization bounds; (2) `corridor.rs:measure_corridor()` fails closed ("no prefix_retained", "no prefix_shell_openings", "no shell_opening", "empty prefix_shell_openings") when required data is missing; (3) naming cleanly distinguishes `measure_attention_diff` (diagnostic measurement tool, no pass/fail) from `compare_attention_output` (verifier tolerance check), and `corridor.rs` module doc explicitly states "measurement tool — no pass/fail threshold"; (4) `CorridorScaleOverrides` documented as "used only in the corridor/debug path, not in the verification protocol", and `bounds.rs` explicitly states pure replay from QKV accumulators alone cannot support ≤1 guarantee — committed intermediates are necessary.
-5. [ ] Derive per-step tolerance bounds and validate empirically, done when each step of the attention chain (dequant, RoPE, Q·K score, softmax, α@V weighted sum, INT8 quantization) has both an analytical upper bound and empirical validation on the real GPU kernel. Check-and-gate with committed intermediates (KV from #3, attn_out_i8 already retained, and challenged-token Q from the opened shell/bridge path in #2) makes this a single-step problem — errors cannot compound across layers because the verifier continues from committed values. The empirical measurement must follow the same rule: compare verifier/GPU reference values against the committed/opened intermediate for that step, then continue the next step from the committed/opened value rather than from the replayed approximation. On the current committed-KV path, treat the first generated token (`token_index = n_prompt_tokens - 1`) and later decode tokens as the authoritative empirical targets. Prompt-side prefill positions (`token_index < n_prompt_tokens - 1`) are currently diagnostic only: they still lack the initial prompt KV needed for structurally complete replay, so they must not be used as headline corridor numbers. Empirical status: Qwen2.5-7B-W8A8 on A100-80GB now has a trustworthy corridor measurement on the corrected committed-`x_attn` path — 672 measurements across 6 workloads, all 28 layers, global max `L_inf = 8`, first-generated-token max `= 5`, decode max `= 8`, `frac_eq > 92%`, `frac<=1 > 99.8%`, with no growth across sequence length. Llama-3.1-8B-W8A8 is now also trustworthy on the corrected path after Llama3 `rope_scaling` support landed: across short through long-context workloads, global max `L_inf = 9`, first-generated-token max `= 5`, decode max `= 9`, `frac_eq ≈ 94–96%`, and `frac<=1 > 99.9%`, with only mild growth at the longest measured contexts. Current evidence therefore supports one shared Qwen/Llama attention tolerance around `10` on the measured path rather than family-specific tolerance splits. Remaining to close #5: finish the code cleanup in #6, land the third-family and larger-model controls in #7/#8, and derive the analytical bound itself. Score witnessing from #9 is an optional stronger follow-on path, not a prerequisite for initial publication. But the single-step bound still determines the accepted neighborhood and false-reject rate, so it must be tight. Explicit theorem target: derive a sufficient condition for `max_abs_diff = 1` in i8 space, i.e. prove that if the pre-quantization float error satisfies `||Δa_f||_inf < scale_a` then requantized outputs differ by at most one bucket. Current formal result: pure replay from QKV accumulators alone cannot support a worst-case `<= 1` guarantee; the theorem target is only plausible once the verifier compares against stronger committed/opened intermediates. In particular, the viable formal-`<= 1` paths are: (a) challenged-token Q from the opened shell/bridge path plus committed full-causal K/V, (b) score anchoring from #9 as an optional stronger path, or (c) commitment-bound attn_out_i8 as a weaker fallback that removes the corridor but does not independently verify attention derivation. Analytical bounds give the ceiling: score error is dominated by dequant+RoPE input perturbation (Δscore ≈ δq·k + q·δk, not just FP32 accumulator epsilon); quantization cliffs mean coordinates near INT8 bucket boundaries can flip from arbitrarily small float changes, so the margin distribution matters, not just machine epsilon; kernel-specific details (dequant semantics, RoPE implementation, accumulation order, block/group scales) affect real bounds. Empirical measurement validates: real L-inf per step, real agreement rates, false-reject rate at the analytical bound, whether the theoretical ceiling is remotely tight. To skip empirical validation entirely would require a fully specified canonical attention arithmetic path (#22), not just committed intermediates.
-6. [ ] Unify verifier/prover/corridor attention semantics around the committed `x_attn` boundary, done when the maintained prover KV-transcript path, canonical verifier replay, and corridor measurement share one explicit story for dequantization, QKV bias application, RoPE convention, scale handling, and the `x_attn` boundary used to reconstruct Q/K/V. The kept path must not silently mix bridge-derived Q with committed/captured K/V, and stale diagnostic-only asymmetries or alternate helper stacks must either be removed or clearly quarantined as debug-only.
-7. [ ] Extend the empirical corridor beyond the landed Qwen+Llama controls to at least one materially larger model, done when at least one 30B/70B-class datapoint (or strongest practical equivalent) is measured on the same corrected path and folded into the support matrix and paper claims. This is follow-on validation work, not a prerequisite for publishing the current Qwen+Llama result. Maintained docs and paper claims must stay scoped to the families, sizes, and quantization schemes that have actually been measured.
-8. [ ] Add one third-family control beyond Qwen and Llama, done when at least one additional family (preferably Mistral, otherwise Gemma or the strongest practical alternative) is measured on the kept path and the result is folded into the support matrix and paper claims. The goal is to show the protocol is not overfit to a single pair of architectures. This is follow-on validation work, not a prerequisite for publishing the current Qwen+Llama result.
-9. [ ] Optional follow-on: add score anchoring / score witnessing for deep audits, done when the protocol can validate pre-softmax attention scores for challenged tokens against shell-Q and Merkle-bound K, then continue from the witness scores for softmax and V weighted sum. Q and K accumulators are INT32 (shell-verified); the score tolerance comes from dequant+RoPE BF16-vs-f64 perturbation on the inputs (Δscore ≈ δq·k + q·δk), not softmax amplification. This catches attention pattern manipulation (wrong K positions getting high scores) without requiring FP softmax agreement. Cost: O(seq_len × n_heads) per audited token per layer. Current local progress: wire/types support for `ScoreWitness` in `V4AuditResponse` is landed in the worktree; next steps are (1) GPU-grounded score measurement, (2) post-witness residual measurement, (3) canonical verifier phase, and (4) prover deep-audit opening path. This is explicitly follow-on tightening work for deeper audits, not part of the initial publication blocker set. The score tolerance bound needs the same analytical+empirical treatment as #5.
-10. [ ] Analyze W_o conditioning for the commitment-bound security argument, done when σ_min(W_o) is computed per layer and included in the verifier key. This quantifies the adversary's freedom under routine audits where attn_out_i8 is commitment-bound but not independently replayed: given fixed next-layer input (shell-verified) and fixed W_o, the set of attn_out_i8 vectors satisfying W_o × attn_out ≈ target is bounded by the Freivalds threshold divided by σ_min. For full-rank W_o with reasonable conditioning, this is at most a few INT8 steps — essentially zero practical freedom for meaningful attention manipulation.
-11. [ ] Clean the repository and converge on one maintained kept-path implementation, done when stale corridor/debug paths, one-off diagnostic hooks, duplicate attention helpers, provisional comments, and obsolete protocol-era code are either deleted or clearly quarantined outside the maintained path. The goal is that the repo visibly reflects the kept protocol and measured path rather than an archaeology of superseded experiments.
-12. [ ] Bind committed KV to real computation via provenance checks, done when the prover cannot commit arbitrary K/V — sampled or batched Freivalds checks verify that committed K/V are consistent with the committed Wk/Wv weights and the bridge inputs that feed them. Important for the final exact-attention protocol, but not a prerequisite for deriving tolerance bounds once the committed intermediates are structurally complete.
-13. [ ] Rewrite the verifier from scratch against the frozen final spec, done when the canonical verifier is the frozen trusted path, the legacy verifier is no longer needed for rollback, and the remaining verifier contract is explicit in tests and GPU evidence. Partial: the canonical verifier is now the trusted public path; legacy-vs-canonical parity tests, canonical frozen pass/reject fixtures, and full verifier-suite coverage (`canonical`, `v4_e2e`, `boundary_fuzz`, `cross_version`, `golden_conformance`, `hardening_gate`) exist; external challenge-response matching now lives in the client-side wrapper rather than inside the canonical trust boundary; phase-level tests cover all 9 phases (structural, embedding, specs, output policy, bridge, LM-head, deep prefix, tokenization, detokenization) plus Ctx::new() unit tests; token-0 attention replay closes the single-token computation gap; deep-prefix attention replay verifies multi-token attention for both prefix tokens and the opened token in the toy/reference path; routine-audit known-gap test documents that self-consistent fake `a` passes for token > 0 without deep-prefix. Remaining: fresh real-GPU confirmation on the current canonical code path through `scripts/modal/test_e2e_v4.py` and `redteam/modal/test_adversarial.py`, plus the cleanup/unification work in #6 and #11 so the frozen verifier path is not carrying parallel semantic helper stacks. Production RoPE-aware deep-prefix replay already landed (see CHANGELOG); not yet confirmed on real GPU — tracked in #14.
-14. [ ] Add explicit GPU smoke tests for the current attention-replay coverage, done when maintained GPU tests exercise token-0 attention replay and the kept deep-prefix attention path on the current canonical verifier. Partial boundary: this confirms the currently implemented coverage, but does not by itself close the broader attention protocol work in #1-#14.
-15. [ ] Define verifier-key distribution and pinning, done when clients have one canonical procedure for trusted key provenance, key hash/version pinning, historical key lookup, and fail-closed handling of unknown verifier keys.
-16. [ ] Handle verifier-key rotation explicitly, done when key versions are tracked and old receipts remain auditable with the correct historical key.
-17. [ ] Use verifier-secret randomness in deep-audit batching, done when any deep-audit batching or compression uses verifier-only randomness that the prover cannot predict before commitment.
-18. [ ] Run an explicit hidden-trust-assumptions review, done when exact, approximate, statistical, fail-closed, and out-of-scope trust assumptions are enumerated and checked against the code and claims.
-19. [ ] Explicitly separate audit tiers in the protocol, done when the protocol defines distinct tiers with explicit coverage and cost: receipt-only (commitment exists, no openings); routine (full 7-matrix shell/tail/binding exact, with the current bounded attention check on the challenged path); deep (routine plus fuller challenged-prefix openings on the current maintained path); full (full 7-matrix shell plus all challenged layers and all challenged prefix positions opened). The kept path does not weaken the exact linear shell in lighter tiers; only the attention evidence changes. A future score-witness tier may be added later, but it is not part of the initial published release contract.
-20. [ ] Update guarantee language to match actual verification boundaries, done when the protocol docs clearly separate: exact (shell/tail/bindings/projections — Freivalds-verified or deterministic INT8×INT8), bounded approximate attention replay with empirical tolerance on the maintained path, statistical (sampled provenance checks), and fail-closed (versioning/unsupported paths). Check-and-gate prevents error accumulation, but the per-step tolerance is still an empirically validated bound, not a zero-width exact match. The verifier always continues from committed values. If W_o conditioning or score witnessing land later, the routine/deep attention story can be strengthened accordingly.
-21. [ ] Define verification profiles as the mechanism for cross-family support, done when the protocol has a named-profile concept where each supported model family gets a validated configuration (tolerance table, supported context lengths, audit escalation policy, optional backends) under the same core protocol, receipt format, and verifier architecture. Current evidence supports a shared Qwen/Llama attention tolerance around `10` on the measured path, so profiles should stay focused on architecture/support metadata unless the third-family or larger-model controls demonstrate a real need for policy divergence.
-22. [ ] Optional: canonical deterministic attention arithmetic, done when a canonical attention kernel or arithmetic specification makes attention replay bit-exact on the maintained verified-serving path. This is the only way to eliminate empirical tau entirely on that path — without it, the per-step tolerances in #5 still require measurement to validate. With check-and-gate the corridor is a single-step problem (not accumulating), which makes it much more tractable, but it is still a nonzero tolerance that depends on kernel implementation details. This is explicitly a side experiment, not part of the current release critical path.
-23. [ ] Experimental: prototype a canonical attention kernel and measure corridor=0, done when a custom Triton (or CUDA) attention kernel with specified arithmetic (fixed accumulation order, deterministic reductions, explicit softmax precision) can replace FlashAttention on a maintained verified path and the corridor measurement confirms `L_inf = 0` on the tested model/runtime combination. Initial test plan: (1) write a simple deterministic attention kernel matching verifier arithmetic as closely as practical; (2) integrate it into the verified serving path as an opt-in experiment; (3) rerun the corridor suite on a representative model such as Qwen W8A8; (4) benchmark throughput and end-to-end protocol cost versus the kept path. Success on one experiment does not automatically close #5, #9, or the broader security/documentation work; it only justifies reconsidering that branch if exactness and cost both hold on the maintained path.
-24. [ ] Remove the legacy verifier after a soak period, done when `verify_v4_legacy` and any rollback-only verifier scaffolding are deleted and the canonical verifier is the only maintained trusted verification path.
-25. [ ] Add at least one independent non-Rust verifier consumer, done when some non-Rust implementation can consume the golden vectors and reproduce expected verification results.
+| # | Item |
+|---|------|
+| 98 | **Formal security argument** — define the cheating game, state Freivalds soundness bound (1/p), state detection probability as f(sampling rate, cheating fraction), state what commitment binding prevents |
+| 18 | **Trust assumptions review** — enumerate exact, approximate, statistical, fail-closed, and out-of-scope assumptions; check against code and claims |
+| 106 | **Freshness / temporal binding** — verifier-issued nonce or timestamp in receipts; prevent replay of cached honest responses |
+| 5 | **Tolerance bounds** — analytical per-step bound for the attention corridor. Empirical data exists (Qwen L∞=8, Llama L∞=9); formal bound does not. Theorem target: `max_abs_diff ≤ 1` in i8 space given `‖Δa_f‖∞ < scale_a` |
+| 12 | **KV provenance** — sampled/batched Freivalds checks verify committed K/V are consistent with committed Wk/Wv weights and bridge inputs |
+| 19 | **Audit tiers** — formalize receipt-only / routine / deep / full with explicit coverage and cost per tier |
+| 20 | **Guarantee language** — docs clearly separate exact (Freivalds/INT8), bounded approximate (attention), statistical (sampled provenance), and fail-closed |
+| 15 | **Verifier-key distribution** — canonical procedure for trusted key provenance, hash pinning, historical lookup, fail-closed on unknown keys |
+| 16 | **Key rotation** — key versions tracked; old receipts remain auditable with historical key |
+| 17 | **Verifier-secret randomness** — deep-audit batching uses verifier-only randomness the prover cannot predict before commitment |
 
-## Prover / Live Server / Ops
+---
 
-26. [ ] Add startup self-checks for the live verified server, done when startup fails closed on model-identity mismatch, bad capture settings, or unsupported verified-mode configuration.
-27. [ ] Add supported-architecture detection and fail-closed behavior, done when unsupported model families and layouts are detected explicitly instead of being silently treated as decoder-only/Llama-style.
-28. [ ] Define and enforce buffer-pressure behavior, done when overflow behavior for capture and audit-state buffers is explicit and tested.
-29. [ ] Define and enforce audit-state retention behavior, done when retention TTL, cleanup, and purge behavior are explicit and tested.
-30. [ ] Add health and readiness checks, done when the live server can report whether capture hooks, audit buffers, model identity, and verified-mode settings are all healthy and aligned.
-31. [ ] Add audit-endpoint abuse protection, done when audit requests are rate-limited, bounds-checked, and protected against amplification via unreasonable token or layer requests.
-32. [ ] Add explicit remote-GPU evidence for the EOS-trim regression path, done when a targeted Modal run triggers EOS-before-max_tokens on real GPU and verifies commit + audit + verify on the trimmed trailing-forward-pass path.
+## Tier 2 — Model breadth
 
-## Benchmarks / Performance
+Without broader model support, CommitLLM is a Qwen+Llama demo, not a product.
 
-33. [ ] Define a stable benchmark protocol, done when workload corpus, model/settings, warmup policy, hardware class, remote environment, and reporting format are fixed for milestone comparisons.
-34. [ ] Record benchmark baselines before and after each runtime-affecting milestone, done when every change to the live sampler, final-token boundary, deep-audit path, sync/capture behavior, or retained-state layout has a before/after benchmark entry.
-35. [ ] Run periodic remote-GPU benchmark checkpoints, done when milestone comparisons are repeated on the same representative remote GPU class rather than relying only on local numbers.
-36. [ ] Treat unexplained regressions as blockers, done when each regression is either explained or explicitly recorded as an accepted protocol-strengthening tradeoff before further work proceeds.
-37. [ ] Benchmark exact deep-audit open cost, verifier cost, and payload cost, done when the chosen exact-prefix procedure has real benchmark numbers attached to it.
-38. [ ] Benchmark the canonical routine-audit path, done when baseline, online overhead, commit time, audit-open time, verifier time, retained-state size, and binary payload size are all measured on the reference environment.
-39. [ ] Benchmark the canonical exact-prefix path, done when greedy cost, sampled cost, routine-versus-exact-prefix audit cost, exact-prefix premium, retained-state size, payload size, and verifier time are all measured on the reference environment.
-40. [ ] Inspect the binary payload by field, done when the receipt and audit format is measured field-by-field rather than only as a total size.
-41. [ ] Measure retained-state memory and audit bandwidth, done when per-token storage cost and audit-transfer cost are quantified for the target deployments.
-42. [ ] Measure real audit-window storage costs, done when RAM, NVMe, and network storage costs for realistic retention windows are quantified.
-43. [ ] Calibrate routine-audit detection probabilities, done when routine-audit sampling rates are tied to measured or modeled detection probabilities rather than informal intuition.
-44. [ ] Benchmark batch verification, done when verifier throughput for batched audits is measured rather than assumed.
-45. [ ] Reduce audit payload structurally where possible, done when unnecessary full vectors are removed without weakening the strongest routine/deep-audit semantics. Priority here is lossless shell compression that preserves the full exact Freivalds/bridge checks: width-packed accumulator encodings, tighter binary layouts, and proof-layout improvements. Do not treat dropping shell matrices as the default bandwidth solution.
-46. [ ] Add streaming or incremental audit open if it materially helps, done when it measurably reduces peak memory or audit-open time and is benchmarked against the baseline.
-47. [ ] Lower online inference overhead further if it remains worthwhile, done when the remaining online-cost work has either been completed and benchmarked or consciously stopped because the returns are too small.
-113. [ ] Build a native graph-compatible capture backend, done when the tracing/capture hot path is implemented in C++/CUDA or Triton rather than Python, eliminating Python interception overhead, extra GPU syncs, and host-side copies. This is the concrete path to lowering the current ~12–14% online overhead. The current design explicitly keeps the serving kernel unchanged and pays overhead in tracing *around* it (`sidecar/verilm/capture.py`), not in replacing model math. The native backend should be fused into or adjacent to the existing serving kernels so that accumulator capture happens inside the kernel launch rather than as a separate Python-orchestrated step. This also directly enables CUDA graph compatibility (#93): if capture hooks live at the CUDA/driver level rather than in Python wrappers, they survive graph replay. Milestones: (a) profile the current capture path to identify the dominant cost (Python interception vs. sync vs. copy vs. materialization); (b) prototype a native capture hook for `cutlass_scaled_mm` that writes accumulators to a pre-allocated ring buffer without a Python round-trip; (c) benchmark the prototype against the Python path on the same model/workload; (d) integrate with the existing retained-state pipeline. This is distinct from the canonical deterministic attention kernel (#22/#23), which targets exactness rather than performance and may well be *slower* than FlashAttention. The two projects are complementary but should not be conflated: the capture backend lowers overhead on the kept approximate-attention path; the deterministic kernel optionally eliminates the approximate region.
-48. [ ] Rebenchmark after each meaningful online-path change, done when every material serving-path change has fresh benchmark data attached to it.
+| # | Item |
+|---|------|
+| 100 | **MoE support** — verify expert routing decisions and per-expert shell matmuls for Mixtral, DeepSeek-V2/V3, Qwen-MoE. Commit router logits/top-k, Freivalds on selected expert weights, fail-closed on unsupported routing. |
+| 101 | **FP8 quantization** — validated capture/replay/verification for FP8 (E4M3/E5M2) on Hopper/Blackwell. Capture layer needs FP8 `scaled_mm` wrappers; verifier needs FP8 dequant and bridge replay. |
+| 8 | **Third family** — Mistral, Gemma, or strongest alternative measured on the kept path. Proves not overfit to two architectures. |
+| 7 | **Larger model** — at least one 30B/70B-class datapoint on the corrected path |
+| 103 | **Long-context 128K+** — validate corridor at production context lengths where attention numerics are most stressed |
+| 95 | **GPTQ/AWQ/grouped quant** — at least one non-W8A8 family with a fully validated verifier replay path |
+| 21 | **Verification profiles** — per-family configuration (tolerance table, context lengths, audit policy) under the same core protocol |
 
-## Docs / Publication
+---
 
-49. [ ] Rename the maintained product surface to `CommitLLM` before publication, done when maintained docs, APIs, CLI/help text, scripts, package names, example commands, and user-facing flows consistently use `CommitLLM` as the product name. Internal historical identifiers may remain versioned where needed for compatibility, but the public surface should use only `CommitLLM` branding. This is a publication blocker and should be handled first in the publication checklist: the external story should not ship with split branding.
-50. [ ] Remove protocol-generation naming from the product surface, done when maintained docs, APIs, CLI/help text, and user-facing flows stop framing the first release as “V4/V5” and instead use one canonical first-release product naming story. Internal binary/version fields may stay versioned, but public naming should not imply a prior shipped generation.
-51. [ ] Make the implementation-status split explicit in the docs, done when the docs say they describe the target final protocol and the roadmap is clearly the implementation tracker.
-52. [ ] Make the production verification surface explicitly binary-only, done when maintained docs and public verification APIs clearly mark the canonical binary format as the normative production path and any JSON path as debug/development-only compatibility tooling.
-53. [ ] Freeze the verifier-facing report contract, done when `V4VerifyReport`-equivalent report fields, failure codes, coverage fields, and the client-wrapper contract are pinned by maintained golden tests and documented as a stable public verification surface across Rust and Python.
-54. [ ] Ship a reference client verification flow, done when one canonical verifier-facing CLI or reference flow binds trusted verifier key, exact receipt/commitment, exact served output, verifier-issued challenge, audit bytes, and coverage interpretation in one maintained path.
-55. [ ] Keep the paper, README, and article normative to the final protocol, done when they describe the destination protocol while benchmark and result sections remain factual about current implementation and measurements.
-56. [ ] Update the paper, README, and article with the landed corridor evidence and its current scope, done when maintained result sections report both the Qwen2.5-7B-W8A8 A100 corridor numbers (`global max L_inf = 8`, first-generated-token max `= 5`, decode max `= 8`, `frac_eq > 92%`, `frac<=1 > 99.8%`, no growth with sequence length) and the corrected Llama-3.1-8B-W8A8 corridor numbers (`global max L_inf = 9`, first-generated-token max `= 5`, decode max `= 9`, `frac_eq ≈ 94–96%`, `frac<=1 > 99.9%`, mild long-context growth only), and explicitly label the third-family and larger-model controls as pending until those runs land.
-57. [ ] Update the full protocol documentation in the README, done when the README covers the final protocol framing, verification coverage, manifest surface, architecture, verifier model, and routine-versus-deep audit semantics.
-58. [ ] Update the full protocol specification in the paper, done when the paper contains the exact/statistical/commitment-bound/fail-closed boundary, four-spec structure, routine-versus-deep audit, retained-state path, and verifier randomness model.
-59. [ ] Add an explicit input-verification procedure to the paper, README, and article, done when all three docs explain raw request reconstruction, tokenization under the committed input spec, and binding to the embedding/input path.
-60. [ ] Add an explicit transcript-chain and anti-splice procedure to the paper, README, and article, done when all three docs describe prompt genesis, token/transcript chaining, and rejection of reorder/deletion/splice/cross-request mixups.
-61. [ ] Make one canonical deep-audit procedure explicit in the paper, README, and article, done when the same exact full-prefix algorithm is described as the normative deep-audit mode everywhere.
-62. [ ] Add a decode/output support matrix to the paper, done when the paper has one place that says which features are bound, replayed exactly, or fail-closed.
-63. [ ] Use one canonical randomness story everywhere, done when the docs use the same wording and procedure for seed commitment, seed reveal, and per-token randomness derivation.
-64. [ ] Document verified-mode deviations from stock vLLM, done when the paper and docs explain what verified mode changes operationally without overstating serving-path differences.
-65. [ ] Document supported and unsupported architectures explicitly, done when the docs state the supported model/layout families and the implementation’s fail-closed behavior matches that support matrix.
-66. [ ] Document canonical semantics versus trust assumptions clearly, done when the docs separate protocol semantics from what is simply trusted outside scope.
-67. [ ] Add an explicit trusted-assumptions section to the paper, README, and article, done when standard cryptographic assumptions, verifier-key secrecy, side-channel assumptions, and verifier-correctness assumptions are all stated explicitly.
-68. [ ] Add fail-on-unknown versioning rules to the docs and code-facing docs, done when unknown receipt or protocol versions are specified to fail closed rather than being interpreted leniently.
-69. [ ] Document privacy implications of receipts and audits, done when the docs explain what receipts reveal, what audit openings reveal, and what transport/deployment practices are recommended.
-70. [ ] Add a pipeline or boundary figure, done when at least one maintained doc has a figure that clearly marks exact, statistical, commitment-bound, and trust-assumption boundaries.
-71. [ ] Update the article or writeup to match the full protocol, done when the article has the final trust-boundary figure, four-spec explanation, guarantee boundary, and explicit unsupported-feature fail-closed rule.
-72. [ ] Run the final kept-path benchmark suite, done when the final benchmark set is rerun after the implementation converges on the kept protocol path.
-73. [ ] Explain benchmark methodology and regression gates in the paper and docs, done when the published docs say what hardware and workloads were used and how protocol-strengthening tradeoffs were benchmark-gated.
-74. [ ] Publish only when the story is coherent, done when the code, benchmarks, docs, and claims all line up on the same kept path and any unfinished strengthening work is explicitly scoped as follow-on rather than implied to be landed.
+## Tier 3 — Performance & serving compatibility
 
-## Security / Adversarial
+Determines whether CommitLLM is deployable at production throughput.
 
-97. [ ] Run a systematic adversarial testing campaign, done when a dedicated cheating-provider test suite attempts receipt forgery, transcript splicing, intermediate tampering, model substitution (smaller model behind the same receipt), selective layer cheating, and KV injection — and every attack either fails verification or is documented as an accepted gap with mitigation. This is distinct from correctness testing (#13, #14): correctness tests verify that honest providers pass; adversarial tests verify that dishonest providers fail. The existing `redteam/modal/test_adversarial.py` is a starting point but not a comprehensive campaign.
-98. [ ] Write a formal security argument or reduction, done when the protocol's security claims are stated as explicit theorems with assumptions, adversary model, and winning conditions — even if the proofs are semi-formal rather than machine-checked. At minimum: (a) define the cheating game (adversary controls the provider, wins if verification passes on output that differs from honest execution beyond tolerance); (b) state the soundness bound for the Freivalds shell (information-theoretic, 1/p per check); (c) state the detection probability for routine audits as a function of sampling rate and cheating fraction; (d) state what the commitment binding prevents (post-hoc modification, splice, replay). This need not be Lean-formalized (#84) but it must be written down precisely enough that a cryptographer can review it.
-99. [ ] Fuzz the receipt and audit binary parsers, done when the verifier's binary deserialization paths have been fuzzed with coverage-guided fuzzing (cargo-fuzz or equivalent) and all crashes are fixed. Malformed receipts must fail closed, not panic or produce undefined behavior.
+| # | Item |
+|---|------|
+| 113 | **Native capture backend** — C++/CUDA/Triton hot path replacing Python interception. Milestones: (a) profile dominant cost, (b) prototype native `cutlass_scaled_mm` hook with ring buffer, (c) benchmark vs Python path, (d) integrate. Also enables CUDA graph compat (#93). Distinct from deterministic attention kernel (#22) which targets exactness. |
+| 92 | **Cross-request prefix caching** — committed prefix receipt referenced by subsequent requests. Highest-impact unsupported optimization (~2-5x TTFT). Prefix cache becomes first-class committed object. |
+| 86 | **Test continuous batching** — tracer splits batched prefill into per-token traces; commit+audit+verify on real GPU with concurrent requests |
+| 87 | **Test paged attention** — paged KV doesn't interfere with committed KV transcript integrity |
+| 88 | **Test tensor parallelism** — TP=2 and TP=4 produce valid receipts. Startup hook patches TP workers but needs real multi-GPU confirmation. |
+| 89 | **Test fused kernels** — fused QKV and gate-up projections produce correct shell accumulators, pass Freivalds |
+| 90 | **Test FlashAttention** — attention outputs within established corridor bounds with FA enabled |
+| 91 | **Test more W8A8 families** — overlaps with #7 and #8 |
+| 93 | **CUDA graph compatibility** — capture hooks survive graph replay. Largely solved by #113. Impact: ~10-30% decode latency. |
+| 94 | **Speculative decoding** — commit draft model identity, draft tokens, acceptance masks. New sub-protocol for accept/reject transcript. Impact: ~2-3x generation latency. |
+| 96 | **LoRA/adapter verification** — verifier confirms served weights match `base + adapter`. Model spec already hashes adapter identity. |
+| 102 | **Pipeline parallelism** — PP configs produce valid receipts. Capture layer handles cross-GPU activation transfers. |
+| 47 | **Lower online overhead** — complete remaining cost work or consciously stop if returns are too small |
+| 45 | **Reduce audit payload** — lossless shell compression: width-packed accumulators, tighter binary layouts. Don't drop shell matrices. |
 
-## Serving-Optimization Compatibility
+---
 
-These items validate that CommitLLM works correctly with standard production serving optimizations. The protocol is designed to support request-local, semantics-preserving optimizations; the work here is confirming that empirically and fixing any integration issues.
+## Tier 4 — Production infrastructure
 
-### Already supported — needs explicit testing
+Needed for real multi-tenant deployment.
 
-86. [ ] Test continuous batching / batched prefill / batched decode under verified mode, done when the tracer correctly splits batched prefill rows into per-token traces and commit+audit+verify passes on real GPU with concurrent batched requests. The tracer already handles this in `sidecar/verilm/trace.py` but lacks dedicated integration tests.
-87. [ ] Test paged attention under verified mode, done when paged KV management does not interfere with committed KV transcript integrity and commit+audit+verify passes with paged attention enabled on real GPU.
-88. [ ] Test tensor parallelism (multi-GPU) under verified mode, done when TP=2 and TP=4 configurations produce valid receipts and pass verification. The startup hook patches TP workers in `sidecar/verilm/_startup.py` and `sidecar/verilm/worker.py` but this needs real multi-GPU confirmation.
-89. [ ] Test fused GEMM / fused projection kernels under verified mode, done when fused QKV and fused gate-up projections produce correct shell accumulators and pass Freivalds checks. The capture layer wraps `cutlass_scaled_mm` in `sidecar/verilm/capture.py` but needs explicit fused-kernel test coverage.
-90. [ ] Test FlashAttention v2/v3 under verified mode, done when FlashAttention-based serving produces attention outputs within the established corridor bounds and commit+audit+verify passes. The protocol already treats attention as the approximate region so this should work, but needs measurement confirmation.
-91. [ ] Test INT8/W8A8 quantization families beyond Qwen and Llama, done when at least one additional W8A8 model family passes the full corridor measurement and verification pipeline. Overlaps with roadmap items #7 and #8.
+| # | Item |
+|---|------|
+| 104 | **Streaming / SSE** — incremental commitments during token-by-token streaming; partial receipts before generation completes |
+| 105 | **Multi-turn binding** — chain receipts across conversation turns (hash of prior receipt in next commitment) |
+| 107 | **Monitoring / observability** — export metrics: failure rate, corridor histograms, audit latency, buffer utilization, receipt throughput (Prometheus/OTel) |
+| 108 | **Receipt storage** — indexing by request ID, time, model, verification status. Append-only log, object store, or blockchain anchoring. |
+| 109 | **Verifier deployment** — hosted service vs client-side library vs hybrid. Address key distribution, receipt transport, offline vs real-time. |
+| 110 | **Receipt compression** — compact aggregate receipts or compressed streams at thousands of req/sec |
+| 111 | **Audit delegation** — verifier delegates authority to trusted third-party auditor. Define trust model, revocation. |
+| 78 | **OpenAI-compatible proxy** — standard API with receipt metadata, challenge endpoint, verifier CLI |
+| 77 | **Client SDKs** — Python and TypeScript wrappers for receipt handling and verification |
+| 54 | **Reference client flow** — one canonical CLI: trusted key → receipt → served output → challenge → audit → coverage interpretation |
+| 26 | **Startup self-checks** — fail closed on model-identity mismatch, bad capture settings, unsupported config |
+| 27 | **Architecture detection** — unsupported families detected explicitly, not silently treated as Llama-style |
+| 28 | **Buffer-pressure behavior** — capture and audit-state buffer overflow is explicit and tested |
+| 29 | **Retention behavior** — audit-state TTL, cleanup, and purge are explicit and tested |
+| 30 | **Health checks** — server reports capture hook, audit buffer, model identity, verified-mode health |
+| 31 | **Abuse protection** — audit requests rate-limited, bounds-checked, no amplification |
+| 32 | **EOS-trim evidence** — real-GPU test: EOS-before-max_tokens triggers trim, commit+audit+verify passes |
 
-### Supportable with protocol extensions
+---
 
-92. [ ] Design protocol extension for cross-request prefix caching, done when a committed prefix receipt can be referenced by subsequent requests without recomputing shared KV state. This is the highest-impact unsupported optimization (~2-5x TTFT for shared-prefix workloads). The fundamental challenge is that shared prefix state breaks the per-request commitment model; the prefix cache itself needs to become a first-class committed object.
-93. [ ] Design protocol extension for CUDA graph compatibility, done when the capture/tracing layer can operate within CUDA graph replay rather than requiring Python-level kernel interception. Current capture hooks in `sidecar/verilm/capture.py` are bypassed by CUDA graph replay. Options include driver-level interception or a graph-capture-aware wrapper. Impact: ~10-30% decode latency reduction.
-94. [ ] Design protocol extension for speculative decoding, done when the protocol can commit draft model identity, draft tokens, acceptance masks, and prove that final tokens match what the target model would have produced at accepted positions. This requires a new sub-protocol for the accept/reject transcript and decode binding. Impact: ~2-3x generation latency reduction.
-95. [ ] Add GPTQ / AWQ / grouped quantization support, done when at least one non-W8A8 quantization family has a fully validated replay path in the verifier. The manifest already binds `quant_family`, `scale_derivation`, and `quant_block_size`. Overlaps with roadmap item #5.
-96. [ ] Add LoRA / adapter / merged checkpoint verification, done when the verifier can confirm that served weights match `base + adapter` for a committed adapter identity. The model spec already hashes adapter identity. Overlaps with roadmap item #80.
+## Tier 5 — Strengthening & research
 
-### Architecture extensions
+Important for the long-term story but not blocking anything above.
 
-100. [ ] Add Mixture-of-Experts (MoE) support, done when the protocol can verify expert routing decisions and per-expert computation for MoE models (Mixtral, DeepSeek-V2/V3, Qwen-MoE). Router selection adds a new verification dimension: the verifier must confirm which experts were activated per token and that the activated experts' matmuls are shell-verified. This requires (a) committing the router logits or top-k selection per token per layer, (b) Freivalds checks on the selected expert weight matrices, and (c) fail-closed behavior for unsupported routing patterns. MoE is becoming a dominant architecture for large models, so this is high priority for broad model coverage.
-101. [ ] Add FP8 quantization support (Hopper/Blackwell native), done when FP8 (E4M3/E5M2) models have a validated capture, replay, and verification path. FP8 is becoming the default precision on H100/H200/B200 GPUs. The capture layer needs FP8-specific `scaled_mm` wrappers, the verifier needs FP8 dequantization and bridge replay, and the keygen needs FP8-to-reference conversion. The corridor measurement may differ from INT8 because FP8 has different rounding semantics and range.
-102. [ ] Add pipeline parallelism support, done when PP configurations (layers split across GPUs) produce valid receipts and pass verification. PP changes the communication pattern — intermediate activations are sent between GPUs at layer boundaries rather than being all-reduced within layers. The capture layer must handle cross-GPU activation transfers and the retained state must be consistent across pipeline stages.
-103. [ ] Validate long-context (128K+) corridor behavior, done when the attention corridor is measured at 128K+ context lengths on at least one model and the tolerance bounds from #5 are confirmed to hold. Item #5 notes "mild growth at longest measured contexts" for Llama — this needs explicit validation at production-scale context lengths where attention numerics are most stressed (larger softmax denominators, more accumulation steps, potential for larger FP rounding divergence).
+| # | Item |
+|---|------|
+| 9 | **Score witnessing** — validate pre-softmax scores for challenged tokens against shell-Q and Merkle-bound K. Catches attention pattern manipulation without requiring FP softmax agreement. Cost: O(seq_len × n_heads) per audited token per layer. |
+| 10 | **W_o conditioning** — compute σ_min(W_o) per layer; quantifies adversary freedom when attn_out_i8 is commitment-bound but not independently replayed |
+| 22 | **Deterministic attention arithmetic** — canonical kernel or arithmetic spec making attention replay bit-exact. Only way to eliminate empirical τ entirely. Side experiment, not critical path. |
+| 23 | **Prototype deterministic kernel** — custom Triton/CUDA attention with fixed accumulation order, deterministic reductions. Measure corridor=0. May be slower than FlashAttention. |
+| 112 | **Cheating-incentive analysis** — quantify cost/benefit of model substitution, detection probability vs audit sampling rate, equilibrium conditions |
+| 84 | **Lean formalization** — machine-checked core verification claims |
+| 25 | **Non-Rust verifier** — independent implementation consuming golden vectors |
+| 79 | **llama.cpp plugin** — capture retained state from llama.cpp serving path |
+| 83 | **Marketplace integration** — providers attach receipts, clients challenge through market surface |
+| 81 | **Receipt encryption** — encrypt receipts/audit payloads to verifier's public key |
+| 82 | **Generalized retained state** — schema-driven format beyond constant-width decoder models |
+| 85 | **Full shell recomputation** — bandwidth-light, verifier-heavy mode. Future experiment requiring local weights. |
+| 75 | **Receipt-format spec** — binary format documented independently of implementation |
+| 76 | **API extensions** — serving API carries receipt metadata in stable, documented way |
+| 24 | **Remove legacy verifier** — delete `verify_v4_legacy` after soak period |
 
-### Protocol extensions for production patterns
+---
 
-104. [ ] Design protocol extension for streaming / SSE token delivery, done when the protocol can produce incremental commitments or partial receipts during token-by-token streaming, so that a client receiving tokens via SSE can verify partial output before generation completes. The current protocol commits after generation finishes — a streaming extension must define when intermediate commitments are binding and how the final receipt relates to the streamed partial commitments.
-105. [ ] Design protocol extension for multi-turn binding, done when the protocol can chain receipts across conversation turns so that a verifier can confirm the same model and configuration were used across an entire conversation. Each turn is currently an independent request; a provider could serve turn 1 honestly and swap models for turn 2. The extension needs a turn-chaining commitment (hash of prior turn's receipt included in the next turn's commitment) without requiring the verifier to hold the full conversation history.
-106. [ ] Add freshness / temporal binding to receipts, done when receipts include a verifier-issued nonce or timestamp commitment that prevents replay of cached honest responses. A provider should not be able to pre-compute a valid receipt for a common query and serve the cached receipt for all future identical queries without actually running inference. This connects to #60 (anti-splice) but addresses a different attack: not reordering tokens within a request, but replaying entire responses across requests.
+## Benchmarks checklist
 
-## Deployment / Operations
+All benchmark items in one place for tracking.
 
-107. [ ] Add monitoring and observability for verified mode, done when the verified server exports structured metrics for: verification failure rate, corridor distribution (per-layer L-inf histograms), audit latency percentiles, capture hook health, retained-state buffer utilization, and receipt generation throughput. These should be exportable to standard monitoring systems (Prometheus, OpenTelemetry, or equivalent).
-108. [ ] Define receipt storage and retrieval architecture, done when there is a specified storage backend for receipts that supports indexing by request ID, time range, model identity, and verification status — and verifiers can query and retrieve receipts for audit. This is the infrastructure between "the server generates a receipt" and "the verifier checks it." Options include append-only log, object store with metadata index, or blockchain anchoring for public verifiability.
-109. [ ] Define verifier deployment architecture, done when there is a clear deployment story for how verifiers run in production: hosted verification service, client-side library, or hybrid. This must address key distribution (#15), receipt transport, challenge/response networking, and whether verification can happen offline or requires real-time interaction with the provider.
-110. [ ] Add receipt compression and aggregation for high-throughput scenarios, done when a provider serving thousands of requests/sec can produce compact aggregate receipts or compressed receipt streams without losing per-request auditability. Individual receipt overhead may be acceptable for low-throughput use cases but becomes a bottleneck at API-provider scale.
-111. [ ] Add third-party audit delegation, done when a verifier can delegate audit authority to a trusted third party (auditor) who can challenge and verify on the verifier's behalf. This enables verification-as-a-service without the verifier needing to run infrastructure or hold the verifier key directly. Must define the trust model: what the auditor can learn, what it cannot forge, and how delegation is revoked.
+| # | Item |
+|---|------|
+| 33 | Stable benchmark protocol |
+| 34 | Record baselines before/after each runtime-affecting milestone |
+| 35 | Periodic remote-GPU benchmark checkpoints |
+| 36 | Treat unexplained regressions as blockers |
+| 37 | Benchmark deep-audit open cost |
+| 38 | Benchmark routine-audit path |
+| 39 | Benchmark exact-prefix path |
+| 40 | Inspect binary payload by field |
+| 41 | Measure retained-state memory and audit bandwidth |
+| 42 | Measure audit-window storage costs |
+| 43 | Calibrate routine-audit detection probabilities |
+| 44 | Benchmark batch verification |
+| 48 | Rebenchmark after each online-path change |
+| 72 | Run final kept-path benchmark suite |
+| 73 | Explain benchmark methodology in paper and docs |
 
-## Economic / Game-Theoretic Analysis
+---
 
-112. [ ] Write a cheating-incentive analysis, done when the cost-benefit tradeoff for a cheating provider is quantified: (a) the economic benefit of substituting a smaller/cheaper model, (b) the probability of detection as a function of routine audit sampling rate (#43) and cheating fraction, (c) the expected penalty (contract, reputation, financial), and (d) the equilibrium conditions under which cheating is irrational. This connects the protocol's technical detection probability to real-world deployment economics and informs the recommended audit policy tiers (#19).
+## Docs / publication detail
 
-## Ecosystem / Future
+| # | Item |
+|---|------|
+| 51 | Make implementation-status split explicit |
+| 52 | Production verification surface is binary-only |
+| 53 | Freeze verifier-facing report contract |
+| 55 | Paper/README/article normative to final protocol |
+| 56 | Update with landed corridor evidence (Qwen L∞=8, Llama L∞=9) |
+| 57 | Full protocol documentation in README |
+| 58 | Full protocol specification in paper |
+| 59 | Explicit input-verification procedure |
+| 60 | Transcript-chain and anti-splice procedure |
+| 61 | Canonical deep-audit procedure |
+| 62 | Decode/output support matrix in paper |
+| 63 | One canonical randomness story |
+| 64 | Document verified-mode deviations from stock vLLM |
+| 65 | Document supported/unsupported architectures |
+| 66 | Document canonical semantics vs trust assumptions |
+| 67 | Explicit trusted-assumptions section |
+| 68 | Fail-on-unknown versioning rules |
+| 69 | Document privacy implications of receipts and audits |
+| 70 | Pipeline / boundary figure |
+| 71 | Update article to match full protocol |
 
-75. [ ] Write a receipt-format specification, done when the receipt and audit binary format is documented independently of the implementation code.
-76. [ ] Add API extensions for receipt fields, done when the serving API can carry receipt metadata in a stable, documented way.
-77. [ ] Build client SDKs, done when at least Python and TypeScript wrappers exist for receipt handling and verification.
-78. [ ] Build an OpenAI-compatible proxy with receipts, done when the proxy serves a standard API, returns receipt metadata, exposes a challenge endpoint, and ships with a simple verifier CLI.
-79. [ ] Build a `llama.cpp` tracing plugin, done when the protocol can capture the required retained state from a `llama.cpp` serving path.
-80. [ ] Add fine-tuned-model and LoRA support, done when adapters or merged checkpoints can be committed, identified, and verified under the model spec. Duplicate of #96 — close whichever lands second.
-81. [ ] Add optional receipt or audit encryption for verifier-targeted privacy, done when the product can encrypt receipts or audit payloads to the verifier’s public key without changing the core claim-critical path.
-82. [ ] Generalize the packed retained-state path beyond constant-width decoder models, done when the retained-state format is schema-driven and can carry per-layer shapes and layout metadata safely.
-83. [ ] Build an inference-marketplace integration, done when marketplace providers can attach receipts and clients can challenge or verify them through the market surface.
-84. [ ] Formalize the protocol in Lean, done when the core verification claims have a maintained Lean formalization.
-85. [ ] Optionally benchmark verifier-side full shell recomputation as a bandwidth-light, verifier-heavy mode, done when exact verifier recomputation of opened shell matmuls has real bandwidth and latency numbers on representative hardware. This is a future experiment, not the kept default path: it requires local weight availability and heavy verifier compute, so it must not silently replace prover-opened accumulator checks in the main product story.
+---
+
+## Completed
+
+| # | Item |
+|---|------|
+| 1 | ✓ Make quantization semantics first-class protocol data |
+| 2 | ✓ Fix bridge trust boundary for attention (`x_attn_i8`, `scale_x_attn`, check-and-gate, `vi-retained-v3`) |
+| 3 | ✓ Add committed KV transcript with `kv_root` covering full causal prefix |
+| 4 | ✓ Clean old attention-gap measurement strategy (no confounded L∞=127/255, fail-closed on missing data, clean naming) |
