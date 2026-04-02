@@ -3,8 +3,8 @@
 //! The tree commits to per-token hashes. The prover sends the root
 //! with the response, then opens individual leaves on challenge.
 
-use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Build a Merkle tree from leaf hashes. Returns all nodes (bottom-up)
 /// and the root hash.
@@ -191,11 +191,7 @@ pub fn hash_retained_with_residual(
 /// Chains the retained leaf hash (the exact committed object) into the
 /// transcript chain. This ties order/splice resistance to the retained
 /// Merkle tree rather than ad hoc token features.
-pub fn io_hash_v4(
-    leaf_hash: [u8; 32],
-    token_id: u32,
-    prev_io_hash: [u8; 32],
-) -> [u8; 32] {
+pub fn io_hash_v4(leaf_hash: [u8; 32], token_id: u32, prev_io_hash: [u8; 32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"vi-io-v4");
     hasher.update(leaf_hash);
@@ -239,7 +235,6 @@ pub fn hash_kv_entry(layer: usize, position: usize, k_roped: &[f64], v_deq: &[f6
     hash_f64_into(&mut hasher, v_deq);
     hasher.finalize().into()
 }
-
 
 #[derive(Debug, Clone)]
 pub struct MerkleTree {
@@ -362,8 +357,13 @@ pub fn hash_output_spec(spec: &crate::types::OutputSpec) -> [u8; 32] {
     hasher.update([spec.ignore_eos as u8]);
     hash_optional_string(&mut hasher, spec.detokenization_policy.as_deref());
     match spec.eos_token_id {
-        Some(id) => { hasher.update([1u8]); hasher.update(id.to_le_bytes()); }
-        None => { hasher.update([0u8]); }
+        Some(id) => {
+            hasher.update([1u8]);
+            hasher.update(id.to_le_bytes());
+        }
+        None => {
+            hasher.update([0u8]);
+        }
     }
     hasher.finalize().into()
 }
@@ -484,16 +484,14 @@ pub fn hash_weights(
             // INT8 weight bytes
             let weights = weights_iter(layer, mt_idx);
             // Safety: i8 and u8 have identical layout
-            let bytes: &[u8] = unsafe {
-                std::slice::from_raw_parts(weights.as_ptr() as *const u8, weights.len())
-            };
+            let bytes: &[u8] =
+                unsafe { std::slice::from_raw_parts(weights.as_ptr() as *const u8, weights.len()) };
             hasher.update(bytes);
         }
     }
 
     hasher.finalize().into()
 }
-
 
 /// SHA-256 of a sampling seed (for seed commitment).
 pub fn hash_seed(seed: &[u8; 32]) -> [u8; 32] {
@@ -681,7 +679,7 @@ mod tests {
 
     #[test]
     fn test_four_spec_hash_deterministic() {
-        use crate::types::{InputSpec, ModelSpec, DecodeSpec, OutputSpec};
+        use crate::types::{DecodeSpec, InputSpec, ModelSpec, OutputSpec};
 
         let input = InputSpec {
             tokenizer_hash: [1u8; 32],
@@ -752,7 +750,7 @@ mod tests {
 
     #[test]
     fn test_four_spec_hash_differs_per_spec() {
-        use crate::types::{InputSpec, ModelSpec, DecodeSpec, OutputSpec};
+        use crate::types::{DecodeSpec, InputSpec, ModelSpec, OutputSpec};
 
         let input = InputSpec {
             tokenizer_hash: [1u8; 32],
@@ -910,13 +908,24 @@ mod tests {
         use crate::types::ModelSpec;
 
         let base = ModelSpec {
-            weight_hash: None, quant_hash: None, rope_config_hash: None,
-            rmsnorm_eps: None, adapter_hash: None,
-            n_layers: None, hidden_dim: None, vocab_size: None,
+            weight_hash: None,
+            quant_hash: None,
+            rope_config_hash: None,
+            rmsnorm_eps: None,
+            adapter_hash: None,
+            n_layers: None,
+            hidden_dim: None,
+            vocab_size: None,
             embedding_merkle_root: None,
-            quant_family: None, scale_derivation: None, quant_block_size: None,
-            kv_dim: None, ffn_dim: None, d_head: None,
-            n_q_heads: None, n_kv_heads: None, rope_theta: None,
+            quant_family: None,
+            scale_derivation: None,
+            quant_block_size: None,
+            kv_dim: None,
+            ffn_dim: None,
+            d_head: None,
+            n_q_heads: None,
+            n_kv_heads: None,
+            rope_theta: None,
         };
         let with_family = ModelSpec {
             quant_family: Some("W8A8".into()),
@@ -931,8 +940,11 @@ mod tests {
             quant_family: Some("GPTQ".into()),
             ..base.clone()
         };
-        assert_ne!(h_with, hash_model_spec(&other_family),
-            "different quant_family values must produce different hashes");
+        assert_ne!(
+            h_with,
+            hash_model_spec(&other_family),
+            "different quant_family values must produce different hashes"
+        );
     }
 
     #[test]
@@ -940,27 +952,44 @@ mod tests {
         use crate::types::ModelSpec;
 
         let base = ModelSpec {
-            weight_hash: None, quant_hash: None, rope_config_hash: None,
-            rmsnorm_eps: None, adapter_hash: None,
-            n_layers: None, hidden_dim: None, vocab_size: None,
+            weight_hash: None,
+            quant_hash: None,
+            rope_config_hash: None,
+            rmsnorm_eps: None,
+            adapter_hash: None,
+            n_layers: None,
+            hidden_dim: None,
+            vocab_size: None,
             embedding_merkle_root: None,
-            quant_family: None, scale_derivation: None, quant_block_size: None,
-            kv_dim: None, ffn_dim: None, d_head: None,
-            n_q_heads: None, n_kv_heads: None, rope_theta: None,
+            quant_family: None,
+            scale_derivation: None,
+            quant_block_size: None,
+            kv_dim: None,
+            ffn_dim: None,
+            d_head: None,
+            n_q_heads: None,
+            n_kv_heads: None,
+            rope_theta: None,
         };
         let with_sd = ModelSpec {
             scale_derivation: Some("absmax".into()),
             ..base.clone()
         };
-        assert_ne!(hash_model_spec(&base), hash_model_spec(&with_sd),
-            "scale_derivation must affect model spec hash");
+        assert_ne!(
+            hash_model_spec(&base),
+            hash_model_spec(&with_sd),
+            "scale_derivation must affect model spec hash"
+        );
 
         let other_sd = ModelSpec {
             scale_derivation: Some("zeropoint".into()),
             ..base.clone()
         };
-        assert_ne!(hash_model_spec(&with_sd), hash_model_spec(&other_sd),
-            "different scale_derivation values must produce different hashes");
+        assert_ne!(
+            hash_model_spec(&with_sd),
+            hash_model_spec(&other_sd),
+            "different scale_derivation values must produce different hashes"
+        );
     }
 
     #[test]
@@ -968,27 +997,43 @@ mod tests {
         use crate::types::ModelSpec;
 
         let base = ModelSpec {
-            weight_hash: None, quant_hash: None, rope_config_hash: None,
-            rmsnorm_eps: None, adapter_hash: None,
-            n_layers: None, hidden_dim: None, vocab_size: None,
+            weight_hash: None,
+            quant_hash: None,
+            rope_config_hash: None,
+            rmsnorm_eps: None,
+            adapter_hash: None,
+            n_layers: None,
+            hidden_dim: None,
+            vocab_size: None,
             embedding_merkle_root: None,
-            quant_family: None, scale_derivation: None, quant_block_size: None,
-            kv_dim: None, ffn_dim: None, d_head: None,
-            n_q_heads: None, n_kv_heads: None, rope_theta: None,
+            quant_family: None,
+            scale_derivation: None,
+            quant_block_size: None,
+            kv_dim: None,
+            ffn_dim: None,
+            d_head: None,
+            n_q_heads: None,
+            n_kv_heads: None,
+            rope_theta: None,
         };
         let with_bs = ModelSpec {
             quant_block_size: Some(32),
             ..base.clone()
         };
-        assert_ne!(hash_model_spec(&base), hash_model_spec(&with_bs),
-            "quant_block_size must affect model spec hash");
+        assert_ne!(
+            hash_model_spec(&base),
+            hash_model_spec(&with_bs),
+            "quant_block_size must affect model spec hash"
+        );
 
         let other_bs = ModelSpec {
             quant_block_size: Some(128),
             ..base.clone()
         };
-        assert_ne!(hash_model_spec(&with_bs), hash_model_spec(&other_bs),
-            "different quant_block_size values must produce different hashes");
+        assert_ne!(
+            hash_model_spec(&with_bs),
+            hash_model_spec(&other_bs),
+            "different quant_block_size values must produce different hashes"
+        );
     }
-
 }

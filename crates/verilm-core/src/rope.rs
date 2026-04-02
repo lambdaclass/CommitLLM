@@ -55,7 +55,7 @@ pub fn apply_rope_head_with_inv_freq(
         let angle = (position as f64) * inv_freq[i];
         let cos_f = angle.cos();
         let sin_f = angle.sin();
-        out[i]        = head_vec[i] * cos_f - head_vec[i + half] * sin_f;
+        out[i] = head_vec[i] * cos_f - head_vec[i + half] * sin_f;
         out[i + half] = head_vec[i + half] * cos_f + head_vec[i] * sin_f;
     }
 
@@ -339,21 +339,28 @@ mod tests {
                 // High freq: unchanged
                 assert!(
                     (scaled[k] - unscaled[k]).abs() < 1e-15,
-                    "dim {} (wavelen={:.0}) should be unchanged", k, wavelen
+                    "dim {} (wavelen={:.0}) should be unchanged",
+                    k,
+                    wavelen
                 );
             } else if wavelen > low_freq_wavelen {
                 // Low freq: divided by factor
                 assert!(
                     (scaled[k] - unscaled[k] / 8.0).abs() < 1e-15,
-                    "dim {} (wavelen={:.0}) should be /8", k, wavelen
+                    "dim {} (wavelen={:.0}) should be /8",
+                    k,
+                    wavelen
                 );
             } else {
                 // Medium: interpolated — should be between scaled and unscaled
                 assert!(
-                    scaled[k] >= unscaled[k] / 8.0 - 1e-15
-                        && scaled[k] <= unscaled[k] + 1e-15,
+                    scaled[k] >= unscaled[k] / 8.0 - 1e-15 && scaled[k] <= unscaled[k] + 1e-15,
                     "dim {} (wavelen={:.0}) should be interpolated: got {}, range [{}, {}]",
-                    k, wavelen, scaled[k], unscaled[k] / 8.0, unscaled[k]
+                    k,
+                    wavelen,
+                    scaled[k],
+                    unscaled[k] / 8.0,
+                    unscaled[k]
                 );
             }
         }
@@ -389,7 +396,9 @@ mod tests {
         let head = vec![1.0f64; 64];
         let out_scaled_0 = apply_rope_q(&head.repeat(4), 0, &cfg_scaled);
         let out_unscaled_0 = apply_rope_q(&head.repeat(4), 0, &cfg_unscaled);
-        let diff_0: f64 = out_scaled_0.iter().zip(out_unscaled_0.iter())
+        let diff_0: f64 = out_scaled_0
+            .iter()
+            .zip(out_unscaled_0.iter())
             .map(|(a, b)| (a - b).abs())
             .fold(0.0, f64::max);
         assert!(diff_0 < 1e-10, "position 0 should be identical");
@@ -398,7 +407,9 @@ mod tests {
         let q = vec![1.0f64; 256];
         let out_scaled = apply_rope_q(&q, 4000, &cfg_scaled);
         let out_unscaled = apply_rope_q(&q, 4000, &cfg_unscaled);
-        let diff: f64 = out_scaled.iter().zip(out_unscaled.iter())
+        let diff: f64 = out_scaled
+            .iter()
+            .zip(out_unscaled.iter())
             .map(|(a, b)| (a - b).abs())
             .fold(0.0, f64::max);
         assert!(
@@ -442,7 +453,8 @@ mod tests {
         assert!(
             (norm_before - norm_after).abs() < 1e-10,
             "scaled RoPE must preserve L2 norm: before={}, after={}",
-            norm_before, norm_after
+            norm_before,
+            norm_after
         );
     }
 }

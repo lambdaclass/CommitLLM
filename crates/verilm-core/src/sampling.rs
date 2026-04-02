@@ -62,7 +62,8 @@ pub fn sample(logits: &[f32], params: &DecodeParams, token_seed: &[u8; 32]) -> u
     }
 
     // 1. Temperature scaling
-    let scaled: Vec<f64> = logits.iter()
+    let scaled: Vec<f64> = logits
+        .iter()
         .map(|&l| (l as f64) / (params.temperature as f64))
         .collect();
 
@@ -151,16 +152,19 @@ fn apply_top_k(logits: &[f64], top_k: u32) -> Vec<f64> {
     let count_above = logits.iter().filter(|&&v| v > threshold).count();
     let mut remaining_at_threshold = k - count_above;
 
-    logits.iter().map(|&v| {
-        if v > threshold {
-            v
-        } else if v == threshold && remaining_at_threshold > 0 {
-            remaining_at_threshold -= 1;
-            v
-        } else {
-            f64::NEG_INFINITY
-        }
-    }).collect()
+    logits
+        .iter()
+        .map(|&v| {
+            if v > threshold {
+                v
+            } else if v == threshold && remaining_at_threshold > 0 {
+                remaining_at_threshold -= 1;
+                v
+            } else {
+                f64::NEG_INFINITY
+            }
+        })
+        .collect()
 }
 
 /// Softmax with f64 precision. −∞ values become 0.
@@ -171,9 +175,16 @@ fn softmax(logits: &[f64]) -> Vec<f64> {
         let n = logits.len() as f64;
         return vec![1.0 / n; logits.len()];
     }
-    let exps: Vec<f64> = logits.iter().map(|&l| {
-        if l == f64::NEG_INFINITY { 0.0 } else { (l - max).exp() }
-    }).collect();
+    let exps: Vec<f64> = logits
+        .iter()
+        .map(|&l| {
+            if l == f64::NEG_INFINITY {
+                0.0
+            } else {
+                (l - max).exp()
+            }
+        })
+        .collect();
     let sum: f64 = exps.iter().sum();
     exps.iter().map(|&e| e / sum).collect()
 }
@@ -202,9 +213,11 @@ fn apply_top_p(probs: &[f64], top_p: f32) -> Vec<f64> {
         }
     }
 
-    probs.iter().enumerate().map(|(i, &prob)| {
-        if keep[i] { prob } else { 0.0 }
-    }).collect()
+    probs
+        .iter()
+        .enumerate()
+        .map(|(i, &prob)| if keep[i] { prob } else { 0.0 })
+        .collect()
 }
 
 /// Re-normalize probabilities (after top-p zeroed some out).
@@ -253,20 +266,49 @@ mod tests {
     #[test]
     fn golden_derive_token_seed() {
         let cases: &[([u8; 32], u32, &str)] = &[
-            ([0x00; 32], 0,          "2dba785c6ff986561c1966229452bd4adfd9d7a1390b3736ac6154afcc191cc5"),
-            ([0x00; 32], 1,          "e8093d5a84a7e30367f5d0bd5ebd3e2a4a4d525f45da7bccd21456b3e423553b"),
-            ([0xff; 32], 0,          "2734bdc41f86e9153cd1e2ea9e2a0433443cf29f801044a835ac57062debc175"),
-            ([0x2a; 32], 0,          "b7d4026903b15e8da93f6e52a2880b38757e6de73269f37a6eec9fc89a590ceb"),
-            ([0x2a; 32], 1,          "4a761e9037c976a07d30a1abe31546954ad4eb11f8d5cb65395a148826d0f53e"),
-            ([0x2a; 32], 99,         "0164293884811dcff10ac68fc6000051355a45fa3eb7d42f2bae6e357d7ec0b8"),
-            ([0x07; 32], u32::MAX,   "6f454c93853bb2484b73f4c9430a4662512636adb69fbbbcd1bd70cf47da6d71"),
+            (
+                [0x00; 32],
+                0,
+                "2dba785c6ff986561c1966229452bd4adfd9d7a1390b3736ac6154afcc191cc5",
+            ),
+            (
+                [0x00; 32],
+                1,
+                "e8093d5a84a7e30367f5d0bd5ebd3e2a4a4d525f45da7bccd21456b3e423553b",
+            ),
+            (
+                [0xff; 32],
+                0,
+                "2734bdc41f86e9153cd1e2ea9e2a0433443cf29f801044a835ac57062debc175",
+            ),
+            (
+                [0x2a; 32],
+                0,
+                "b7d4026903b15e8da93f6e52a2880b38757e6de73269f37a6eec9fc89a590ceb",
+            ),
+            (
+                [0x2a; 32],
+                1,
+                "4a761e9037c976a07d30a1abe31546954ad4eb11f8d5cb65395a148826d0f53e",
+            ),
+            (
+                [0x2a; 32],
+                99,
+                "0164293884811dcff10ac68fc6000051355a45fa3eb7d42f2bae6e357d7ec0b8",
+            ),
+            (
+                [0x07; 32],
+                u32::MAX,
+                "6f454c93853bb2484b73f4c9430a4662512636adb69fbbbcd1bd70cf47da6d71",
+            ),
         ];
         for (batch_seed, idx, expected_hex) in cases {
             let result = derive_token_seed(batch_seed, *idx);
             let got_hex: String = result.iter().map(|b| format!("{:02x}", b)).collect();
             assert_eq!(
                 got_hex, *expected_hex,
-                "derive_token_seed([0x{:02x};32], {}) drifted", batch_seed[0], idx
+                "derive_token_seed([0x{:02x};32], {}) drifted",
+                batch_seed[0], idx
             );
         }
     }
@@ -278,27 +320,95 @@ mod tests {
     fn golden_sample_conformance() {
         let cases: &[(&str, &[f32], f32, u32, f32, [u8; 32], u32, u32)] = &[
             // Basic temperature=1.0, no filtering
-            ("temp1_basic",     &[1.0, 2.0, 3.0, 4.0],                     1.0, 0, 1.0, [0x2a; 32], 0, 1),
+            (
+                "temp1_basic",
+                &[1.0, 2.0, 3.0, 4.0],
+                1.0,
+                0,
+                1.0,
+                [0x2a; 32],
+                0,
+                1,
+            ),
             // Lower temperature concentrates distribution
-            ("temp05_basic",    &[1.0, 2.0, 3.0, 4.0],                     0.5, 0, 1.0, [0x2a; 32], 0, 2),
+            (
+                "temp05_basic",
+                &[1.0, 2.0, 3.0, 4.0],
+                0.5,
+                0,
+                1.0,
+                [0x2a; 32],
+                0,
+                2,
+            ),
             // Top-k=2 restricts to top 2 logits
-            ("topk2",           &[1.0, 2.0, 3.0, 4.0],                     1.0, 2, 1.0, [0x2a; 32], 0, 2),
+            (
+                "topk2",
+                &[1.0, 2.0, 3.0, 4.0],
+                1.0,
+                2,
+                1.0,
+                [0x2a; 32],
+                0,
+                2,
+            ),
             // Top-p=0.5 with dominant token
-            ("topp05",          &[1.0, 1.0, 1.0, 10.0],                    1.0, 0, 0.5, [0x2a; 32], 0, 3),
+            (
+                "topp05",
+                &[1.0, 1.0, 1.0, 10.0],
+                1.0,
+                0,
+                0.5,
+                [0x2a; 32],
+                0,
+                3,
+            ),
             // Combined top-k=3 + top-p=0.9
-            ("topk3_topp09",    &[2.0, 4.0, 6.0, 8.0, 1.0],               1.0, 3, 0.9, [0x07; 32], 5, 2),
+            (
+                "topk3_topp09",
+                &[2.0, 4.0, 6.0, 8.0, 1.0],
+                1.0,
+                3,
+                0.9,
+                [0x07; 32],
+                5,
+                2,
+            ),
             // 8-wide vocab with temperature=0.8
-            ("wide8_temp08",    &[0.5, 1.5, 3.0, 0.1, 2.0, 4.0, 0.3, 1.0], 0.8, 0, 1.0, [0x63; 32], 10, 5),
+            (
+                "wide8_temp08",
+                &[0.5, 1.5, 3.0, 0.1, 2.0, 4.0, 0.3, 1.0],
+                0.8,
+                0,
+                1.0,
+                [0x63; 32],
+                10,
+                5,
+            ),
             // Same logits, different seed → different token
-            ("temp1_zeroseed",  &[1.0, 2.0, 3.0, 4.0],                     1.0, 0, 1.0, [0x00; 32], 0, 3),
+            (
+                "temp1_zeroseed",
+                &[1.0, 2.0, 3.0, 4.0],
+                1.0,
+                0,
+                1.0,
+                [0x00; 32],
+                0,
+                3,
+            ),
         ];
         for &(name, logits, temp, top_k, top_p, batch_seed, idx, expected) in cases {
             let seed = derive_token_seed(&batch_seed, idx);
-            let params = DecodeParams { temperature: temp, top_k, top_p };
+            let params = DecodeParams {
+                temperature: temp,
+                top_k,
+                top_p,
+            };
             let got = sample(logits, &params, &seed);
             assert_eq!(
                 got, expected,
-                "sampler drift in '{}': expected token {} got {}", name, expected, got
+                "sampler drift in '{}': expected token {} got {}",
+                name, expected, got
             );
         }
     }
@@ -308,18 +418,23 @@ mod tests {
     fn golden_greedy_deterministic() {
         let cases: &[(&[f32], u32)] = &[
             (&[1.0, 5.0, 3.0, 2.0], 1),
-            (&[5.0, 3.0, 5.0, 2.0], 0),  // tie → lowest index
+            (&[5.0, 3.0, 5.0, 2.0], 0), // tie → lowest index
             (&[0.0, 0.0, 0.0, 1.0], 3),
-            (&[-1.0, -2.0, -0.5, -3.0], 2),  // all negative → least negative
+            (&[-1.0, -2.0, -0.5, -3.0], 2), // all negative → least negative
         ];
-        let params = DecodeParams { temperature: 0.0, top_k: 0, top_p: 1.0 };
+        let params = DecodeParams {
+            temperature: 0.0,
+            top_k: 0,
+            top_p: 1.0,
+        };
         for (logits, expected) in cases {
             for seed_byte in [0x00, 0x2a, 0xff] {
                 let seed = [seed_byte; 32];
                 let got = sample(logits, &params, &seed);
                 assert_eq!(
                     got, *expected,
-                    "greedy drift: logits={:?} expected {} got {}", logits, expected, got
+                    "greedy drift: logits={:?} expected {} got {}",
+                    logits, expected, got
                 );
             }
         }
@@ -328,7 +443,11 @@ mod tests {
     #[test]
     fn test_greedy_returns_argmax() {
         let logits = vec![1.0, 5.0, 3.0, 2.0];
-        let params = DecodeParams { temperature: 0.0, top_k: 0, top_p: 1.0 };
+        let params = DecodeParams {
+            temperature: 0.0,
+            top_k: 0,
+            top_p: 1.0,
+        };
         let seed = [0u8; 32];
         assert_eq!(sample(&logits, &params, &seed), 1);
     }
@@ -336,7 +455,11 @@ mod tests {
     #[test]
     fn test_greedy_tie_breaks_by_lowest_index() {
         let logits = vec![5.0, 3.0, 5.0, 2.0];
-        let params = DecodeParams { temperature: 0.0, top_k: 0, top_p: 1.0 };
+        let params = DecodeParams {
+            temperature: 0.0,
+            top_k: 0,
+            top_p: 1.0,
+        };
         let seed = [0u8; 32];
         assert_eq!(sample(&logits, &params, &seed), 0);
     }
@@ -344,7 +467,11 @@ mod tests {
     #[test]
     fn test_deterministic_same_seed() {
         let logits = vec![1.0, 2.0, 3.0, 4.0];
-        let params = DecodeParams { temperature: 1.0, top_k: 0, top_p: 1.0 };
+        let params = DecodeParams {
+            temperature: 1.0,
+            top_k: 0,
+            top_p: 1.0,
+        };
         let seed = [42u8; 32];
         let a = sample(&logits, &params, &seed);
         let b = sample(&logits, &params, &seed);
@@ -354,20 +481,31 @@ mod tests {
     #[test]
     fn test_different_seeds_can_differ() {
         let logits = vec![1.0; 100]; // uniform — different seeds should eventually differ
-        let params = DecodeParams { temperature: 1.0, top_k: 0, top_p: 1.0 };
+        let params = DecodeParams {
+            temperature: 1.0,
+            top_k: 0,
+            top_p: 1.0,
+        };
         let mut results = std::collections::HashSet::new();
         for i in 0..20u32 {
             let seed = derive_token_seed(&[i as u8; 32], 0);
             results.insert(sample(&logits, &params, &seed));
         }
-        assert!(results.len() > 1, "different seeds should produce different results on uniform");
+        assert!(
+            results.len() > 1,
+            "different seeds should produce different results on uniform"
+        );
     }
 
     #[test]
     fn test_top_k_filters() {
         // With top_k=1, should always pick the max
         let logits = vec![1.0, 10.0, 5.0, 3.0];
-        let params = DecodeParams { temperature: 1.0, top_k: 1, top_p: 1.0 };
+        let params = DecodeParams {
+            temperature: 1.0,
+            top_k: 1,
+            top_p: 1.0,
+        };
         let seed = [99u8; 32];
         assert_eq!(sample(&logits, &params, &seed), 1);
     }
@@ -376,7 +514,11 @@ mod tests {
     fn test_top_p_filters() {
         // One token has 99% of the probability mass; top_p=0.5 should select it
         let logits = vec![100.0, 0.0, 0.0, 0.0];
-        let params = DecodeParams { temperature: 1.0, top_k: 0, top_p: 0.5 };
+        let params = DecodeParams {
+            temperature: 1.0,
+            top_k: 0,
+            top_p: 0.5,
+        };
         let seed = [77u8; 32];
         assert_eq!(sample(&logits, &params, &seed), 0);
     }
@@ -432,25 +574,36 @@ mod tests {
     fn test_temperature_concentrates() {
         // Low temperature should concentrate on the max
         let logits = vec![1.0, 2.0, 10.0, 3.0];
-        let params = DecodeParams { temperature: 0.01, top_k: 0, top_p: 1.0 };
+        let params = DecodeParams {
+            temperature: 0.01,
+            top_k: 0,
+            top_p: 1.0,
+        };
         // With very low temp, should almost always pick index 2
         for i in 0..10u32 {
             let seed = derive_token_seed(&[i as u8; 32], 0);
-            assert_eq!(sample(&logits, &params, &seed), 2,
-                "low temperature should concentrate on max");
+            assert_eq!(
+                sample(&logits, &params, &seed),
+                2,
+                "low temperature should concentrate on max"
+            );
         }
     }
 
     #[test]
     fn test_replay_sampling_e2e() {
         let lm_head: Vec<i8> = vec![
-            1, 0, 0,  // token 0: logit = 1
-            0, 0, 0,  // token 1: logit = 0
+            1, 0, 0, // token 0: logit = 1
+            0, 0, 0, // token 1: logit = 0
             0, 0, 10, // token 2: logit = 10
-            0, 1, 0,  // token 3: logit = 1
+            0, 1, 0, // token 3: logit = 1
         ];
         let hidden: Vec<i8> = vec![1, 1, 1];
-        let params = DecodeParams { temperature: 0.0, top_k: 0, top_p: 1.0 };
+        let params = DecodeParams {
+            temperature: 0.0,
+            top_k: 0,
+            top_p: 1.0,
+        };
         let batch_seed = [42u8; 32];
         let result = replay_sampling(&lm_head, &hidden, 4, 3, &params, &batch_seed, 0);
         assert_eq!(result, 2, "greedy should pick token with highest logit");

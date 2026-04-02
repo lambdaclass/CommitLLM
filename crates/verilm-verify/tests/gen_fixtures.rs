@@ -46,7 +46,14 @@ fn retained_from_traces(traces: &[verilm_core::types::LayerTrace]) -> RetainedTo
 }
 
 fn unit_scales(n_layers: usize) -> Vec<CapturedLayerScales> {
-    vec![CapturedLayerScales { scale_x_attn: 1.0, scale_x_ffn: 1.0, scale_h: 1.0 }; n_layers]
+    vec![
+        CapturedLayerScales {
+            scale_x_attn: 1.0,
+            scale_x_ffn: 1.0,
+            scale_h: 1.0
+        };
+        n_layers
+    ]
 }
 
 // --- Full-bridge helpers (same as canonical.rs tests) ---
@@ -66,7 +73,11 @@ fn setup_full_bridge() -> (
 
     let n_mt = MatrixType::PER_LAYER.len();
     let weight_scales: Vec<Vec<f32>> = (0..cfg.n_layers)
-        .map(|l| (0..n_mt).map(|m| 0.01 + 0.001 * (l * n_mt + m) as f32).collect())
+        .map(|l| {
+            (0..n_mt)
+                .map(|m| 0.01 + 0.001 * (l * n_mt + m) as f32)
+                .collect()
+        })
         .collect();
     let rmsnorm_attn: Vec<Vec<f32>> = (0..cfg.n_layers)
         .map(|l| {
@@ -91,17 +102,27 @@ fn setup_full_bridge() -> (
     key.rmsnorm_ffn_weights = rmsnorm_ffn.clone();
     key.rmsnorm_eps = 1e-5;
 
-    (cfg, model, key, weight_scales, rmsnorm_attn, rmsnorm_ffn, initial_residual)
+    (
+        cfg,
+        model,
+        key,
+        weight_scales,
+        rmsnorm_attn,
+        rmsnorm_ffn,
+        initial_residual,
+    )
 }
 
 fn bridge_scales(cfg: &ModelConfig) -> Vec<(f32, f32, f32, f32)> {
     (0..cfg.n_layers)
-        .map(|l| (
-            0.3 + 0.05 * l as f32,
-            0.5 + 0.1 * l as f32,
-            0.4 + 0.07 * l as f32,
-            0.6 + 0.03 * l as f32,
-        ))
+        .map(|l| {
+            (
+                0.3 + 0.05 * l as f32,
+                0.5 + 0.1 * l as f32,
+                0.4 + 0.07 * l as f32,
+                0.6 + 0.03 * l as f32,
+            )
+        })
         .collect()
 }
 
@@ -146,29 +167,53 @@ fn full_bridge_forward(
 
         let attn_out = matmul_i32(&lw.wo, &a, cfg.hidden_dim, cfg.hidden_dim);
         let x_ffn = bridge_residual_rmsnorm(
-            &attn_out, ws(MatrixType::Wo), scale_a,
-            &mut residual, &rmsnorm_ffn[l], eps, scale_x_ffn,
+            &attn_out,
+            ws(MatrixType::Wo),
+            scale_a,
+            &mut residual,
+            &rmsnorm_ffn[l],
+            eps,
+            scale_x_ffn,
         );
 
         let g = matmul_i32(&lw.wg, &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
         let u = matmul_i32(&lw.wu, &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
         let h = verilm_core::silu::compute_h_scaled(
-            &g, &u, ws(MatrixType::Wg), ws(MatrixType::Wu), scale_x_ffn, scale_h,
+            &g,
+            &u,
+            ws(MatrixType::Wg),
+            ws(MatrixType::Wu),
+            scale_x_ffn,
+            scale_h,
         );
         let ffn_out = matmul_i32(&lw.wd, &h, cfg.hidden_dim, cfg.ffn_dim);
 
         if l + 1 < rmsnorm_attn.len() {
             let next_scale = scales.get(l + 1).map(|s| s.0).unwrap_or(1.0);
             bridge_residual_rmsnorm(
-                &ffn_out, ws(MatrixType::Wd), scale_h,
-                &mut residual, &rmsnorm_attn[l + 1], eps, next_scale,
+                &ffn_out,
+                ws(MatrixType::Wd),
+                scale_h,
+                &mut residual,
+                &rmsnorm_attn[l + 1],
+                eps,
+                next_scale,
             );
         } else {
             dequant_add_residual(&ffn_out, ws(MatrixType::Wd), scale_h, &mut residual);
         }
 
-        layers.push(RetainedLayerState { a, scale_a, x_attn_i8: None, scale_x_attn: None });
-        captured_scales.push(CapturedLayerScales { scale_x_attn, scale_x_ffn, scale_h });
+        layers.push(RetainedLayerState {
+            a,
+            scale_a,
+            x_attn_i8: None,
+            scale_x_attn: None,
+        });
+        captured_scales.push(CapturedLayerScales {
+            scale_x_attn,
+            scale_x_ffn,
+            scale_h,
+        });
     }
 
     (RetainedTokenState { layers }, captured_scales)
@@ -268,14 +313,35 @@ fn generate_frozen_fixtures() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)], None, None);
+    let (_commitment, state) = commit_minimal(
+        vec![retained],
+        &params,
+        None,
+        vec![unit_scales(cfg.n_layers)],
+        None,
+        None,
+    );
     let response = open_v4(
-        &state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false,
+        &state,
+        0,
+        &ToyWeights(&model),
+        &cfg,
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
     );
 
     let audit_binary = verilm_core::serialize::serialize_v4_audit(&response);
     std::fs::write(dir.join("v4_audit_canonical.bin"), &audit_binary).unwrap();
-    eprintln!("wrote v4_audit_canonical.bin ({} bytes)", audit_binary.len());
+    eprintln!(
+        "wrote v4_audit_canonical.bin ({} bytes)",
+        audit_binary.len()
+    );
 
     let key_binary = verilm_core::serialize::serialize_key(&key);
     std::fs::write(dir.join("v4_key_canonical.bin"), &key_binary).unwrap();
@@ -294,7 +360,14 @@ fn generate_frozen_fixtures() {
     key_fb.embedding_merkle_root = Some(root);
 
     let (retained_fb, captured_scales_fb) = full_bridge_forward(
-        &cfg_fb, &model_fb, &initial_residual, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+        &cfg_fb,
+        &model_fb,
+        &initial_residual,
+        &rmsnorm_attn,
+        &rmsnorm_ffn,
+        &ws,
+        &scales,
+        1e-5,
     );
 
     let proof = verilm_core::merkle::prove(&tree, token_id as usize);
@@ -314,19 +387,42 @@ fn generate_frozen_fixtures() {
         manifest: Some(&manifest),
         n_prompt_tokens: Some(1),
     };
-    let (_commitment_fb, state_fb) = commit_minimal(vec![retained_fb], &params_fb, None, vec![captured_scales_fb], None, None);
+    let (_commitment_fb, state_fb) = commit_minimal(
+        vec![retained_fb],
+        &params_fb,
+        None,
+        vec![captured_scales_fb],
+        None,
+        None,
+    );
     let response_fb = open_v4(
-        &state_fb, 0, &ToyWeights(&model_fb), &cfg_fb, &ws,
-        &[], Some(&bridge), None, None, None, false, false,
+        &state_fb,
+        0,
+        &ToyWeights(&model_fb),
+        &cfg_fb,
+        &ws,
+        &[],
+        Some(&bridge),
+        None,
+        None,
+        None,
+        false,
+        false,
     );
 
     let audit_fb_binary = verilm_core::serialize::serialize_v4_audit(&response_fb);
     std::fs::write(dir.join("v4_audit_fullbridge.bin"), &audit_fb_binary).unwrap();
-    eprintln!("wrote v4_audit_fullbridge.bin ({} bytes)", audit_fb_binary.len());
+    eprintln!(
+        "wrote v4_audit_fullbridge.bin ({} bytes)",
+        audit_fb_binary.len()
+    );
 
     let key_fb_binary = verilm_core::serialize::serialize_key(&key_fb);
     std::fs::write(dir.join("v4_key_fullbridge.bin"), &key_fb_binary).unwrap();
-    eprintln!("wrote v4_key_fullbridge.bin ({} bytes)", key_fb_binary.len());
+    eprintln!(
+        "wrote v4_key_fullbridge.bin ({} bytes)",
+        key_fb_binary.len()
+    );
 
     // Verify the canonical fixture passes canonical verification before freezing
     let report = verilm_verify::canonical::verify_response(&key_fb, &response_fb, None, None);

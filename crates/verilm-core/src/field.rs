@@ -140,7 +140,11 @@ impl Fp64 {
         let lo2 = sum & P64;
         let hi2 = sum >> 61;
         let r = lo2 + hi2;
-        if r >= P64 { r - P64 } else { r }
+        if r >= P64 {
+            r - P64
+        } else {
+            r
+        }
     }
 
     pub fn new(val: u64) -> Self {
@@ -379,7 +383,11 @@ impl Fp128 {
         let lo = val & P128;
         let hi = val >> 127;
         let r = lo + hi;
-        if r >= P128 { r - P128 } else { r }
+        if r >= P128 {
+            r - P128
+        } else {
+            r
+        }
     }
 
     pub fn new(val: u128) -> Self {

@@ -13,28 +13,21 @@
 //! stored root. This allows routine audits (10/80 layers) to verify KV
 //! commitments without needing all layers' data.
 
-use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 use crate::merkle::{self, MerkleProof, MerkleTree};
 
 /// Compute the KV hash for a single layer at a single token position.
-pub fn compute_kv_layer_hash(
-    token_index: u32,
-    layer_index: u32,
-    k: &[i8],
-    v: &[i8],
-) -> [u8; 32] {
+pub fn compute_kv_layer_hash(token_index: u32, layer_index: u32, k: &[i8], v: &[i8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"vi-kv-layer-v1");
     hasher.update(token_index.to_le_bytes());
     hasher.update(layer_index.to_le_bytes());
     // Safety: i8 and u8 have identical layout
-    let k_bytes: &[u8] =
-        unsafe { std::slice::from_raw_parts(k.as_ptr() as *const u8, k.len()) };
-    let v_bytes: &[u8] =
-        unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len()) };
+    let k_bytes: &[u8] = unsafe { std::slice::from_raw_parts(k.as_ptr() as *const u8, k.len()) };
+    let v_bytes: &[u8] = unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len()) };
     hasher.update(k_bytes);
     hasher.update(v_bytes);
     hasher.finalize().into()
@@ -244,10 +237,18 @@ mod tests {
 
     fn dummy_kv(layers: usize, dim: usize, seed: u8) -> (Vec<Vec<i8>>, Vec<Vec<i8>>) {
         let k: Vec<Vec<i8>> = (0..layers)
-            .map(|l| (0..dim).map(|i| ((seed as usize + l * dim + i) % 256) as i8).collect())
+            .map(|l| {
+                (0..dim)
+                    .map(|i| ((seed as usize + l * dim + i) % 256) as i8)
+                    .collect()
+            })
             .collect();
         let v: Vec<Vec<i8>> = (0..layers)
-            .map(|l| (0..dim).map(|i| ((seed as usize + 128 + l * dim + i) % 256) as i8).collect())
+            .map(|l| {
+                (0..dim)
+                    .map(|i| ((seed as usize + 128 + l * dim + i) % 256) as i8)
+                    .collect()
+            })
             .collect();
         (k, v)
     }
@@ -365,7 +366,8 @@ mod tests {
         // Verify each layer individually
         for l in 0..4u32 {
             let proof = merkle::prove(&tree, l as usize);
-            let result = verifier.verify_layer_opening(0, l, &k[l as usize], &v[l as usize], &proof);
+            let result =
+                verifier.verify_layer_opening(0, l, &k[l as usize], &v[l as usize], &proof);
             assert!(result.is_ok(), "layer {} failed: {:?}", l, result);
         }
     }
@@ -385,7 +387,9 @@ mod tests {
         let proof = merkle::prove(&tree, 1);
         let result = verifier.verify_layer_opening(0, 1, &k_bad, &v[1], &proof);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Merkle proof verification failed"));
+        assert!(result
+            .unwrap_err()
+            .contains("Merkle proof verification failed"));
     }
 
     #[test]

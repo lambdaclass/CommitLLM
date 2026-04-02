@@ -26,10 +26,13 @@ pub fn rmsnorm_f64(x_i8: &[i8], weights: &[f32], eps: f64) -> Vec<f64> {
         "RMSNorm: x and weights must have same length"
     );
     let n = x_i8.len() as f64;
-    let sum_sq: f64 = x_i8.iter().map(|&v| {
-        let f = v as f64;
-        f * f
-    }).sum();
+    let sum_sq: f64 = x_i8
+        .iter()
+        .map(|&v| {
+            let f = v as f64;
+            f * f
+        })
+        .sum();
     let rms = (sum_sq / n + eps).sqrt();
     let inv_rms = 1.0 / rms;
     x_i8.iter()

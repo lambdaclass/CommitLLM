@@ -7,12 +7,12 @@
 //! The canonical verifier answers: "is this audit proof mathematically correct?"
 //! This wrapper answers: "is this audit proof a valid response to *my* challenge?"
 
-use verilm_core::types::{AuditChallenge, V4AuditResponse, VerifierKey};
 use verilm_core::serialize;
+use verilm_core::types::{AuditChallenge, V4AuditResponse, VerifierKey};
 
 use crate::{
-    canonical, Detokenizer, FailureCode, FailureContext, PromptTokenizer, V4VerifyReport,
-    Verdict, VerificationFailure,
+    canonical, Detokenizer, FailureCode, FailureContext, PromptTokenizer, V4VerifyReport, Verdict,
+    VerificationFailure,
 };
 
 /// Verify a V4 audit binary with protocol-level challenge binding.
@@ -30,7 +30,13 @@ pub fn verify_challenged_binary(
     detokenizer: Option<&dyn Detokenizer>,
 ) -> Result<V4VerifyReport, String> {
     let response = serialize::deserialize_v4_audit(audit_bytes)?;
-    Ok(verify_challenged_response(challenge, key, &response, tokenizer, detokenizer))
+    Ok(verify_challenged_response(
+        challenge,
+        key,
+        &response,
+        tokenizer,
+        detokenizer,
+    ))
 }
 
 /// Verify a deserialized V4 audit response with protocol-level challenge binding.

@@ -147,7 +147,8 @@ fn test_freivalds_check_with_safetensors_key() {
             assert!(
                 freivalds::check(v, &x, r, &z),
                 "Freivalds check failed at layer {} {:?}",
-                layer_idx, mt
+                layer_idx,
+                mt
             );
         }
     }
@@ -292,12 +293,8 @@ fn make_bf16_safetensors() -> (tempfile::TempDir, ModelConfig) {
         .map(|((name, shape), data)| {
             (
                 name.clone(),
-                safetensors::tensor::TensorView::new(
-                    safetensors::Dtype::BF16,
-                    shape.clone(),
-                    data,
-                )
-                .unwrap(),
+                safetensors::tensor::TensorView::new(safetensors::Dtype::BF16, shape.clone(), data)
+                    .unwrap(),
             )
         })
         .collect();
@@ -387,8 +384,13 @@ fn test_weight_provider_loads_and_matches() {
     for (layer_idx, layer_weights) in all_weights.iter().enumerate() {
         for (mt, expected) in layer_weights {
             let got = provider.weight(layer_idx, *mt);
-            assert_eq!(got, expected.as_slice(),
-                "weight mismatch at layer {} {:?}", layer_idx, mt);
+            assert_eq!(
+                got,
+                expected.as_slice(),
+                "weight mismatch at layer {} {:?}",
+                layer_idx,
+                mt
+            );
         }
     }
 }
@@ -415,17 +417,18 @@ fn test_weight_provider_freivalds_compatible() {
             let w = provider.weight(layer_idx, *mt);
 
             let z: Vec<i32> = (0..rows)
-                .map(|r| (0..cols).map(|c| w[r * cols + c] as i32 * x[c] as i32).sum())
+                .map(|r| {
+                    (0..cols)
+                        .map(|c| w[r * cols + c] as i32 * x[c] as i32)
+                        .sum()
+                })
                 .collect();
 
             assert!(
-                freivalds::check(
-                    key.v_for(layer_idx, *mt),
-                    &x,
-                    key.r_for(*mt),
-                    &z,
-                ),
-                "Freivalds failed: layer {} {:?}", layer_idx, mt
+                freivalds::check(key.v_for(layer_idx, *mt), &x, key.r_for(*mt), &z,),
+                "Freivalds failed: layer {} {:?}",
+                layer_idx,
+                mt
             );
         }
     }
@@ -540,17 +543,28 @@ fn test_w8a8_keygen_detects_per_channel_scales() {
     // per_channel_weight_scales shape: [n_layers][7][output_dim]
     assert_eq!(key.per_channel_weight_scales.len(), cfg.n_layers);
     for (layer_idx, layer_scales) in key.per_channel_weight_scales.iter().enumerate() {
-        assert_eq!(layer_scales.len(), 7, "layer {} should have 7 matrices", layer_idx);
+        assert_eq!(
+            layer_scales.len(),
+            7,
+            "layer {} should have 7 matrices",
+            layer_idx
+        );
         for (j, mt) in MatrixType::PER_LAYER.iter().enumerate() {
             let expected_dim = mt.output_dim(&cfg);
             assert_eq!(
                 layer_scales[j].len(),
                 expected_dim,
                 "layer {} {:?} scale length mismatch",
-                layer_idx, mt
+                layer_idx,
+                mt
             );
             for &s in &layer_scales[j] {
-                assert!(s > 0.0, "layer {} {:?} has non-positive scale", layer_idx, mt);
+                assert!(
+                    s > 0.0,
+                    "layer {} {:?} has non-positive scale",
+                    layer_idx,
+                    mt
+                );
             }
         }
     }
@@ -578,7 +592,10 @@ fn test_w8a8_key_roundtrip() {
 
     assert_eq!(key2.quant_family.as_deref(), Some("W8A8"));
     assert_eq!(key2.scale_derivation.as_deref(), Some("per_channel_absmax"));
-    assert_eq!(key2.per_channel_weight_scales, key.per_channel_weight_scales);
+    assert_eq!(
+        key2.per_channel_weight_scales,
+        key.per_channel_weight_scales
+    );
     assert!(key2.has_per_channel_scales());
 }
 
@@ -588,7 +605,10 @@ fn test_w8a8_qwen_profile_detected_and_roundtrips() {
     write_model_config_json(&dir, "qwen2", 1_000_000.0);
 
     let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
-    let profile = key.verification_profile.as_ref().expect("expected qwen profile");
+    let profile = key
+        .verification_profile
+        .as_ref()
+        .expect("expected qwen profile");
     assert_eq!(profile.name, "qwen-w8a8");
     assert_eq!(profile.model_family, "qwen2");
     assert_eq!(profile.bridge_tolerance, 1);
@@ -607,7 +627,10 @@ fn test_w8a8_llama_profile_detected() {
     write_model_config_json(&dir, "llama", 500_000.0);
 
     let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
-    let profile = key.verification_profile.as_ref().expect("expected llama profile");
+    let profile = key
+        .verification_profile
+        .as_ref()
+        .expect("expected llama profile");
     assert_eq!(profile.name, "llama-w8a8");
     assert_eq!(profile.model_family, "llama");
     assert_eq!(profile.bridge_tolerance, 1);
@@ -637,12 +660,18 @@ fn test_w8a8_freivalds_still_works() {
             let w = provider.weight(layer_idx, *mt);
 
             let z: Vec<i32> = (0..rows)
-                .map(|r| (0..cols).map(|c| w[r * cols + c] as i32 * x[c] as i32).sum())
+                .map(|r| {
+                    (0..cols)
+                        .map(|c| w[r * cols + c] as i32 * x[c] as i32)
+                        .sum()
+                })
                 .collect();
 
             assert!(
                 freivalds::check(key.v_for(layer_idx, *mt), &x, key.r_for(*mt), &z),
-                "Freivalds failed: layer {} {:?}", layer_idx, mt
+                "Freivalds failed: layer {} {:?}",
+                layer_idx,
+                mt
             );
         }
     }
@@ -654,7 +683,11 @@ fn test_llama3_rope_scaling_stored_in_key() {
     write_llama3_config_json(&dir);
 
     let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
-    let scaling = key.config.rope_scaling.as_ref().expect("expected rope_scaling");
+    let scaling = key
+        .config
+        .rope_scaling
+        .as_ref()
+        .expect("expected rope_scaling");
     assert_eq!(scaling.rope_type, "llama3");
     assert_eq!(scaling.factor, 8.0);
     assert_eq!(scaling.low_freq_factor, 1.0);

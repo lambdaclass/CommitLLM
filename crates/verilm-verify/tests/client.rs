@@ -47,7 +47,11 @@ fn setup_full_bridge() -> (
 
     let n_mt = MatrixType::PER_LAYER.len();
     let weight_scales: Vec<Vec<f32>> = (0..cfg.n_layers)
-        .map(|l| (0..n_mt).map(|m| 0.01 + 0.001 * (l * n_mt + m) as f32).collect())
+        .map(|l| {
+            (0..n_mt)
+                .map(|m| 0.01 + 0.001 * (l * n_mt + m) as f32)
+                .collect()
+        })
         .collect();
 
     let rmsnorm_attn: Vec<Vec<f32>> = (0..cfg.n_layers)
@@ -74,17 +78,27 @@ fn setup_full_bridge() -> (
     key.rmsnorm_ffn_weights = rmsnorm_ffn.clone();
     key.rmsnorm_eps = 1e-5;
 
-    (cfg, model, key, weight_scales, rmsnorm_attn, rmsnorm_ffn, initial_residual)
+    (
+        cfg,
+        model,
+        key,
+        weight_scales,
+        rmsnorm_attn,
+        rmsnorm_ffn,
+        initial_residual,
+    )
 }
 
 fn bridge_scales(cfg: &ModelConfig) -> Vec<(f32, f32, f32, f32)> {
     (0..cfg.n_layers)
-        .map(|l| (
-            0.3 + 0.05 * l as f32,
-            0.5 + 0.1 * l as f32,
-            0.4 + 0.07 * l as f32,
-            0.6 + 0.03 * l as f32,
-        ))
+        .map(|l| {
+            (
+                0.3 + 0.05 * l as f32,
+                0.5 + 0.1 * l as f32,
+                0.4 + 0.07 * l as f32,
+                0.6 + 0.03 * l as f32,
+            )
+        })
         .collect()
 }
 
@@ -131,29 +145,53 @@ fn full_bridge_forward(
 
         let attn_out = matmul_i32(&lw.wo, &a, cfg.hidden_dim, cfg.hidden_dim);
         let x_ffn = bridge_residual_rmsnorm(
-            &attn_out, ws(MatrixType::Wo), scale_a,
-            &mut residual, &rmsnorm_ffn[l], eps, scale_x_ffn,
+            &attn_out,
+            ws(MatrixType::Wo),
+            scale_a,
+            &mut residual,
+            &rmsnorm_ffn[l],
+            eps,
+            scale_x_ffn,
         );
 
         let g = matmul_i32(&lw.wg, &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
         let u = matmul_i32(&lw.wu, &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
         let h = verilm_core::silu::compute_h_scaled(
-            &g, &u, ws(MatrixType::Wg), ws(MatrixType::Wu), scale_x_ffn, scale_h,
+            &g,
+            &u,
+            ws(MatrixType::Wg),
+            ws(MatrixType::Wu),
+            scale_x_ffn,
+            scale_h,
         );
         let ffn_out = matmul_i32(&lw.wd, &h, cfg.hidden_dim, cfg.ffn_dim);
 
         if l + 1 < rmsnorm_attn.len() {
             let next_scale = scales.get(l + 1).map(|s| s.0).unwrap_or(1.0);
             bridge_residual_rmsnorm(
-                &ffn_out, ws(MatrixType::Wd), scale_h,
-                &mut residual, &rmsnorm_attn[l + 1], eps, next_scale,
+                &ffn_out,
+                ws(MatrixType::Wd),
+                scale_h,
+                &mut residual,
+                &rmsnorm_attn[l + 1],
+                eps,
+                next_scale,
             );
         } else {
             dequant_add_residual(&ffn_out, ws(MatrixType::Wd), scale_h, &mut residual);
         }
 
-        layers.push(RetainedLayerState { a, scale_a, x_attn_i8: None, scale_x_attn: None });
-        captured_scales.push(CapturedLayerScales { scale_x_attn, scale_x_ffn, scale_h });
+        layers.push(RetainedLayerState {
+            a,
+            scale_a,
+            x_attn_i8: None,
+            scale_x_attn: None,
+        });
+        captured_scales.push(CapturedLayerScales {
+            scale_x_attn,
+            scale_x_ffn,
+            scale_h,
+        });
     }
 
     (RetainedTokenState { layers }, captured_scales)
@@ -243,7 +281,14 @@ fn build_audit() -> (
     key.embedding_merkle_root = Some(root);
 
     let (retained, captured_scales) = full_bridge_forward(
-        &cfg, &model, &initial_residual, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+        &cfg,
+        &model,
+        &initial_residual,
+        &rmsnorm_attn,
+        &rmsnorm_ffn,
+        &ws,
+        &scales,
+        1e-5,
     );
 
     let proof = verilm_core::merkle::prove(&tree, token_id as usize);
@@ -263,10 +308,27 @@ fn build_audit() -> (
         manifest: Some(&manifest),
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales], None, None);
+    let (_commitment, state) = commit_minimal(
+        vec![retained],
+        &params,
+        None,
+        vec![captured_scales],
+        None,
+        None,
+    );
     let response = open_v4(
-        &state, 0, &ToyWeights(&model), &cfg, &ws,
-        &[], Some(&bridge), None, None, None, false, false,
+        &state,
+        0,
+        &ToyWeights(&model),
+        &cfg,
+        &ws,
+        &[],
+        Some(&bridge),
+        None,
+        None,
+        None,
+        false,
+        false,
     );
 
     let binary = verilm_core::serialize::serialize_v4_audit(&response);
@@ -287,7 +349,12 @@ fn client_challenge_match_pass() {
         tier: AuditTier::Full,
     };
     let report = verify_challenged_binary(&challenge, &key, &binary, None, None).unwrap();
-    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "failures: {:?}",
+        report.failures
+    );
     // Should have 2 extra checks (token_index + layer_indices) beyond canonical baseline.
     let baseline = verify_binary(&key, &binary, None, None).unwrap();
     assert_eq!(report.checks_run, baseline.checks_run + 2);
@@ -304,7 +371,10 @@ fn client_wrong_token_index_rejected() {
     let report = verify_challenged_binary(&challenge, &key, &binary, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::ChallengeTokenMismatch),
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::ChallengeTokenMismatch),
         "should have ChallengeTokenMismatch: {:?}",
         report.failures,
     );
@@ -323,7 +393,10 @@ fn client_wrong_layer_indices_rejected() {
     let report = verify_challenged_binary(&challenge, &key, &binary, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::ChallengeLayerMismatch),
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::ChallengeLayerMismatch),
         "should have ChallengeLayerMismatch: {:?}",
         report.failures,
     );
@@ -342,10 +415,15 @@ fn client_canonical_failure_propagated() {
     let report = verify_challenged_response(&challenge, &key, &response, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     // Canonical seed failure present, no challenge failures.
-    assert!(report.failures.iter().any(|f| f.code == FailureCode::MissingSeedCommitment));
-    assert!(!report.failures.iter().any(|f|
-        f.code == FailureCode::ChallengeTokenMismatch || f.code == FailureCode::ChallengeLayerMismatch
-    ));
+    assert!(report
+        .failures
+        .iter()
+        .any(|f| f.code == FailureCode::MissingSeedCommitment));
+    assert!(!report
+        .failures
+        .iter()
+        .any(|f| f.code == FailureCode::ChallengeTokenMismatch
+            || f.code == FailureCode::ChallengeLayerMismatch));
 }
 
 #[test]
@@ -360,8 +438,14 @@ fn client_both_canonical_and_challenge_failures() {
     };
     let report = verify_challenged_response(&challenge, &key, &response, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.code == FailureCode::MissingSeedCommitment));
-    assert!(report.failures.iter().any(|f| f.code == FailureCode::ChallengeTokenMismatch));
+    assert!(report
+        .failures
+        .iter()
+        .any(|f| f.code == FailureCode::MissingSeedCommitment));
+    assert!(report
+        .failures
+        .iter()
+        .any(|f| f.code == FailureCode::ChallengeTokenMismatch));
 }
 
 #[test]
@@ -370,7 +454,9 @@ fn client_without_wrapper_has_no_challenge_checks() {
     let (key, binary, _) = build_audit();
     let report = verify_binary(&key, &binary, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Pass);
-    assert!(!report.failures.iter().any(|f|
-        f.code == FailureCode::ChallengeTokenMismatch || f.code == FailureCode::ChallengeLayerMismatch
-    ));
+    assert!(!report
+        .failures
+        .iter()
+        .any(|f| f.code == FailureCode::ChallengeTokenMismatch
+            || f.code == FailureCode::ChallengeLayerMismatch));
 }

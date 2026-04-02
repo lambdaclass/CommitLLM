@@ -127,10 +127,7 @@ fn half_to_f32(h: u16) -> f32 {
 /// Absmax quantization: quantize f32 values to INT8.
 /// Returns (quantized_weights, scale) where w_f32 ≈ quantized * scale.
 fn quantize_absmax(values: &[f32]) -> (Vec<i8>, f32) {
-    let absmax = values
-        .iter()
-        .map(|v| v.abs())
-        .fold(0.0f32, f32::max);
+    let absmax = values.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
     if absmax == 0.0 {
         return (vec![0i8; values.len()], 1.0);
     }
@@ -171,15 +168,16 @@ fn load_weights_as_i8(
 }
 
 /// Load a 1D tensor as f32. Supports F32, BF16, and F16 source dtypes.
-fn load_1d_f32(
-    shards: &[(SafeTensors<'_>, &MappedShard)],
-    name: &str,
-) -> Result<Vec<f32>> {
+fn load_1d_f32(shards: &[(SafeTensors<'_>, &MappedShard)], name: &str) -> Result<Vec<f32>> {
     let (data, shape, dtype) = find_tensor_raw(shards, name)?;
     // Accept 1D [N] or 2D [N,1] (common in W8A8 weight_scale tensors).
     let is_1d = shape.len() == 1 || (shape.len() == 2 && shape[1] == 1);
     if !is_1d {
-        bail!("tensor {} has shape {:?}, expected 1D or [N,1]", name, shape);
+        bail!(
+            "tensor {} has shape {:?}, expected 1D or [N,1]",
+            name,
+            shape
+        );
     }
     match dtype {
         Dtype::F32 => Ok(data
@@ -206,7 +204,11 @@ fn compute_embedding_hashes(
     let bytes_per_elem: usize = match dtype {
         Dtype::F32 => 4,
         Dtype::BF16 | Dtype::F16 => 2,
-        other => bail!("embedding tensor {} has unsupported dtype {:?}", name, other),
+        other => bail!(
+            "embedding tensor {} has unsupported dtype {:?}",
+            name,
+            other
+        ),
     };
     let mut hashes = Vec::with_capacity(rows);
     for row in 0..rows {
@@ -270,28 +272,52 @@ struct ModelJsonConfig {
 fn read_model_config_json(dir: &Path) -> ModelJsonConfig {
     let config_path = dir.join("config.json");
     let Ok(data) = std::fs::read_to_string(&config_path) else {
-        return ModelJsonConfig { rmsnorm_eps: 1e-5, rope_theta: 10000.0, model_type: None, rope_scaling: None };
+        return ModelJsonConfig {
+            rmsnorm_eps: 1e-5,
+            rope_theta: 10000.0,
+            model_type: None,
+            rope_scaling: None,
+        };
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else {
-        return ModelJsonConfig { rmsnorm_eps: 1e-5, rope_theta: 10000.0, model_type: None, rope_scaling: None };
+        return ModelJsonConfig {
+            rmsnorm_eps: 1e-5,
+            rope_theta: 10000.0,
+            model_type: None,
+            rope_scaling: None,
+        };
     };
-    let eps = v.get("rms_norm_eps")
+    let eps = v
+        .get("rms_norm_eps")
         .and_then(|v| v.as_f64())
         .unwrap_or(1e-5);
-    let rope_theta = v.get("rope_theta")
+    let rope_theta = v
+        .get("rope_theta")
         .and_then(|v| v.as_f64())
         .unwrap_or(10000.0);
-    let model_type = v.get("model_type")
+    let model_type = v
+        .get("model_type")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
     // Read rope_scaling block if present
     let rope_scaling = v.get("rope_scaling").and_then(|rs| {
-        let rope_type = rs.get("rope_type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let rope_type = rs
+            .get("rope_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let factor = rs.get("factor").and_then(|v| v.as_f64()).unwrap_or(1.0);
-        let low_freq_factor = rs.get("low_freq_factor").and_then(|v| v.as_f64()).unwrap_or(1.0);
-        let high_freq_factor = rs.get("high_freq_factor").and_then(|v| v.as_f64()).unwrap_or(4.0);
-        let original_max = rs.get("original_max_position_embeddings")
+        let low_freq_factor = rs
+            .get("low_freq_factor")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0);
+        let high_freq_factor = rs
+            .get("high_freq_factor")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(4.0);
+        let original_max = rs
+            .get("original_max_position_embeddings")
             .and_then(|v| v.as_u64())
             .unwrap_or(8192) as usize;
         if rope_type.is_empty() {
@@ -307,7 +333,12 @@ fn read_model_config_json(dir: &Path) -> ModelJsonConfig {
         }
     });
 
-    ModelJsonConfig { rmsnorm_eps: eps, rope_theta, model_type, rope_scaling }
+    ModelJsonConfig {
+        rmsnorm_eps: eps,
+        rope_theta,
+        model_type,
+        rope_scaling,
+    }
 }
 
 /// Detect model config by inspecting tensor shapes and config.json.
@@ -337,7 +368,9 @@ pub fn detect_config(dir: &Path) -> Result<ModelConfig> {
     // Count layers
     let mut n_layers = 0;
     loop {
-        let name = MatrixType::Wq.weight_name().replace("{}", &n_layers.to_string());
+        let name = MatrixType::Wq
+            .weight_name()
+            .replace("{}", &n_layers.to_string());
         let found = parsed.iter().any(|(st, _)| st.tensor(&name).is_ok());
         if !found {
             break;
@@ -435,7 +468,10 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         Dtype::I8 => "I8",
         Dtype::BF16 => "BF16",
         Dtype::F16 => "F16",
-        other => bail!("unsupported source dtype {:?} — expected I8, BF16, or F16", other),
+        other => bail!(
+            "unsupported source dtype {:?} — expected I8, BF16, or F16",
+            other
+        ),
     }
     .to_string();
 
@@ -475,22 +511,23 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
 
             // Try to load per-channel weight scales (W8A8 native INT8).
             let scale_name = mt.weight_scale_name().replace("{}", &layer_idx.to_string());
-            let pc_scales = match load_1d_f32(&parsed, &scale_name) {
-                Ok(s) => {
-                    if s.len() != rows {
-                        bail!(
+            let pc_scales =
+                match load_1d_f32(&parsed, &scale_name) {
+                    Ok(s) => {
+                        if s.len() != rows {
+                            bail!(
                             "weight_scale {} has {} elements, expected {} (output_dim for {:?})",
                             scale_name, s.len(), rows, mt
                         );
+                        }
+                        if layer_idx == 0 && j == 0 {
+                            eprintln!("  found per-channel weight scales (W8A8)");
+                        }
+                        found_per_channel = true;
+                        s
                     }
-                    if layer_idx == 0 && j == 0 {
-                        eprintln!("  found per-channel weight scales (W8A8)");
-                    }
-                    found_per_channel = true;
-                    s
-                }
-                Err(_) => Vec::new(),
-            };
+                    Err(_) => Vec::new(),
+                };
 
             let r = &r_vectors[j];
             let v = freivalds::precompute_v(r, &weights, rows, cols);
@@ -510,8 +547,7 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
             }
         }
 
-        let ffn_norm_name =
-            format!("model.layers.{}.post_attention_layernorm.weight", layer_idx);
+        let ffn_norm_name = format!("model.layers.{}.post_attention_layernorm.weight", layer_idx);
         match load_1d_f32(&parsed, &ffn_norm_name) {
             Ok(w) => rmsnorm_ffn_weights.push(w),
             Err(e) => {
@@ -522,7 +558,10 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
 
         // QKV projection biases (model-dependent, e.g. Qwen2)
         let mut layer_biases: [Vec<f32>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-        for (i, mt) in [MatrixType::Wq, MatrixType::Wk, MatrixType::Wv].iter().enumerate() {
+        for (i, mt) in [MatrixType::Wq, MatrixType::Wk, MatrixType::Wv]
+            .iter()
+            .enumerate()
+        {
             if let Some(bias_pattern) = mt.bias_name() {
                 let bias_name = bias_pattern.replace("{}", &layer_idx.to_string());
                 if let Ok(b) = load_1d_f32(&parsed, &bias_name) {
@@ -575,13 +614,19 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
 
     // Load lm_head (unembedding matrix) for logit verification + Freivalds.
     // The r vector is already in r_vectors[LmHead].
-    let lm_head_idx = MatrixType::ALL.iter().position(|&m| m == MatrixType::LmHead).unwrap();
+    let lm_head_idx = MatrixType::ALL
+        .iter()
+        .position(|&m| m == MatrixType::LmHead)
+        .unwrap();
     let (lm_head, v_lm_head) = match load_weights_as_i8(&parsed, "lm_head.weight") {
         Ok((weights, scale)) => {
             let (_, lm_shape, _) = find_tensor_raw(&parsed, "lm_head.weight")?;
             let vocab_size = lm_shape[0];
             let hidden_dim = cfg.hidden_dim;
-            eprintln!("  lm_head: {}x{} (scale={:.6})", vocab_size, hidden_dim, scale);
+            eprintln!(
+                "  lm_head: {}x{} (scale={:.6})",
+                vocab_size, hidden_dim, scale
+            );
 
             let r = &r_vectors[lm_head_idx];
             let v = freivalds::precompute_v(r, &weights, vocab_size, hidden_dim);
@@ -721,16 +766,12 @@ pub fn compute_weight_hash(dir: &Path) -> Result<[u8; 32]> {
 
 /// Write a safetensors file from a list of (name, shape, i8 data).
 /// Used for testing.
-pub fn write_safetensors(
-    path: &Path,
-    tensors: &[(&str, Vec<usize>, &[i8])],
-) -> Result<()> {
+pub fn write_safetensors(path: &Path, tensors: &[(&str, Vec<usize>, &[i8])]) -> Result<()> {
     let views: Vec<_> = tensors
         .iter()
         .map(|(name, shape, data)| {
-            let bytes: &[u8] = unsafe {
-                std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len())
-            };
+            let bytes: &[u8] =
+                unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len()) };
             (name.to_string(), Dtype::I8, shape.clone(), bytes)
         })
         .collect();
@@ -888,7 +929,10 @@ impl SafetensorsWeightProvider {
 
             // QKV projection biases (model-dependent, e.g. Qwen2)
             let mut layer_biases: [Vec<f32>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-            for (i, mt) in [MatrixType::Wq, MatrixType::Wk, MatrixType::Wv].iter().enumerate() {
+            for (i, mt) in [MatrixType::Wq, MatrixType::Wk, MatrixType::Wv]
+                .iter()
+                .enumerate()
+            {
                 if let Some(bias_pattern) = mt.bias_name() {
                     let bias_name = bias_pattern.replace("{}", &layer_idx.to_string());
                     if let Ok(b) = load_1d_f32(&parsed, &bias_name) {
@@ -1031,14 +1075,21 @@ impl SafetensorsWeightProvider {
             .map(|s| SafeTensors::deserialize(&s.mmap).map(|st| (st, s)))
             .collect::<std::result::Result<Vec<_>, _>>()
             .context("failed to parse safetensors")?;
-        load_2d_row_f32(&parsed, "model.embed_tokens.weight", token_id, self.config.hidden_dim)
+        load_2d_row_f32(
+            &parsed,
+            "model.embed_tokens.weight",
+            token_id,
+            self.config.hidden_dim,
+        )
     }
 
     /// Generate a Merkle proof for the given token ID's embedding row.
     ///
     /// Returns `None` if the embedding tree was not built (tensor missing).
     pub fn embedding_proof(&self, token_id: usize) -> Option<verilm_core::merkle::MerkleProof> {
-        self.embedding_tree.as_ref().map(|tree| verilm_core::merkle::prove(tree, token_id))
+        self.embedding_tree
+            .as_ref()
+            .map(|tree| verilm_core::merkle::prove(tree, token_id))
     }
 
     /// Embedding Merkle root, if available.
@@ -1071,14 +1122,19 @@ impl SafetensorsWeightProvider {
 
 impl ShellWeights for SafetensorsWeightProvider {
     fn weight(&self, layer: usize, mt: MatrixType) -> &[i8] {
-        let mt_idx = MatrixType::PER_LAYER.iter().position(|&m| m == mt)
+        let mt_idx = MatrixType::PER_LAYER
+            .iter()
+            .position(|&m| m == mt)
             .expect("weight(): only per-layer matrices, not LmHead");
         &self.weights[layer][mt_idx]
     }
 }
 
 impl verilm_core::types::EmbeddingLookup for SafetensorsWeightProvider {
-    fn embedding_row_and_proof(&self, token_id: u32) -> Option<(Vec<f32>, Option<verilm_core::merkle::MerkleProof>)> {
+    fn embedding_row_and_proof(
+        &self,
+        token_id: u32,
+    ) -> Option<(Vec<f32>, Option<verilm_core::merkle::MerkleProof>)> {
         let row = self.load_embedding_row(token_id as usize).ok()?;
         let proof = self.embedding_proof(token_id as usize);
         Some((row, proof))

@@ -88,7 +88,14 @@ pub fn measure_corridor(
     );
 
     let measurements = if key.rope_aware_replay {
-        measure_roped(key, prefix_ret, prefix_shells, response, n_layers, scale_overrides)?
+        measure_roped(
+            key,
+            prefix_ret,
+            prefix_shells,
+            response,
+            n_layers,
+            scale_overrides,
+        )?
     } else {
         measure_toy(key, prefix_ret, prefix_shells, response, n_layers)?
     };
@@ -129,22 +136,18 @@ fn measure_toy(
             }
 
             let q_i8 = verilm_core::requantize(q_acc);
-            let replayed = verilm_core::attention::replay_attention_reference(
-                &q_i8, &kv_k, &kv_v, cfg,
-            );
+            let replayed =
+                verilm_core::attention::replay_attention_reference(&q_i8, &kv_k, &kv_v, cfg);
             all_stats.push(measure_attention_diff(&rs.a, &replayed, layer_idx, j)?);
         }
 
         // Opened token
-        if let Some((q_acc, k_acc, v_acc, rs)) =
-            opened_token_qkv(response, layer_idx)
-        {
+        if let Some((q_acc, k_acc, v_acc, rs)) = opened_token_qkv(response, layer_idx) {
             kv_k.push(verilm_core::requantize(k_acc));
             kv_v.push(verilm_core::requantize(v_acc));
             let q_i8 = verilm_core::requantize(q_acc);
-            let replayed = verilm_core::attention::replay_attention_reference(
-                &q_i8, &kv_k, &kv_v, cfg,
-            );
+            let replayed =
+                verilm_core::attention::replay_attention_reference(&q_i8, &kv_k, &kv_v, cfg);
             let pos = response.token_index as usize;
             all_stats.push(measure_attention_diff(&rs.a, &replayed, layer_idx, pos)?);
         }
@@ -179,8 +182,16 @@ fn measure_roped(
                 _ => break,
             };
 
-            let (_, k_roped, v_deq) =
-                dequant_rope_qkv(key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, j, scale_overrides);
+            let (_, k_roped, v_deq) = dequant_rope_qkv(
+                key,
+                layer_idx,
+                q_acc,
+                k_acc,
+                v_acc,
+                sl.scale_x_attn,
+                j,
+                scale_overrides,
+            );
             kv_k.push(k_roped);
             kv_v.push(v_deq);
 
@@ -188,13 +199,25 @@ fn measure_roped(
                 continue;
             }
 
-            let (q_roped, _, _) =
-                dequant_rope_qkv(key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, j, scale_overrides);
+            let (q_roped, _, _) = dequant_rope_qkv(
+                key,
+                layer_idx,
+                q_acc,
+                k_acc,
+                v_acc,
+                sl.scale_x_attn,
+                j,
+                scale_overrides,
+            );
 
             // Targeted diagnostic: layer 0 token 1 — V-bound check
             if layer_idx == 0 && j == 1 {
                 let (replayed, a_f64) = verilm_core::attention::replay_attention_roped_raw(
-                    &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
+                    &q_roped,
+                    &kv_k,
+                    &kv_v,
+                    rs.scale_a as f64,
+                    cfg,
                 );
                 let n = 16
                     .min(a_f64.len())
@@ -207,16 +230,45 @@ fn measure_roped(
                 let mut v_max = vec![f64::NEG_INFINITY; d_head];
                 for v_t in &kv_v {
                     for i in 0..d_head.min(v_t.len()) {
-                        if v_t[i] < v_min[i] { v_min[i] = v_t[i]; }
-                        if v_t[i] > v_max[i] { v_max[i] = v_t[i]; }
+                        if v_t[i] < v_min[i] {
+                            v_min[i] = v_t[i];
+                        }
+                        if v_t[i] > v_max[i] {
+                            v_max[i] = v_t[i];
+                        }
                     }
                 }
-                eprintln!("\n[DIAG-VBOUND] layer=0 pos=1 scale_a={:.8} kv_entries={}", rs.scale_a, kv_v.len());
-                eprintln!("  a_f64[..{}]:  {:?}", n, &a_f64[..n].iter().map(|v| format!("{:.6}", v)).collect::<Vec<_>>());
+                eprintln!(
+                    "\n[DIAG-VBOUND] layer=0 pos=1 scale_a={:.8} kv_entries={}",
+                    rs.scale_a,
+                    kv_v.len()
+                );
+                eprintln!(
+                    "  a_f64[..{}]:  {:?}",
+                    n,
+                    &a_f64[..n]
+                        .iter()
+                        .map(|v| format!("{:.6}", v))
+                        .collect::<Vec<_>>()
+                );
                 eprintln!("  a_i8_rep[..{}]: {:?}", n, &replayed[..n]);
                 eprintln!("  a_i8_gpu[..{}]: {:?}", n, &rs.a[..n]);
-                eprintln!("  V_min[..{}]:  {:?}", n, &v_min[..n].iter().map(|v| format!("{:.4}", v)).collect::<Vec<_>>());
-                eprintln!("  V_max[..{}]:  {:?}", n, &v_max[..n].iter().map(|v| format!("{:.4}", v)).collect::<Vec<_>>());
+                eprintln!(
+                    "  V_min[..{}]:  {:?}",
+                    n,
+                    &v_min[..n]
+                        .iter()
+                        .map(|v| format!("{:.4}", v))
+                        .collect::<Vec<_>>()
+                );
+                eprintln!(
+                    "  V_max[..{}]:  {:?}",
+                    n,
+                    &v_max[..n]
+                        .iter()
+                        .map(|v| format!("{:.4}", v))
+                        .collect::<Vec<_>>()
+                );
                 // Classification: does a_f64[i] lie within [V_min[i], V_max[i]]?
                 let mut oob = 0;
                 for i in 0..n {
@@ -245,29 +297,43 @@ fn measure_roped(
                 all_stats.push(measure_attention_diff(&rs.a, &replayed, layer_idx, j)?);
             } else {
                 let replayed = verilm_core::attention::replay_attention_roped(
-                    &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
+                    &q_roped,
+                    &kv_k,
+                    &kv_v,
+                    rs.scale_a as f64,
+                    cfg,
                 );
                 all_stats.push(measure_attention_diff(&rs.a, &replayed, layer_idx, j)?);
             }
         }
 
         // Opened token
-        if let Some((q_acc, k_acc, v_acc, rs)) =
-            opened_token_qkv(response, layer_idx)
-        {
+        if let Some((q_acc, k_acc, v_acc, rs)) = opened_token_qkv(response, layer_idx) {
             let shell = response.shell_opening.as_ref().unwrap();
             let sl = &shell.layers[layer_idx];
             let pos = response.token_index as usize;
 
-            let (q_roped, k_roped, v_deq) =
-                dequant_rope_qkv(key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, pos, scale_overrides);
+            let (q_roped, k_roped, v_deq) = dequant_rope_qkv(
+                key,
+                layer_idx,
+                q_acc,
+                k_acc,
+                v_acc,
+                sl.scale_x_attn,
+                pos,
+                scale_overrides,
+            );
             kv_k.push(k_roped);
             kv_v.push(v_deq);
 
             // VBOUND diagnostic for opened token at layer 0
             if layer_idx == 0 {
                 let (replayed, a_f64) = verilm_core::attention::replay_attention_roped_raw(
-                    &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
+                    &q_roped,
+                    &kv_k,
+                    &kv_v,
+                    rs.scale_a as f64,
+                    cfg,
                 );
                 let n = 16
                     .min(a_f64.len())
@@ -279,13 +345,19 @@ fn measure_roped(
                 let mut v_max = vec![f64::NEG_INFINITY; d_head];
                 for v_t in &kv_v {
                     for i in 0..d_head.min(v_t.len()) {
-                        if v_t[i] < v_min[i] { v_min[i] = v_t[i]; }
-                        if v_t[i] > v_max[i] { v_max[i] = v_t[i]; }
+                        if v_t[i] < v_min[i] {
+                            v_min[i] = v_t[i];
+                        }
+                        if v_t[i] > v_max[i] {
+                            v_max[i] = v_t[i];
+                        }
                     }
                 }
                 let mut oob = 0;
                 for i in 0..n {
-                    if a_f64[i] < v_min[i] || a_f64[i] > v_max[i] { oob += 1; }
+                    if a_f64[i] < v_min[i] || a_f64[i] > v_max[i] {
+                        oob += 1;
+                    }
                 }
                 let mut implied_scales: Vec<f64> = Vec::new();
                 for i in 0..n {
@@ -297,21 +369,42 @@ fn measure_roped(
                     let mut s = implied_scales.clone();
                     s.sort_by(|a, b| a.partial_cmp(b).unwrap());
                     s[s.len() / 2]
-                } else { 0.0 };
-                eprintln!("\n[DIAG-VBOUND-OPENED] layer=0 pos={} scale_a={:.8} kv_entries={}",
-                    pos, rs.scale_a, kv_v.len());
-                eprintln!("  a_f64[..{}]:  {:?}", n, &a_f64[..n].iter().map(|v| format!("{:.6}", v)).collect::<Vec<_>>());
+                } else {
+                    0.0
+                };
+                eprintln!(
+                    "\n[DIAG-VBOUND-OPENED] layer=0 pos={} scale_a={:.8} kv_entries={}",
+                    pos,
+                    rs.scale_a,
+                    kv_v.len()
+                );
+                eprintln!(
+                    "  a_f64[..{}]:  {:?}",
+                    n,
+                    &a_f64[..n]
+                        .iter()
+                        .map(|v| format!("{:.6}", v))
+                        .collect::<Vec<_>>()
+                );
                 eprintln!("  a_i8_rep[..{}]: {:?}", n, &replayed[..n]);
                 eprintln!("  a_i8_gpu[..{}]: {:?}", n, &rs.a[..n]);
                 eprintln!("  out-of-V-bound: {}/{} dims", oob, n);
                 if !implied_scales.is_empty() {
-                    eprintln!("  implied_scale: {:.8} vs scale_a: {:.8} (ratio: {:.4})",
-                        median, rs.scale_a as f64, median / rs.scale_a as f64);
+                    eprintln!(
+                        "  implied_scale: {:.8} vs scale_a: {:.8} (ratio: {:.4})",
+                        median,
+                        rs.scale_a as f64,
+                        median / rs.scale_a as f64
+                    );
                 }
                 all_stats.push(measure_attention_diff(&rs.a, &replayed, layer_idx, pos)?);
             } else {
                 let replayed = verilm_core::attention::replay_attention_roped(
-                    &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
+                    &q_roped,
+                    &kv_k,
+                    &kv_v,
+                    rs.scale_a as f64,
+                    cfg,
                 );
                 all_stats.push(measure_attention_diff(&rs.a, &replayed, layer_idx, pos)?);
             }
@@ -337,12 +430,30 @@ fn dequant_rope_qkv(
     position: usize,
     overrides: Option<&CorridorScaleOverrides>,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    let q_f64 = dequant_one(key, layer_idx, MatrixType::Wq, q_acc, scale_x_attn,
-        overrides.map(|o| o.wq[layer_idx].as_slice()));
-    let k_f64 = dequant_one(key, layer_idx, MatrixType::Wk, k_acc, scale_x_attn,
-        overrides.map(|o| o.wk[layer_idx].as_slice()));
-    let v_f64 = dequant_one(key, layer_idx, MatrixType::Wv, v_acc, scale_x_attn,
-        overrides.map(|o| o.wv[layer_idx].as_slice()));
+    let q_f64 = dequant_one(
+        key,
+        layer_idx,
+        MatrixType::Wq,
+        q_acc,
+        scale_x_attn,
+        overrides.map(|o| o.wq[layer_idx].as_slice()),
+    );
+    let k_f64 = dequant_one(
+        key,
+        layer_idx,
+        MatrixType::Wk,
+        k_acc,
+        scale_x_attn,
+        overrides.map(|o| o.wk[layer_idx].as_slice()),
+    );
+    let v_f64 = dequant_one(
+        key,
+        layer_idx,
+        MatrixType::Wv,
+        v_acc,
+        scale_x_attn,
+        overrides.map(|o| o.wv[layer_idx].as_slice()),
+    );
 
     // Add projection biases (model-dependent, e.g. Qwen2)
     let q_f64 = add_qkv_bias(key, layer_idx, MatrixType::Wq, q_f64);
@@ -388,7 +499,12 @@ fn add_qkv_bias(key: &VerifierKey, layer_idx: usize, mt: MatrixType, mut v: Vec<
 fn opened_token_qkv(
     r: &V4AuditResponse,
     layer_idx: usize,
-) -> Option<(&[i32], &[i32], &[i32], &verilm_core::types::RetainedLayerState)> {
+) -> Option<(
+    &[i32],
+    &[i32],
+    &[i32],
+    &verilm_core::types::RetainedLayerState,
+)> {
     let shell = r.shell_opening.as_ref()?;
     if layer_idx >= shell.layers.len() || layer_idx >= r.retained.layers.len() {
         return None;
@@ -435,8 +551,14 @@ pub fn measure_corridor_committed_kv(
         let layer_kv = &kv_entries[layer_idx];
         // Build KV cache from committed entries up to and including token_pos.
         let n_positions = (token_pos + 1).min(layer_kv.len());
-        let kv_k: Vec<Vec<f64>> = layer_kv[..n_positions].iter().map(|e| e.k_roped.clone()).collect();
-        let kv_v: Vec<Vec<f64>> = layer_kv[..n_positions].iter().map(|e| e.v_deq.clone()).collect();
+        let kv_k: Vec<Vec<f64>> = layer_kv[..n_positions]
+            .iter()
+            .map(|e| e.k_roped.clone())
+            .collect();
+        let kv_v: Vec<Vec<f64>> = layer_kv[..n_positions]
+            .iter()
+            .map(|e| e.v_deq.clone())
+            .collect();
 
         if kv_k.is_empty() {
             continue;
@@ -450,8 +572,14 @@ pub fn measure_corridor_committed_kv(
             None => continue,
         };
 
-        let q_f64 = dequant_one(key, layer_idx, MatrixType::Wq, q_acc, sl.scale_x_attn,
-            scale_overrides.map(|o| o.wq[layer_idx].as_slice()));
+        let q_f64 = dequant_one(
+            key,
+            layer_idx,
+            MatrixType::Wq,
+            q_acc,
+            sl.scale_x_attn,
+            scale_overrides.map(|o| o.wq[layer_idx].as_slice()),
+        );
         let q_f64 = add_qkv_bias(key, layer_idx, MatrixType::Wq, q_f64);
         let q_roped = verilm_core::rope::apply_rope_q(&q_f64, token_pos, cfg);
 
@@ -460,17 +588,44 @@ pub fn measure_corridor_committed_kv(
             // Diagnostic: at pos=0 there is 1 KV entry, softmax=[1.0],
             // so a_f64 must equal v_deq (for head 0 at least).
             let (replayed, a_f64) = verilm_core::attention::replay_attention_roped_raw(
-                &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
+                &q_roped,
+                &kv_k,
+                &kv_v,
+                rs.scale_a as f64,
+                cfg,
             );
             let n = 16.min(a_f64.len()).min(rs.a.len());
             let v0 = &kv_v[0];
-            let inv_sa = if (rs.scale_a as f64).abs() > 1e-30 { 1.0 / rs.scale_a as f64 } else { 1.0 };
-            eprintln!("\n[DIAG-CKV] token_pos=0 layer=0 n_kv={} scale_a={:.8e} inv_scale_a={:.8e}",
-                kv_v.len(), rs.scale_a, inv_sa);
-            eprintln!("  v_deq[0][..{n}]:     {:?}", &v0[..n].iter().map(|v| format!("{:.6}", v)).collect::<Vec<_>>());
-            eprintln!("  a_f64[..{n}]:        {:?}", &a_f64[..n].iter().map(|v| format!("{:.6}", v)).collect::<Vec<_>>());
+            let inv_sa = if (rs.scale_a as f64).abs() > 1e-30 {
+                1.0 / rs.scale_a as f64
+            } else {
+                1.0
+            };
+            eprintln!(
+                "\n[DIAG-CKV] token_pos=0 layer=0 n_kv={} scale_a={:.8e} inv_scale_a={:.8e}",
+                kv_v.len(),
+                rs.scale_a,
+                inv_sa
+            );
+            eprintln!(
+                "  v_deq[0][..{n}]:     {:?}",
+                &v0[..n]
+                    .iter()
+                    .map(|v| format!("{:.6}", v))
+                    .collect::<Vec<_>>()
+            );
+            eprintln!(
+                "  a_f64[..{n}]:        {:?}",
+                &a_f64[..n]
+                    .iter()
+                    .map(|v| format!("{:.6}", v))
+                    .collect::<Vec<_>>()
+            );
             // v_deq / scale_a — what a_i8 should be if scale_a is right
-            let v_requant: Vec<i8> = v0[..n].iter().map(|&v| (v * inv_sa).round().clamp(-128.0, 127.0) as i8).collect();
+            let v_requant: Vec<i8> = v0[..n]
+                .iter()
+                .map(|&v| (v * inv_sa).round().clamp(-128.0, 127.0) as i8)
+                .collect();
             eprintln!("  v_deq/scale_a[..{n}]: {:?}", v_requant);
             eprintln!("  replayed_i8[..{n}]:  {:?}", &replayed[..n]);
             eprintln!("  claimed_i8[..{n}]:   {:?}", &rs.a[..n]);
@@ -479,8 +634,15 @@ pub fn measure_corridor_committed_kv(
             let max_diff_f64: f64 = (0..d).map(|i| (a_f64[i] - v0[i]).abs()).fold(0.0, f64::max);
             eprintln!("  |a_f64 - v_deq| head0 max: {:.8e}", max_diff_f64);
             // Check head layout: kv_dim vs hidden_dim
-            eprintln!("  v_deq[0] len={} kv_dim={} hidden_dim={} n_kv_heads={} n_q_heads={} d_head={}",
-                v0.len(), cfg.n_kv_heads * cfg.d_head, cfg.hidden_dim, cfg.n_kv_heads, cfg.n_q_heads, cfg.d_head);
+            eprintln!(
+                "  v_deq[0] len={} kv_dim={} hidden_dim={} n_kv_heads={} n_q_heads={} d_head={}",
+                v0.len(),
+                cfg.n_kv_heads * cfg.d_head,
+                cfg.hidden_dim,
+                cfg.n_kv_heads,
+                cfg.n_q_heads,
+                cfg.d_head
+            );
 
             // ── Per-head best-match matrix ──
             // With n_kv=1, attention output for Q-head qh = V[kv_head].
@@ -489,8 +651,10 @@ pub fn measure_corridor_committed_kv(
             let n_q = cfg.n_q_heads;
             let n_kv = cfg.n_kv_heads;
             let heads_per_kv = n_q / n_kv;
-            eprintln!("\n[DIAG-HEAD-MAP] n_q_heads={} n_kv_heads={} heads_per_kv={} d_head={}",
-                n_q, n_kv, heads_per_kv, d_head);
+            eprintln!(
+                "\n[DIAG-HEAD-MAP] n_q_heads={} n_kv_heads={} heads_per_kv={} d_head={}",
+                n_q, n_kv, heads_per_kv, d_head
+            );
 
             // For each KV head, quantize v_deq slice to i8
             let mut v_quant_per_kvh: Vec<Vec<i8>> = Vec::new();
@@ -498,7 +662,8 @@ pub fn measure_corridor_committed_kv(
                 let start = kvh * d_head;
                 let end = start + d_head;
                 let slice = &v0[start..end.min(v0.len())];
-                let quant: Vec<i8> = slice.iter()
+                let quant: Vec<i8> = slice
+                    .iter()
                     .map(|&v| (v * inv_sa).round().clamp(-128.0, 127.0) as i8)
                     .collect();
                 v_quant_per_kvh.push(quant);
@@ -506,40 +671,60 @@ pub fn measure_corridor_committed_kv(
 
             // L-inf matrix: match[qh][kvh] = max |claimed_qh[i] - v_quant_kvh[i]|
             eprintln!("  L-inf match matrix (rows=Q-heads, cols=KV-heads):");
-            eprintln!("  {:>4} | {:>6} {:>6} {:>6} {:>6} | best  expected",
-                "qh", "kvh0", "kvh1", "kvh2", "kvh3");
+            eprintln!(
+                "  {:>4} | {:>6} {:>6} {:>6} {:>6} | best  expected",
+                "qh", "kvh0", "kvh1", "kvh2", "kvh3"
+            );
             eprintln!("  {}", "-".repeat(56));
             for qh in 0..n_q {
                 let claimed_start = qh * d_head;
                 let claimed_end = claimed_start + d_head;
-                if claimed_end > rs.a.len() { break; }
+                if claimed_end > rs.a.len() {
+                    break;
+                }
                 let claimed_slice = &rs.a[claimed_start..claimed_end];
 
                 let mut linfs = Vec::new();
                 for kvh in 0..n_kv {
                     let vq = &v_quant_per_kvh[kvh];
-                    let linf: i16 = claimed_slice.iter().zip(vq.iter())
+                    let linf: i16 = claimed_slice
+                        .iter()
+                        .zip(vq.iter())
                         .map(|(&c, &v)| (c as i16 - v as i16).abs())
-                        .max().unwrap_or(0);
+                        .max()
+                        .unwrap_or(0);
                     linfs.push(linf);
                 }
 
-                let best_kvh = linfs.iter().enumerate()
-                    .min_by_key(|(_, &l)| l).map(|(i, _)| i).unwrap_or(0);
+                let best_kvh = linfs
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, &l)| l)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
                 let expected_kvh = qh / heads_per_kv;
-                let marker = if best_kvh != expected_kvh { " *** MISMATCH" } else { "" };
-                eprintln!("  {:>4} | {:>6} {:>6} {:>6} {:>6} | kvh{}  kvh{}{}",
-                    qh, linfs[0], linfs[1], linfs[2], linfs[3],
-                    best_kvh, expected_kvh, marker);
+                let marker = if best_kvh != expected_kvh {
+                    " *** MISMATCH"
+                } else {
+                    ""
+                };
+                eprintln!(
+                    "  {:>4} | {:>6} {:>6} {:>6} {:>6} | kvh{}  kvh{}{}",
+                    qh, linfs[0], linfs[1], linfs[2], linfs[3], best_kvh, expected_kvh, marker
+                );
             }
 
             // Check: are Q heads within the same GQA group identical in claimed?
-            eprintln!("\n[DIAG-GQA-GROUP] Intra-group consistency (should be identical for n_kv=1):");
+            eprintln!(
+                "\n[DIAG-GQA-GROUP] Intra-group consistency (should be identical for n_kv=1):"
+            );
             for kvg in 0..n_kv {
                 let first_qh = kvg * heads_per_kv;
                 let ref_start = first_qh * d_head;
                 let ref_end = ref_start + d_head;
-                if ref_end > rs.a.len() { break; }
+                if ref_end > rs.a.len() {
+                    break;
+                }
                 let ref_slice = &rs.a[ref_start..ref_end];
 
                 let mut group_info = Vec::new();
@@ -547,22 +732,34 @@ pub fn measure_corridor_committed_kv(
                     let qh = first_qh + offset;
                     let s = qh * d_head;
                     let e = s + d_head;
-                    if e > rs.a.len() { break; }
+                    if e > rs.a.len() {
+                        break;
+                    }
                     let slice = &rs.a[s..e];
-                    let linf: i16 = ref_slice.iter().zip(slice.iter())
+                    let linf: i16 = ref_slice
+                        .iter()
+                        .zip(slice.iter())
                         .map(|(&a, &b)| (a as i16 - b as i16).abs())
-                        .max().unwrap_or(0);
+                        .max()
+                        .unwrap_or(0);
                     group_info.push((qh, linf));
                 }
                 let maxdiff = group_info.iter().map(|(_, l)| *l).max().unwrap_or(0);
-                eprintln!("  KV group {} (Q heads {}-{}): max intra-group L-inf = {}",
-                    kvg, first_qh, first_qh + heads_per_kv - 1, maxdiff);
+                eprintln!(
+                    "  KV group {} (Q heads {}-{}): max intra-group L-inf = {}",
+                    kvg,
+                    first_qh,
+                    first_qh + heads_per_kv - 1,
+                    maxdiff
+                );
             }
 
             // Show first 8 elements of claimed_i8 for Q heads 0 and 7 (different KV groups)
             eprintln!("\n[DIAG-HEAD-SLICES] First 8 elements per Q-head:");
             for qh in [0, 1, 7, 14, 21].iter().copied() {
-                if (qh + 1) * d_head > rs.a.len() { break; }
+                if (qh + 1) * d_head > rs.a.len() {
+                    break;
+                }
                 let s = qh * d_head;
                 let slice = &rs.a[s..s + 8.min(d_head)];
                 let expected_kvh = qh / heads_per_kv;
@@ -573,12 +770,20 @@ pub fn measure_corridor_committed_kv(
                 eprintln!("  v_quant kvh={}: {:?}", kvh, slice);
             }
 
-            all_stats.push(measure_attention_diff(&rs.a, &replayed, layer_idx, token_pos)?);
+            all_stats.push(measure_attention_diff(
+                &rs.a, &replayed, layer_idx, token_pos,
+            )?);
         } else {
             let replayed = verilm_core::attention::replay_attention_roped(
-                &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
+                &q_roped,
+                &kv_k,
+                &kv_v,
+                rs.scale_a as f64,
+                cfg,
             );
-            all_stats.push(measure_attention_diff(&rs.a, &replayed, layer_idx, token_pos)?);
+            all_stats.push(measure_attention_diff(
+                &rs.a, &replayed, layer_idx, token_pos,
+            )?);
         }
     }
 

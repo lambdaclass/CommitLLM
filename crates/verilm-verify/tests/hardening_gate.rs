@@ -45,13 +45,30 @@
 #[test]
 fn gate_redteam_surface_exists() {
     let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent().unwrap().parent().unwrap();
-    assert!(workspace.join("redteam/README.md").exists(), "redteam README must exist");
-    assert!(workspace.join("redteam/attack_matrix.md").exists(), "redteam attack matrix must exist");
-    assert!(workspace.join("redteam/modal/test_model_substitution.py").exists(),
-        "redteam model-substitution runner must exist");
-    assert!(workspace.join("redteam/modal/test_freshness_gap.py").exists(),
-        "redteam freshness-gap runner must exist");
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    assert!(
+        workspace.join("redteam/README.md").exists(),
+        "redteam README must exist"
+    );
+    assert!(
+        workspace.join("redteam/attack_matrix.md").exists(),
+        "redteam attack matrix must exist"
+    );
+    assert!(
+        workspace
+            .join("redteam/modal/test_model_substitution.py")
+            .exists(),
+        "redteam model-substitution runner must exist"
+    );
+    assert!(
+        workspace
+            .join("redteam/modal/test_freshness_gap.py")
+            .exists(),
+        "redteam freshness-gap runner must exist"
+    );
 }
 
 /// Verify the boundary_fuzz suite exists and has the expected test count.
@@ -82,11 +99,15 @@ fn gate_cross_version_exists() {
     // Frozen fixtures must be present.
     let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
     assert!(
-        std::path::Path::new(fixtures).join("v4_audit_canonical.bin").exists(),
+        std::path::Path::new(fixtures)
+            .join("v4_audit_canonical.bin")
+            .exists(),
         "frozen audit fixture missing"
     );
     assert!(
-        std::path::Path::new(fixtures).join("v4_key_canonical.bin").exists(),
+        std::path::Path::new(fixtures)
+            .join("v4_key_canonical.bin")
+            .exists(),
         "frozen key fixture missing"
     );
 }
@@ -108,15 +129,20 @@ fn gate_v4_e2e_exists() {
 #[test]
 fn gate_gpu_adversarial_exists() {
     let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent().unwrap().parent().unwrap();
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
     let path = workspace.join("redteam/modal/test_adversarial.py");
-    assert!(path.exists(), "redteam/modal/test_adversarial.py must exist");
+    assert!(
+        path.exists(),
+        "redteam/modal/test_adversarial.py must exist"
+    );
 
     let content = std::fs::read_to_string(&path).unwrap();
     // The adversarial suite is a single-file script with inline assertions,
     // not pytest. Count assert statements as a proxy for scenario coverage.
-    let assert_count = content.matches("assert ").count()
-        + content.matches("assert(").count();
+    let assert_count = content.matches("assert ").count() + content.matches("assert(").count();
     assert!(
         assert_count >= 10,
         "redteam/modal/test_adversarial.py has only {} assertions — expected >= 10",
@@ -133,12 +159,12 @@ fn gate_failure_taxonomy_exists() {
     use verilm_verify::{FailureCategory, FailureCode};
 
     let categories: Vec<FailureCategory> = [
-        FailureCode::WrongCommitmentVersion,  // Structural
-        FailureCode::FreivaldsFailed,          // CryptographicBinding
-        FailureCode::SpecFieldMismatch,        // SpecMismatch
-        FailureCode::UnsupportedSamplerVersion,// Unsupported
-        FailureCode::TokenSelectionMismatch,   // SemanticViolation
-        FailureCode::TokenizerError,           // Operational
+        FailureCode::WrongCommitmentVersion,    // Structural
+        FailureCode::FreivaldsFailed,           // CryptographicBinding
+        FailureCode::SpecFieldMismatch,         // SpecMismatch
+        FailureCode::UnsupportedSamplerVersion, // Unsupported
+        FailureCode::TokenSelectionMismatch,    // SemanticViolation
+        FailureCode::TokenizerError,            // Operational
     ]
     .iter()
     .map(|c| c.category())

@@ -64,7 +64,14 @@ fn retained_from_traces(traces: &[verilm_core::types::LayerTrace]) -> RetainedTo
 }
 
 fn unit_scales(n_layers: usize) -> Vec<CapturedLayerScales> {
-    vec![CapturedLayerScales { scale_x_attn: 1.0, scale_x_ffn: 1.0, scale_h: 1.0 }; n_layers]
+    vec![
+        CapturedLayerScales {
+            scale_x_attn: 1.0,
+            scale_x_ffn: 1.0,
+            scale_h: 1.0
+        };
+        n_layers
+    ]
 }
 
 /// Build a valid V4AuditResponse via the prover, ready for mutation.
@@ -75,7 +82,11 @@ fn make_valid_response(
 ) -> (verilm_core::types::VerifierKey, V4AuditResponse) {
     let key = generate_key(cfg, model, [1u8; 32]);
     let inputs: Vec<Vec<i8>> = (0..n_tokens)
-        .map(|t| (0..cfg.hidden_dim).map(|i| ((i + t * 7) % 256) as i8).collect())
+        .map(|t| {
+            (0..cfg.hidden_dim)
+                .map(|i| ((i + t * 7) % 256) as i8)
+                .collect()
+        })
         .collect();
     let all_retained: Vec<RetainedTokenState> = inputs
         .iter()
@@ -93,7 +104,20 @@ fn make_valid_response(
     let all_scales = vec![unit_scales(cfg.n_layers); n_tok];
     let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None);
     // Open token 0 (has no prefix).
-    let response = open_v4(&state, 0, &ToyWeights(model), cfg, &[], &[], None, None, None, None, false, false);
+    let response = open_v4(
+        &state,
+        0,
+        &ToyWeights(model),
+        cfg,
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    );
     (key, response)
 }
 
@@ -106,7 +130,11 @@ fn make_valid_response_at(
 ) -> (verilm_core::types::VerifierKey, V4AuditResponse) {
     let key = generate_key(cfg, model, [1u8; 32]);
     let inputs: Vec<Vec<i8>> = (0..n_tokens)
-        .map(|t| (0..cfg.hidden_dim).map(|i| ((i + t * 7) % 256) as i8).collect())
+        .map(|t| {
+            (0..cfg.hidden_dim)
+                .map(|i| ((i + t * 7) % 256) as i8)
+                .collect()
+        })
         .collect();
     let all_retained: Vec<RetainedTokenState> = inputs
         .iter()
@@ -123,7 +151,20 @@ fn make_valid_response_at(
     let n_tok = all_retained.len();
     let all_scales = vec![unit_scales(cfg.n_layers); n_tok];
     let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None);
-    let response = open_v4(&state, token_index, &ToyWeights(model), cfg, &[], &[], None, None, None, None, false, false);
+    let response = open_v4(
+        &state,
+        token_index,
+        &ToyWeights(model),
+        cfg,
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    );
     (key, response)
 }
 
@@ -291,7 +332,10 @@ fn binary_single_bit_flip_in_payload() {
 
 #[test]
 fn structural_missing_seed_commitment() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     response.commitment.seed_commitment = None;
 
@@ -302,7 +346,10 @@ fn structural_missing_seed_commitment() {
 
 #[test]
 fn structural_missing_prompt_hash() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     response.commitment.prompt_hash = None;
     response.prompt = None;
@@ -314,7 +361,10 @@ fn structural_missing_prompt_hash() {
 
 #[test]
 fn structural_prompt_bytes_without_committed_hash() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     response.commitment.prompt_hash = None;
     // prompt bytes present but no committed hash.
@@ -326,7 +376,10 @@ fn structural_prompt_bytes_without_committed_hash() {
 
 #[test]
 fn structural_committed_hash_without_prompt_bytes() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     // Keep prompt_hash but strip prompt bytes.
     response.prompt = None;
@@ -338,7 +391,10 @@ fn structural_committed_hash_without_prompt_bytes() {
 
 #[test]
 fn structural_missing_n_prompt_tokens_in_commitment() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     response.commitment.n_prompt_tokens = None;
 
@@ -349,7 +405,10 @@ fn structural_missing_n_prompt_tokens_in_commitment() {
 
 #[test]
 fn structural_missing_n_prompt_tokens_in_response() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     response.n_prompt_tokens = None;
 
@@ -360,7 +419,10 @@ fn structural_missing_n_prompt_tokens_in_response() {
 
 #[test]
 fn structural_n_prompt_tokens_mismatch() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     // Commitment says 1, response says 2.
     response.n_prompt_tokens = Some(2);
@@ -372,7 +434,10 @@ fn structural_n_prompt_tokens_mismatch() {
 
 #[test]
 fn structural_n_prompt_tokens_exceeds_n_tokens() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     // n_tokens=1, set n_prompt_tokens to 100 (way exceeds n_tokens+1).
     response.commitment.n_prompt_tokens = Some(100);
@@ -389,7 +454,10 @@ fn structural_n_prompt_tokens_exceeds_n_tokens() {
 
 #[test]
 fn prefix_count_mismatch_too_few() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response_at(&cfg, &model, 3, 2);
     // token_index=2 expects 2 prefix leaves. Remove one.
     response.prefix_leaf_hashes.pop();
@@ -403,11 +471,17 @@ fn prefix_count_mismatch_too_few() {
 
 #[test]
 fn prefix_count_mismatch_too_many() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response_at(&cfg, &model, 3, 1);
     // token_index=1 expects 1 prefix leaf. Add an extra.
     response.prefix_leaf_hashes.push([0xAA; 32]);
-    response.prefix_merkle_proofs.push(MerkleProof { leaf_index: 99, siblings: vec![] });
+    response.prefix_merkle_proofs.push(MerkleProof {
+        leaf_index: 99,
+        siblings: vec![],
+    });
     response.prefix_token_ids.push(999);
 
     let report = verify_v4(&key, &response, None);
@@ -418,13 +492,21 @@ fn prefix_count_mismatch_too_many() {
 #[test]
 fn token_index_zero_no_prefix() {
     // token_index=0 should require exactly 0 prefix leaves and still pass.
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, response) = make_valid_response(&cfg, &model, 1);
     assert_eq!(response.token_index, 0);
     assert!(response.prefix_leaf_hashes.is_empty());
 
     let report = verify_v4(&key, &response, None);
-    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "failures: {:?}",
+        report.failures
+    );
 }
 
 // ===========================================================================
@@ -434,7 +516,10 @@ fn token_index_zero_no_prefix() {
 #[test]
 fn layer_indices_gap_rejected() {
     // layer_indices [0, 2] with 2 layers — gap at 1.
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     let shell = response.shell_opening.as_mut().unwrap();
     shell.layers.truncate(2);
@@ -448,7 +533,10 @@ fn layer_indices_gap_rejected() {
 #[test]
 fn layer_indices_reversed_rejected() {
     // layer_indices [1, 0] — not ascending.
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     let shell = response.shell_opening.as_mut().unwrap();
     shell.layers.truncate(2);
@@ -462,7 +550,10 @@ fn layer_indices_reversed_rejected() {
 #[test]
 fn layer_indices_empty_is_contiguous() {
     // layer_indices = Some(vec![]) with 0 layers — degenerate but contiguous.
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     let shell = response.shell_opening.as_mut().unwrap();
     shell.layers.clear();
@@ -470,8 +561,10 @@ fn layer_indices_empty_is_contiguous() {
 
     let report = verify_v4(&key, &response, None);
     // This should report routine coverage (0 of N layers) and no contiguity error.
-    assert!(!has_code(&report, FailureCode::NonContiguousLayerIndices),
-        "empty layer_indices should be trivially contiguous");
+    assert!(
+        !has_code(&report, FailureCode::NonContiguousLayerIndices),
+        "empty layer_indices should be trivially contiguous"
+    );
     match &report.coverage {
         AuditCoverage::Routine { layers_checked, .. } => assert_eq!(*layers_checked, 0),
         other => panic!("expected Routine(0/N), got {:?}", other),
@@ -481,7 +574,10 @@ fn layer_indices_empty_is_contiguous() {
 #[test]
 fn layer_indices_count_mismatch_rejected() {
     // layer_indices says 1 layer but shell has 2 layer openings.
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     let shell = response.shell_opening.as_mut().unwrap();
     // Keep all layers but claim only index 0.
@@ -498,7 +594,10 @@ fn layer_indices_count_mismatch_rejected() {
 
 #[test]
 fn eos_stop_policy_eos_not_at_end_rejected() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response_at(&cfg, &model, 3, 1);
     let mut manifest = make_manifest(0.0);
     manifest.eos_policy = "stop".into();
@@ -516,7 +615,10 @@ fn eos_stop_policy_eos_not_at_end_rejected() {
 #[test]
 fn eos_stop_policy_eos_at_end_passes_policy_check() {
     // EOS at the last position under "stop" policy should not trigger EosPolicyViolated.
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response_at(&cfg, &model, 3, 2);
     let mut manifest = make_manifest(0.0);
     manifest.eos_policy = "stop".into();
@@ -527,13 +629,19 @@ fn eos_stop_policy_eos_at_end_passes_policy_check() {
     // token_index=2, n_tokens=3 → last token. EOS here is OK.
 
     let report = verify_v4(&key, &response, None);
-    assert!(!has_code(&report, FailureCode::EosPolicyViolated),
-        "EOS at last position should not violate stop policy, got: {:?}", report.failures);
+    assert!(
+        !has_code(&report, FailureCode::EosPolicyViolated),
+        "EOS at last position should not violate stop policy, got: {:?}",
+        report.failures
+    );
 }
 
 #[test]
 fn eos_unknown_policy_rejected() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     let mut manifest = make_manifest(0.0);
     manifest.eos_policy = "yolo".into();
@@ -549,7 +657,10 @@ fn eos_unknown_policy_rejected() {
 
 #[test]
 fn eos_ignore_eos_with_eos_token_rejected() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     let mut manifest = make_manifest(0.0);
     manifest.ignore_eos = true;
@@ -566,7 +677,10 @@ fn eos_ignore_eos_with_eos_token_rejected() {
 #[test]
 fn eos_min_tokens_without_eos_token_id_rejected() {
     // min_tokens > 0 but no eos_token_id → fail-closed.
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     let mut manifest = make_manifest(0.0);
     manifest.min_tokens = 5;
@@ -583,7 +697,10 @@ fn eos_min_tokens_without_eos_token_id_rejected() {
 #[test]
 fn eos_ignore_eos_without_eos_token_id_rejected() {
     // ignore_eos=true but no eos_token_id → fail-closed.
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     let mut manifest = make_manifest(0.0);
     manifest.ignore_eos = true;
@@ -600,7 +717,10 @@ fn eos_ignore_eos_without_eos_token_id_rejected() {
 #[test]
 fn eos_min_tokens_eos_in_window_rejected() {
     // min_tokens=10 but challenged token is EOS within the window.
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response_at(&cfg, &model, 3, 1);
     let eos_id = response.token_id; // make this token the EOS
     let mut manifest = make_manifest(0.0);
@@ -621,7 +741,10 @@ fn eos_min_tokens_eos_in_window_rejected() {
 
 #[test]
 fn missing_shell_opening_reports_structural_failure() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     response.shell_opening = None;
 
@@ -637,7 +760,10 @@ fn missing_shell_opening_reports_structural_failure() {
 
 #[test]
 fn wrong_revealed_seed_rejected() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     response.revealed_seed[0] ^= 0xFF; // flip one byte
 
@@ -649,7 +775,10 @@ fn wrong_revealed_seed_rejected() {
 
 #[test]
 fn wrong_prompt_bytes_rejected() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     // Change prompt bytes without updating the committed hash.
     response.prompt = Some(b"TAMPERED PROMPT".to_vec());
@@ -661,7 +790,10 @@ fn wrong_prompt_bytes_rejected() {
 
 #[test]
 fn tampered_merkle_root_rejected() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     response.commitment.merkle_root[0] ^= 0xFF;
 
@@ -672,7 +804,10 @@ fn tampered_merkle_root_rejected() {
 
 #[test]
 fn tampered_io_root_rejected() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     response.commitment.io_root[0] ^= 0xFF;
 
@@ -683,7 +818,10 @@ fn tampered_io_root_rejected() {
 
 #[test]
 fn tampered_prev_io_hash_rejected() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response_at(&cfg, &model, 3, 2);
     response.prev_io_hash[0] ^= 0xFF;
 
@@ -694,7 +832,10 @@ fn tampered_prev_io_hash_rejected() {
 
 #[test]
 fn tampered_prefix_leaf_hash_rejected() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response_at(&cfg, &model, 3, 2);
     response.prefix_leaf_hashes[0][0] ^= 0xFF;
 
@@ -710,7 +851,10 @@ fn tampered_prefix_leaf_hash_rejected() {
 
 #[test]
 fn decode_mode_greedy_with_nonzero_temp_rejected() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     let mut manifest = make_manifest(0.5); // temp=0.5 (sampled)
     manifest.decode_mode = Some("greedy".into()); // but claims greedy
@@ -725,7 +869,10 @@ fn decode_mode_greedy_with_nonzero_temp_rejected() {
 
 #[test]
 fn decode_mode_sampled_with_zero_temp_rejected() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     let mut manifest = make_manifest(0.0); // temp=0.0 (greedy)
     manifest.decode_mode = Some("sampled".into()); // but claims sampled
@@ -740,7 +887,10 @@ fn decode_mode_sampled_with_zero_temp_rejected() {
 
 #[test]
 fn unsupported_decode_features_rejected() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     let mut manifest = make_manifest(0.0);
     manifest.repetition_penalty = 1.5; // non-default
@@ -757,12 +907,17 @@ fn unsupported_decode_features_rejected() {
     let report = verify_v4(&key, &response, None);
     assert_eq!(report.verdict, Verdict::Fail);
     // All 7 unsupported features should be individually flagged.
-    let unsupported_count = report.failures.iter()
+    let unsupported_count = report
+        .failures
+        .iter()
         .filter(|f| f.code == FailureCode::UnsupportedDecodeFeature)
         .count();
-    assert!(unsupported_count >= 7,
+    assert!(
+        unsupported_count >= 7,
         "expected >= 7 UnsupportedDecodeFeature, got {}: {:?}",
-        unsupported_count, report.failures);
+        unsupported_count,
+        report.failures
+    );
 }
 
 // ===========================================================================
@@ -771,7 +926,10 @@ fn unsupported_decode_features_rejected() {
 
 #[test]
 fn manifest_hash_mismatch_rejected() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     let manifest = make_manifest(0.0);
     response.commitment.manifest_hash = Some([0xAA; 32]); // wrong hash
@@ -789,26 +947,42 @@ fn manifest_hash_mismatch_rejected() {
 #[test]
 fn single_token_commitment_pass() {
     // The minimal possible commitment: 1 token, token_index=0, no prefix.
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, response) = make_valid_response(&cfg, &model, 1);
     assert_eq!(response.commitment.n_tokens, 1);
     assert_eq!(response.token_index, 0);
     assert!(response.prefix_leaf_hashes.is_empty());
 
     let report = verify_v4(&key, &response, None);
-    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "failures: {:?}",
+        report.failures
+    );
 }
 
 #[test]
 fn last_token_in_batch_pass() {
     // Open the last token in a 4-token batch.
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, response) = make_valid_response_at(&cfg, &model, 4, 3);
     assert_eq!(response.token_index, 3);
     assert_eq!(response.prefix_leaf_hashes.len(), 3);
 
     let report = verify_v4(&key, &response, None);
-    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "failures: {:?}",
+        report.failures
+    );
 }
 
 // ===========================================================================
@@ -817,7 +991,10 @@ fn last_token_in_batch_pass() {
 
 #[test]
 fn tampered_retained_a_vector_rejected_with_category() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     // Tamper the retained state — should break Merkle proof.
     response.retained.layers[0].a[0] = !response.retained.layers[0].a[0];
@@ -833,7 +1010,10 @@ fn tampered_retained_a_vector_rejected_with_category() {
 
 #[test]
 fn coverage_single_layer_routine() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     assert!(cfg.n_layers >= 2);
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     let shell = response.shell_opening.as_mut().unwrap();
@@ -842,7 +1022,10 @@ fn coverage_single_layer_routine() {
 
     let report = verify_v4(&key, &response, None);
     match &report.coverage {
-        AuditCoverage::Routine { layers_checked, layers_total } => {
+        AuditCoverage::Routine {
+            layers_checked,
+            layers_total,
+        } => {
             assert_eq!(*layers_checked, 1);
             assert_eq!(*layers_total, cfg.n_layers);
         }
@@ -852,11 +1035,19 @@ fn coverage_single_layer_routine() {
 
 #[test]
 fn coverage_all_layers_full() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, response) = make_valid_response(&cfg, &model, 1);
 
     let report = verify_v4(&key, &response, None);
-    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "failures: {:?}",
+        report.failures
+    );
     match &report.coverage {
         AuditCoverage::Full { layers_checked } => {
             assert_eq!(*layers_checked, cfg.n_layers);
@@ -871,16 +1062,24 @@ fn coverage_all_layers_full() {
 
 #[test]
 fn failure_context_carries_token_index() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response_at(&cfg, &model, 3, 2);
     response.commitment.merkle_root[0] ^= 0xFF; // break Merkle proof
 
     let report = verify_v4(&key, &response, None);
-    let merkle_failure = report.failures.iter()
+    let merkle_failure = report
+        .failures
+        .iter()
         .find(|f| f.code == FailureCode::MerkleProofFailed)
         .expect("should have MerkleProofFailed");
-    assert_eq!(merkle_failure.context.token_index, Some(2),
-        "failure context should carry the challenged token_index");
+    assert_eq!(
+        merkle_failure.context.token_index,
+        Some(2),
+        "failure context should carry the challenged token_index"
+    );
 }
 
 // ===========================================================================
@@ -889,7 +1088,10 @@ fn failure_context_carries_token_index() {
 
 #[test]
 fn unknown_sampler_version_rejected() {
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (key, mut response) = make_valid_response(&cfg, &model, 1);
     let mut manifest = make_manifest(0.5);
     manifest.sampler_version = Some("futuristic-sampler-v99".into());
@@ -909,14 +1111,20 @@ fn unknown_sampler_version_rejected() {
 #[test]
 fn binary_unknown_audit_magic_vv5a_rejected() {
     // Future version magic "VV5A" must be rejected by the current deserializer.
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let (_key, response) = make_valid_response(&cfg, &model, 1);
     let mut binary = serialize::serialize_v4_audit(&response);
     // Replace VV4A magic with VV5A.
     binary[2] = b'5';
     let result = serialize::deserialize_v4_audit(&binary);
     assert!(result.is_err(), "VV5A magic should be rejected");
-    assert!(result.unwrap_err().contains("magic"), "error should mention magic");
+    assert!(
+        result.unwrap_err().contains("magic"),
+        "error should mention magic"
+    );
 }
 
 #[test]
@@ -941,13 +1149,20 @@ fn binary_unknown_key_magic_rejected_as_audit() {
 fn long_prompt_short_output_pass() {
     // Many prompt tokens (high n_prompt_tokens), minimal generation (1 token).
     // Simulated: commit 5 tokens, declare 4 are prompt, 1 generated.
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let key = generate_key(&cfg, &model, [1u8; 32]);
     let n_tokens = 5usize;
     let n_prompt = 4u32; // 4 prompt tokens → 1 generated token
 
     let inputs: Vec<Vec<i8>> = (0..n_tokens)
-        .map(|t| (0..cfg.hidden_dim).map(|i| ((i + t * 7) % 256) as i8).collect())
+        .map(|t| {
+            (0..cfg.hidden_dim)
+                .map(|i| ((i + t * 7) % 256) as i8)
+                .collect()
+        })
         .collect();
     let all_retained: Vec<RetainedTokenState> = inputs
         .iter()
@@ -965,11 +1180,28 @@ fn long_prompt_short_output_pass() {
     let all_scales = vec![unit_scales(cfg.n_layers); n_tok];
     let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None);
     // Open the last token (the single generated token).
-    let response = open_v4(&state, (n_tokens - 1) as u32, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
+    let response = open_v4(
+        &state,
+        (n_tokens - 1) as u32,
+        &ToyWeights(&model),
+        &cfg,
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    );
 
     let report = verify_v4(&key, &response, None);
-    assert_eq!(report.verdict, Verdict::Pass,
-        "long prompt + short output should pass, failures: {:?}", report.failures);
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "long prompt + short output should pass, failures: {:?}",
+        report.failures
+    );
     assert_eq!(response.commitment.n_prompt_tokens, Some(n_prompt));
     assert_eq!(response.prefix_leaf_hashes.len(), n_tokens - 1);
 }
@@ -978,13 +1210,20 @@ fn long_prompt_short_output_pass() {
 fn short_prompt_long_output_pass() {
     // Minimal prompt (1 token), many generated tokens.
     // Simulated: commit 8 tokens, declare 1 is prompt, 7 generated.
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let key = generate_key(&cfg, &model, [1u8; 32]);
     let n_tokens = 8usize;
     let n_prompt = 1u32;
 
     let inputs: Vec<Vec<i8>> = (0..n_tokens)
-        .map(|t| (0..cfg.hidden_dim).map(|i| ((i + t * 7) % 256) as i8).collect())
+        .map(|t| {
+            (0..cfg.hidden_dim)
+                .map(|i| ((i + t * 7) % 256) as i8)
+                .collect()
+        })
         .collect();
     let all_retained: Vec<RetainedTokenState> = inputs
         .iter()
@@ -1003,11 +1242,28 @@ fn short_prompt_long_output_pass() {
     let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None);
     // Open a token in the middle of the generated range.
     let mid = (n_tokens / 2) as u32;
-    let response = open_v4(&state, mid, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
+    let response = open_v4(
+        &state,
+        mid,
+        &ToyWeights(&model),
+        &cfg,
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    );
 
     let report = verify_v4(&key, &response, None);
-    assert_eq!(report.verdict, Verdict::Pass,
-        "short prompt + long output should pass, failures: {:?}", report.failures);
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "short prompt + long output should pass, failures: {:?}",
+        report.failures
+    );
     assert_eq!(response.commitment.n_prompt_tokens, Some(n_prompt));
     assert_eq!(response.prefix_leaf_hashes.len(), mid as usize);
 }
@@ -1016,14 +1272,21 @@ fn short_prompt_long_output_pass() {
 fn all_prompt_no_generation_boundary() {
     // Edge: n_prompt_tokens == n_tokens + 1 (all tokens are prompt, zero generated).
     // This is the maximum allowed by the bound check.
-    let (cfg, model) = (ModelConfig::toy(), generate_model(&ModelConfig::toy(), 12345));
+    let (cfg, model) = (
+        ModelConfig::toy(),
+        generate_model(&ModelConfig::toy(), 12345),
+    );
     let key = generate_key(&cfg, &model, [1u8; 32]);
     let n_tokens = 3usize;
     // n_prompt_tokens = n_tokens + 1 = 4 (the +1 is the embedding input token).
     let n_prompt = (n_tokens as u32) + 1;
 
     let inputs: Vec<Vec<i8>> = (0..n_tokens)
-        .map(|t| (0..cfg.hidden_dim).map(|i| ((i + t * 7) % 256) as i8).collect())
+        .map(|t| {
+            (0..cfg.hidden_dim)
+                .map(|i| ((i + t * 7) % 256) as i8)
+                .collect()
+        })
         .collect();
     let all_retained: Vec<RetainedTokenState> = inputs
         .iter()
@@ -1040,10 +1303,26 @@ fn all_prompt_no_generation_boundary() {
     let n_tok = all_retained.len();
     let all_scales = vec![unit_scales(cfg.n_layers); n_tok];
     let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None);
-    let response = open_v4(&state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
+    let response = open_v4(
+        &state,
+        0,
+        &ToyWeights(&model),
+        &cfg,
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    );
 
     // Should pass structural checks — n_prompt_tokens == n_tokens + 1 is the allowed maximum.
     let report = verify_v4(&key, &response, None);
-    assert!(!has_code(&report, FailureCode::NPromptTokensBound),
-        "n_prompt_tokens == n_tokens + 1 should be within bounds, got: {:?}", report.failures);
+    assert!(
+        !has_code(&report, FailureCode::NPromptTokensBound),
+        "n_prompt_tokens == n_tokens + 1 should be within bounds, got: {:?}",
+        report.failures
+    );
 }

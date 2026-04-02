@@ -139,9 +139,9 @@ pub struct RopeScaling {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
     pub name: String,
-    pub hidden_dim: usize,    // n
-    pub kv_dim: usize,        // n_kv = n_kv_heads * d_head
-    pub ffn_dim: usize,       // n_ffn
+    pub hidden_dim: usize, // n
+    pub kv_dim: usize,     // n_kv = n_kv_heads * d_head
+    pub ffn_dim: usize,    // n_ffn
     pub d_head: usize,
     pub n_layers: usize,
     pub n_q_heads: usize,
@@ -161,7 +161,7 @@ impl ModelConfig {
         ModelConfig {
             name: "Llama-3-70B".into(),
             hidden_dim: 8192,
-            kv_dim: 1024,     // 8 KV heads * 128
+            kv_dim: 1024, // 8 KV heads * 128
             ffn_dim: 28672,
             d_head: 128,
             n_layers: 80,
@@ -177,7 +177,7 @@ impl ModelConfig {
         ModelConfig {
             name: "Llama-3-8B".into(),
             hidden_dim: 4096,
-            kv_dim: 1024,     // 8 KV heads * 128
+            kv_dim: 1024, // 8 KV heads * 128
             ffn_dim: 14336,
             d_head: 128,
             n_layers: 32,
@@ -194,7 +194,7 @@ impl ModelConfig {
         ModelConfig {
             name: "Llama-3.1-8B".into(),
             hidden_dim: 4096,
-            kv_dim: 1024,     // 8 KV heads * 128
+            kv_dim: 1024, // 8 KV heads * 128
             ffn_dim: 14336,
             d_head: 128,
             n_layers: 32,
@@ -216,7 +216,7 @@ impl ModelConfig {
         ModelConfig {
             name: "Llama-3-405B".into(),
             hidden_dim: 16384,
-            kv_dim: 1024,     // 8 KV heads * 128
+            kv_dim: 1024, // 8 KV heads * 128
             ffn_dim: 53248,
             d_head: 128,
             n_layers: 126,
@@ -233,7 +233,7 @@ impl ModelConfig {
         ModelConfig {
             name: "toy".into(),
             hidden_dim: 16,
-            kv_dim: 4,        // 2 KV heads * 2
+            kv_dim: 4, // 2 KV heads * 2
             ffn_dim: 32,
             d_head: 2,
             n_layers: 2,

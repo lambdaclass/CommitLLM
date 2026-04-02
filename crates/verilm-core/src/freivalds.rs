@@ -13,7 +13,7 @@
 //! any input x without actually computing Wx. Since v = r^T W and the
 //! prover knows W (open weights), leaking v also leaks r.
 
-use crate::field::{Fp, Fp64, Fp128, P64};
+use crate::field::{Fp, Fp128, Fp64, P64};
 
 /// Precompute v = r^T W in F_p.
 ///
@@ -112,7 +112,7 @@ pub fn derive_block_coefficients(
     matrix_idx: usize,
     n_blocks: usize,
 ) -> Vec<Fp> {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
 
     let mut coeffs = Vec::with_capacity(n_blocks);
     for b in 0..n_blocks {
@@ -145,13 +145,7 @@ pub fn derive_block_coefficients(
 /// - `c`: random batching coefficients (length = n_blocks)
 ///
 /// Returns true if the check passes.
-pub fn check_q8_blocks(
-    v: &[Fp],
-    x: &[i8],
-    r: &[Fp],
-    sumi: &[Vec<i32>],
-    c: &[Fp],
-) -> bool {
+pub fn check_q8_blocks(v: &[Fp], x: &[i8], r: &[Fp], sumi: &[Vec<i32>], c: &[Fp]) -> bool {
     let n_blocks = sumi.len();
     assert_eq!(c.len(), n_blocks);
     assert_eq!(v.len(), n_blocks * Q8_0_BLOCK_SIZE);
@@ -433,10 +427,8 @@ mod tests {
         ];
         let d_w = vec![
             // row 0: scale_b0, scale_b1
-            1.0, 2.0,
-            // row 1
-            0.5, 1.5,
-            // row 2
+            1.0, 2.0, // row 1
+            0.5, 1.5, // row 2
             1.0, 1.0,
         ];
         let d_x = vec![1.0, 0.5];
@@ -479,7 +471,9 @@ mod tests {
         // Flat check
         let z: Vec<i32> = (0..rows)
             .map(|row| {
-                (0..cols).map(|col| w[row * cols + col] as i32 * x[col] as i32).sum()
+                (0..cols)
+                    .map(|col| w[row * cols + col] as i32 * x[col] as i32)
+                    .sum()
             })
             .collect();
         assert!(check(&v, &x, &r, &z));

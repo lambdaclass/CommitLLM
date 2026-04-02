@@ -44,9 +44,9 @@ fn test_requantize_basic() {
 fn test_requantize_boundary_values() {
     assert_eq!(requantize(-129), -128i8); // just below range -> clamp low
     assert_eq!(requantize(-128), -128i8); // exact low boundary
-    assert_eq!(requantize(0), 0i8);       // zero
-    assert_eq!(requantize(127), 127i8);   // exact high boundary
-    assert_eq!(requantize(128), 127i8);   // just above range -> clamp high
+    assert_eq!(requantize(0), 0i8); // zero
+    assert_eq!(requantize(127), 127i8); // exact high boundary
+    assert_eq!(requantize(128), 127i8); // just above range -> clamp high
     assert_eq!(requantize(i32::MAX), 127i8);
     assert_eq!(requantize(i32::MIN), -128i8);
 }
@@ -175,7 +175,17 @@ fn test_silu_h_matches_check_silu() {
 #[test]
 fn test_requantize_is_deterministic() {
     let inputs: Vec<i32> = vec![
-        i32::MIN, -129, -128, -1, 0, 1, 127, 128, i32::MAX, 999, -999,
+        i32::MIN,
+        -129,
+        -128,
+        -1,
+        0,
+        1,
+        127,
+        128,
+        i32::MAX,
+        999,
+        -999,
     ];
 
     for &x in &inputs {

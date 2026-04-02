@@ -54,8 +54,7 @@ pub fn deserialize_v4_audit(data: &[u8]) -> Result<V4AuditResponse, String> {
     }
     let decompressed =
         zstd::decode_all(&data[4..]).map_err(|e| format!("zstd decompression failed: {e}"))?;
-    bincode::deserialize(&decompressed)
-        .map_err(|e| format!("V4 audit deserialization failed: {e}"))
+    bincode::deserialize(&decompressed).map_err(|e| format!("V4 audit deserialization failed: {e}"))
 }
 
 // ── Transport compression (independent of schema) ───────────

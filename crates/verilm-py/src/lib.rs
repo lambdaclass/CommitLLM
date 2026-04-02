@@ -8,8 +8,7 @@ use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyBytes, PyDict, PyList};
 
 use verilm_core::types::{
-    AuditTier, BatchCommitment,
-    DeploymentManifest, InputSpec, V4AuditResponse, VerifierKey,
+    AuditTier, BatchCommitment, DeploymentManifest, InputSpec, V4AuditResponse, VerifierKey,
 };
 use verilm_prover::FullBindingParams;
 
@@ -30,24 +29,37 @@ impl verilm_verify::PromptTokenizer for PyCallableTokenizer<'_> {
         let py = self.callback.py();
         let prompt_bytes = PyBytes::new(py, prompt);
         let spec_dict = PyDict::new(py);
-        spec_dict.set_item("tokenizer_hash", hex::encode(input_spec.tokenizer_hash))
+        spec_dict
+            .set_item("tokenizer_hash", hex::encode(input_spec.tokenizer_hash))
             .map_err(|e| e.to_string())?;
-        spec_dict.set_item("system_prompt_hash",
-            input_spec.system_prompt_hash.map(hex::encode))
+        spec_dict
+            .set_item(
+                "system_prompt_hash",
+                input_spec.system_prompt_hash.map(hex::encode),
+            )
             .map_err(|e| e.to_string())?;
-        spec_dict.set_item("chat_template_hash",
-            input_spec.chat_template_hash.map(hex::encode))
+        spec_dict
+            .set_item(
+                "chat_template_hash",
+                input_spec.chat_template_hash.map(hex::encode),
+            )
             .map_err(|e| e.to_string())?;
-        spec_dict.set_item("bos_eos_policy", &input_spec.bos_eos_policy)
+        spec_dict
+            .set_item("bos_eos_policy", &input_spec.bos_eos_policy)
             .map_err(|e| e.to_string())?;
-        spec_dict.set_item("truncation_policy", &input_spec.truncation_policy)
+        spec_dict
+            .set_item("truncation_policy", &input_spec.truncation_policy)
             .map_err(|e| e.to_string())?;
-        spec_dict.set_item("special_token_policy", &input_spec.special_token_policy)
+        spec_dict
+            .set_item("special_token_policy", &input_spec.special_token_policy)
             .map_err(|e| e.to_string())?;
 
-        let result = self.callback.call1((prompt_bytes, spec_dict))
+        let result = self
+            .callback
+            .call1((prompt_bytes, spec_dict))
             .map_err(|e| format!("Python tokenizer callback failed: {}", e))?;
-        result.extract::<Vec<u32>>()
+        result
+            .extract::<Vec<u32>>()
             .map_err(|e| format!("tokenizer callback did not return list[int]: {}", e))
     }
 }
@@ -63,15 +75,17 @@ struct PyCallableDetokenizer<'py> {
 impl verilm_verify::Detokenizer for PyCallableDetokenizer<'_> {
     fn decode(&self, token_ids: &[u32], policy: Option<&str>) -> Result<String, String> {
         let py = self.callback.py();
-        let ids_list = PyList::new(py, token_ids)
-            .map_err(|e| e.to_string())?;
+        let ids_list = PyList::new(py, token_ids).map_err(|e| e.to_string())?;
         let policy_obj: Bound<'_, PyAny> = match policy {
             Some(p) => p.into_pyobject(py).map_err(|e| e.to_string())?.into_any(),
             None => py.None().into_bound(py),
         };
-        let result = self.callback.call1((ids_list, policy_obj))
+        let result = self
+            .callback
+            .call1((ids_list, policy_obj))
             .map_err(|e| format!("Python detokenizer callback failed: {}", e))?;
-        result.extract::<String>()
+        result
+            .extract::<String>()
             .map_err(|e| format!("detokenizer callback did not return str: {}", e))
     }
 }
@@ -81,9 +95,8 @@ impl verilm_verify::Detokenizer for PyCallableDetokenizer<'_> {
 /// Avoids the Python-side `.tobytes()` allocation + copy.
 fn try_buffer_as_bytes(obj: &Bound<'_, PyAny>) -> Option<Vec<u8>> {
     let mut view: pyo3::ffi::Py_buffer = unsafe { std::mem::zeroed() };
-    if unsafe {
-        pyo3::ffi::PyObject_GetBuffer(obj.as_ptr(), &mut view, pyo3::ffi::PyBUF_SIMPLE)
-    } != 0
+    if unsafe { pyo3::ffi::PyObject_GetBuffer(obj.as_ptr(), &mut view, pyo3::ffi::PyBUF_SIMPLE) }
+        != 0
     {
         unsafe { pyo3::ffi::PyErr_Clear() };
         return None;
@@ -141,7 +154,9 @@ fn extract_i8_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<i8>> {
     if let Ok(v) = obj.extract::<Vec<i8>>() {
         return Ok(v);
     }
-    Err(PyValueError::new_err("expected bytes, buffer, or list of i8"))
+    Err(PyValueError::new_err(
+        "expected bytes, buffer, or list of i8",
+    ))
 }
 
 /// Extract a Vec<f32> from bytes, buffer protocol, or Python list.
@@ -164,61 +179,74 @@ fn extract_manifest(d: &Bound<'_, PyDict>) -> PyResult<DeploymentManifest> {
     let bytes = hex::decode(&tokenizer_hash_hex)
         .map_err(|e| PyValueError::new_err(format!("invalid tokenizer_hash hex: {}", e)))?;
     if bytes.len() != 32 {
-        return Err(PyValueError::new_err("tokenizer_hash must be 32 bytes (64 hex chars)"));
+        return Err(PyValueError::new_err(
+            "tokenizer_hash must be 32 bytes (64 hex chars)",
+        ));
     }
     let mut tokenizer_hash = [0u8; 32];
     tokenizer_hash.copy_from_slice(&bytes);
 
     Ok(DeploymentManifest {
         tokenizer_hash,
-        temperature: d.get_item("temperature")?
+        temperature: d
+            .get_item("temperature")?
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or(0.0),
-        top_k: d.get_item("top_k")?
+        top_k: d
+            .get_item("top_k")?
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or(0),
-        top_p: d.get_item("top_p")?
+        top_p: d
+            .get_item("top_p")?
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or(1.0),
-        eos_policy: d.get_item("eos_policy")?
+        eos_policy: d
+            .get_item("eos_policy")?
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or_else(|| "stop".to_string()),
-        weight_hash: d.get_item("weight_hash")?
+        weight_hash: d
+            .get_item("weight_hash")?
             .map(|v| {
                 let hex_str: String = v.extract()?;
                 decode_hex32(&hex_str, "weight_hash")
             })
             .transpose()?,
-        quant_hash: d.get_item("quant_hash")?
+        quant_hash: d
+            .get_item("quant_hash")?
             .map(|v| {
                 let hex_str: String = v.extract()?;
                 decode_hex32(&hex_str, "quant_hash")
             })
             .transpose()?,
-        system_prompt_hash: d.get_item("system_prompt_hash")?
+        system_prompt_hash: d
+            .get_item("system_prompt_hash")?
             .map(|v| {
                 let hex_str: String = v.extract()?;
                 decode_hex32(&hex_str, "system_prompt_hash")
             })
             .transpose()?,
-        repetition_penalty: d.get_item("repetition_penalty")?
+        repetition_penalty: d
+            .get_item("repetition_penalty")?
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or(1.0),
-        frequency_penalty: d.get_item("frequency_penalty")?
+        frequency_penalty: d
+            .get_item("frequency_penalty")?
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or(0.0),
-        presence_penalty: d.get_item("presence_penalty")?
+        presence_penalty: d
+            .get_item("presence_penalty")?
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or(0.0),
         logit_bias: {
-            let lb: Vec<(u32, f32)> = d.get_item("logit_bias")?
+            let lb: Vec<(u32, f32)> = d
+                .get_item("logit_bias")?
                 .map(|v| v.extract())
                 .transpose()?
                 .unwrap_or_default();
@@ -227,7 +255,8 @@ fn extract_manifest(d: &Bound<'_, PyDict>) -> PyResult<DeploymentManifest> {
             sorted
         },
         bad_word_ids: {
-            let bw: Vec<u32> = d.get_item("bad_word_ids")?
+            let bw: Vec<u32> = d
+                .get_item("bad_word_ids")?
                 .map(|v| v.extract())
                 .transpose()?
                 .unwrap_or_default();
@@ -236,22 +265,28 @@ fn extract_manifest(d: &Bound<'_, PyDict>) -> PyResult<DeploymentManifest> {
             sorted.dedup();
             sorted
         },
-        guided_decoding: d.get_item("guided_decoding")?
+        guided_decoding: d
+            .get_item("guided_decoding")?
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or_default(),
-        stop_sequences: d.get_item("stop_sequences")?
+        stop_sequences: d
+            .get_item("stop_sequences")?
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or_default(),
-        max_tokens: d.get_item("max_tokens")?
+        max_tokens: d
+            .get_item("max_tokens")?
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or(0),
-        chat_template_hash: d.get_item("chat_template_hash")?
+        chat_template_hash: d
+            .get_item("chat_template_hash")?
             .and_then(|v| {
                 // Python may pass None for absent hash.
-                if v.is_none() { return None; }
+                if v.is_none() {
+                    return None;
+                }
                 Some(v)
             })
             .map(|v| {
@@ -259,118 +294,144 @@ fn extract_manifest(d: &Bound<'_, PyDict>) -> PyResult<DeploymentManifest> {
                 decode_hex32(&hex_str, "chat_template_hash")
             })
             .transpose()?,
-        rope_config_hash: d.get_item("rope_config_hash")?
+        rope_config_hash: d
+            .get_item("rope_config_hash")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| {
                 let hex_str: String = v.extract()?;
                 decode_hex32(&hex_str, "rope_config_hash")
             })
             .transpose()?,
-        rmsnorm_eps: d.get_item("rmsnorm_eps")?
+        rmsnorm_eps: d
+            .get_item("rmsnorm_eps")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract::<f64>())
             .transpose()?,
-        sampler_version: d.get_item("sampler_version")?
+        sampler_version: d
+            .get_item("sampler_version")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract::<String>())
             .transpose()?,
-        bos_eos_policy: d.get_item("bos_eos_policy")?
+        bos_eos_policy: d
+            .get_item("bos_eos_policy")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract::<String>())
             .transpose()?,
-        truncation_policy: d.get_item("truncation_policy")?
+        truncation_policy: d
+            .get_item("truncation_policy")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract::<String>())
             .transpose()?,
-        special_token_policy: d.get_item("special_token_policy")?
+        special_token_policy: d
+            .get_item("special_token_policy")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract::<String>())
             .transpose()?,
-        adapter_hash: d.get_item("adapter_hash")?
+        adapter_hash: d
+            .get_item("adapter_hash")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| {
                 let hex_str: String = v.extract()?;
                 decode_hex32(&hex_str, "adapter_hash")
             })
             .transpose()?,
-        min_tokens: d.get_item("min_tokens")?
+        min_tokens: d
+            .get_item("min_tokens")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or(0),
-        ignore_eos: d.get_item("ignore_eos")?
+        ignore_eos: d
+            .get_item("ignore_eos")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract())
             .transpose()?
             .unwrap_or(false),
-        detokenization_policy: d.get_item("detokenization_policy")?
+        detokenization_policy: d
+            .get_item("detokenization_policy")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract::<String>())
             .transpose()?,
-        eos_token_id: d.get_item("eos_token_id")?
+        eos_token_id: d
+            .get_item("eos_token_id")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract())
             .transpose()?,
-        n_layers: d.get_item("n_layers")?
+        n_layers: d
+            .get_item("n_layers")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract())
             .transpose()?,
-        hidden_dim: d.get_item("hidden_dim")?
+        hidden_dim: d
+            .get_item("hidden_dim")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract())
             .transpose()?,
-        vocab_size: d.get_item("vocab_size")?
+        vocab_size: d
+            .get_item("vocab_size")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract())
             .transpose()?,
-        embedding_merkle_root: d.get_item("embedding_merkle_root")?
+        embedding_merkle_root: d
+            .get_item("embedding_merkle_root")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| {
                 let hex_str: String = v.extract()?;
                 decode_hex32(&hex_str, "embedding_merkle_root")
             })
             .transpose()?,
-        padding_policy: d.get_item("padding_policy")?
+        padding_policy: d
+            .get_item("padding_policy")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract::<String>())
             .transpose()?,
-        decode_mode: d.get_item("decode_mode")?
+        decode_mode: d
+            .get_item("decode_mode")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract::<String>())
             .transpose()?,
-        quant_family: d.get_item("quant_family")?
+        quant_family: d
+            .get_item("quant_family")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract::<String>())
             .transpose()?,
-        scale_derivation: d.get_item("scale_derivation")?
+        scale_derivation: d
+            .get_item("scale_derivation")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract::<String>())
             .transpose()?,
-        quant_block_size: d.get_item("quant_block_size")?
+        quant_block_size: d
+            .get_item("quant_block_size")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract())
             .transpose()?,
-        kv_dim: d.get_item("kv_dim")?
+        kv_dim: d
+            .get_item("kv_dim")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract())
             .transpose()?,
-        ffn_dim: d.get_item("ffn_dim")?
+        ffn_dim: d
+            .get_item("ffn_dim")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract())
             .transpose()?,
-        d_head: d.get_item("d_head")?
+        d_head: d
+            .get_item("d_head")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract())
             .transpose()?,
-        n_q_heads: d.get_item("n_q_heads")?
+        n_q_heads: d
+            .get_item("n_q_heads")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract())
             .transpose()?,
-        n_kv_heads: d.get_item("n_kv_heads")?
+        n_kv_heads: d
+            .get_item("n_kv_heads")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract())
             .transpose()?,
-        rope_theta: d.get_item("rope_theta")?
+        rope_theta: d
+            .get_item("rope_theta")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract::<f64>())
             .transpose()?,
@@ -396,7 +457,9 @@ fn build_audit_challenge(
     tier: String,
 ) -> PyResult<Bound<'_, PyDict>> {
     if challenge_seed.len() != 32 {
-        return Err(PyValueError::new_err("challenge_seed must be exactly 32 bytes"));
+        return Err(PyValueError::new_err(
+            "challenge_seed must be exactly 32 bytes",
+        ));
     }
     let mut challenge_seed_arr = [0u8; 32];
     challenge_seed_arr.copy_from_slice(&challenge_seed);
@@ -407,12 +470,8 @@ fn build_audit_challenge(
         _ => return Err(PyValueError::new_err(format!("invalid tier: {}", tier))),
     };
 
-    let challenge = verilm_verify::build_audit_challenge(
-        &challenge_seed_arr,
-        n_tokens,
-        n_layers,
-        tier_enum,
-    );
+    let challenge =
+        verilm_verify::build_audit_challenge(&challenge_seed_arr, n_tokens, n_layers, tier_enum);
 
     let d = PyDict::new(py);
     d.set_item("token_index", challenge.token_index)?;
@@ -471,12 +530,17 @@ struct WeightProvider {
 impl WeightProvider {
     #[new]
     fn new(model_dir: String) -> PyResult<Self> {
-        let provider = verilm_keygen::SafetensorsWeightProvider::load(
-            std::path::Path::new(&model_dir),
-        ).map_err(|e| PyValueError::new_err(format!(
-            "failed to load weights from {}: {}", model_dir, e
-        )))?;
-        Ok(WeightProvider { inner: Arc::new(provider) })
+        let provider =
+            verilm_keygen::SafetensorsWeightProvider::load(std::path::Path::new(&model_dir))
+                .map_err(|e| {
+                    PyValueError::new_err(format!(
+                        "failed to load weights from {}: {}",
+                        model_dir, e
+                    ))
+                })?;
+        Ok(WeightProvider {
+            inner: Arc::new(provider),
+        })
     }
 
     /// Return the R_W weight-chain hash as a hex string.
@@ -578,7 +642,12 @@ impl MinimalBatchStateHandle {
     /// states + proofs, and prover-computed shell openings for the challenged
     /// token (so the verifier can check with key-only Freivalds).
     #[pyo3(signature = (token_index, layer_indices=None, output_text=None))]
-    fn audit_v4(&self, token_index: u32, layer_indices: Option<Vec<usize>>, output_text: Option<String>) -> PyResult<String> {
+    fn audit_v4(
+        &self,
+        token_index: u32,
+        layer_indices: Option<Vec<usize>>,
+        output_text: Option<String>,
+    ) -> PyResult<String> {
         let mut response = self.build_v4_response(token_index, layer_indices.as_deref())?;
         response.output_text = output_text;
         serde_json::to_string(&response)
@@ -587,7 +656,13 @@ impl MinimalBatchStateHandle {
 
     /// Binary V4 audit: bincode + zstd. Returns bytes.
     #[pyo3(signature = (token_index, layer_indices=None, output_text=None))]
-    fn audit_v4_binary<'py>(&self, py: Python<'py>, token_index: u32, layer_indices: Option<Vec<usize>>, output_text: Option<String>) -> PyResult<Bound<'py, PyBytes>> {
+    fn audit_v4_binary<'py>(
+        &self,
+        py: Python<'py>,
+        token_index: u32,
+        layer_indices: Option<Vec<usize>>,
+        output_text: Option<String>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
         let mut response = self.build_v4_response(token_index, layer_indices.as_deref())?;
         response.output_text = output_text;
         let data = verilm_core::serialize::serialize_v4_audit(&response);
@@ -596,7 +671,11 @@ impl MinimalBatchStateHandle {
 }
 
 impl MinimalBatchStateHandle {
-    fn build_v4_response(&self, token_index: u32, layer_filter: Option<&[usize]>) -> PyResult<verilm_core::types::V4AuditResponse> {
+    fn build_v4_response(
+        &self,
+        token_index: u32,
+        layer_filter: Option<&[usize]>,
+    ) -> PyResult<verilm_core::types::V4AuditResponse> {
         if token_index >= self.inner.all_retained.len() as u32 {
             return Err(PyValueError::new_err(format!(
                 "token_index {} out of range (n_tokens={})",
@@ -607,37 +686,53 @@ impl MinimalBatchStateHandle {
 
         let provider = self.provider.as_ref().ok_or_else(|| {
             PyValueError::new_err(
-                "V4 audit requires WeightProvider; none was provided at commit time"
+                "V4 audit requires WeightProvider; none was provided at commit time",
             )
         })?;
         let token_id = self.inner.token_ids[token_index as usize] as usize;
         let bridge_data: Option<(Vec<f32>, Option<verilm_core::merkle::MerkleProof>)> =
             if !provider.rmsnorm_attn_weights().is_empty() {
-                let embedding_row = provider.load_embedding_row(token_id)
-                    .map_err(|e| PyValueError::new_err(format!(
-                        "failed to load embedding row for token {}: {}", token_id, e
-                    )))?;
+                let embedding_row = provider.load_embedding_row(token_id).map_err(|e| {
+                    PyValueError::new_err(format!(
+                        "failed to load embedding row for token {}: {}",
+                        token_id, e
+                    ))
+                })?;
                 let embedding_proof = provider.embedding_proof(token_id);
                 Some((embedding_row, embedding_proof))
             } else {
                 None
             };
-        let bridge = bridge_data.as_ref().map(|(emb_row, emb_proof)| {
-            verilm_core::types::BridgeParams {
-                rmsnorm_attn_weights: provider.rmsnorm_attn_weights(),
-                rmsnorm_ffn_weights: provider.rmsnorm_ffn_weights(),
-                rmsnorm_eps: provider.rmsnorm_eps(),
-                initial_residual: emb_row,
-                embedding_proof: emb_proof.clone(),
-            }
-        });
+        let bridge =
+            bridge_data
+                .as_ref()
+                .map(|(emb_row, emb_proof)| verilm_core::types::BridgeParams {
+                    rmsnorm_attn_weights: provider.rmsnorm_attn_weights(),
+                    rmsnorm_ffn_weights: provider.rmsnorm_ffn_weights(),
+                    rmsnorm_eps: provider.rmsnorm_eps(),
+                    initial_residual: emb_row,
+                    embedding_proof: emb_proof.clone(),
+                });
         let tail = provider.tail_params();
         let emb_lookup: Option<&dyn verilm_core::types::EmbeddingLookup> =
-            if self.rich_prefix || self.deep_prefix { Some(provider.as_ref()) } else { None };
+            if self.rich_prefix || self.deep_prefix {
+                Some(provider.as_ref())
+            } else {
+                None
+            };
         Ok(verilm_prover::open_v4(
-            &self.inner, token_index, provider.as_ref(), provider.config(),
-            provider.weight_scales(), provider.per_channel_weight_scales(), bridge.as_ref(), tail.as_ref(), layer_filter,
-            emb_lookup, self.deep_prefix, self.use_captured_x_attn,
+            &self.inner,
+            token_index,
+            provider.as_ref(),
+            provider.config(),
+            provider.weight_scales(),
+            provider.per_channel_weight_scales(),
+            bridge.as_ref(),
+            tail.as_ref(),
+            layer_filter,
+            emb_lookup,
+            self.deep_prefix,
+            self.use_captured_x_attn,
         ))
     }
 }
@@ -691,9 +786,7 @@ fn commit_minimal_from_captures(
     //   for each fwd pass:
     //     for each layer:
     //       [B values for qkv_proj, B for o_proj, B for gate_up, B for down]
-    let expected_scales: usize = fwd_batch_sizes.iter()
-        .map(|&bs| bs * 4 * n_layers)
-        .sum();
+    let expected_scales: usize = fwd_batch_sizes.iter().map(|&bs| bs * 4 * n_layers).sum();
     if scales.len() != expected_scales {
         return Err(PyValueError::new_err(format!(
             "expected {} scales (4 × batch_size per layer entry), got {}",
@@ -717,10 +810,14 @@ fn commit_minimal_from_captures(
             } else {
                 None
             };
-            let s_qkv = scales[cursor..cursor + batch_size].to_vec(); cursor += batch_size;
-            let s_o   = scales[cursor..cursor + batch_size].to_vec(); cursor += batch_size;
-            let s_gate = scales[cursor..cursor + batch_size].to_vec(); cursor += batch_size;
-            let s_down = scales[cursor..cursor + batch_size].to_vec(); cursor += batch_size;
+            let s_qkv = scales[cursor..cursor + batch_size].to_vec();
+            cursor += batch_size;
+            let s_o = scales[cursor..cursor + batch_size].to_vec();
+            cursor += batch_size;
+            let s_gate = scales[cursor..cursor + batch_size].to_vec();
+            cursor += batch_size;
+            let s_down = scales[cursor..cursor + batch_size].to_vec();
+            cursor += batch_size;
             captures.push(verilm_prover::MinimalCaptureEntry {
                 a_i8,
                 x_attn_i8,
@@ -733,14 +830,13 @@ fn commit_minimal_from_captures(
         }
     }
 
-    let (all_retained, captured_scales, captured_x_attn) = verilm_prover::build_retained_from_captures(
-        &captures,
-        n_layers,
-        &fwd_batch_sizes,
-    );
+    let (all_retained, captured_scales, captured_x_attn) =
+        verilm_prover::build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
 
     if sampling_seed.len() != 32 {
-        return Err(PyValueError::new_err("sampling_seed must be exactly 32 bytes"));
+        return Err(PyValueError::new_err(
+            "sampling_seed must be exactly 32 bytes",
+        ));
     }
     let mut seed = [0u8; 32];
     seed.copy_from_slice(&sampling_seed);
@@ -855,7 +951,12 @@ impl PackedBatchStateHandle {
     }
 
     #[pyo3(signature = (token_index, layer_indices=None, output_text=None))]
-    fn audit_v4(&self, token_index: u32, layer_indices: Option<Vec<usize>>, output_text: Option<String>) -> PyResult<String> {
+    fn audit_v4(
+        &self,
+        token_index: u32,
+        layer_indices: Option<Vec<usize>>,
+        output_text: Option<String>,
+    ) -> PyResult<String> {
         let mut response = self.build_v4_response(token_index, layer_indices.as_deref())?;
         response.output_text = output_text;
         serde_json::to_string(&response)
@@ -863,7 +964,13 @@ impl PackedBatchStateHandle {
     }
 
     #[pyo3(signature = (token_index, layer_indices=None, output_text=None))]
-    fn audit_v4_binary<'py>(&self, py: Python<'py>, token_index: u32, layer_indices: Option<Vec<usize>>, output_text: Option<String>) -> PyResult<Bound<'py, PyBytes>> {
+    fn audit_v4_binary<'py>(
+        &self,
+        py: Python<'py>,
+        token_index: u32,
+        layer_indices: Option<Vec<usize>>,
+        output_text: Option<String>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
         let mut response = self.build_v4_response(token_index, layer_indices.as_deref())?;
         response.output_text = output_text;
         let data = verilm_core::serialize::serialize_v4_audit(&response);
@@ -873,48 +980,66 @@ impl PackedBatchStateHandle {
 
 impl PackedBatchStateHandle {
     fn build_v4_response(
-        &self, token_index: u32, layer_filter: Option<&[usize]>,
+        &self,
+        token_index: u32,
+        layer_filter: Option<&[usize]>,
     ) -> PyResult<verilm_core::types::V4AuditResponse> {
         if token_index >= self.inner.n_tokens() as u32 {
             return Err(PyValueError::new_err(format!(
                 "token_index {} out of range (n_tokens={})",
-                token_index, self.inner.n_tokens()
+                token_index,
+                self.inner.n_tokens()
             )));
         }
 
         let provider = self.provider.as_ref().ok_or_else(|| {
             PyValueError::new_err(
-                "V4 audit requires WeightProvider; none was provided at commit time"
+                "V4 audit requires WeightProvider; none was provided at commit time",
             )
         })?;
         let token_id = self.inner.token_ids[token_index as usize] as usize;
         let bridge_data: Option<(Vec<f32>, Option<verilm_core::merkle::MerkleProof>)> =
             if !provider.rmsnorm_attn_weights().is_empty() {
-                let embedding_row = provider.load_embedding_row(token_id)
-                    .map_err(|e| PyValueError::new_err(format!(
-                        "failed to load embedding row for token {}: {}", token_id, e
-                    )))?;
+                let embedding_row = provider.load_embedding_row(token_id).map_err(|e| {
+                    PyValueError::new_err(format!(
+                        "failed to load embedding row for token {}: {}",
+                        token_id, e
+                    ))
+                })?;
                 let embedding_proof = provider.embedding_proof(token_id);
                 Some((embedding_row, embedding_proof))
             } else {
                 None
             };
-        let bridge = bridge_data.as_ref().map(|(emb_row, emb_proof)| {
-            verilm_core::types::BridgeParams {
-                rmsnorm_attn_weights: provider.rmsnorm_attn_weights(),
-                rmsnorm_ffn_weights: provider.rmsnorm_ffn_weights(),
-                rmsnorm_eps: provider.rmsnorm_eps(),
-                initial_residual: emb_row,
-                embedding_proof: emb_proof.clone(),
-            }
-        });
+        let bridge =
+            bridge_data
+                .as_ref()
+                .map(|(emb_row, emb_proof)| verilm_core::types::BridgeParams {
+                    rmsnorm_attn_weights: provider.rmsnorm_attn_weights(),
+                    rmsnorm_ffn_weights: provider.rmsnorm_ffn_weights(),
+                    rmsnorm_eps: provider.rmsnorm_eps(),
+                    initial_residual: emb_row,
+                    embedding_proof: emb_proof.clone(),
+                });
         let tail = provider.tail_params();
         let emb_lookup: Option<&dyn verilm_core::types::EmbeddingLookup> =
-            if self.rich_prefix || self.deep_prefix { Some(provider.as_ref()) } else { None };
+            if self.rich_prefix || self.deep_prefix {
+                Some(provider.as_ref())
+            } else {
+                None
+            };
         Ok(verilm_prover::open_v4_packed(
-            &self.inner, token_index, provider.as_ref(), provider.config(),
-            provider.weight_scales(), provider.per_channel_weight_scales(), bridge.as_ref(), tail.as_ref(), layer_filter,
-            emb_lookup, self.deep_prefix,
+            &self.inner,
+            token_index,
+            provider.as_ref(),
+            provider.config(),
+            provider.weight_scales(),
+            provider.per_channel_weight_scales(),
+            bridge.as_ref(),
+            tail.as_ref(),
+            layer_filter,
+            emb_lookup,
+            self.deep_prefix,
         ))
     }
 }
@@ -976,19 +1101,25 @@ fn commit_minimal_packed(
     } else if let Some(raw) = try_buffer_as_bytes(packed_a) {
         raw
     } else {
-        return Err(PyValueError::new_err("packed_a must support buffer protocol (bytes, bytearray, numpy, memoryview)"));
+        return Err(PyValueError::new_err(
+            "packed_a must support buffer protocol (bytes, bytearray, numpy, memoryview)",
+        ));
     };
 
     // Extract packed final residuals similarly.
-    let fr_bytes: Option<Vec<u8>> = packed_final_res.map(|obj| {
-        if let Ok(b) = obj.cast::<PyBytes>() {
-            Ok(b.as_bytes().to_vec())
-        } else if let Some(raw) = try_buffer_as_bytes(obj) {
-            Ok(raw)
-        } else {
-            Err(PyValueError::new_err("packed_final_res must support buffer protocol"))
-        }
-    }).transpose()?;
+    let fr_bytes: Option<Vec<u8>> = packed_final_res
+        .map(|obj| {
+            if let Ok(b) = obj.cast::<PyBytes>() {
+                Ok(b.as_bytes().to_vec())
+            } else if let Some(raw) = try_buffer_as_bytes(obj) {
+                Ok(raw)
+            } else {
+                Err(PyValueError::new_err(
+                    "packed_final_res must support buffer protocol",
+                ))
+            }
+        })
+        .transpose()?;
 
     // Extract scales via buffer protocol (numpy array → one bulk memcpy).
     // Drain output is in call order: for each (fwd, layer), 4 groups of
@@ -1012,11 +1143,17 @@ fn commit_minimal_packed(
             }
             token_offset += batch_size;
         }
-        assert_eq!(cursor, drain_scales.len(), "scale rearrangement consumed wrong number of values");
+        assert_eq!(
+            cursor,
+            drain_scales.len(),
+            "scale rearrangement consumed wrong number of values"
+        );
     }
 
     if sampling_seed.len() != 32 {
-        return Err(PyValueError::new_err("sampling_seed must be exactly 32 bytes"));
+        return Err(PyValueError::new_err(
+            "sampling_seed must be exactly 32 bytes",
+        ));
     }
     let mut seed = [0u8; 32];
     seed.copy_from_slice(&sampling_seed);
@@ -1065,10 +1202,8 @@ fn generate_key(model_dir: String, seed: Vec<u8>) -> PyResult<String> {
     let mut seed_arr = [0u8; 32];
     seed_arr.copy_from_slice(&seed);
 
-    let key = verilm_keygen::generate_key(
-        std::path::Path::new(&model_dir),
-        seed_arr,
-    ).map_err(|e| PyValueError::new_err(format!("keygen failed: {}", e)))?;
+    let key = verilm_keygen::generate_key(std::path::Path::new(&model_dir), seed_arr)
+        .map_err(|e| PyValueError::new_err(format!("keygen failed: {}", e)))?;
 
     serde_json::to_string(&key)
         .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
@@ -1106,12 +1241,20 @@ fn verify_v4<'py>(
     tokenizer_fn: Option<Bound<'py, PyAny>>,
     detokenizer_fn: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let response: verilm_core::types::V4AuditResponse = serde_json::from_str(audit_json)
-        .map_err(|e| PyValueError::new_err(format!("failed to deserialize V4AuditResponse: {}", e)))?;
+    let response: verilm_core::types::V4AuditResponse =
+        serde_json::from_str(audit_json).map_err(|e| {
+            PyValueError::new_err(format!("failed to deserialize V4AuditResponse: {}", e))
+        })?;
     let key: VerifierKey = serde_json::from_str(key_json)
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize VerifierKey: {}", e)))?;
 
-    let report = run_verify(&key, &response, expected_prompt_token_ids.as_deref(), tokenizer_fn, detokenizer_fn);
+    let report = run_verify(
+        &key,
+        &response,
+        expected_prompt_token_ids.as_deref(),
+        tokenizer_fn,
+        detokenizer_fn,
+    );
 
     let result = PyDict::new(py);
     result.set_item("passed", report.verdict == verilm_verify::Verdict::Pass)?;
@@ -1119,7 +1262,10 @@ fn verify_v4<'py>(
     result.set_item("checks_passed", report.checks_passed)?;
     let failure_msgs: Vec<&str> = report.failures.iter().map(|f| f.message.as_str()).collect();
     result.set_item("failures", &failure_msgs)?;
-    result.set_item("classified_failures", classified_failures_to_py(py, &report.failures)?)?;
+    result.set_item(
+        "classified_failures",
+        classified_failures_to_py(py, &report.failures)?,
+    )?;
     result.set_item("coverage", coverage_to_py(py, &report.coverage))?;
     result.set_item("duration_us", report.duration.as_micros() as u64)?;
     Ok(result)
@@ -1152,7 +1298,13 @@ fn verify_v4_binary<'py>(
     let key: VerifierKey = serde_json::from_str(key_json)
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize VerifierKey: {}", e)))?;
 
-    let report = run_verify(&key, &response, expected_prompt_token_ids.as_deref(), tokenizer_fn, detokenizer_fn);
+    let report = run_verify(
+        &key,
+        &response,
+        expected_prompt_token_ids.as_deref(),
+        tokenizer_fn,
+        detokenizer_fn,
+    );
 
     let result = PyDict::new(py);
     result.set_item("passed", report.verdict == verilm_verify::Verdict::Pass)?;
@@ -1160,7 +1312,10 @@ fn verify_v4_binary<'py>(
     result.set_item("checks_passed", report.checks_passed)?;
     let failure_msgs: Vec<&str> = report.failures.iter().map(|f| f.message.as_str()).collect();
     result.set_item("failures", &failure_msgs)?;
-    result.set_item("classified_failures", classified_failures_to_py(py, &report.failures)?)?;
+    result.set_item(
+        "classified_failures",
+        classified_failures_to_py(py, &report.failures)?,
+    )?;
     result.set_item("coverage", coverage_to_py(py, &report.coverage))?;
     result.set_item("duration_us", report.duration.as_micros() as u64)?;
     Ok(result)
@@ -1171,35 +1326,60 @@ fn classified_failures_to_py<'py>(
     py: Python<'py>,
     failures: &[verilm_verify::VerificationFailure],
 ) -> PyResult<Bound<'py, PyList>> {
-    let items: Vec<Bound<'py, PyDict>> = failures.iter().map(|f| {
-        let d = PyDict::new(py);
-        d.set_item("code", f.code.to_string()).unwrap();
-        d.set_item("category", f.category.to_string()).unwrap();
-        d.set_item("message", &f.message).unwrap();
-        // Context: only include non-None fields
-        let ctx = PyDict::new(py);
-        if let Some(ti) = f.context.token_index { ctx.set_item("token_index", ti).unwrap(); }
-        if let Some(l) = f.context.layer { ctx.set_item("layer", l).unwrap(); }
-        if let Some(ref m) = f.context.matrix { ctx.set_item("matrix", m).unwrap(); }
-        if let Some(ref fld) = f.context.field { ctx.set_item("field", fld).unwrap(); }
-        if let Some(ref s) = f.context.spec { ctx.set_item("spec", s).unwrap(); }
-        if let Some(ref e) = f.context.expected { ctx.set_item("expected", e).unwrap(); }
-        if let Some(ref a) = f.context.actual { ctx.set_item("actual", a).unwrap(); }
-        if ctx.len() > 0 { d.set_item("context", ctx).unwrap(); }
-        d
-    }).collect();
+    let items: Vec<Bound<'py, PyDict>> = failures
+        .iter()
+        .map(|f| {
+            let d = PyDict::new(py);
+            d.set_item("code", f.code.to_string()).unwrap();
+            d.set_item("category", f.category.to_string()).unwrap();
+            d.set_item("message", &f.message).unwrap();
+            // Context: only include non-None fields
+            let ctx = PyDict::new(py);
+            if let Some(ti) = f.context.token_index {
+                ctx.set_item("token_index", ti).unwrap();
+            }
+            if let Some(l) = f.context.layer {
+                ctx.set_item("layer", l).unwrap();
+            }
+            if let Some(ref m) = f.context.matrix {
+                ctx.set_item("matrix", m).unwrap();
+            }
+            if let Some(ref fld) = f.context.field {
+                ctx.set_item("field", fld).unwrap();
+            }
+            if let Some(ref s) = f.context.spec {
+                ctx.set_item("spec", s).unwrap();
+            }
+            if let Some(ref e) = f.context.expected {
+                ctx.set_item("expected", e).unwrap();
+            }
+            if let Some(ref a) = f.context.actual {
+                ctx.set_item("actual", a).unwrap();
+            }
+            if ctx.len() > 0 {
+                d.set_item("context", ctx).unwrap();
+            }
+            d
+        })
+        .collect();
     Ok(PyList::new(py, items)?)
 }
 
 /// Convert AuditCoverage to a Python dict.
-fn coverage_to_py<'py>(py: Python<'py>, coverage: &verilm_verify::AuditCoverage) -> Bound<'py, PyDict> {
+fn coverage_to_py<'py>(
+    py: Python<'py>,
+    coverage: &verilm_verify::AuditCoverage,
+) -> Bound<'py, PyDict> {
     let d = PyDict::new(py);
     match coverage {
         verilm_verify::AuditCoverage::Full { layers_checked } => {
             d.set_item("level", "full").unwrap();
             d.set_item("layers_checked", *layers_checked).unwrap();
         }
-        verilm_verify::AuditCoverage::Routine { layers_checked, layers_total } => {
+        verilm_verify::AuditCoverage::Routine {
+            layers_checked,
+            layers_total,
+        } => {
             d.set_item("level", "routine").unwrap();
             d.set_item("layers_checked", *layers_checked).unwrap();
             d.set_item("layers_total", *layers_total).unwrap();
@@ -1222,10 +1402,12 @@ fn run_verify(
 ) -> verilm_verify::V4VerifyReport {
     let tok_wrapper = tokenizer_fn.map(|cb| PyCallableTokenizer { callback: cb });
     let detok_wrapper = detokenizer_fn.map(|cb| PyCallableDetokenizer { callback: cb });
-    let tok_ref: Option<&dyn verilm_verify::PromptTokenizer> =
-        tok_wrapper.as_ref().map(|t| t as &dyn verilm_verify::PromptTokenizer);
-    let detok_ref: Option<&dyn verilm_verify::Detokenizer> =
-        detok_wrapper.as_ref().map(|d| d as &dyn verilm_verify::Detokenizer);
+    let tok_ref: Option<&dyn verilm_verify::PromptTokenizer> = tok_wrapper
+        .as_ref()
+        .map(|t| t as &dyn verilm_verify::PromptTokenizer);
+    let detok_ref: Option<&dyn verilm_verify::Detokenizer> = detok_wrapper
+        .as_ref()
+        .map(|d| d as &dyn verilm_verify::Detokenizer);
     verilm_verify::verify_v4_full(key, response, expected_prompt_token_ids, tok_ref, detok_ref)
 }
 
@@ -1246,8 +1428,9 @@ fn verify_input_tokenization<'py>(
     audit_json: &str,
     expected_prompt_token_ids: Vec<u32>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let response: V4AuditResponse = serde_json::from_str(audit_json)
-        .map_err(|e| PyValueError::new_err(format!("failed to deserialize V4AuditResponse: {}", e)))?;
+    let response: V4AuditResponse = serde_json::from_str(audit_json).map_err(|e| {
+        PyValueError::new_err(format!("failed to deserialize V4AuditResponse: {}", e))
+    })?;
 
     let failures = verilm_verify::verify_input_tokenization(&response, &expected_prompt_token_ids);
 
@@ -1315,7 +1498,11 @@ fn canonical_sample(
     }
     let mut seed_arr = [0u8; 32];
     seed_arr.copy_from_slice(token_seed);
-    let params = verilm_core::sampling::DecodeParams { temperature, top_k, top_p };
+    let params = verilm_core::sampling::DecodeParams {
+        temperature,
+        top_k,
+        top_p,
+    };
     Ok(verilm_core::sampling::sample(&logits, &params, &seed_arr))
 }
 
@@ -1414,9 +1601,7 @@ impl CaptureHook {
         // GPU→CPU + numpy: one bulk transfer.
         // Per-row scales are preserved (no .max() reduction) so that each
         // token in a prefill batch gets its own scale_a.
-        let numpy_arr = cat
-            .call_method0("cpu")?
-            .call_method0("numpy")?;
+        let numpy_arr = cat.call_method0("cpu")?.call_method0("numpy")?;
 
         Ok((numpy_arr.unbind(), count))
     }
@@ -1472,8 +1657,9 @@ fn measure_corridor(
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize audit: {}", e)))?;
     let overrides = scale_overrides_json
         .map(|json| {
-            serde_json::from_str::<verilm_verify::corridor::CorridorScaleOverrides>(json)
-                .map_err(|e| PyValueError::new_err(format!("failed to deserialize scale overrides: {}", e)))
+            serde_json::from_str::<verilm_verify::corridor::CorridorScaleOverrides>(json).map_err(
+                |e| PyValueError::new_err(format!("failed to deserialize scale overrides: {}", e)),
+            )
         })
         .transpose()?;
     let report = verilm_verify::corridor::measure_corridor(&key, &response, overrides.as_ref())
@@ -1508,12 +1694,14 @@ fn measure_corridor_committed_kv(
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize audit: {}", e)))?;
     let overrides = scale_overrides_json
         .map(|json| {
-            serde_json::from_str::<verilm_verify::corridor::CorridorScaleOverrides>(json)
-                .map_err(|e| PyValueError::new_err(format!("failed to deserialize scale overrides: {}", e)))
+            serde_json::from_str::<verilm_verify::corridor::CorridorScaleOverrides>(json).map_err(
+                |e| PyValueError::new_err(format!("failed to deserialize scale overrides: {}", e)),
+            )
         })
         .transpose()?;
-    let report = verilm_verify::corridor::measure_corridor_committed_kv(&key, &response, overrides.as_ref())
-        .map_err(|e| PyValueError::new_err(format!("corridor measurement failed: {}", e)))?;
+    let report =
+        verilm_verify::corridor::measure_corridor_committed_kv(&key, &response, overrides.as_ref())
+            .map_err(|e| PyValueError::new_err(format!("corridor measurement failed: {}", e)))?;
     serde_json::to_string(&report)
         .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
 }

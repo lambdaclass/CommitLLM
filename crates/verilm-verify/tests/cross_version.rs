@@ -74,7 +74,14 @@ fn retained_from_traces(traces: &[verilm_core::types::LayerTrace]) -> RetainedTo
 }
 
 fn unit_scales(n_layers: usize) -> Vec<CapturedLayerScales> {
-    vec![CapturedLayerScales { scale_x_attn: 1.0, scale_x_ffn: 1.0, scale_h: 1.0 }; n_layers]
+    vec![
+        CapturedLayerScales {
+            scale_x_attn: 1.0,
+            scale_x_ffn: 1.0,
+            scale_h: 1.0
+        };
+        n_layers
+    ]
 }
 
 // ===========================================================================
@@ -86,8 +93,8 @@ fn frozen_v4_audit_deserializes() {
     let data = fixture("v4_audit_canonical.bin");
     assert_eq!(&data[..4], b"VV4A", "fixture magic should be VV4A");
 
-    let response = serialize::deserialize_v4_audit(&data)
-        .expect("canonical audit fixture must deserialize");
+    let response =
+        serialize::deserialize_v4_audit(&data).expect("canonical audit fixture must deserialize");
 
     assert_eq!(response.token_index, 0);
     assert_eq!(response.token_id, 42);
@@ -109,10 +116,17 @@ fn frozen_v4_audit_verifies_pass() {
     let key = generate_key(&cfg, &model, [1u8; 32]);
 
     let report = verify_v4_compat(&key, &response, None);
-    assert_eq!(report.verdict, Verdict::Pass,
-        "frozen fixture must verify pass, failures: {:?}", report.failures);
-    assert!(report.checks_run >= 15,
-        "expected >= 15 checks, got {}", report.checks_run);
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "frozen fixture must verify pass, failures: {:?}",
+        report.failures
+    );
+    assert!(
+        report.checks_run >= 15,
+        "expected >= 15 checks, got {}",
+        report.checks_run
+    );
     match &report.coverage {
         AuditCoverage::Full { layers_checked } => {
             assert_eq!(*layers_checked, cfg.n_layers);
@@ -137,18 +151,38 @@ fn frozen_v4_audit_byte_stable() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)], None, None);
+    let (_commitment, state) = commit_minimal(
+        vec![retained],
+        &params,
+        None,
+        vec![unit_scales(cfg.n_layers)],
+        None,
+        None,
+    );
     let response = open_v4(
-        &state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false,
+        &state,
+        0,
+        &ToyWeights(&model),
+        &cfg,
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
     );
     let fresh_binary = serialize::serialize_v4_audit(&response);
     let frozen = fixture("v4_audit_canonical.bin");
 
     assert_eq!(
-        fresh_binary, frozen,
+        fresh_binary,
+        frozen,
         "serialized audit binary is not byte-stable — format drift detected \
          (fresh {} bytes vs frozen {} bytes)",
-        fresh_binary.len(), frozen.len()
+        fresh_binary.len(),
+        frozen.len()
     );
 }
 
@@ -157,8 +191,7 @@ fn frozen_v4_key_deserializes() {
     let data = fixture("v4_key_canonical.bin");
     assert_eq!(&data[..4], b"VKEY", "fixture magic should be VKEY");
 
-    let key = serialize::deserialize_key(&data)
-        .expect("canonical key fixture must deserialize");
+    let key = serialize::deserialize_key(&data).expect("canonical key fixture must deserialize");
 
     let cfg = ModelConfig::toy();
     assert_eq!(key.config.n_layers, cfg.n_layers);
@@ -176,10 +209,12 @@ fn frozen_v4_key_byte_stable() {
     let frozen = fixture("v4_key_canonical.bin");
 
     assert_eq!(
-        fresh_binary, frozen,
+        fresh_binary,
+        frozen,
         "serialized key binary is not byte-stable — format drift detected \
          (fresh {} bytes vs frozen {} bytes)",
-        fresh_binary.len(), frozen.len()
+        fresh_binary.len(),
+        frozen.len()
     );
 }
 
@@ -193,8 +228,12 @@ fn frozen_v4_key_used_with_frozen_audit() {
     let response = serialize::deserialize_v4_audit(&audit_data).unwrap();
 
     let report = verify_v4_compat(&key, &response, None);
-    assert_eq!(report.verdict, Verdict::Pass,
-        "frozen key + frozen audit must verify pass, failures: {:?}", report.failures);
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "frozen key + frozen audit must verify pass, failures: {:?}",
+        report.failures
+    );
 }
 
 // ===========================================================================
@@ -227,8 +266,10 @@ fn frozen_reject_cross_format() {
     assert_eq!(&data[..4], b"VV4A", "cross-format fixture has audit magic");
 
     let result = serialize::deserialize_v4_audit(&data);
-    assert!(result.is_err(),
-        "key body with audit magic must be rejected (cross-format)");
+    assert!(
+        result.is_err(),
+        "key body with audit magic must be rejected (cross-format)"
+    );
 }
 
 #[test]
@@ -237,10 +278,16 @@ fn frozen_reject_corrupted_bincode() {
     assert_eq!(&data[..4], b"VV4A", "corrupted fixture has correct magic");
 
     let result = serialize::deserialize_v4_audit(&data);
-    assert!(result.is_err(),
-        "valid zstd + garbage bincode must be rejected");
+    assert!(
+        result.is_err(),
+        "valid zstd + garbage bincode must be rejected"
+    );
     let err = result.unwrap_err();
-    assert!(err.contains("deserialization"), "error should mention deserialization: {}", err);
+    assert!(
+        err.contains("deserialization"),
+        "error should mention deserialization: {}",
+        err
+    );
 }
 
 // ===========================================================================
@@ -318,13 +365,31 @@ fn frozen_fullbridge_has_manifest_and_bridge() {
     let audit_data = fixture("v4_audit_fullbridge.bin");
     let response = serialize::deserialize_v4_audit(&audit_data).unwrap();
 
-    assert!(response.manifest.is_some(), "canonical fixture must have manifest");
+    assert!(
+        response.manifest.is_some(),
+        "canonical fixture must have manifest"
+    );
     let shell = response.shell_opening.as_ref().expect("must have shell");
-    assert!(shell.initial_residual.is_some(), "canonical fixture must have initial_residual");
-    assert!(shell.embedding_proof.is_some(), "canonical fixture must have embedding_proof");
-    assert!(response.commitment.manifest_hash.is_some(), "commitment must have manifest_hash");
-    assert!(response.commitment.input_spec_hash.is_some(), "commitment must have input_spec_hash");
-    assert!(response.commitment.model_spec_hash.is_some(), "commitment must have model_spec_hash");
+    assert!(
+        shell.initial_residual.is_some(),
+        "canonical fixture must have initial_residual"
+    );
+    assert!(
+        shell.embedding_proof.is_some(),
+        "canonical fixture must have embedding_proof"
+    );
+    assert!(
+        response.commitment.manifest_hash.is_some(),
+        "commitment must have manifest_hash"
+    );
+    assert!(
+        response.commitment.input_spec_hash.is_some(),
+        "commitment must have input_spec_hash"
+    );
+    assert!(
+        response.commitment.model_spec_hash.is_some(),
+        "commitment must have model_spec_hash"
+    );
 }
 
 #[test]
@@ -341,15 +406,19 @@ fn future_key_magic_vke2_rejected() {
 #[test]
 fn frozen_key_as_audit_rejected() {
     let data = fixture("v4_key_canonical.bin");
-    assert!(serialize::deserialize_v4_audit(&data).is_err(),
-        "key fixture must not parse as audit response");
+    assert!(
+        serialize::deserialize_v4_audit(&data).is_err(),
+        "key fixture must not parse as audit response"
+    );
 }
 
 #[test]
 fn frozen_audit_as_key_rejected() {
     let data = fixture("v4_audit_canonical.bin");
-    assert!(serialize::deserialize_key(&data).is_err(),
-        "audit fixture must not parse as verifier key");
+    assert!(
+        serialize::deserialize_key(&data).is_err(),
+        "audit fixture must not parse as verifier key"
+    );
 }
 
 // ===========================================================================
@@ -358,7 +427,7 @@ fn frozen_audit_as_key_rejected() {
 
 #[test]
 fn frozen_audit_sha256_pinned() {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let data = fixture("v4_audit_canonical.bin");
     let hash = hex::encode(Sha256::digest(&data));
     // Pinned on first generation. Update ONLY on intentional format change.
@@ -371,14 +440,13 @@ fn frozen_audit_sha256_pinned() {
 
 #[test]
 fn frozen_key_sha256_pinned() {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let data = fixture("v4_key_canonical.bin");
     let hash = hex::encode(Sha256::digest(&data));
     // Pinned on first generation. Update ONLY on intentional format change.
     // Updated: added rope_scaling field to ModelConfig.
     assert_eq!(
-        hash,
-        "14a3bcdb963c2d5580dff284d49aefe08c4e29a508ca58c9a894ffcb97a4ad38",
+        hash, "14a3bcdb963c2d5580dff284d49aefe08c4e29a508ca58c9a894ffcb97a4ad38",
         "key fixture checksum drifted — was the fixture silently regenerated?"
     );
 }

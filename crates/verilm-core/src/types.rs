@@ -146,7 +146,6 @@ pub struct DeploymentManifest {
     pub system_prompt_hash: Option<[u8; 32]>,
 
     // --- Logit-modifying parameters (affect token selection) ---
-
     /// Repetition penalty: multiplicative factor on logits of previously generated tokens.
     /// 1.0 = disabled (no penalty).
     #[serde(default = "default_repetition_penalty")]
@@ -173,7 +172,6 @@ pub struct DeploymentManifest {
     pub guided_decoding: String,
 
     // --- Output-level parameters ---
-
     /// Stop sequences that terminate generation. Empty = rely on eos_policy only.
     #[serde(default)]
     pub stop_sequences: Vec<String>,
@@ -182,7 +180,6 @@ pub struct DeploymentManifest {
     pub max_tokens: u32,
 
     // --- Four-spec fields (flow through to InputSpec/ModelSpec/DecodeSpec) ---
-
     /// SHA-256 of the chat template (Jinja2 or equivalent).
     #[serde(default)]
     pub chat_template_hash: Option<[u8; 32]>,
@@ -201,7 +198,6 @@ pub struct DeploymentManifest {
     pub decode_mode: Option<String>,
 
     // --- Fields that flow through to InputSpec ---
-
     /// BOS/EOS preprocessing policy (e.g. "add_bos", "none").
     #[serde(default)]
     pub bos_eos_policy: Option<String>,
@@ -217,13 +213,11 @@ pub struct DeploymentManifest {
     pub padding_policy: Option<String>,
 
     // --- Fields that flow through to ModelSpec ---
-
     /// Hash of adapter / LoRA / merged-checkpoint identity.
     #[serde(default)]
     pub adapter_hash: Option<[u8; 32]>,
 
     // --- Architecture fields that flow through to ModelSpec ---
-
     /// Number of transformer layers.
     #[serde(default)]
     pub n_layers: Option<u32>,
@@ -238,7 +232,6 @@ pub struct DeploymentManifest {
     pub embedding_merkle_root: Option<[u8; 32]>,
 
     // --- Quantization fields that flow through to ModelSpec (#5-7) ---
-
     /// Quantization family label (e.g. "W8A8", "Q8_0", "AWQ", "GPTQ").
     #[serde(default)]
     pub quant_family: Option<String>,
@@ -250,7 +243,6 @@ pub struct DeploymentManifest {
     pub quant_block_size: Option<u32>,
 
     // --- Remaining architecture fields that flow through to ModelSpec (#8) ---
-
     /// KV dimension (n_kv_heads * d_head).
     #[serde(default)]
     pub kv_dim: Option<u32>,
@@ -271,7 +263,6 @@ pub struct DeploymentManifest {
     pub rope_theta: Option<f64>,
 
     // --- Fields that flow through to OutputSpec ---
-
     /// Minimum tokens before EOS is allowed. 0 = no minimum.
     #[serde(default)]
     pub min_tokens: u32,
@@ -287,7 +278,9 @@ pub struct DeploymentManifest {
     pub eos_token_id: Option<u32>,
 }
 
-fn default_repetition_penalty() -> f32 { 1.0 }
+fn default_repetition_penalty() -> f32 {
+    1.0
+}
 
 impl DeploymentManifest {
     pub const DISABLED_REPETITION_PENALTY: f32 = 1.0;
@@ -392,7 +385,6 @@ pub struct ModelSpec {
     pub embedding_merkle_root: Option<[u8; 32]>,
 
     // --- Quantization identity (#5-7) ---
-
     /// Quantization family label (e.g. "W8A8", "Q8_0", "AWQ", "GPTQ").
     #[serde(default)]
     pub quant_family: Option<String>,
@@ -404,7 +396,6 @@ pub struct ModelSpec {
     pub quant_block_size: Option<u32>,
 
     // --- Remaining architecture knobs (#8) ---
-
     /// KV dimension (n_kv_heads * d_head).
     #[serde(default)]
     pub kv_dim: Option<u32>,
@@ -726,7 +717,9 @@ impl VerifierKey {
     /// Precomputed v = r^T W for a per-layer matrix.
     /// Panics on LmHead — use `v_lm_head` for the global unembedding matrix.
     pub fn v_for(&self, layer: usize, mt: MatrixType) -> &[Fp] {
-        let idx = MatrixType::PER_LAYER.iter().position(|&m| m == mt)
+        let idx = MatrixType::PER_LAYER
+            .iter()
+            .position(|&m| m == mt)
             .expect("v_for: use v_lm_head for LmHead");
         &self.v_vectors[layer][idx]
     }
@@ -740,7 +733,9 @@ impl VerifierKey {
         if self.weight_scales.is_empty() || layer >= self.weight_scales.len() {
             return 0.0;
         }
-        let idx = MatrixType::PER_LAYER.iter().position(|&m| m == mt)
+        let idx = MatrixType::PER_LAYER
+            .iter()
+            .position(|&m| m == mt)
             .expect("weight_scale_for: not applicable for LmHead");
         if idx >= self.weight_scales[layer].len() {
             return 0.0;
@@ -760,7 +755,9 @@ impl VerifierKey {
         {
             return None;
         }
-        let idx = MatrixType::PER_LAYER.iter().position(|&m| m == mt)
+        let idx = MatrixType::PER_LAYER
+            .iter()
+            .position(|&m| m == mt)
             .expect("per_channel_scales_for: not applicable for LmHead");
         if idx >= self.per_channel_weight_scales[layer].len() {
             return None;
@@ -791,7 +788,11 @@ impl VerifierKey {
             _ => return None,
         };
         let bias = &self.qkv_biases[layer][idx];
-        if bias.is_empty() { None } else { Some(bias) }
+        if bias.is_empty() {
+            None
+        } else {
+            Some(bias)
+        }
     }
 }
 
@@ -803,7 +804,7 @@ impl VerifierKey {
 /// requantized result. The requantization step is verified separately.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LayerTrace {
-    pub x_attn: Vec<i8>,   // input to attention block (INT8)
+    pub x_attn: Vec<i8>,    // input to attention block (INT8)
     pub q: Vec<i32>,        // W_q x (i32 accumulator)
     pub k: Vec<i32>,        // W_k x (i32 accumulator)
     pub v: Vec<i32>,        // W_v x (i32 accumulator)
@@ -874,7 +875,6 @@ pub struct LayerTrace {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RetainedLayerState {
     // --- Irreducible: depends on full KV prefix, not replayable ---
-
     /// Post-attention INT8 output fed into W_o. Comes from
     /// softmax(QK^T/√d)V which depends on the full KV prefix.
     pub a: Vec<i8>,
@@ -883,7 +883,6 @@ pub struct RetainedLayerState {
     pub scale_a: f32,
 
     // --- Bridge trust boundary: committed QKV input ---
-
     /// Committed quantized attention input: `quantize(rmsnorm(residual), scale_x_attn)`.
     /// When present, the verifier check-and-gates against its canonical derivation
     /// and uses this committed value for downstream QKV Freivalds checks.
@@ -960,7 +959,9 @@ pub struct ShellLayerOpening {
     pub scale_h: f32,
 }
 
-fn default_scale() -> f32 { 1.0 }
+fn default_scale() -> f32 {
+    1.0
+}
 
 /// Shell opening for a complete token: all layers' matmul intermediates.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1004,7 +1005,10 @@ pub struct ShellTokenOpening {
 pub trait EmbeddingLookup {
     /// Load the embedding row for the given token ID and its Merkle proof.
     /// Returns `None` if embedding data is unavailable for this token.
-    fn embedding_row_and_proof(&self, token_id: u32) -> Option<(Vec<f32>, Option<crate::merkle::MerkleProof>)>;
+    fn embedding_row_and_proof(
+        &self,
+        token_id: u32,
+    ) -> Option<(Vec<f32>, Option<crate::merkle::MerkleProof>)>;
 }
 
 /// Contains the RMSNorm weights and initial residual needed for
@@ -1120,7 +1124,6 @@ pub struct V4AuditResponse {
     pub prefix_shell_openings: Option<Vec<ShellTokenOpening>>,
 
     // ──── Committed KV transcript (roadmap #3) ────
-
     /// Per-layer KV entries for the causal prefix of the challenged token.
     /// Outer index: challenged layer index. Inner: positions 0..=token_index.
     /// Only present for challenged layers when `kv_roots` is populated.
@@ -1255,7 +1258,6 @@ pub struct Q8LayerTrace {
     pub ffn_out_f32: Vec<f32>,
 }
 
-
 /// Protocol version for the IO hash format used in the commitment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommitmentVersion {
@@ -1325,7 +1327,6 @@ pub struct BatchCommitment {
     #[serde(default)]
     pub kv_roots: Vec<[u8; 32]>,
 }
-
 
 /// Audit tier: determines how many layers are opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

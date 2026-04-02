@@ -12,7 +12,10 @@ pub mod corridor;
 use std::time::{Duration, Instant};
 
 use verilm_core::constants::MatrixType;
-use verilm_core::types::{AuditChallenge, AuditTier, CommitmentVersion, DeploymentManifest, InputSpec, OutputSpec, V4AuditResponse, VerifierKey};
+use verilm_core::types::{
+    AuditChallenge, AuditTier, CommitmentVersion, DeploymentManifest, InputSpec, OutputSpec,
+    V4AuditResponse, VerifierKey,
+};
 use verilm_core::{freivalds, merkle};
 
 pub use verilm_core::requantize;
@@ -36,7 +39,10 @@ pub enum AuditCoverage {
     /// All layers were opened and checked.
     Full { layers_checked: usize },
     /// A contiguous prefix of layers was opened (routine audit).
-    Routine { layers_checked: usize, layers_total: usize },
+    Routine {
+        layers_checked: usize,
+        layers_total: usize,
+    },
     /// Coverage could not be determined (no shell opening present).
     Unknown,
 }
@@ -44,10 +50,13 @@ pub enum AuditCoverage {
 impl std::fmt::Display for AuditCoverage {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::Full { layers_checked } =>
-                write!(f, "full ({}/{} layers)", layers_checked, layers_checked),
-            Self::Routine { layers_checked, layers_total } =>
-                write!(f, "routine ({}/{} layers)", layers_checked, layers_total),
+            Self::Full { layers_checked } => {
+                write!(f, "full ({}/{} layers)", layers_checked, layers_checked)
+            }
+            Self::Routine {
+                layers_checked,
+                layers_total,
+            } => write!(f, "routine ({}/{} layers)", layers_checked, layers_total),
             Self::Unknown => write!(f, "unknown"),
         }
     }
@@ -187,38 +196,69 @@ impl FailureCode {
     pub fn category(self) -> FailureCategory {
         use FailureCode::*;
         match self {
-            WrongCommitmentVersion | MissingShellOpening | MissingSeedCommitment
-            | MissingPromptHash | MissingPromptBytes | UncommittedPrompt
-            | MissingNPromptTokens | MissingSpecHash | MissingManifestHash
-            | MissingInitialResidual | MissingEmbeddingProof | MissingLogits
-            | MissingFinalHidden | MissingFinalResidual | MissingOutputText
-            | MissingEosTokenId | MissingQkv | ShellLayerCountMismatch
-            | NonContiguousLayerIndices | PrefixCountMismatch | UnboundInitialResidual
-                => FailureCategory::Structural,
+            WrongCommitmentVersion
+            | MissingShellOpening
+            | MissingSeedCommitment
+            | MissingPromptHash
+            | MissingPromptBytes
+            | UncommittedPrompt
+            | MissingNPromptTokens
+            | MissingSpecHash
+            | MissingManifestHash
+            | MissingInitialResidual
+            | MissingEmbeddingProof
+            | MissingLogits
+            | MissingFinalHidden
+            | MissingFinalResidual
+            | MissingOutputText
+            | MissingEosTokenId
+            | MissingQkv
+            | ShellLayerCountMismatch
+            | NonContiguousLayerIndices
+            | PrefixCountMismatch
+            | UnboundInitialResidual => FailureCategory::Structural,
 
-            FreivaldsFailed | LmHeadFreivaldsFailed | MerkleProofFailed
-            | RetainedHashMismatch | IoChainMismatch | IoChainProofFailed
-            | SeedMismatch | PromptHashMismatch | ManifestHashMismatch
-            | SpecHashMismatch | EmbeddingProofFailed | EmbeddingLeafMismatch
+            FreivaldsFailed
+            | LmHeadFreivaldsFailed
+            | MerkleProofFailed
+            | RetainedHashMismatch
+            | IoChainMismatch
+            | IoChainProofFailed
+            | SeedMismatch
+            | PromptHashMismatch
+            | ManifestHashMismatch
+            | SpecHashMismatch
+            | EmbeddingProofFailed
+            | EmbeddingLeafMismatch
             | AttentionReplayMismatch
-            | ChallengeTokenMismatch | ChallengeLayerMismatch
-            | BridgeXAttnMismatch | BridgeScaleMismatch
-            | KvRootsCountMismatch | KvEntriesCountMismatch
-            | KvProofInvalid | KvProofCountMismatch
-                => FailureCategory::CryptographicBinding,
+            | ChallengeTokenMismatch
+            | ChallengeLayerMismatch
+            | BridgeXAttnMismatch
+            | BridgeScaleMismatch
+            | KvRootsCountMismatch
+            | KvEntriesCountMismatch
+            | KvProofInvalid
+            | KvProofCountMismatch => FailureCategory::CryptographicBinding,
 
             SpecFieldMismatch => FailureCategory::SpecMismatch,
 
-            UnsupportedSamplerVersion | UnsupportedDecodeMode
-            | UnsupportedDecodeFeature | UnknownEosPolicy
-                => FailureCategory::Unsupported,
+            UnsupportedSamplerVersion
+            | UnsupportedDecodeMode
+            | UnsupportedDecodeFeature
+            | UnknownEosPolicy => FailureCategory::Unsupported,
 
-            TokenSelectionMismatch | ExceedsMaxTokens | MinTokensViolated
-            | EosPolicyViolated | IgnoreEosViolated | DecodeModeTempInconsistent
-            | PromptTokenMismatch | PromptTokenCountMismatch
-            | NPromptTokensMismatch | NPromptTokensBound
-            | PrefixTokenCountMismatch | DetokenizationMismatch
-                => FailureCategory::SemanticViolation,
+            TokenSelectionMismatch
+            | ExceedsMaxTokens
+            | MinTokensViolated
+            | EosPolicyViolated
+            | IgnoreEosViolated
+            | DecodeModeTempInconsistent
+            | PromptTokenMismatch
+            | PromptTokenCountMismatch
+            | NPromptTokensMismatch
+            | NPromptTokensBound
+            | PrefixTokenCountMismatch
+            | DetokenizationMismatch => FailureCategory::SemanticViolation,
 
             TokenizerError | DetokenizerError => FailureCategory::Operational,
         }
@@ -228,7 +268,13 @@ impl FailureCode {
 impl std::fmt::Display for FailureCode {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         // Use serde's rename_all = "snake_case" convention
-        write!(f, "{}", serde_json::to_string(self).unwrap_or_else(|_| format!("{:?}", self)).trim_matches('"'))
+        write!(
+            f,
+            "{}",
+            serde_json::to_string(self)
+                .unwrap_or_else(|_| format!("{:?}", self))
+                .trim_matches('"')
+        )
     }
 }
 
@@ -253,9 +299,13 @@ pub struct FailureContext {
 
 impl FailureContext {
     fn is_empty(&self) -> bool {
-        self.token_index.is_none() && self.layer.is_none() && self.matrix.is_none()
-            && self.field.is_none() && self.spec.is_none()
-            && self.expected.is_none() && self.actual.is_none()
+        self.token_index.is_none()
+            && self.layer.is_none()
+            && self.matrix.is_none()
+            && self.field.is_none()
+            && self.spec.is_none()
+            && self.expected.is_none()
+            && self.actual.is_none()
     }
 }
 
@@ -286,7 +336,11 @@ pub(crate) fn vfail(code: FailureCode, msg: impl Into<String>) -> VerificationFa
 }
 
 /// Create a [`VerificationFailure`] with structured context.
-pub(crate) fn vfail_ctx(code: FailureCode, msg: impl Into<String>, ctx: FailureContext) -> VerificationFailure {
+pub(crate) fn vfail_ctx(
+    code: FailureCode,
+    msg: impl Into<String>,
+    ctx: FailureContext,
+) -> VerificationFailure {
     VerificationFailure {
         category: code.category(),
         code,
@@ -340,8 +394,14 @@ pub fn verify_manifest(
 ) -> Vec<VerificationFailure> {
     let computed = merkle::hash_manifest(expected_manifest);
     match commitment.manifest_hash {
-        None => vec![vfail(FailureCode::MissingManifestHash, "commitment missing manifest_hash")],
-        Some(h) if h != computed => vec![vfail(FailureCode::ManifestHashMismatch, "manifest_hash mismatch")],
+        None => vec![vfail(
+            FailureCode::MissingManifestHash,
+            "commitment missing manifest_hash",
+        )],
+        Some(h) if h != computed => vec![vfail(
+            FailureCode::ManifestHashMismatch,
+            "manifest_hash mismatch",
+        )],
         Some(_) => Vec::new(),
     }
 }
@@ -363,8 +423,14 @@ pub fn verify_manifest_specs(
         merkle::hash_output_spec(output),
     );
     match commitment.manifest_hash {
-        None => vec![vfail(FailureCode::MissingManifestHash, "commitment missing manifest_hash")],
-        Some(h) if h != computed => vec![vfail(FailureCode::ManifestHashMismatch, "manifest_hash mismatch")],
+        None => vec![vfail(
+            FailureCode::MissingManifestHash,
+            "commitment missing manifest_hash",
+        )],
+        Some(h) if h != computed => vec![vfail(
+            FailureCode::ManifestHashMismatch,
+            "manifest_hash mismatch",
+        )],
         Some(_) => Vec::new(),
     }
 }
@@ -393,7 +459,8 @@ pub fn verify_input_tokenization(
                 FailureCode::PromptTokenCountMismatch,
                 format!(
                     "tokenization produced {} prompt tokens but commitment has n_prompt_tokens={}",
-                    expected_prompt_token_ids.len(), committed_npt
+                    expected_prompt_token_ids.len(),
+                    committed_npt
                 ),
             ));
             return failures;
@@ -410,7 +477,9 @@ pub fn verify_input_tokenization(
     let n_prompt_in_chain = expected_prompt_token_ids.len() - 1; // first consumed as embedding
 
     // Collect all chain token IDs: prefix_token_ids + [token_id]
-    let all_chain: Vec<u32> = response.prefix_token_ids.iter()
+    let all_chain: Vec<u32> = response
+        .prefix_token_ids
+        .iter()
         .copied()
         .chain(std::iter::once(response.token_id))
         .collect();
@@ -420,7 +489,8 @@ pub fn verify_input_tokenization(
             FailureCode::PromptTokenCountMismatch,
             format!(
                 "prompt has {} tokens in chain but response only has {} total chain entries",
-                n_prompt_in_chain, all_chain.len()
+                n_prompt_in_chain,
+                all_chain.len()
             ),
         ));
         return failures;
@@ -433,9 +503,14 @@ pub fn verify_input_tokenization(
                 FailureCode::PromptTokenMismatch,
                 format!(
                     "prompt token mismatch at position {}: expected {} but chain has {}",
-                    i + 1, expected_tid, all_chain[i]
+                    i + 1,
+                    expected_tid,
+                    all_chain[i]
                 ),
-                FailureContext { token_index: Some((i + 1) as u32), ..Default::default() },
+                FailureContext {
+                    token_index: Some((i + 1) as u32),
+                    ..Default::default()
+                },
             ));
         }
     }
@@ -561,7 +636,6 @@ impl std::fmt::Display for V4VerifyReport {
     }
 }
 
-
 /// Verify V4 audit response using the canonical verifier.
 ///
 /// Delegates to [`canonical::verify_response`] — binary-only mental model,
@@ -625,7 +699,10 @@ pub fn verify_v4_legacy(
                         reconstructed_tids.as_deref()
                     }
                     Err(e) => {
-                        failures.push(vfail(FailureCode::TokenizerError, format!("tokenizer reconstruction failed: {}", e)));
+                        failures.push(vfail(
+                            FailureCode::TokenizerError,
+                            format!("tokenizer reconstruction failed: {}", e),
+                        ));
                         None
                     }
                 }
@@ -670,19 +747,31 @@ pub fn verify_v4_legacy(
                                 ),
                             ));
                         } else if !verilm_core::merkle::verify(emb_root, &leaf, proof) {
-                            failures.push(vfail(FailureCode::EmbeddingProofFailed, "embedding Merkle proof verification failed"));
+                            failures.push(vfail(
+                                FailureCode::EmbeddingProofFailed,
+                                "embedding Merkle proof verification failed",
+                            ));
                         }
                     }
                     (None, _) => {
-                        failures.push(vfail(FailureCode::MissingInitialResidual, "key has embedding_merkle_root but shell missing initial_residual"));
+                        failures.push(vfail(
+                            FailureCode::MissingInitialResidual,
+                            "key has embedding_merkle_root but shell missing initial_residual",
+                        ));
                     }
                     (Some(_), None) => {
-                        failures.push(vfail(FailureCode::MissingEmbeddingProof, "key has embedding_merkle_root but shell missing embedding_proof"));
+                        failures.push(vfail(
+                            FailureCode::MissingEmbeddingProof,
+                            "key has embedding_merkle_root but shell missing embedding_proof",
+                        ));
                     }
                 }
             } else if shell.initial_residual.is_some() {
                 checks_run += 1;
-                failures.push(vfail(FailureCode::UnboundInitialResidual, "shell has initial_residual but key has no embedding_merkle_root to verify it"));
+                failures.push(vfail(
+                    FailureCode::UnboundInitialResidual,
+                    "shell has initial_residual but key has no embedding_merkle_root to verify it",
+                ));
             }
 
             // Rich prefix: verify embedding binding for all prefix tokens.
@@ -703,11 +792,14 @@ pub fn verify_v4_legacy(
                         FailureCode::PrefixCountMismatch,
                         format!(
                             "prefix embedding count mismatch: {} rows, {} proofs, {} token_ids",
-                            prefix_rows.len(), prefix_proofs.len(), response.prefix_token_ids.len()
+                            prefix_rows.len(),
+                            prefix_proofs.len(),
+                            response.prefix_token_ids.len()
                         ),
                     ));
                 } else {
-                    for (j, ((row, proof), &tid)) in prefix_rows.iter()
+                    for (j, ((row, proof), &tid)) in prefix_rows
+                        .iter()
                         .zip(prefix_proofs.iter())
                         .zip(response.prefix_token_ids.iter())
                         .enumerate()
@@ -721,7 +813,10 @@ pub fn verify_v4_legacy(
                                     "prefix token {}: embedding proof leaf_index {} != token_id {}",
                                     j, proof.leaf_index, tid
                                 ),
-                                FailureContext { token_index: Some(j as u32), ..Default::default() },
+                                FailureContext {
+                                    token_index: Some(j as u32),
+                                    ..Default::default()
+                                },
                             ));
                         } else if !verilm_core::merkle::verify(emb_root, &leaf, proof) {
                             failures.push(vfail_ctx(
@@ -730,7 +825,10 @@ pub fn verify_v4_legacy(
                                     "prefix token {}: embedding Merkle proof verification failed",
                                     j
                                 ),
-                                FailureContext { token_index: Some(j as u32), ..Default::default() },
+                                FailureContext {
+                                    token_index: Some(j as u32),
+                                    ..Default::default()
+                                },
                             ));
                         }
                     }
@@ -739,10 +837,9 @@ pub fn verify_v4_legacy(
 
             // Deep prefix: verify prefix_retained[j] hashes to prefix_leaf_hashes[j],
             // then run shell Freivalds+bridge on each prefix token.
-            if let (Some(ref prefix_ret), Some(ref prefix_shells)) = (
-                &response.prefix_retained,
-                &response.prefix_shell_openings,
-            ) {
+            if let (Some(ref prefix_ret), Some(ref prefix_shells)) =
+                (&response.prefix_retained, &response.prefix_shell_openings)
+            {
                 if prefix_ret.len() != response.prefix_leaf_hashes.len()
                     || prefix_shells.len() != response.prefix_leaf_hashes.len()
                 {
@@ -751,11 +848,14 @@ pub fn verify_v4_legacy(
                         FailureCode::PrefixCountMismatch,
                         format!(
                             "deep prefix count mismatch: {} retained, {} shells, {} leaf_hashes",
-                            prefix_ret.len(), prefix_shells.len(), response.prefix_leaf_hashes.len()
+                            prefix_ret.len(),
+                            prefix_shells.len(),
+                            response.prefix_leaf_hashes.len()
                         ),
                     ));
                 } else {
-                    for (j, ((ret_j, shell_j), &expected_hash)) in prefix_ret.iter()
+                    for (j, ((ret_j, shell_j), &expected_hash)) in prefix_ret
+                        .iter()
                         .zip(prefix_shells.iter())
                         .zip(response.prefix_leaf_hashes.iter())
                         .enumerate()
@@ -763,15 +863,16 @@ pub fn verify_v4_legacy(
                         // 1. Hash consistency: retained state must match committed leaf.
                         checks_run += 1;
                         let fr_ref = shell_j.final_residual.as_deref();
-                        let hash_j = verilm_core::merkle::hash_retained_with_residual(ret_j, fr_ref);
+                        let hash_j =
+                            verilm_core::merkle::hash_retained_with_residual(ret_j, fr_ref);
                         if hash_j != expected_hash {
                             failures.push(vfail_ctx(
                                 FailureCode::RetainedHashMismatch,
-                                format!(
-                                    "prefix token {}: retained hash mismatch (deep audit)",
-                                    j
-                                ),
-                                FailureContext { token_index: Some(j as u32), ..Default::default() },
+                                format!("prefix token {}: retained hash mismatch (deep audit)", j),
+                                FailureContext {
+                                    token_index: Some(j as u32),
+                                    ..Default::default()
+                                },
                             ));
                             continue;
                         }
@@ -828,15 +929,41 @@ pub fn verify_v4_legacy(
                 // Fail-closed: all four spec hashes MUST be present in the commitment.
                 checks_run += 4;
                 match response.commitment.input_spec_hash {
-                    None => failures.push(vfail_ctx(FailureCode::MissingSpecHash, "commitment missing input_spec_hash", FailureContext { spec: Some("input".into()), ..Default::default() })),
-                    Some(committed) if h_in != committed =>
-                        failures.push(vfail_ctx(FailureCode::SpecHashMismatch, "input_spec_hash mismatch", FailureContext { spec: Some("input".into()), ..Default::default() })),
+                    None => failures.push(vfail_ctx(
+                        FailureCode::MissingSpecHash,
+                        "commitment missing input_spec_hash",
+                        FailureContext {
+                            spec: Some("input".into()),
+                            ..Default::default()
+                        },
+                    )),
+                    Some(committed) if h_in != committed => failures.push(vfail_ctx(
+                        FailureCode::SpecHashMismatch,
+                        "input_spec_hash mismatch",
+                        FailureContext {
+                            spec: Some("input".into()),
+                            ..Default::default()
+                        },
+                    )),
                     _ => {}
                 }
                 match response.commitment.model_spec_hash {
-                    None => failures.push(vfail_ctx(FailureCode::MissingSpecHash, "commitment missing model_spec_hash", FailureContext { spec: Some("model".into()), ..Default::default() })),
-                    Some(committed) if h_mod != committed =>
-                        failures.push(vfail_ctx(FailureCode::SpecHashMismatch, "model_spec_hash mismatch", FailureContext { spec: Some("model".into()), ..Default::default() })),
+                    None => failures.push(vfail_ctx(
+                        FailureCode::MissingSpecHash,
+                        "commitment missing model_spec_hash",
+                        FailureContext {
+                            spec: Some("model".into()),
+                            ..Default::default()
+                        },
+                    )),
+                    Some(committed) if h_mod != committed => failures.push(vfail_ctx(
+                        FailureCode::SpecHashMismatch,
+                        "model_spec_hash mismatch",
+                        FailureContext {
+                            spec: Some("model".into()),
+                            ..Default::default()
+                        },
+                    )),
                     _ => {}
                 }
 
@@ -850,7 +977,10 @@ pub fn verify_v4_legacy(
                                 "rmsnorm_eps mismatch: manifest={} key={}",
                                 manifest_eps, key.rmsnorm_eps
                             ),
-                            FailureContext { field: Some("rmsnorm_eps".into()), ..Default::default() },
+                            FailureContext {
+                                field: Some("rmsnorm_eps".into()),
+                                ..Default::default()
+                            },
                         ));
                     }
                 }
@@ -861,17 +991,30 @@ pub fn verify_v4_legacy(
                 {
                     checks_run += 1;
                     if manifest_rope != key_rope {
-                        failures.push(vfail_ctx(FailureCode::SpecFieldMismatch, "rope_config_hash mismatch: manifest != key", FailureContext { field: Some("rope_config_hash".into()), ..Default::default() }));
+                        failures.push(vfail_ctx(
+                            FailureCode::SpecFieldMismatch,
+                            "rope_config_hash mismatch: manifest != key",
+                            FailureContext {
+                                field: Some("rope_config_hash".into()),
+                                ..Default::default()
+                            },
+                        ));
                     }
                 }
 
                 // Cross-check: manifest weight_hash (R_W) must agree with verifier key.
-                if let (Some(manifest_rw), Some(key_rw)) =
-                    (model_spec.weight_hash, key.weight_hash)
+                if let (Some(manifest_rw), Some(key_rw)) = (model_spec.weight_hash, key.weight_hash)
                 {
                     checks_run += 1;
                     if manifest_rw != key_rw {
-                        failures.push(vfail_ctx(FailureCode::SpecFieldMismatch, "weight_hash mismatch: manifest != key", FailureContext { field: Some("weight_hash".into()), ..Default::default() }));
+                        failures.push(vfail_ctx(
+                            FailureCode::SpecFieldMismatch,
+                            "weight_hash mismatch: manifest != key",
+                            FailureContext {
+                                field: Some("weight_hash".into()),
+                                ..Default::default()
+                            },
+                        ));
                     }
                 }
 
@@ -881,8 +1024,14 @@ pub fn verify_v4_legacy(
                     if n as usize != key.config.n_layers {
                         failures.push(vfail_ctx(
                             FailureCode::SpecFieldMismatch,
-                            format!("n_layers mismatch: manifest={} key={}", n, key.config.n_layers),
-                            FailureContext { field: Some("n_layers".into()), ..Default::default() },
+                            format!(
+                                "n_layers mismatch: manifest={} key={}",
+                                n, key.config.n_layers
+                            ),
+                            FailureContext {
+                                field: Some("n_layers".into()),
+                                ..Default::default()
+                            },
                         ));
                     }
                 }
@@ -893,8 +1042,14 @@ pub fn verify_v4_legacy(
                     if d as usize != key.config.hidden_dim {
                         failures.push(vfail_ctx(
                             FailureCode::SpecFieldMismatch,
-                            format!("hidden_dim mismatch: manifest={} key={}", d, key.config.hidden_dim),
-                            FailureContext { field: Some("hidden_dim".into()), ..Default::default() },
+                            format!(
+                                "hidden_dim mismatch: manifest={} key={}",
+                                d, key.config.hidden_dim
+                            ),
+                            FailureContext {
+                                field: Some("hidden_dim".into()),
+                                ..Default::default()
+                            },
                         ));
                     }
                 }
@@ -905,8 +1060,14 @@ pub fn verify_v4_legacy(
                     if v as usize != key.config.vocab_size {
                         failures.push(vfail_ctx(
                             FailureCode::SpecFieldMismatch,
-                            format!("vocab_size mismatch: manifest={} key={}", v, key.config.vocab_size),
-                            FailureContext { field: Some("vocab_size".into()), ..Default::default() },
+                            format!(
+                                "vocab_size mismatch: manifest={} key={}",
+                                v, key.config.vocab_size
+                            ),
+                            FailureContext {
+                                field: Some("vocab_size".into()),
+                                ..Default::default()
+                            },
                         ));
                     }
                 }
@@ -917,7 +1078,14 @@ pub fn verify_v4_legacy(
                 {
                     checks_run += 1;
                     if manifest_emr != key_emr {
-                        failures.push(vfail_ctx(FailureCode::SpecFieldMismatch, "embedding_merkle_root mismatch: manifest != key", FailureContext { field: Some("embedding_merkle_root".into()), ..Default::default() }));
+                        failures.push(vfail_ctx(
+                            FailureCode::SpecFieldMismatch,
+                            "embedding_merkle_root mismatch: manifest != key",
+                            FailureContext {
+                                field: Some("embedding_merkle_root".into()),
+                                ..Default::default()
+                            },
+                        ));
                     }
                 }
 
@@ -929,8 +1097,14 @@ pub fn verify_v4_legacy(
                     if manifest_qf != key_qf {
                         failures.push(vfail_ctx(
                             FailureCode::SpecFieldMismatch,
-                            format!("quant_family mismatch: manifest='{}' key='{}'", manifest_qf, key_qf),
-                            FailureContext { field: Some("quant_family".into()), ..Default::default() },
+                            format!(
+                                "quant_family mismatch: manifest='{}' key='{}'",
+                                manifest_qf, key_qf
+                            ),
+                            FailureContext {
+                                field: Some("quant_family".into()),
+                                ..Default::default()
+                            },
                         ));
                     }
                 }
@@ -943,8 +1117,14 @@ pub fn verify_v4_legacy(
                     if manifest_sd != key_sd {
                         failures.push(vfail_ctx(
                             FailureCode::SpecFieldMismatch,
-                            format!("scale_derivation mismatch: manifest='{}' key='{}'", manifest_sd, key_sd),
-                            FailureContext { field: Some("scale_derivation".into()), ..Default::default() },
+                            format!(
+                                "scale_derivation mismatch: manifest='{}' key='{}'",
+                                manifest_sd, key_sd
+                            ),
+                            FailureContext {
+                                field: Some("scale_derivation".into()),
+                                ..Default::default()
+                            },
                         ));
                     }
                 }
@@ -957,8 +1137,14 @@ pub fn verify_v4_legacy(
                     if manifest_bs != key_bs {
                         failures.push(vfail_ctx(
                             FailureCode::SpecFieldMismatch,
-                            format!("quant_block_size mismatch: manifest={} key={}", manifest_bs, key_bs),
-                            FailureContext { field: Some("quant_block_size".into()), ..Default::default() },
+                            format!(
+                                "quant_block_size mismatch: manifest={} key={}",
+                                manifest_bs, key_bs
+                            ),
+                            FailureContext {
+                                field: Some("quant_block_size".into()),
+                                ..Default::default()
+                            },
                         ));
                     }
                 }
@@ -970,7 +1156,10 @@ pub fn verify_v4_legacy(
                         failures.push(vfail_ctx(
                             FailureCode::SpecFieldMismatch,
                             format!("kv_dim mismatch: manifest={} key={}", v, key.config.kv_dim),
-                            FailureContext { field: Some("kv_dim".into()), ..Default::default() },
+                            FailureContext {
+                                field: Some("kv_dim".into()),
+                                ..Default::default()
+                            },
                         ));
                     }
                 }
@@ -981,8 +1170,14 @@ pub fn verify_v4_legacy(
                     if v as usize != key.config.ffn_dim {
                         failures.push(vfail_ctx(
                             FailureCode::SpecFieldMismatch,
-                            format!("ffn_dim mismatch: manifest={} key={}", v, key.config.ffn_dim),
-                            FailureContext { field: Some("ffn_dim".into()), ..Default::default() },
+                            format!(
+                                "ffn_dim mismatch: manifest={} key={}",
+                                v, key.config.ffn_dim
+                            ),
+                            FailureContext {
+                                field: Some("ffn_dim".into()),
+                                ..Default::default()
+                            },
                         ));
                     }
                 }
@@ -994,7 +1189,10 @@ pub fn verify_v4_legacy(
                         failures.push(vfail_ctx(
                             FailureCode::SpecFieldMismatch,
                             format!("d_head mismatch: manifest={} key={}", v, key.config.d_head),
-                            FailureContext { field: Some("d_head".into()), ..Default::default() },
+                            FailureContext {
+                                field: Some("d_head".into()),
+                                ..Default::default()
+                            },
                         ));
                     }
                 }
@@ -1005,8 +1203,14 @@ pub fn verify_v4_legacy(
                     if v as usize != key.config.n_q_heads {
                         failures.push(vfail_ctx(
                             FailureCode::SpecFieldMismatch,
-                            format!("n_q_heads mismatch: manifest={} key={}", v, key.config.n_q_heads),
-                            FailureContext { field: Some("n_q_heads".into()), ..Default::default() },
+                            format!(
+                                "n_q_heads mismatch: manifest={} key={}",
+                                v, key.config.n_q_heads
+                            ),
+                            FailureContext {
+                                field: Some("n_q_heads".into()),
+                                ..Default::default()
+                            },
                         ));
                     }
                 }
@@ -1017,8 +1221,14 @@ pub fn verify_v4_legacy(
                     if v as usize != key.config.n_kv_heads {
                         failures.push(vfail_ctx(
                             FailureCode::SpecFieldMismatch,
-                            format!("n_kv_heads mismatch: manifest={} key={}", v, key.config.n_kv_heads),
-                            FailureContext { field: Some("n_kv_heads".into()), ..Default::default() },
+                            format!(
+                                "n_kv_heads mismatch: manifest={} key={}",
+                                v, key.config.n_kv_heads
+                            ),
+                            FailureContext {
+                                field: Some("n_kv_heads".into()),
+                                ..Default::default()
+                            },
                         ));
                     }
                 }
@@ -1033,32 +1243,67 @@ pub fn verify_v4_legacy(
                                 "rope_theta mismatch: manifest={} key={}",
                                 manifest_theta, key.config.rope_theta
                             ),
-                            FailureContext { field: Some("rope_theta".into()), ..Default::default() },
+                            FailureContext {
+                                field: Some("rope_theta".into()),
+                                ..Default::default()
+                            },
                         ));
                     }
                 }
 
                 match response.commitment.decode_spec_hash {
-                    None => failures.push(vfail_ctx(FailureCode::MissingSpecHash, "commitment missing decode_spec_hash", FailureContext { spec: Some("decode".into()), ..Default::default() })),
-                    Some(committed) if h_dec != committed =>
-                        failures.push(vfail_ctx(FailureCode::SpecHashMismatch, "decode_spec_hash mismatch", FailureContext { spec: Some("decode".into()), ..Default::default() })),
+                    None => failures.push(vfail_ctx(
+                        FailureCode::MissingSpecHash,
+                        "commitment missing decode_spec_hash",
+                        FailureContext {
+                            spec: Some("decode".into()),
+                            ..Default::default()
+                        },
+                    )),
+                    Some(committed) if h_dec != committed => failures.push(vfail_ctx(
+                        FailureCode::SpecHashMismatch,
+                        "decode_spec_hash mismatch",
+                        FailureContext {
+                            spec: Some("decode".into()),
+                            ..Default::default()
+                        },
+                    )),
                     _ => {}
                 }
                 match response.commitment.output_spec_hash {
-                    None => failures.push(vfail_ctx(FailureCode::MissingSpecHash, "commitment missing output_spec_hash", FailureContext { spec: Some("output".into()), ..Default::default() })),
-                    Some(committed) if h_out != committed =>
-                        failures.push(vfail_ctx(FailureCode::SpecHashMismatch, "output_spec_hash mismatch", FailureContext { spec: Some("output".into()), ..Default::default() })),
+                    None => failures.push(vfail_ctx(
+                        FailureCode::MissingSpecHash,
+                        "commitment missing output_spec_hash",
+                        FailureContext {
+                            spec: Some("output".into()),
+                            ..Default::default()
+                        },
+                    )),
+                    Some(committed) if h_out != committed => failures.push(vfail_ctx(
+                        FailureCode::SpecHashMismatch,
+                        "output_spec_hash mismatch",
+                        FailureContext {
+                            spec: Some("output".into()),
+                            ..Default::default()
+                        },
+                    )),
                     _ => {}
                 }
 
                 // Verify composed manifest hash: M = H(H_input || H_model || H_decode || H_output).
                 checks_run += 1;
                 match response.commitment.manifest_hash {
-                    None => failures.push(vfail(FailureCode::MissingManifestHash, "commitment missing manifest_hash")),
+                    None => failures.push(vfail(
+                        FailureCode::MissingManifestHash,
+                        "commitment missing manifest_hash",
+                    )),
                     Some(committed_hash) => {
                         let computed = merkle::hash_manifest_composed(h_in, h_mod, h_dec, h_out);
                         if computed != committed_hash {
-                            failures.push(vfail(FailureCode::ManifestHashMismatch, "manifest hash does not match commitment"));
+                            failures.push(vfail(
+                                FailureCode::ManifestHashMismatch,
+                                "manifest hash does not match commitment",
+                            ));
                         }
                     }
                 }
@@ -1096,7 +1341,10 @@ pub fn verify_v4_legacy(
                         }
                         "sampled" => {
                             if decode_spec.temperature == 0.0 {
-                                failures.push(vfail(FailureCode::DecodeModeTempInconsistent, "decode_mode='sampled' but temperature=0.0 (must be >0.0)"));
+                                failures.push(vfail(
+                                    FailureCode::DecodeModeTempInconsistent,
+                                    "decode_mode='sampled' but temperature=0.0 (must be >0.0)",
+                                ));
                             }
                         }
                         other => {
@@ -1117,29 +1365,53 @@ pub fn verify_v4_legacy(
                 if decode_spec.repetition_penalty != 1.0 {
                     failures.push(vfail_ctx(
                         FailureCode::UnsupportedDecodeFeature,
-                        format!("unsupported repetition_penalty={} (canonical sampler requires 1.0)", decode_spec.repetition_penalty),
-                        FailureContext { field: Some("repetition_penalty".into()), ..Default::default() },
+                        format!(
+                            "unsupported repetition_penalty={} (canonical sampler requires 1.0)",
+                            decode_spec.repetition_penalty
+                        ),
+                        FailureContext {
+                            field: Some("repetition_penalty".into()),
+                            ..Default::default()
+                        },
                     ));
                 }
                 if decode_spec.frequency_penalty != 0.0 {
                     failures.push(vfail_ctx(
                         FailureCode::UnsupportedDecodeFeature,
-                        format!("unsupported frequency_penalty={} (canonical sampler requires 0.0)", decode_spec.frequency_penalty),
-                        FailureContext { field: Some("frequency_penalty".into()), ..Default::default() },
+                        format!(
+                            "unsupported frequency_penalty={} (canonical sampler requires 0.0)",
+                            decode_spec.frequency_penalty
+                        ),
+                        FailureContext {
+                            field: Some("frequency_penalty".into()),
+                            ..Default::default()
+                        },
                     ));
                 }
                 if decode_spec.presence_penalty != 0.0 {
                     failures.push(vfail_ctx(
                         FailureCode::UnsupportedDecodeFeature,
-                        format!("unsupported presence_penalty={} (canonical sampler requires 0.0)", decode_spec.presence_penalty),
-                        FailureContext { field: Some("presence_penalty".into()), ..Default::default() },
+                        format!(
+                            "unsupported presence_penalty={} (canonical sampler requires 0.0)",
+                            decode_spec.presence_penalty
+                        ),
+                        FailureContext {
+                            field: Some("presence_penalty".into()),
+                            ..Default::default()
+                        },
                     ));
                 }
                 if !decode_spec.logit_bias.is_empty() {
                     failures.push(vfail_ctx(
                         FailureCode::UnsupportedDecodeFeature,
-                        format!("unsupported logit_bias ({} entries, canonical sampler requires empty)", decode_spec.logit_bias.len()),
-                        FailureContext { field: Some("logit_bias".into()), ..Default::default() },
+                        format!(
+                            "unsupported logit_bias ({} entries, canonical sampler requires empty)",
+                            decode_spec.logit_bias.len()
+                        ),
+                        FailureContext {
+                            field: Some("logit_bias".into()),
+                            ..Default::default()
+                        },
                     ));
                 }
                 if !decode_spec.bad_word_ids.is_empty() {
@@ -1152,8 +1424,14 @@ pub fn verify_v4_legacy(
                 if !decode_spec.guided_decoding.is_empty() {
                     failures.push(vfail_ctx(
                         FailureCode::UnsupportedDecodeFeature,
-                        format!("unsupported guided_decoding='{}' (canonical sampler requires empty)", decode_spec.guided_decoding),
-                        FailureContext { field: Some("guided_decoding".into()), ..Default::default() },
+                        format!(
+                            "unsupported guided_decoding='{}' (canonical sampler requires empty)",
+                            decode_spec.guided_decoding
+                        ),
+                        FailureContext {
+                            field: Some("guided_decoding".into()),
+                            ..Default::default()
+                        },
                     ));
                 }
 
@@ -1171,7 +1449,9 @@ pub fn verify_v4_legacy(
                     // are generated tokens. Thus:
                     //   n_generated = n_tokens - (n_prompt - 1) = n_tokens - n_prompt + 1
                     let n_prompt = response.commitment.n_prompt_tokens.unwrap_or(0);
-                    let n_generated = response.commitment.n_tokens
+                    let n_generated = response
+                        .commitment
+                        .n_tokens
                         .saturating_sub(n_prompt.saturating_sub(1));
                     if response.token_index >= response.commitment.n_tokens {
                         failures.push(vfail(
@@ -1205,9 +1485,7 @@ pub fn verify_v4_legacy(
                     // Generated tokens start at index (n_prompt_tokens - 1).
                     if output_spec.min_tokens > 0 {
                         checks_run += 1;
-                        let gen_start = response.n_prompt_tokens
-                            .unwrap_or(1)
-                            .saturating_sub(1);
+                        let gen_start = response.n_prompt_tokens.unwrap_or(1).saturating_sub(1);
                         // The number of generated tokens committed.
                         let n_generated = response.commitment.n_tokens.saturating_sub(gen_start);
                         if n_generated < output_spec.min_tokens {
@@ -1247,7 +1525,10 @@ pub fn verify_v4_legacy(
                     }
                 } else if output_spec.min_tokens > 0 || output_spec.ignore_eos {
                     // Fail-closed: can't enforce min_tokens or ignore_eos without eos_token_id.
-                    failures.push(vfail(FailureCode::MissingEosTokenId, "output_spec requires min_tokens or ignore_eos but eos_token_id is missing"));
+                    failures.push(vfail(
+                        FailureCode::MissingEosTokenId,
+                        "output_spec requires min_tokens or ignore_eos but eos_token_id is missing",
+                    ));
                 }
 
                 // eos_policy enforcement.
@@ -1260,7 +1541,8 @@ pub fn verify_v4_legacy(
                 if output_spec.eos_policy == "stop" {
                     if let Some(eos_id) = output_spec.eos_token_id {
                         checks_run += 1;
-                        let is_last_token = response.token_index == response.commitment.n_tokens.saturating_sub(1);
+                        let is_last_token =
+                            response.token_index == response.commitment.n_tokens.saturating_sub(1);
                         if response.token_id == eos_id && !is_last_token {
                             failures.push(vfail(
                                 FailureCode::EosPolicyViolated,
@@ -1306,8 +1588,14 @@ pub fn verify_v4_legacy(
             let final_hidden = if let Some(ref fr) = shell.final_residual {
                 if let Some(ref fnw) = key.final_norm_weights {
                     let res_f64: Vec<f64> = fr.iter().map(|&v| v as f64).collect();
-                    let normed = verilm_core::rmsnorm::rmsnorm_f64_input(&res_f64, fnw, key.rmsnorm_eps);
-                    Some(normed.iter().map(|&v| v.round().clamp(-128.0, 127.0) as i8).collect())
+                    let normed =
+                        verilm_core::rmsnorm::rmsnorm_f64_input(&res_f64, fnw, key.rmsnorm_eps);
+                    Some(
+                        normed
+                            .iter()
+                            .map(|&v| v.round().clamp(-128.0, 127.0) as i8)
+                            .collect(),
+                    )
                 } else {
                     // No final_norm_weights in key — fall back to shell replay (toy model).
                     shell_final_hidden
@@ -1339,28 +1627,35 @@ pub fn verify_v4_legacy(
                     (Some(ref claimed_logits), Some(ref fh)) => {
                         checks_run += 1;
                         if !freivalds::check(v_lm, fh, r_lm, claimed_logits) {
-                            failures.push(vfail(FailureCode::LmHeadFreivaldsFailed, "lm_head: Freivalds check failed on prover's logits_i32 claim"));
+                            failures.push(vfail(
+                                FailureCode::LmHeadFreivaldsFailed,
+                                "lm_head: Freivalds check failed on prover's logits_i32 claim",
+                            ));
                         }
 
                         // Token replay: use the prover's (now Freivalds-verified) logits.
                         // Only replay for generated tokens — prompt-side tokens were
                         // chosen by the tokenizer, not by argmax/sampling over logits.
-                        let gen_start = response.n_prompt_tokens
+                        let gen_start = response
+                            .n_prompt_tokens
                             .map(|npt| npt.saturating_sub(1))
                             .unwrap_or(0);
                         let is_generated = response.token_index >= gen_start;
 
                         if key.config.vocab_size > 0 && is_generated {
                             checks_run += 1;
-                            let logits: Vec<f32> = claimed_logits.iter().map(|&v| v as f32).collect();
+                            let logits: Vec<f32> =
+                                claimed_logits.iter().map(|&v| v as f32).collect();
 
                             let expected_token = if let Some(ref dp) = decode_params {
                                 let token_seed = verilm_core::sampling::derive_token_seed(
-                                    &response.revealed_seed, response.token_index,
+                                    &response.revealed_seed,
+                                    response.token_index,
                                 );
                                 verilm_core::sampling::sample(&logits, dp, &token_seed)
                             } else {
-                                logits.iter()
+                                logits
+                                    .iter()
                                     .enumerate()
                                     .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
                                     .map(|(i, _)| i as u32)
@@ -1379,16 +1674,25 @@ pub fn verify_v4_legacy(
                         }
                     }
                     (None, _) => {
-                        failures.push(vfail(FailureCode::MissingLogits, "lm_head: key requires logits_i32 but shell opening did not provide it"));
+                        failures.push(vfail(
+                            FailureCode::MissingLogits,
+                            "lm_head: key requires logits_i32 but shell opening did not provide it",
+                        ));
                     }
                     (Some(_), None) => {
-                        failures.push(vfail(FailureCode::MissingFinalHidden, "lm_head: logits_i32 present but no final_hidden to check against"));
+                        failures.push(vfail(
+                            FailureCode::MissingFinalHidden,
+                            "lm_head: logits_i32 present but no final_hidden to check against",
+                        ));
                     }
                 }
             }
         }
         None => {
-            failures.push(vfail(FailureCode::MissingShellOpening, "V4 audit response missing shell_opening"));
+            failures.push(vfail(
+                FailureCode::MissingShellOpening,
+                "V4 audit response missing shell_opening",
+            ));
         }
     }
 
@@ -1401,21 +1705,23 @@ pub fn verify_v4_legacy(
         checks_run += 1;
         match &response.output_text {
             Some(ref claimed_text) => {
-                let detok_policy = response.manifest.as_ref()
+                let detok_policy = response
+                    .manifest
+                    .as_ref()
                     .map(|m| OutputSpec::from(m))
                     .and_then(|os| os.detokenization_policy);
 
                 // Collect generation token IDs: prefix after prompt boundary + challenged token.
-                let gen_start = response.n_prompt_tokens
-                    .unwrap_or(1)
-                    .saturating_sub(1) as usize;
-                let mut gen_token_ids: Vec<u32> = response.prefix_token_ids
+                let gen_start = response.n_prompt_tokens.unwrap_or(1).saturating_sub(1) as usize;
+                let mut gen_token_ids: Vec<u32> = response
+                    .prefix_token_ids
                     .get(gen_start..)
                     .unwrap_or(&[])
                     .to_vec();
                 gen_token_ids.push(response.token_id);
 
-                let is_last_token = response.token_index == response.commitment.n_tokens.saturating_sub(1);
+                let is_last_token =
+                    response.token_index == response.commitment.n_tokens.saturating_sub(1);
 
                 match detok.decode(&gen_token_ids, detok_policy.as_deref()) {
                     Ok(decoded) => {
@@ -1444,7 +1750,10 @@ pub fn verify_v4_legacy(
                         }
                     }
                     Err(e) => {
-                        failures.push(vfail(FailureCode::DetokenizerError, format!("detokenization failed: {}", e)));
+                        failures.push(vfail(
+                            FailureCode::DetokenizerError,
+                            format!("detokenization failed: {}", e),
+                        ));
                     }
                 }
             }
@@ -1461,7 +1770,9 @@ pub fn verify_v4_legacy(
     // Compute audit coverage from the shell opening's layer_indices.
     let coverage = match &response.shell_opening {
         Some(shell) => {
-            let layers_checked = shell.layer_indices.as_ref()
+            let layers_checked = shell
+                .layer_indices
+                .as_ref()
                 .map_or(shell.layers.len(), |v| v.len());
             if layers_checked >= key.config.n_layers {
                 AuditCoverage::Full { layers_checked }
@@ -1479,7 +1790,11 @@ pub fn verify_v4_legacy(
     let checks_passed = checks_run.saturating_sub(failures.len());
 
     V4VerifyReport {
-        verdict: if failures.is_empty() { Verdict::Pass } else { Verdict::Fail },
+        verdict: if failures.is_empty() {
+            Verdict::Pass
+        } else {
+            Verdict::Fail
+        },
         token_index: response.token_index,
         checks_run,
         checks_passed,
@@ -1516,7 +1831,9 @@ fn verify_shell_opening(
     let mut checks_run = 0usize;
 
     // Resolve which layers are present.
-    let opened_layers: Vec<usize> = shell.layer_indices.clone()
+    let opened_layers: Vec<usize> = shell
+        .layer_indices
+        .clone()
         .unwrap_or_else(|| (0..retained.layers.len()).collect());
 
     if shell.layers.len() != opened_layers.len() {
@@ -1524,7 +1841,8 @@ fn verify_shell_opening(
             FailureCode::ShellLayerCountMismatch,
             format!(
                 "shell_opening has {} layers but layer_indices specifies {}",
-                shell.layers.len(), opened_layers.len()
+                shell.layers.len(),
+                opened_layers.len()
             ),
         ));
         return (checks_run, failures, None);
@@ -1564,11 +1882,12 @@ fn verify_shell_opening(
         let ir = shell.initial_residual.as_ref().unwrap();
         let res: Vec<f64> = ir.iter().map(|&v| v as f64).collect();
         let normed = verilm_core::rmsnorm::rmsnorm_f64_input(
-            &res, &key.rmsnorm_attn_weights[0], key.rmsnorm_eps,
+            &res,
+            &key.rmsnorm_attn_weights[0],
+            key.rmsnorm_eps,
         );
-        let xa = verilm_core::rmsnorm::quantize_f64_to_i8(
-            &normed, shell.layers[0].scale_x_attn as f64,
-        );
+        let xa =
+            verilm_core::rmsnorm::quantize_f64_to_i8(&normed, shell.layers[0].scale_x_attn as f64);
         (Some(res), Some(xa))
     } else {
         (None, None)
@@ -1576,7 +1895,9 @@ fn verify_shell_opening(
 
     // Iterate 0..=max_layer: bridge is sequential, Freivalds only on opened layers.
     for layer_idx in 0..=max_layer {
-        if layer_idx >= retained.layers.len() { break; }
+        if layer_idx >= retained.layers.len() {
+            break;
+        }
         let rs = &retained.layers[layer_idx];
         let a = &rs.a;
 
@@ -1595,19 +1916,18 @@ fn verify_shell_opening(
                     match opened_acc {
                         Some(z) => {
                             checks_run += 1;
-                            if !freivalds::check(
-                                key.v_for(layer_idx, *mt),
-                                xa,
-                                key.r_for(*mt),
-                                z,
-                            ) {
+                            if !freivalds::check(key.v_for(layer_idx, *mt), xa, key.r_for(*mt), z) {
                                 failures.push(vfail_ctx(
                                     FailureCode::FreivaldsFailed,
                                     format!(
                                         "layer {} {:?}: Freivalds failed on shell opening",
                                         layer_idx, mt
                                     ),
-                                    FailureContext { layer: Some(layer_idx), matrix: Some(format!("{:?}", mt)), ..Default::default() },
+                                    FailureContext {
+                                        layer: Some(layer_idx),
+                                        matrix: Some(format!("{:?}", mt)),
+                                        ..Default::default()
+                                    },
                                 ));
                             }
                         }
@@ -1618,7 +1938,11 @@ fn verify_shell_opening(
                                     "layer {} {:?}: shell opening missing QKV (x_attn derivable)",
                                     layer_idx, mt
                                 ),
-                                FailureContext { layer: Some(layer_idx), matrix: Some(format!("{:?}", mt)), ..Default::default() },
+                                FailureContext {
+                                    layer: Some(layer_idx),
+                                    matrix: Some(format!("{:?}", mt)),
+                                    ..Default::default()
+                                },
                             ));
                         }
                     }
@@ -1636,7 +1960,11 @@ fn verify_shell_opening(
                 failures.push(vfail_ctx(
                     FailureCode::FreivaldsFailed,
                     format!("layer {} Wo: Freivalds failed on shell opening", layer_idx),
-                    FailureContext { layer: Some(layer_idx), matrix: Some("Wo".into()), ..Default::default() },
+                    FailureContext {
+                        layer: Some(layer_idx),
+                        matrix: Some("Wo".into()),
+                        ..Default::default()
+                    },
                 ));
             }
 
@@ -1665,26 +1993,26 @@ fn verify_shell_opening(
             // W_g, W_u @ x_ffn
             for (mt, z) in [(MatrixType::Wg, &sl.g), (MatrixType::Wu, &sl.u)] {
                 checks_run += 1;
-                if !freivalds::check(
-                    key.v_for(layer_idx, mt),
-                    &x_ffn,
-                    key.r_for(mt),
-                    z,
-                ) {
+                if !freivalds::check(key.v_for(layer_idx, mt), &x_ffn, key.r_for(mt), z) {
                     failures.push(vfail_ctx(
                         FailureCode::FreivaldsFailed,
                         format!(
                             "layer {} {:?}: Freivalds failed on shell opening",
                             layer_idx, mt
                         ),
-                        FailureContext { layer: Some(layer_idx), matrix: Some(format!("{:?}", mt)), ..Default::default() },
+                        FailureContext {
+                            layer: Some(layer_idx),
+                            matrix: Some(format!("{:?}", mt)),
+                            ..Default::default()
+                        },
                     ));
                 }
             }
 
             // Bridge: verifier derives h from prover's g, u using scales
             let h = verilm_core::silu::compute_h_scaled(
-                &sl.g, &sl.u,
+                &sl.g,
+                &sl.u,
                 key.weight_scale_for(layer_idx, MatrixType::Wg),
                 key.weight_scale_for(layer_idx, MatrixType::Wu),
                 sl.scale_x_ffn,
@@ -1702,12 +2030,17 @@ fn verify_shell_opening(
                 failures.push(vfail_ctx(
                     FailureCode::FreivaldsFailed,
                     format!("layer {} Wd: Freivalds failed on shell opening", layer_idx),
-                    FailureContext { layer: Some(layer_idx), matrix: Some("Wd".into()), ..Default::default() },
+                    FailureContext {
+                        layer: Some(layer_idx),
+                        matrix: Some("Wd".into()),
+                        ..Default::default()
+                    },
                 ));
             }
 
             // Post-FFN bridge: derive x_attn for next layer
-            let next_scale_x_attn = shell.layers
+            let next_scale_x_attn = shell
+                .layers
                 .get(si + 1)
                 .map(|s| s.scale_x_attn)
                 .unwrap_or(1.0);
@@ -1759,10 +2092,16 @@ fn verify_shell_opening(
     // Derive final_hidden from the chain endpoint.
     // For full bridge with final_norm_weights: apply final RMSNorm to residual.
     // For simplified bridge (toy model): x_attn after last layer is requantize(ffn_out).
-    let final_hidden = if let (Some(ref res), Some(ref fnw)) = (&residual, &key.final_norm_weights) {
+    let final_hidden = if let (Some(ref res), Some(ref fnw)) = (&residual, &key.final_norm_weights)
+    {
         let normed = verilm_core::rmsnorm::rmsnorm_f64_input(res, fnw, key.rmsnorm_eps);
         // Quantize to i8 with unit scale (simple clamp) for lm_head matmul.
-        Some(normed.iter().map(|&v| v.round().clamp(-128.0, 127.0) as i8).collect())
+        Some(
+            normed
+                .iter()
+                .map(|&v| v.round().clamp(-128.0, 127.0) as i8)
+                .collect(),
+        )
     } else {
         // Simplified bridge: x_attn after last layer IS the final hidden state.
         x_attn.clone()
@@ -1791,7 +2130,8 @@ pub fn verify_v4_with_weights(
 
     // Extract initial_residual only when authenticated (embedding root present).
     let initial_residual = if key.embedding_merkle_root.is_some() {
-        response.shell_opening
+        response
+            .shell_opening
             .as_ref()
             .and_then(|s| s.initial_residual.as_deref())
     } else {
@@ -1816,13 +2156,19 @@ pub fn verify_v4_with_weights(
     failures.extend(f);
 
     // Weight-backed verification always replays all layers.
-    let coverage = AuditCoverage::Full { layers_checked: key.config.n_layers };
+    let coverage = AuditCoverage::Full {
+        layers_checked: key.config.n_layers,
+    };
 
     let duration = start.elapsed();
     let checks_passed = checks_run.saturating_sub(failures.len());
 
     V4VerifyReport {
-        verdict: if failures.is_empty() { Verdict::Pass } else { Verdict::Fail },
+        verdict: if failures.is_empty() {
+            Verdict::Pass
+        } else {
+            Verdict::Fail
+        },
         token_index: response.token_index,
         checks_run,
         checks_passed,
@@ -1833,9 +2179,7 @@ pub fn verify_v4_with_weights(
 }
 
 /// Structural checks shared by verify_v4 and verify_v4_with_replay.
-fn verify_v4_structural(
-    response: &V4AuditResponse,
-) -> (usize, Vec<VerificationFailure>) {
+fn verify_v4_structural(response: &V4AuditResponse) -> (usize, Vec<VerificationFailure>) {
     let mut failures = Vec::new();
     let mut checks_run = 0usize;
 
@@ -1857,11 +2201,17 @@ fn verify_v4_structural(
         Some(expected) => {
             let computed = merkle::hash_seed(&response.revealed_seed);
             if computed != expected {
-                failures.push(vfail(FailureCode::SeedMismatch, "seed commitment mismatch: hash(revealed_seed) != commitment.seed_commitment"));
+                failures.push(vfail(
+                    FailureCode::SeedMismatch,
+                    "seed commitment mismatch: hash(revealed_seed) != commitment.seed_commitment",
+                ));
             }
         }
         None => {
-            failures.push(vfail(FailureCode::MissingSeedCommitment, "V4 commitment missing seed_commitment"));
+            failures.push(vfail(
+                FailureCode::MissingSeedCommitment,
+                "V4 commitment missing seed_commitment",
+            ));
         }
     }
 
@@ -1871,23 +2221,38 @@ fn verify_v4_structural(
         (Some(prompt), Some(committed_hash)) => {
             let computed = merkle::hash_prompt(prompt);
             if computed != committed_hash {
-                failures.push(vfail(FailureCode::PromptHashMismatch, "prompt_hash mismatch: hash(prompt) != commitment.prompt_hash"));
+                failures.push(vfail(
+                    FailureCode::PromptHashMismatch,
+                    "prompt_hash mismatch: hash(prompt) != commitment.prompt_hash",
+                ));
             }
         }
         (None, Some(_)) => {
-            failures.push(vfail(FailureCode::MissingPromptBytes, "commitment has prompt_hash but response missing prompt bytes"));
+            failures.push(vfail(
+                FailureCode::MissingPromptBytes,
+                "commitment has prompt_hash but response missing prompt bytes",
+            ));
         }
         (Some(_), None) => {
-            failures.push(vfail(FailureCode::UncommittedPrompt, "response has prompt but commitment missing prompt_hash"));
+            failures.push(vfail(
+                FailureCode::UncommittedPrompt,
+                "response has prompt but commitment missing prompt_hash",
+            ));
         }
         (None, None) => {
-            failures.push(vfail(FailureCode::MissingPromptHash, "V4 commitment missing prompt_hash"));
+            failures.push(vfail(
+                FailureCode::MissingPromptHash,
+                "V4 commitment missing prompt_hash",
+            ));
         }
     }
 
     // 3b. Prompt token count binding (fail-closed): n_prompt_tokens MUST be present.
     checks_run += 1;
-    match (response.commitment.n_prompt_tokens, response.n_prompt_tokens) {
+    match (
+        response.commitment.n_prompt_tokens,
+        response.n_prompt_tokens,
+    ) {
         (Some(committed_npt), Some(response_npt)) => {
             if committed_npt != response_npt {
                 failures.push(vfail(
@@ -1911,10 +2276,16 @@ fn verify_v4_structural(
             }
         }
         (None, _) => {
-            failures.push(vfail(FailureCode::MissingNPromptTokens, "commitment missing n_prompt_tokens"));
+            failures.push(vfail(
+                FailureCode::MissingNPromptTokens,
+                "commitment missing n_prompt_tokens",
+            ));
         }
         (_, None) => {
-            failures.push(vfail(FailureCode::MissingNPromptTokens, "response missing n_prompt_tokens"));
+            failures.push(vfail(
+                FailureCode::MissingNPromptTokens,
+                "response missing n_prompt_tokens",
+            ));
         }
     }
 
@@ -1922,7 +2293,9 @@ fn verify_v4_structural(
     // When shell_opening has final_residual, include it in the leaf hash
     // (it was bound into the commitment at commit time).
     checks_run += 1;
-    let final_residual_ref = response.shell_opening.as_ref()
+    let final_residual_ref = response
+        .shell_opening
+        .as_ref()
         .and_then(|s| s.final_residual.as_deref());
     let leaf_hash = merkle::hash_retained_with_residual(&response.retained, final_residual_ref);
     if !merkle::verify(
@@ -1936,7 +2309,10 @@ fn verify_v4_structural(
                 "token {}: retained leaf Merkle proof failed",
                 response.token_index
             ),
-            FailureContext { token_index: Some(response.token_index), ..Default::default() },
+            FailureContext {
+                token_index: Some(response.token_index),
+                ..Default::default()
+            },
         ));
     }
 
@@ -1951,11 +2327,11 @@ fn verify_v4_structural(
         if !merkle::verify(&response.commitment.merkle_root, prefix_leaf_hash, proof) {
             failures.push(vfail_ctx(
                 FailureCode::MerkleProofFailed,
-                format!(
-                    "prefix token {}: retained leaf Merkle proof failed",
-                    j
-                ),
-                FailureContext { token_index: Some(j as u32), ..Default::default() },
+                format!("prefix token {}: retained leaf Merkle proof failed", j),
+                FailureContext {
+                    token_index: Some(j as u32),
+                    ..Default::default()
+                },
             ));
         }
     }
@@ -1978,7 +2354,10 @@ fn verify_v4_structural(
                 "token {}: prev_io_hash doesn't match recomputed chain from prefix",
                 response.token_index
             ),
-            FailureContext { token_index: Some(response.token_index), ..Default::default() },
+            FailureContext {
+                token_index: Some(response.token_index),
+                ..Default::default()
+            },
         ));
     }
 
@@ -1995,7 +2374,10 @@ fn verify_v4_structural(
                 "token {}: IO chain proof verification failed",
                 response.token_index
             ),
-            FailureContext { token_index: Some(response.token_index), ..Default::default() },
+            FailureContext {
+                token_index: Some(response.token_index),
+                ..Default::default()
+            },
         ));
     }
 
@@ -2010,7 +2392,10 @@ fn verify_v4_structural(
                 response.token_index,
                 response.prefix_leaf_hashes.len()
             ),
-            FailureContext { token_index: Some(response.token_index), ..Default::default() },
+            FailureContext {
+                token_index: Some(response.token_index),
+                ..Default::default()
+            },
         ));
     }
 
@@ -2053,12 +2438,12 @@ fn replay_token_shell(
         let ir = initial_residual.unwrap();
         let res: Vec<f64> = ir.iter().map(|&v| v as f64).collect();
         let normed = verilm_core::rmsnorm::rmsnorm_f64_input(
-            &res, &key.rmsnorm_attn_weights[0], key.rmsnorm_eps,
+            &res,
+            &key.rmsnorm_attn_weights[0],
+            key.rmsnorm_eps,
         );
         // Weight-backed replay doesn't have shell layer scales. Use 1.0.
-        let xa = verilm_core::rmsnorm::quantize_f64_to_i8(
-            &normed, 1.0_f64,
-        );
+        let xa = verilm_core::rmsnorm::quantize_f64_to_i8(&normed, 1.0_f64);
         (Some(res), Some(xa))
     } else {
         (None, None)
@@ -2077,19 +2462,19 @@ fn replay_token_shell(
             for (mt, rows, cols) in &qkv_mats {
                 let z = matmul_i32(weights.weight(layer_idx, *mt), xa, *rows, *cols);
                 checks_run += 1;
-                if !freivalds::check(
-                    key.v_for(layer_idx, *mt),
-                    xa,
-                    key.r_for(*mt),
-                    &z,
-                ) {
+                if !freivalds::check(key.v_for(layer_idx, *mt), xa, key.r_for(*mt), &z) {
                     failures.push(vfail_ctx(
                         FailureCode::FreivaldsFailed,
                         format!(
                             "token {} layer {} {:?}: Freivalds weight-binding failed",
                             token_pos, layer_idx, mt
                         ),
-                        FailureContext { token_index: Some(token_pos as u32), layer: Some(layer_idx), matrix: Some(format!("{:?}", mt)), ..Default::default() },
+                        FailureContext {
+                            token_index: Some(token_pos as u32),
+                            layer: Some(layer_idx),
+                            matrix: Some(format!("{:?}", mt)),
+                            ..Default::default()
+                        },
                     ));
                 }
             }
@@ -2115,7 +2500,12 @@ fn replay_token_shell(
                     "token {} layer {} Wo: Freivalds weight-binding failed",
                     token_pos, layer_idx
                 ),
-                FailureContext { token_index: Some(token_pos as u32), layer: Some(layer_idx), matrix: Some("Wo".into()), ..Default::default() },
+                FailureContext {
+                    token_index: Some(token_pos as u32),
+                    layer: Some(layer_idx),
+                    matrix: Some("Wo".into()),
+                    ..Default::default()
+                },
             ));
         }
 
@@ -2156,26 +2546,27 @@ fn replay_token_shell(
         // Freivalds on W_g, W_u
         for (mt, z) in [(MatrixType::Wg, &g), (MatrixType::Wu, &u)] {
             checks_run += 1;
-            if !freivalds::check(
-                key.v_for(layer_idx, mt),
-                &x_ffn,
-                key.r_for(mt),
-                z,
-            ) {
+            if !freivalds::check(key.v_for(layer_idx, mt), &x_ffn, key.r_for(mt), z) {
                 failures.push(vfail_ctx(
                     FailureCode::FreivaldsFailed,
                     format!(
                         "token {} layer {} {:?}: Freivalds weight-binding failed",
                         token_pos, layer_idx, mt
                     ),
-                    FailureContext { token_index: Some(token_pos as u32), layer: Some(layer_idx), matrix: Some(format!("{:?}", mt)), ..Default::default() },
+                    FailureContext {
+                        token_index: Some(token_pos as u32),
+                        layer: Some(layer_idx),
+                        matrix: Some(format!("{:?}", mt)),
+                        ..Default::default()
+                    },
                 ));
             }
         }
 
         // SiLU: h via scale-aware bridge (unit scales for weight-backed replay)
         let h = verilm_core::silu::compute_h_scaled(
-            &g, &u,
+            &g,
+            &u,
             key.weight_scale_for(layer_idx, MatrixType::Wg),
             key.weight_scale_for(layer_idx, MatrixType::Wu),
             1.0,
@@ -2202,7 +2593,12 @@ fn replay_token_shell(
                     "token {} layer {} Wd: Freivalds weight-binding failed",
                     token_pos, layer_idx
                 ),
-                FailureContext { token_index: Some(token_pos as u32), layer: Some(layer_idx), matrix: Some("Wd".into()), ..Default::default() },
+                FailureContext {
+                    token_index: Some(token_pos as u32),
+                    layer: Some(layer_idx),
+                    matrix: Some("Wd".into()),
+                    ..Default::default()
+                },
             ));
         }
 
@@ -2251,54 +2647,120 @@ mod tests {
 
     #[test]
     fn vfail_structural_codes() {
-        let f = vfail(FailureCode::WrongCommitmentVersion, "expected V4 commitment version");
+        let f = vfail(
+            FailureCode::WrongCommitmentVersion,
+            "expected V4 commitment version",
+        );
         assert_eq!(f.category, FailureCategory::Structural);
         assert_eq!(f.code, FailureCode::WrongCommitmentVersion);
 
-        let f = vfail(FailureCode::MissingShellOpening, "V4 audit response missing shell_opening");
+        let f = vfail(
+            FailureCode::MissingShellOpening,
+            "V4 audit response missing shell_opening",
+        );
         assert_eq!(f.category, FailureCategory::Structural);
 
-        let f = vfail(FailureCode::MissingLogits, "lm_head: key requires logits_i32 but shell opening did not provide it");
+        let f = vfail(
+            FailureCode::MissingLogits,
+            "lm_head: key requires logits_i32 but shell opening did not provide it",
+        );
         assert_eq!(f.category, FailureCategory::Structural);
     }
 
     #[test]
     fn vfail_cryptographic_binding_codes() {
-        assert_eq!(FailureCode::FreivaldsFailed.category(), FailureCategory::CryptographicBinding);
-        assert_eq!(FailureCode::MerkleProofFailed.category(), FailureCategory::CryptographicBinding);
-        assert_eq!(FailureCode::IoChainMismatch.category(), FailureCategory::CryptographicBinding);
-        assert_eq!(FailureCode::SeedMismatch.category(), FailureCategory::CryptographicBinding);
-        assert_eq!(FailureCode::PromptHashMismatch.category(), FailureCategory::CryptographicBinding);
-        assert_eq!(FailureCode::ManifestHashMismatch.category(), FailureCategory::CryptographicBinding);
-        assert_eq!(FailureCode::SpecHashMismatch.category(), FailureCategory::CryptographicBinding);
-        assert_eq!(FailureCode::RetainedHashMismatch.category(), FailureCategory::CryptographicBinding);
+        assert_eq!(
+            FailureCode::FreivaldsFailed.category(),
+            FailureCategory::CryptographicBinding
+        );
+        assert_eq!(
+            FailureCode::MerkleProofFailed.category(),
+            FailureCategory::CryptographicBinding
+        );
+        assert_eq!(
+            FailureCode::IoChainMismatch.category(),
+            FailureCategory::CryptographicBinding
+        );
+        assert_eq!(
+            FailureCode::SeedMismatch.category(),
+            FailureCategory::CryptographicBinding
+        );
+        assert_eq!(
+            FailureCode::PromptHashMismatch.category(),
+            FailureCategory::CryptographicBinding
+        );
+        assert_eq!(
+            FailureCode::ManifestHashMismatch.category(),
+            FailureCategory::CryptographicBinding
+        );
+        assert_eq!(
+            FailureCode::SpecHashMismatch.category(),
+            FailureCategory::CryptographicBinding
+        );
+        assert_eq!(
+            FailureCode::RetainedHashMismatch.category(),
+            FailureCategory::CryptographicBinding
+        );
     }
 
     #[test]
     fn vfail_spec_mismatch_codes() {
-        assert_eq!(FailureCode::SpecFieldMismatch.category(), FailureCategory::SpecMismatch);
+        assert_eq!(
+            FailureCode::SpecFieldMismatch.category(),
+            FailureCategory::SpecMismatch
+        );
     }
 
     #[test]
     fn vfail_unsupported_codes() {
-        assert_eq!(FailureCode::UnsupportedSamplerVersion.category(), FailureCategory::Unsupported);
-        assert_eq!(FailureCode::UnsupportedDecodeFeature.category(), FailureCategory::Unsupported);
-        assert_eq!(FailureCode::UnknownEosPolicy.category(), FailureCategory::Unsupported);
+        assert_eq!(
+            FailureCode::UnsupportedSamplerVersion.category(),
+            FailureCategory::Unsupported
+        );
+        assert_eq!(
+            FailureCode::UnsupportedDecodeFeature.category(),
+            FailureCategory::Unsupported
+        );
+        assert_eq!(
+            FailureCode::UnknownEosPolicy.category(),
+            FailureCategory::Unsupported
+        );
     }
 
     #[test]
     fn vfail_semantic_violation_codes() {
-        assert_eq!(FailureCode::TokenSelectionMismatch.category(), FailureCategory::SemanticViolation);
-        assert_eq!(FailureCode::ExceedsMaxTokens.category(), FailureCategory::SemanticViolation);
-        assert_eq!(FailureCode::MinTokensViolated.category(), FailureCategory::SemanticViolation);
-        assert_eq!(FailureCode::EosPolicyViolated.category(), FailureCategory::SemanticViolation);
-        assert_eq!(FailureCode::DecodeModeTempInconsistent.category(), FailureCategory::SemanticViolation);
+        assert_eq!(
+            FailureCode::TokenSelectionMismatch.category(),
+            FailureCategory::SemanticViolation
+        );
+        assert_eq!(
+            FailureCode::ExceedsMaxTokens.category(),
+            FailureCategory::SemanticViolation
+        );
+        assert_eq!(
+            FailureCode::MinTokensViolated.category(),
+            FailureCategory::SemanticViolation
+        );
+        assert_eq!(
+            FailureCode::EosPolicyViolated.category(),
+            FailureCategory::SemanticViolation
+        );
+        assert_eq!(
+            FailureCode::DecodeModeTempInconsistent.category(),
+            FailureCategory::SemanticViolation
+        );
     }
 
     #[test]
     fn vfail_operational_codes() {
-        assert_eq!(FailureCode::TokenizerError.category(), FailureCategory::Operational);
-        assert_eq!(FailureCode::DetokenizerError.category(), FailureCategory::Operational);
+        assert_eq!(
+            FailureCode::TokenizerError.category(),
+            FailureCategory::Operational
+        );
+        assert_eq!(
+            FailureCode::DetokenizerError.category(),
+            FailureCategory::Operational
+        );
     }
 
     #[test]
@@ -2306,7 +2768,11 @@ mod tests {
         let f = vfail_ctx(
             FailureCode::FreivaldsFailed,
             "layer 0 Wo: Freivalds failed",
-            FailureContext { layer: Some(0), matrix: Some("Wo".into()), ..Default::default() },
+            FailureContext {
+                layer: Some(0),
+                matrix: Some("Wo".into()),
+                ..Default::default()
+            },
         );
         assert_eq!(f.code, FailureCode::FreivaldsFailed);
         assert_eq!(f.category, FailureCategory::CryptographicBinding);

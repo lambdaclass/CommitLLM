@@ -5,8 +5,8 @@
 //! This validates the entire math pipeline before touching real models.
 
 use rand::Rng;
-use rand_chacha::ChaCha20Rng;
 use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
 
 use verilm_core::constants::{MatrixType, ModelConfig};
 use verilm_core::field::Fp;
@@ -96,7 +96,12 @@ pub fn generate_model_with_head(cfg: &ModelConfig, seed: u64) -> ToyModel {
 /// Compute logit vector from the last hidden state via lm_head matmul.
 ///
 /// logits = lm_head @ last_hidden_state (i32 accumulators, then cast to f32).
-pub fn compute_logits(lm_head: &[i8], last_hidden: &[i8], vocab_size: usize, hidden_dim: usize) -> Vec<f32> {
+pub fn compute_logits(
+    lm_head: &[i8],
+    last_hidden: &[i8],
+    vocab_size: usize,
+    hidden_dim: usize,
+) -> Vec<f32> {
     matmul_i32(lm_head, last_hidden, vocab_size, hidden_dim)
         .iter()
         .map(|&v| v as f32)
@@ -188,8 +193,9 @@ pub fn forward_pass_autoregressive(
     let d_head = cfg.d_head;
     let inv_sqrt_d = 1.0 / (d_head as f64).sqrt();
 
-    let mut kv_cache: Vec<(Vec<Vec<i8>>, Vec<Vec<i8>>)> =
-        (0..cfg.n_layers).map(|_| (Vec::new(), Vec::new())).collect();
+    let mut kv_cache: Vec<(Vec<Vec<i8>>, Vec<Vec<i8>>)> = (0..cfg.n_layers)
+        .map(|_| (Vec::new(), Vec::new()))
+        .collect();
 
     let mut all_traces = Vec::new();
 
@@ -224,9 +230,7 @@ pub fn forward_pass_autoregressive(
             for qh in 0..cfg.n_q_heads {
                 let kv_head = qh / heads_per_kv;
 
-                let q_head: Vec<f64> = (0..d_head)
-                    .map(|i| q_i8[qh * d_head + i] as f64)
-                    .collect();
+                let q_head: Vec<f64> = (0..d_head).map(|i| q_i8[qh * d_head + i] as f64).collect();
 
                 let scores: Vec<f64> = (0..seq_len)
                     .map(|t| {
@@ -239,8 +243,7 @@ pub fn forward_pass_autoregressive(
                     .collect();
 
                 let max_score = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                let exp_scores: Vec<f64> =
-                    scores.iter().map(|&s| (s - max_score).exp()).collect();
+                let exp_scores: Vec<f64> = scores.iter().map(|&s| (s - max_score).exp()).collect();
                 let sum_exp: f64 = exp_scores.iter().sum();
                 let weights: Vec<f64> = exp_scores.iter().map(|&e| e / sum_exp).collect();
 
@@ -270,7 +273,17 @@ pub fn forward_pass_autoregressive(
             x = requantize(&ffn_out);
 
             token_layers.push(LayerTrace {
-                x_attn, q, k, v, a, attn_out, x_ffn, g, u, h, ffn_out,
+                x_attn,
+                q,
+                k,
+                v,
+                a,
+                attn_out,
+                x_ffn,
+                g,
+                u,
+                h,
+                ffn_out,
                 kv_cache_k: Vec::new(),
                 kv_cache_v: Vec::new(),
                 scale_x_attn: None,
@@ -292,10 +305,7 @@ pub fn forward_pass_autoregressive(
 /// Returns `kv_entries[layer][position]` — the post-RoPE K and dequantized V
 /// at each (layer, position) pair. For the toy model, K and V are simply
 /// the requantized i32 accumulators cast to f64 (no RoPE, unit scale).
-pub fn kv_entries_from_traces(
-    cfg: &ModelConfig,
-    traces: &[Vec<LayerTrace>],
-) -> Vec<Vec<KvEntry>> {
+pub fn kv_entries_from_traces(cfg: &ModelConfig, traces: &[Vec<LayerTrace>]) -> Vec<Vec<KvEntry>> {
     let mut result: Vec<Vec<KvEntry>> = (0..cfg.n_layers).map(|_| Vec::new()).collect();
 
     for token_traces in traces {
@@ -359,7 +369,7 @@ pub fn generate_key(cfg: &ModelConfig, model: &[LayerWeights], seed: [u8; 32]) -
     let weight_hash = verilm_core::merkle::hash_weights(
         "I8",
         cfg.n_layers,
-        &[],  // no quantization scales for native INT8
+        &[], // no quantization scales for native INT8
         |layer, mt_idx| {
             let lw = &model[layer];
             match MatrixType::PER_LAYER[mt_idx] {
@@ -407,7 +417,11 @@ pub fn generate_key(cfg: &ModelConfig, model: &[LayerWeights], seed: [u8; 32]) -
 }
 
 /// Generate a verifier key with W_o/V norms and lm_head for Level B verification.
-pub fn generate_key_level_b(cfg: &ModelConfig, model: &[LayerWeights], seed: [u8; 32]) -> VerifierKey {
+pub fn generate_key_level_b(
+    cfg: &ModelConfig,
+    model: &[LayerWeights],
+    seed: [u8; 32],
+) -> VerifierKey {
     generate_key_level_b_with_head(cfg, model, seed, None)
 }
 
@@ -451,4 +465,3 @@ pub fn generate_key_level_b_with_head(
         .fold(0.0f32, f32::max);
     key
 }
-

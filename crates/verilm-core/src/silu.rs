@@ -223,7 +223,10 @@ mod tests {
         let u_acc = vec![20, 30, -10, 50, -60];
         let unit = compute_h_unit_scale(&g_acc, &u_acc);
         let scaled = compute_h_scaled(&g_acc, &u_acc, 0.0, 0.0, 1.0, 1.0);
-        assert_eq!(unit, scaled, "zero weight scale should fall back to unit-scale");
+        assert_eq!(
+            unit, scaled,
+            "zero weight scale should fall back to unit-scale"
+        );
     }
 
     #[test]

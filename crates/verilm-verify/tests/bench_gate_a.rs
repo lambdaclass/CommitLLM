@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 use verilm_core::constants::{MatrixType, ModelConfig};
 use verilm_core::types::{BridgeParams, RetainedLayerState, RetainedTokenState, ShellWeights};
 use verilm_prover::{commit_minimal, open_v4, CapturedLayerScales, FullBindingParams};
-use verilm_test_vectors::{forward_pass_autoregressive, generate_key, generate_model, LayerWeights};
+use verilm_test_vectors::{
+    forward_pass_autoregressive, generate_key, generate_model, LayerWeights,
+};
 use verilm_verify::{verify_v4_legacy, verify_v4_with_weights, Verdict};
 
 /// Thin wrapper: routes through the legacy verifier while canonical is validated.
@@ -50,18 +52,32 @@ fn median(times: &mut [Duration]) -> Duration {
 
 // ───────────────────────────── full-bridge helpers ─────────────────────────
 
-fn setup_full_bridge() -> (ModelConfig, Vec<LayerWeights>, verilm_core::types::VerifierKey,
-    Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<f32>)
-{
+fn setup_full_bridge() -> (
+    ModelConfig,
+    Vec<LayerWeights>,
+    verilm_core::types::VerifierKey,
+    Vec<Vec<f32>>,
+    Vec<Vec<f32>>,
+    Vec<Vec<f32>>,
+    Vec<f32>,
+) {
     let cfg = ModelConfig::toy();
     let model = generate_model(&cfg, 42);
     let mut key = generate_key(&cfg, &model, [7u8; 32]);
 
     let rmsnorm_attn: Vec<Vec<f32>> = (0..cfg.n_layers)
-        .map(|l| (0..cfg.hidden_dim).map(|i| 0.8 + 0.01 * (l * cfg.hidden_dim + i) as f32).collect())
+        .map(|l| {
+            (0..cfg.hidden_dim)
+                .map(|i| 0.8 + 0.01 * (l * cfg.hidden_dim + i) as f32)
+                .collect()
+        })
         .collect();
     let rmsnorm_ffn: Vec<Vec<f32>> = (0..cfg.n_layers)
-        .map(|l| (0..cfg.hidden_dim).map(|i| 0.9 + 0.005 * (l * cfg.hidden_dim + i) as f32).collect())
+        .map(|l| {
+            (0..cfg.hidden_dim)
+                .map(|i| 0.9 + 0.005 * (l * cfg.hidden_dim + i) as f32)
+                .collect()
+        })
         .collect();
 
     let initial_residual: Vec<f32> = (0..cfg.hidden_dim)
@@ -69,8 +85,13 @@ fn setup_full_bridge() -> (ModelConfig, Vec<LayerWeights>, verilm_core::types::V
         .collect();
 
     let weight_scales: Vec<Vec<f32>> = (0..cfg.n_layers)
-        .map(|l| MatrixType::PER_LAYER.iter().enumerate()
-            .map(|(j, _)| 0.01 + 0.002 * (l * 7 + j) as f32).collect())
+        .map(|l| {
+            MatrixType::PER_LAYER
+                .iter()
+                .enumerate()
+                .map(|(j, _)| 0.01 + 0.002 * (l * 7 + j) as f32)
+                .collect()
+        })
         .collect();
 
     key.weight_scales = weight_scales.clone();
@@ -78,23 +99,44 @@ fn setup_full_bridge() -> (ModelConfig, Vec<LayerWeights>, verilm_core::types::V
     key.rmsnorm_ffn_weights = rmsnorm_ffn.clone();
     key.rmsnorm_eps = 1e-5;
 
-    (cfg, model, key, weight_scales, rmsnorm_attn, rmsnorm_ffn, initial_residual)
+    (
+        cfg,
+        model,
+        key,
+        weight_scales,
+        rmsnorm_attn,
+        rmsnorm_ffn,
+        initial_residual,
+    )
 }
 
 fn bridge_scales(cfg: &ModelConfig) -> Vec<(f32, f32, f32, f32)> {
     (0..cfg.n_layers)
-        .map(|l| (0.3 + 0.05 * l as f32, 0.5 + 0.1 * l as f32,
-                   0.4 + 0.07 * l as f32, 0.6 + 0.03 * l as f32))
+        .map(|l| {
+            (
+                0.3 + 0.05 * l as f32,
+                0.5 + 0.1 * l as f32,
+                0.4 + 0.07 * l as f32,
+                0.6 + 0.03 * l as f32,
+            )
+        })
         .collect()
 }
 
 fn full_bridge_forward(
-    cfg: &ModelConfig, model: &[LayerWeights], initial_residual: &[f32],
-    rmsnorm_attn: &[Vec<f32>], rmsnorm_ffn: &[Vec<f32>],
-    weight_scales: &[Vec<f32>], scales: &[(f32, f32, f32, f32)], eps: f64,
+    cfg: &ModelConfig,
+    model: &[LayerWeights],
+    initial_residual: &[f32],
+    rmsnorm_attn: &[Vec<f32>],
+    rmsnorm_ffn: &[Vec<f32>],
+    weight_scales: &[Vec<f32>],
+    scales: &[(f32, f32, f32, f32)],
+    eps: f64,
 ) -> (RetainedTokenState, Vec<CapturedLayerScales>) {
     use verilm_core::matmul::matmul_i32;
-    use verilm_core::rmsnorm::{bridge_residual_rmsnorm, dequant_add_residual, rmsnorm_f64_input, quantize_f64_to_i8};
+    use verilm_core::rmsnorm::{
+        bridge_residual_rmsnorm, dequant_add_residual, quantize_f64_to_i8, rmsnorm_f64_input,
+    };
 
     let mut residual: Vec<f64> = initial_residual.iter().map(|&v| v as f64).collect();
     let mut layers = Vec::new();
@@ -122,37 +164,70 @@ fn full_bridge_forward(
 
         let attn_out = matmul_i32(&lw.wo, &a, cfg.hidden_dim, cfg.hidden_dim);
         let x_ffn = bridge_residual_rmsnorm(
-            &attn_out, ws(MatrixType::Wo), scale_a, &mut residual, &rmsnorm_ffn[l], eps, scale_x_ffn);
+            &attn_out,
+            ws(MatrixType::Wo),
+            scale_a,
+            &mut residual,
+            &rmsnorm_ffn[l],
+            eps,
+            scale_x_ffn,
+        );
 
         let g = matmul_i32(&lw.wg, &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
         let u = matmul_i32(&lw.wu, &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
         let h = verilm_core::silu::compute_h_scaled(
-            &g, &u, ws(MatrixType::Wg), ws(MatrixType::Wu), scale_x_ffn, scale_h);
+            &g,
+            &u,
+            ws(MatrixType::Wg),
+            ws(MatrixType::Wu),
+            scale_x_ffn,
+            scale_h,
+        );
         let ffn_out = matmul_i32(&lw.wd, &h, cfg.hidden_dim, cfg.ffn_dim);
 
         if l + 1 < rmsnorm_attn.len() {
             let next_scale = scales.get(l + 1).map(|s| s.0).unwrap_or(1.0);
             bridge_residual_rmsnorm(
-                &ffn_out, ws(MatrixType::Wd), scale_h, &mut residual, &rmsnorm_attn[l + 1], eps, next_scale);
+                &ffn_out,
+                ws(MatrixType::Wd),
+                scale_h,
+                &mut residual,
+                &rmsnorm_attn[l + 1],
+                eps,
+                next_scale,
+            );
         } else {
             dequant_add_residual(&ffn_out, ws(MatrixType::Wd), scale_h, &mut residual);
         }
 
-        layers.push(RetainedLayerState { a, scale_a, x_attn_i8: None, scale_x_attn: None });
-        captured_scales.push(CapturedLayerScales { scale_x_attn, scale_x_ffn, scale_h });
+        layers.push(RetainedLayerState {
+            a,
+            scale_a,
+            x_attn_i8: None,
+            scale_x_attn: None,
+        });
+        captured_scales.push(CapturedLayerScales {
+            scale_x_attn,
+            scale_x_ffn,
+            scale_h,
+        });
     }
     (RetainedTokenState { layers }, captured_scales)
 }
 
-fn setup_embedding_tree(ir: &[f32], token_id: u32, n_vocab: usize)
-    -> (verilm_core::merkle::MerkleTree, [u8; 32])
-{
+fn setup_embedding_tree(
+    ir: &[f32],
+    token_id: u32,
+    n_vocab: usize,
+) -> (verilm_core::merkle::MerkleTree, [u8; 32]) {
     let mut leaves = Vec::with_capacity(n_vocab);
     for i in 0..n_vocab {
         if i == token_id as usize {
             leaves.push(verilm_core::merkle::hash_embedding_row(ir));
         } else {
-            let row: Vec<f32> = (0..ir.len()).map(|j| (i * 1000 + j) as f32 * 0.001).collect();
+            let row: Vec<f32> = (0..ir.len())
+                .map(|j| (i * 1000 + j) as f32 * 0.001)
+                .collect();
             leaves.push(verilm_core::merkle::hash_embedding_row(&row));
         }
     }
@@ -189,21 +264,23 @@ fn bench_gate_a() {
     let mut retained_all: Vec<RetainedTokenState> = Vec::with_capacity(N_TOKENS);
     let mut scales_all: Vec<Vec<CapturedLayerScales>> = Vec::with_capacity(N_TOKENS);
     for t in 0..N_TOKENS {
-        let layers: Vec<RetainedLayerState> = all_layers[t].iter().map(|lt| {
-            RetainedLayerState {
+        let layers: Vec<RetainedLayerState> = all_layers[t]
+            .iter()
+            .map(|lt| RetainedLayerState {
                 a: lt.a.clone(),
                 scale_a: lt.scale_a.unwrap_or(1.0),
                 x_attn_i8: None,
                 scale_x_attn: None,
-            }
-        }).collect();
-        let token_scales: Vec<CapturedLayerScales> = all_layers[t].iter().map(|lt| {
-            CapturedLayerScales {
+            })
+            .collect();
+        let token_scales: Vec<CapturedLayerScales> = all_layers[t]
+            .iter()
+            .map(|lt| CapturedLayerScales {
                 scale_x_attn: lt.scale_x_attn.unwrap_or(1.0),
                 scale_x_ffn: lt.scale_x_ffn.unwrap_or(1.0),
                 scale_h: lt.scale_h.unwrap_or(1.0),
-            }
-        }).collect();
+            })
+            .collect();
         retained_all.push(RetainedTokenState { layers });
         scales_all.push(token_scales);
     }
@@ -219,7 +296,14 @@ fn bench_gate_a() {
             manifest: None,
             n_prompt_tokens: Some(1),
         };
-        let (_c, s) = commit_minimal(retained_all.clone(), &params, None, scales_all.clone(), None, None);
+        let (_c, s) = commit_minimal(
+            retained_all.clone(),
+            &params,
+            None,
+            scales_all.clone(),
+            None,
+            None,
+        );
         commit_times.push(start.elapsed());
         state = Some(s);
     }
@@ -231,7 +315,20 @@ fn bench_gate_a() {
     let mut response_simple = None;
     for _ in 0..ITERS {
         let start = Instant::now();
-        let r = open_v4(&state, 5, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
+        let r = open_v4(
+            &state,
+            5,
+            &ToyWeights(&model),
+            &cfg,
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+        );
         open_simple_times.push(start.elapsed());
         response_simple = Some(r);
     }
@@ -244,7 +341,12 @@ fn bench_gate_a() {
         let start = Instant::now();
         let report = verify_v4(&key, &response_simple, None);
         verify_simple_times.push(start.elapsed());
-        assert_eq!(report.verdict, Verdict::Pass, "simplified: {:?}", report.failures);
+        assert_eq!(
+            report.verdict,
+            Verdict::Pass,
+            "simplified: {:?}",
+            report.failures
+        );
     }
     let verify_simple_med = median(&mut verify_simple_times);
 
@@ -257,7 +359,15 @@ fn bench_gate_a() {
     fb_key.embedding_merkle_root = Some(emb_root);
 
     let (fb_retained, fb_captured_scales) = full_bridge_forward(
-        &fb_cfg, &fb_model, &fb_ir, &fb_rn_attn, &fb_rn_ffn, &fb_ws, &fb_scales, 1e-5);
+        &fb_cfg,
+        &fb_model,
+        &fb_ir,
+        &fb_rn_attn,
+        &fb_rn_ffn,
+        &fb_ws,
+        &fb_scales,
+        1e-5,
+    );
     let fb_proof = verilm_core::merkle::prove(&emb_tree, fb_token_id as usize);
 
     let fb_params = FullBindingParams {
@@ -267,7 +377,14 @@ fn bench_gate_a() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_fb_commitment, fb_state) = commit_minimal(vec![fb_retained], &fb_params, None, vec![fb_captured_scales], None, None);
+    let (_fb_commitment, fb_state) = commit_minimal(
+        vec![fb_retained],
+        &fb_params,
+        None,
+        vec![fb_captured_scales],
+        None,
+        None,
+    );
 
     let fb_bridge = BridgeParams {
         rmsnorm_attn_weights: &fb_rn_attn,
@@ -281,7 +398,20 @@ fn bench_gate_a() {
     let mut response_full = None;
     for _ in 0..ITERS {
         let start = Instant::now();
-        let r = open_v4(&fb_state, 0, &ToyWeights(&fb_model), &fb_cfg, &fb_ws, &[], Some(&fb_bridge), None, None, None, false, false);
+        let r = open_v4(
+            &fb_state,
+            0,
+            &ToyWeights(&fb_model),
+            &fb_cfg,
+            &fb_ws,
+            &[],
+            Some(&fb_bridge),
+            None,
+            None,
+            None,
+            false,
+            false,
+        );
         open_full_times.push(start.elapsed());
         response_full = Some(r);
     }
@@ -293,7 +423,12 @@ fn bench_gate_a() {
         let start = Instant::now();
         let report = verify_v4(&fb_key, &response_full, None);
         verify_full_times.push(start.elapsed());
-        assert_eq!(report.verdict, Verdict::Pass, "full bridge: {:?}", report.failures);
+        assert_eq!(
+            report.verdict,
+            Verdict::Pass,
+            "full bridge: {:?}",
+            report.failures
+        );
     }
     let verify_full_med = median(&mut verify_full_times);
 
@@ -303,7 +438,12 @@ fn bench_gate_a() {
         let start = Instant::now();
         let report = verify_v4_with_weights(&fb_key, &response_full, &ToyWeights(&fb_model));
         verify_weights_times.push(start.elapsed());
-        assert_eq!(report.verdict, Verdict::Pass, "oracle: {:?}", report.failures);
+        assert_eq!(
+            report.verdict,
+            Verdict::Pass,
+            "oracle: {:?}",
+            report.failures
+        );
     }
     let verify_weights_med = median(&mut verify_weights_times);
 
@@ -317,54 +457,105 @@ fn bench_gate_a() {
 
     // ── Report ──
     println!("\n╔══════════════════════════════════════════════════════════════════════╗");
-    println!("║          BENCHMARK GATE A  —  toy model ({} layers, {}D)              ║",
-        cfg.n_layers, cfg.hidden_dim);
+    println!(
+        "║          BENCHMARK GATE A  —  toy model ({} layers, {}D)              ║",
+        cfg.n_layers, cfg.hidden_dim
+    );
     println!("╠══════════════════════════════════════════════════════════════════════╣");
     println!("║  {:44} {:>10} {:>8}  ║", "", "median", "unit");
     println!("╠══════════════════════════════════════════════════════════════════════╣");
-    println!("║  {:44} {:>10} {:>8}  ║",
+    println!(
+        "║  {:44} {:>10} {:>8}  ║",
         format!("1. Baseline forward ({} tokens)", N_TOKENS),
-        fwd_med.as_micros(), "us");
-    println!("║  {:44} {:>10} {:>8}  ║",
+        fwd_med.as_micros(),
+        "us"
+    );
+    println!(
+        "║  {:44} {:>10} {:>8}  ║",
         format!("2. Minimal commit ({} tokens)", N_TOKENS),
-        commit_med.as_micros(), "us");
+        commit_med.as_micros(),
+        "us"
+    );
     println!("╠══════════════════════════════════════════════════════════════════════╣");
-    println!("║  {:44} {:>10} {:>8}  ║",
+    println!(
+        "║  {:44} {:>10} {:>8}  ║",
         "3a. Audit open (simplified bridge)",
-        open_simple_med.as_micros(), "us");
-    println!("║  {:44} {:>10} {:>8}  ║",
+        open_simple_med.as_micros(),
+        "us"
+    );
+    println!(
+        "║  {:44} {:>10} {:>8}  ║",
         "3b. Audit open (full bridge)",
-        open_full_med.as_micros(), "us");
+        open_full_med.as_micros(),
+        "us"
+    );
     println!("╠══════════════════════════════════════════════════════════════════════╣");
-    println!("║  {:44} {:>10} {:>8}  ║",
+    println!(
+        "║  {:44} {:>10} {:>8}  ║",
         "4a. Verify (simplified, key-only)",
-        verify_simple_med.as_micros(), "us");
-    println!("║  {:44} {:>10} {:>8}  ║",
+        verify_simple_med.as_micros(),
+        "us"
+    );
+    println!(
+        "║  {:44} {:>10} {:>8}  ║",
         "4b. Verify (full bridge, key-only)",
-        verify_full_med.as_micros(), "us");
-    println!("║  {:44} {:>10} {:>8}  ║",
+        verify_full_med.as_micros(),
+        "us"
+    );
+    println!(
+        "║  {:44} {:>10} {:>8}  ║",
         "4c. Verify (full bridge, with weights)",
-        verify_weights_med.as_micros(), "us");
+        verify_weights_med.as_micros(),
+        "us"
+    );
     println!("╠══════════════════════════════════════════════════════════════════════╣");
-    println!("║  {:44} {:>10} {:>8}  ║",
-        "5a. Audit payload (simplified, JSON)",
-        payload_simple, "bytes");
-    println!("║  {:44} {:>10} {:>8}  ║",
-        "5b. Audit payload (full bridge, JSON)",
-        payload_full, "bytes");
-    println!("║  {:44} {:>10} {:>8}  ║",
-        "6a. Retained/token (JSON)",
-        retained_json, "bytes");
-    println!("║  {:44} {:>10} {:>8}  ║",
-        "6b. Retained/token (bincode)",
-        retained_bincode, "bytes");
+    println!(
+        "║  {:44} {:>10} {:>8}  ║",
+        "5a. Audit payload (simplified, JSON)", payload_simple, "bytes"
+    );
+    println!(
+        "║  {:44} {:>10} {:>8}  ║",
+        "5b. Audit payload (full bridge, JSON)", payload_full, "bytes"
+    );
+    println!(
+        "║  {:44} {:>10} {:>8}  ║",
+        "6a. Retained/token (JSON)", retained_json, "bytes"
+    );
+    println!(
+        "║  {:44} {:>10} {:>8}  ║",
+        "6b. Retained/token (bincode)", retained_bincode, "bytes"
+    );
     println!("╚══════════════════════════════════════════════════════════════════════╝\n");
 
     // Sanity: all times should be under generous bounds
-    assert!(fwd_med < Duration::from_millis(200), "forward pass too slow: {:?}", fwd_med);
-    assert!(commit_med < Duration::from_millis(100), "commit too slow: {:?}", commit_med);
-    assert!(open_simple_med < Duration::from_millis(50), "simplified open too slow: {:?}", open_simple_med);
-    assert!(open_full_med < Duration::from_millis(50), "full bridge open too slow: {:?}", open_full_med);
-    assert!(verify_simple_med < Duration::from_millis(50), "simplified verify too slow: {:?}", verify_simple_med);
-    assert!(verify_full_med < Duration::from_millis(50), "full bridge verify too slow: {:?}", verify_full_med);
+    assert!(
+        fwd_med < Duration::from_millis(200),
+        "forward pass too slow: {:?}",
+        fwd_med
+    );
+    assert!(
+        commit_med < Duration::from_millis(100),
+        "commit too slow: {:?}",
+        commit_med
+    );
+    assert!(
+        open_simple_med < Duration::from_millis(50),
+        "simplified open too slow: {:?}",
+        open_simple_med
+    );
+    assert!(
+        open_full_med < Duration::from_millis(50),
+        "full bridge open too slow: {:?}",
+        open_full_med
+    );
+    assert!(
+        verify_simple_med < Duration::from_millis(50),
+        "simplified verify too slow: {:?}",
+        verify_simple_med
+    );
+    assert!(
+        verify_full_med < Duration::from_millis(50),
+        "full bridge verify too slow: {:?}",
+        verify_full_med
+    );
 }

@@ -61,7 +61,14 @@ fn retained_from_traces(traces: &[verilm_core::types::LayerTrace]) -> RetainedTo
 }
 
 fn unit_scales(n_layers: usize) -> Vec<CapturedLayerScales> {
-    vec![CapturedLayerScales { scale_x_attn: 1.0, scale_x_ffn: 1.0, scale_h: 1.0 }; n_layers]
+    vec![
+        CapturedLayerScales {
+            scale_x_attn: 1.0,
+            scale_x_ffn: 1.0,
+            scale_h: 1.0
+        };
+        n_layers
+    ]
 }
 
 // =========================================================================
@@ -87,14 +94,18 @@ fn golden_challenge_derivation() {
         ([0x07; 32], 50, 16, 7, 10),
     ];
     for &(seed, n_tokens, n_layers, exp_token, exp_routine_layers) in cases {
-        let routine = verilm_verify::build_audit_challenge(&seed, n_tokens, n_layers, AuditTier::Routine);
+        let routine =
+            verilm_verify::build_audit_challenge(&seed, n_tokens, n_layers, AuditTier::Routine);
         assert_eq!(
             routine.token_index, exp_token,
-            "token_index drift: seed=0x{:02x} n_tokens={}", seed[0], n_tokens
+            "token_index drift: seed=0x{:02x} n_tokens={}",
+            seed[0], n_tokens
         );
         assert_eq!(
-            routine.layer_indices.len(), exp_routine_layers,
-            "routine layer count drift: seed=0x{:02x}", seed[0]
+            routine.layer_indices.len(),
+            exp_routine_layers,
+            "routine layer count drift: seed=0x{:02x}",
+            seed[0]
         );
         // Routine layers must be contiguous 0..=L_max
         for (i, &l) in routine.layer_indices.iter().enumerate() {
@@ -102,8 +113,15 @@ fn golden_challenge_derivation() {
         }
 
         let full = verilm_verify::build_audit_challenge(&seed, n_tokens, n_layers, AuditTier::Full);
-        assert_eq!(full.token_index, exp_token, "full tier must pick same token");
-        assert_eq!(full.layer_indices.len(), n_layers, "full tier must include all layers");
+        assert_eq!(
+            full.token_index, exp_token,
+            "full tier must pick same token"
+        );
+        assert_eq!(
+            full.layer_indices.len(),
+            n_layers,
+            "full tier must include all layers"
+        );
     }
 }
 
@@ -204,9 +222,27 @@ fn golden_e2e_verify() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)], None, None);
+    let (commitment, state) = commit_minimal(
+        vec![retained],
+        &params,
+        None,
+        vec![unit_scales(cfg.n_layers)],
+        None,
+        None,
+    );
     let response = open_v4(
-        &state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false,
+        &state,
+        0,
+        &ToyWeights(&model),
+        &cfg,
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
     );
 
     // Pin commitment roots
@@ -257,9 +293,27 @@ fn binary_v4_audit_roundtrip() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)], None, None);
+    let (_commitment, state) = commit_minimal(
+        vec![retained],
+        &params,
+        None,
+        vec![unit_scales(cfg.n_layers)],
+        None,
+        None,
+    );
     let response = open_v4(
-        &state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false,
+        &state,
+        0,
+        &ToyWeights(&model),
+        &cfg,
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
     );
 
     let binary = verilm_core::serialize::serialize_v4_audit(&response);
@@ -272,7 +326,10 @@ fn binary_v4_audit_roundtrip() {
     assert_eq!(restored.token_index, response.token_index);
     assert_eq!(restored.token_id, response.token_id);
     assert_eq!(restored.retained, response.retained);
-    assert_eq!(restored.commitment.merkle_root, response.commitment.merkle_root);
+    assert_eq!(
+        restored.commitment.merkle_root,
+        response.commitment.merkle_root
+    );
     assert_eq!(restored.commitment.io_root, response.commitment.io_root);
     assert_eq!(restored.prev_io_hash, response.prev_io_hash);
 
@@ -325,9 +382,27 @@ fn binary_commitment_version_preserved() {
         manifest: None,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![unit_scales(cfg.n_layers)], None, None);
+    let (_commitment, state) = commit_minimal(
+        vec![retained],
+        &params,
+        None,
+        vec![unit_scales(cfg.n_layers)],
+        None,
+        None,
+    );
     let response = open_v4(
-        &state, 0, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false,
+        &state,
+        0,
+        &ToyWeights(&model),
+        &cfg,
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
     );
 
     let binary = verilm_core::serialize::serialize_v4_audit(&response);

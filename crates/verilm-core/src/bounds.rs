@@ -227,7 +227,7 @@ pub fn compute_corridor_bound(
             // K,V committed (exact). Only Q has dequant+RoPE error.
             let eps_qk = params.c_rope * u;
             let eps_v = 0.0; // V is committed
-            // Score error: |Δs_j| ≤ ε_qk·S_max (only Q perturbed)
+                             // Score error: |Δs_j| ≤ ε_qk·S_max (only Q perturbed)
             let softmax = params.bv_over_scale_a * 2.0 * eps_qk * params.s_max;
             let v_deq = 0.0;
             let fp32 = params.bv_over_scale_a * params.seq_len as f64 * u_f32;
@@ -350,12 +350,18 @@ mod tests {
         assert!((b.eps_qk - 5.0 * 2.0_f64.powi(-11)).abs() < 1e-10);
 
         // softmax_term = 127 · 4 · 0.00244 · 20 ≈ 24.8
-        assert!(b.softmax_term > 24.0 && b.softmax_term < 26.0,
-            "softmax_term={}", b.softmax_term);
+        assert!(
+            b.softmax_term > 24.0 && b.softmax_term < 26.0,
+            "softmax_term={}",
+            b.softmax_term
+        );
 
         // Total ≈ 24.8 + 0.06 + negligible ≈ 24.9
-        assert!(b.delta_o_over_scale_a > 24.0,
-            "expected ~25, got {}", b.delta_o_over_scale_a);
+        assert!(
+            b.delta_o_over_scale_a > 24.0,
+            "expected ~25, got {}",
+            b.delta_o_over_scale_a
+        );
         assert!(!b.achieves_leq_1);
         assert!(b.max_abs_diff_i8 >= 25);
     }
@@ -374,8 +380,11 @@ mod tests {
         let b = compute_corridor_bound(&params, CommittedIntermediates::CommittedKV);
 
         // softmax_term = 127 · 2 · 0.00244 · 20 ≈ 12.4
-        assert!(b.softmax_term > 12.0 && b.softmax_term < 13.0,
-            "softmax_term={}", b.softmax_term);
+        assert!(
+            b.softmax_term > 12.0 && b.softmax_term < 13.0,
+            "softmax_term={}",
+            b.softmax_term
+        );
         assert!(!b.achieves_leq_1);
     }
 
@@ -393,8 +402,11 @@ mod tests {
         let b = compute_corridor_bound(&params, CommittedIntermediates::CommittedKV);
 
         // 127 · 2 · 0.00244 · 8 ≈ 4.96
-        assert!(b.softmax_term > 4.5 && b.softmax_term < 5.5,
-            "softmax_term={}", b.softmax_term);
+        assert!(
+            b.softmax_term > 4.5 && b.softmax_term < 5.5,
+            "softmax_term={}",
+            b.softmax_term
+        );
         // Still > 1
         assert!(!b.achieves_leq_1);
     }
@@ -413,8 +425,11 @@ mod tests {
         let b = compute_corridor_bound(&params, CommittedIntermediates::CommittedQKV);
 
         // 127 · 3 · 4096 · 2^-24 ≈ 0.093
-        assert!(b.delta_o_over_scale_a < 0.1,
-            "expected < 0.1, got {}", b.delta_o_over_scale_a);
+        assert!(
+            b.delta_o_over_scale_a < 0.1,
+            "expected < 0.1, got {}",
+            b.delta_o_over_scale_a
+        );
         assert!(b.achieves_leq_1);
     }
 
@@ -432,8 +447,11 @@ mod tests {
         let b = compute_corridor_bound(&params, CommittedIntermediates::CommittedScores);
 
         // v_dequant = 127 · 2^-11 ≈ 0.062
-        assert!(b.v_dequant_term > 0.06 && b.v_dequant_term < 0.07,
-            "v_dequant_term={}", b.v_dequant_term);
+        assert!(
+            b.v_dequant_term > 0.06 && b.v_dequant_term < 0.07,
+            "v_dequant_term={}",
+            b.v_dequant_term
+        );
         assert!(b.delta_o_over_scale_a < 0.1);
         assert!(b.achieves_leq_1);
     }

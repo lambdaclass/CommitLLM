@@ -86,9 +86,7 @@ pub fn replay_attention_reference(
         let kv_head = qh / heads_per_kv;
 
         // Extract Q head
-        let q_head: Vec<f64> = (0..d_head)
-            .map(|i| q_i8[qh * d_head + i] as f64)
-            .collect();
+        let q_head: Vec<f64> = (0..d_head).map(|i| q_i8[qh * d_head + i] as f64).collect();
 
         // Compute attention scores: score[t] = q · k_t / sqrt(d)
         let scores: Vec<f64> = (0..seq_len)
@@ -153,16 +151,18 @@ pub fn replay_attention_roped(
     let heads_per_kv = cfg.n_q_heads / cfg.n_kv_heads;
     let inv_sqrt_d = 1.0 / (d_head as f64).sqrt();
     let seq_len = kv_cache_k_roped.len();
-    let inv_scale = if scale_a.abs() > 1e-30 { 1.0 / scale_a } else { 1.0 };
+    let inv_scale = if scale_a.abs() > 1e-30 {
+        1.0 / scale_a
+    } else {
+        1.0
+    };
 
     let mut a = vec![0i8; cfg.hidden_dim];
 
     for qh in 0..cfg.n_q_heads {
         let kv_head = qh / heads_per_kv;
 
-        let q_head: Vec<f64> = (0..d_head)
-            .map(|i| q_roped[qh * d_head + i])
-            .collect();
+        let q_head: Vec<f64> = (0..d_head).map(|i| q_roped[qh * d_head + i]).collect();
 
         // Attention scores: q · k_t / sqrt(d)
         let scores: Vec<f64> = (0..seq_len)
@@ -192,9 +192,7 @@ pub fn replay_attention_roped(
 
         // Requantize: a_i8 = round(a_f64 / scale_a)
         for i in 0..d_head {
-            a[qh * d_head + i] = (head_out[i] * inv_scale)
-                .round()
-                .clamp(-128.0, 127.0) as i8;
+            a[qh * d_head + i] = (head_out[i] * inv_scale).round().clamp(-128.0, 127.0) as i8;
         }
     }
 
@@ -217,7 +215,11 @@ pub fn replay_attention_roped_raw(
     let heads_per_kv = cfg.n_q_heads / cfg.n_kv_heads;
     let inv_sqrt_d = 1.0 / (d_head as f64).sqrt();
     let seq_len = kv_cache_k_roped.len();
-    let inv_scale = if scale_a.abs() > 1e-30 { 1.0 / scale_a } else { 1.0 };
+    let inv_scale = if scale_a.abs() > 1e-30 {
+        1.0 / scale_a
+    } else {
+        1.0
+    };
 
     let mut a_i8 = vec![0i8; cfg.hidden_dim];
     let mut a_f64 = vec![0.0f64; cfg.hidden_dim];
@@ -225,9 +227,7 @@ pub fn replay_attention_roped_raw(
     for qh in 0..cfg.n_q_heads {
         let kv_head = qh / heads_per_kv;
 
-        let q_head: Vec<f64> = (0..d_head)
-            .map(|i| q_roped[qh * d_head + i])
-            .collect();
+        let q_head: Vec<f64> = (0..d_head).map(|i| q_roped[qh * d_head + i]).collect();
 
         let scores: Vec<f64> = (0..seq_len)
             .map(|t| {
@@ -255,9 +255,7 @@ pub fn replay_attention_roped_raw(
         for i in 0..d_head {
             let idx = qh * d_head + i;
             a_f64[idx] = head_out[i];
-            a_i8[idx] = (head_out[i] * inv_scale)
-                .round()
-                .clamp(-128.0, 127.0) as i8;
+            a_i8[idx] = (head_out[i] * inv_scale).round().clamp(-128.0, 127.0) as i8;
         }
     }
 
@@ -337,8 +335,16 @@ pub fn measure_attention_diff(
     };
 
     let n_f = n as f64;
-    let frac_eq = if n > 0 { histogram[0] as f64 / n_f } else { 0.0 };
-    let frac_le_1 = if n > 0 { (histogram[0] + histogram[1]) as f64 / n_f } else { 0.0 };
+    let frac_eq = if n > 0 {
+        histogram[0] as f64 / n_f
+    } else {
+        0.0
+    };
+    let frac_le_1 = if n > 0 {
+        (histogram[0] + histogram[1]) as f64 / n_f
+    } else {
+        0.0
+    };
     let frac_le_2 = if n > 0 {
         (histogram[0] + histogram[1] + histogram[2]) as f64 / n_f
     } else {
@@ -365,7 +371,11 @@ pub fn measure_attention_diff(
 /// Returns `None` if the vectors have equal length and the L-infinity difference
 /// is within `tolerance.max_abs_diff`. Returns `Some(i16::MAX)` if lengths differ
 /// (malformed input), or `Some(max_diff)` if the tolerance is exceeded.
-pub fn compare_attention_output(claimed: &[i8], replayed: &[i8], tolerance: &AttentionToleranceConfig) -> Option<i16> {
+pub fn compare_attention_output(
+    claimed: &[i8],
+    replayed: &[i8],
+    tolerance: &AttentionToleranceConfig,
+) -> Option<i16> {
     if claimed.len() != replayed.len() {
         return Some(i16::MAX);
     }
@@ -480,11 +490,17 @@ mod tests {
         let claimed = vec![1i8, 2, 3];
         let replayed = vec![1i8, 2, 3, 4];
         let tol = AttentionToleranceConfig { max_abs_diff: 0 };
-        assert_eq!(compare_attention_output(&claimed, &replayed, &tol), Some(i16::MAX));
+        assert_eq!(
+            compare_attention_output(&claimed, &replayed, &tol),
+            Some(i16::MAX)
+        );
 
         // Extended claimed vector is also rejected
         let claimed2 = vec![1i8, 2, 3, 4, 5];
-        assert_eq!(compare_attention_output(&claimed2, &replayed, &tol), Some(i16::MAX));
+        assert_eq!(
+            compare_attention_output(&claimed2, &replayed, &tol),
+            Some(i16::MAX)
+        );
     }
 
     #[test]
@@ -508,7 +524,7 @@ mod tests {
     #[test]
     fn test_measure_diff_known_values() {
         // diffs: 0, 1, 2, 3, 5, 7
-        let claimed  = vec![10i8, 20, 30, 40, 50, 60];
+        let claimed = vec![10i8, 20, 30, 40, 50, 60];
         let replayed = vec![10i8, 19, 28, 37, 45, 53];
         let stats = measure_attention_diff(&claimed, &replayed, 3, 10).unwrap();
         assert_eq!(stats.linf, 7);

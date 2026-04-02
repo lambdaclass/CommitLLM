@@ -80,7 +80,10 @@ fn challenges_depend_on_n_tokens() {
 fn block_coefficients_depend_on_key_seed() {
     let c1 = derive_block_coefficients(&zero_seed(), 0, 0, 8);
     let c2 = derive_block_coefficients(&one_seed(), 0, 0, 8);
-    assert_ne!(c1, c2, "different key seeds must yield different block coefficients");
+    assert_ne!(
+        c1, c2,
+        "different key seeds must yield different block coefficients"
+    );
 }
 
 #[test]
@@ -88,7 +91,10 @@ fn block_coefficients_depend_on_layer() {
     let seed = rand_bytes();
     let c1 = derive_block_coefficients(&seed, 0, 0, 8);
     let c2 = derive_block_coefficients(&seed, 1, 0, 8);
-    assert_ne!(c1, c2, "different layers must yield different block coefficients");
+    assert_ne!(
+        c1, c2,
+        "different layers must yield different block coefficients"
+    );
 }
 
 #[test]
@@ -96,7 +102,10 @@ fn block_coefficients_depend_on_matrix_idx() {
     let seed = rand_bytes();
     let c1 = derive_block_coefficients(&seed, 0, 0, 8);
     let c2 = derive_block_coefficients(&seed, 0, 1, 8);
-    assert_ne!(c1, c2, "different matrix indices must yield different block coefficients");
+    assert_ne!(
+        c1, c2,
+        "different matrix indices must yield different block coefficients"
+    );
 }
 
 #[test]
@@ -246,7 +255,11 @@ fn block_coefficients_are_distinct() {
     let seed = rand_bytes();
     let coeffs = derive_block_coefficients(&seed, 0, 0, 32);
     let set: std::collections::HashSet<u32> = coeffs.iter().map(|c| c.0).collect();
-    assert_eq!(set.len(), coeffs.len(), "block coefficients should be distinct");
+    assert_eq!(
+        set.len(),
+        coeffs.len(),
+        "block coefficients should be distinct"
+    );
 }
 
 // ===========================================================================
@@ -330,7 +343,8 @@ fn block_coefficients_differ_across_keys() {
         seen.insert(vals);
     }
     assert_eq!(
-        seen.len(), 64,
+        seen.len(),
+        64,
         "all 64 different key seeds must produce distinct coefficients"
     );
 }
@@ -351,7 +365,11 @@ fn block_coefficients_differ_across_layers_and_matrices() {
             seen.insert(vals);
         }
     }
-    assert_eq!(seen.len(), 16, "all 16 (layer, matrix) pairs must produce distinct coefficients");
+    assert_eq!(
+        seen.len(),
+        16,
+        "all 16 (layer, matrix) pairs must produce distinct coefficients"
+    );
 }
 
 // ===========================================================================
@@ -406,7 +424,10 @@ fn no_ambiguous_encoding_derive_challenges() {
 
     let c1 = derive_challenges(&root_a, &seed_a, 1024, 8);
     let c2 = derive_challenges(&root_b, &seed_b, 1024, 8);
-    assert_ne!(c1, c2, "different (root, seed) pairs must differ even with byte-shifted inputs");
+    assert_ne!(
+        c1, c2,
+        "different (root, seed) pairs must differ even with byte-shifted inputs"
+    );
 }
 
 /// Same ambiguity test for derive_token_seed.

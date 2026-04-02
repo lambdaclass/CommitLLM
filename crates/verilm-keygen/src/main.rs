@@ -48,7 +48,10 @@ fn main() -> Result<()> {
         arr
     };
 
-    eprintln!("verilm-keygen: generating verifier-secret key from {}", args.model_dir);
+    eprintln!(
+        "verilm-keygen: generating verifier-secret key from {}",
+        args.model_dir
+    );
     let key = verilm_keygen::generate_key(std::path::Path::new(&args.model_dir), seed)?;
 
     let data = serialize::serialize_key(&key);

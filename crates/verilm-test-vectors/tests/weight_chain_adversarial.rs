@@ -9,9 +9,7 @@
 use verilm_core::constants::{MatrixType, ModelConfig};
 use verilm_core::merkle::hash_weights;
 use verilm_core::serialize;
-use verilm_test_vectors::{
-    generate_key, generate_model, LayerWeights,
-};
+use verilm_test_vectors::{generate_key, generate_model, LayerWeights};
 
 fn toy_cfg() -> ModelConfig {
     ModelConfig::toy()
@@ -49,7 +47,10 @@ fn test_expected_hash_mismatch_detected() {
     let hash_b = key_b.weight_hash.unwrap();
 
     // External binding check: hash_a != hash_b
-    assert_ne!(hash_a, hash_b, "different models must produce different hashes");
+    assert_ne!(
+        hash_a, hash_b,
+        "different models must produce different hashes"
+    );
     // Simulated CLI check: key_a's hash does not match expected hash_b
     assert_ne!(
         key_a.weight_hash.unwrap(),
@@ -559,5 +560,3 @@ fn test_dtype_label_case_sensitive() {
 
     assert_ne!(hash_upper, hash_lower, "dtype label must be case-sensitive");
 }
-
-
