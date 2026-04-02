@@ -5,6 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CommitLLM — Cryptographic provenance for LLM inference</title>
   <meta name="description" content="CommitLLM is a cryptographic commit-and-audit protocol for open-weight LLM inference. The provider serves normally on GPU and returns a compact receipt. A verifier checks it on CPU. ~12-14% overhead, 1.3 ms/tok routine audit.">
+  <meta name="theme-color" content="#fffff8">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+
+  <!-- Preconnect for Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 
   <!-- Open Graph -->
   <meta property="og:type" content="website">
@@ -47,11 +55,34 @@
   }
   </script>
 
+  <!-- ScholarlyArticle for the paper -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "ScholarlyArticle",
+    "name": "CommitLLM: A Cryptographic Commit-and-Audit Protocol for Open-Weight LLM Inference",
+    "headline": "CommitLLM: A Cryptographic Commit-and-Audit Protocol for Open-Weight LLM Inference",
+    "abstract": "We present CommitLLM, a cryptographic commit-and-audit protocol for open-weight LLM inference. CommitLLM keeps the provider on the normal serving path and keeps verifier work fast and CPU-only. It combines commitment binding, direct audit, and randomized algebraic fingerprints, including Freivalds-style checks for large matrix products.",
+    "url": "https://raw.githubusercontent.com/lambdaclass/CommitLLM/main/paper/main.pdf",
+    "author": [
+      {"@type": "Person", "name": "Federico Carrone"},
+      {"@type": "Person", "name": "Diego Kingston"},
+      {"@type": "Person", "name": "Manuel Puebla"},
+      {"@type": "Person", "name": "Mauro Toscano"}
+    ],
+    "publisher": [
+      {"@type": "Organization", "name": "Lambda Class", "url": "https://lambdaclass.com"},
+      {"@type": "Organization", "name": "Centro de Criptografía y Seguridad Digital, UBA", "url": "https://ccsd.uba.ar/"}
+    ],
+    "keywords": ["LLM inference", "cryptographic verification", "Freivalds algorithm", "commit-and-audit", "verifiable computation"]
+  }
+  </script>
+
   <link rel="stylesheet" href="{{ get_url(path='style.css') | safe }}">
 </head>
 <body id="top">
 
-<nav class="nav">
+<nav class="nav" aria-label="Main navigation">
   <a class="nav-logo" href="#top">Commit<span>LLM</span></a>
   <div class="nav-group">
     <ul class="nav-links">
@@ -261,7 +292,7 @@
           <span class="tag">LM<sub>head</sub></span>
         </div>
       </div>
-      <div class="demo-box" id="freivalds-demo">
+      <div class="demo-box" id="freivalds-demo" role="region" aria-label="Freivalds algorithm interactive demo">
         <div class="demo-header">Interactive demo &middot; 3&times;3 over F<sub>p</sub></div>
         <div class="demo-output" id="demo-eq"><span class="dim">Click a button to run Freivalds&rsquo; check</span></div>
         <div class="demo-result" id="demo-result" style="display:none;"></div>
