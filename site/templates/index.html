@@ -88,6 +88,7 @@
     <ul class="nav-links">
       <li><a href="#protocol">Protocol</a></li>
       <li><a href="#guarantees">Guarantees</a></li>
+      <li><a href="#audit">Audit</a></li>
       <li><a href="#benchmarks">Benchmarks</a></li>
       <li><a href="#binding">Binding</a></li>
       <li><a href="#usecases">Use cases</a></li>
@@ -261,6 +262,46 @@
 
 <hr class="rule">
 
+<!-- ── Audit modes ───────────────────────────────── -->
+<section class="section" id="audit">
+  <div class="container">
+    <div class="section-label">Audit modes</div>
+    <h2 class="section-title">Routine audit stays cheap. Deep audit upgrades coverage.</h2>
+    <p class="section-sub">
+      CommitLLM uses the same receipt in both modes. Routine audit keeps steady-state verification light; deep audit opens the full retained window and upgrades prefix provenance to exact verification.
+    </p>
+    <div class="audit-grid">
+      <div class="audit-card">
+        <div class="audit-label">Routine audit</div>
+        <h3>Low-friction spot checks</h3>
+        <p>Designed for normal operation when you want frequent verification without opening the full trace every time.</p>
+        <ul class="audit-points">
+          <li>Freivalds-based checks on large linear layers</li>
+          <li>Canonical replay for supported nonlinear subcomputations</li>
+          <li>Sampled prefix and KV provenance with statistical coverage</li>
+          <li>Bounded approximate attention replay on CPU</li>
+        </ul>
+      </div>
+      <div class="audit-card audit-card--highlight">
+        <div class="audit-label">Deep audit</div>
+        <h3>Escalate when the stakes are higher</h3>
+        <p>Use the same commitment, but require a larger opening. This removes the routine-audit statistical gap on the retained prefix window.</p>
+        <ul class="audit-points">
+          <li>Full-prefix and KV openings across the retained audit window</li>
+          <li>Exact prefix provenance instead of sampled coverage</li>
+          <li>The same algebraic, replay, and decode checks as routine audit</li>
+          <li>Higher bandwidth and storage cost, not a different serving path</li>
+        </ul>
+      </div>
+    </div>
+    <div class="audit-note">
+      <strong>Operationally:</strong> routine audit is the default posture; deep audit is the escalation path when a response is high value, disputed, or randomly selected for full review.
+    </div>
+  </div>
+</section>
+
+<hr class="rule">
+
 <!-- ── Freivalds ─────────────────────────────────── -->
 <section class="section" id="freivalds">
   <div class="container">
@@ -315,6 +356,20 @@
     <p class="section-sub">
       Measured on Qwen2.5-7B-W8A8 and Llama-3.1-8B-W8A8. Attention mismatch is single-digit and bounded.
     </p>
+    <div class="bench-facts">
+      <div class="bench-fact">
+        <span class="bench-fact-label">Measured today</span>
+        <strong>Qwen2.5-7B-W8A8 and Llama-3.1-8B-W8A8</strong>
+      </div>
+      <div class="bench-fact">
+        <span class="bench-fact-label">Verifier hardware</span>
+        <strong>CPU only</strong>
+      </div>
+      <div class="bench-fact">
+        <span class="bench-fact-label">Provider path</span>
+        <strong>Normal GPU serving with tracing</strong>
+      </div>
+    </div>
     <div class="bench-cols">
       <div class="bench-panel">
         <h3>Verifier cost &middot; Llama 70B</h3>
@@ -383,6 +438,43 @@
     </div>
   </div>
 </section>
+
+<hr class="rule">
+
+<!-- ── Deployment fit ────────────────────────────── -->
+<section class="section" id="deployment">
+  <div class="container">
+    <div class="section-label">Deployment fit</div>
+    <h2 class="section-title">Built to sit beside real serving stacks</h2>
+    <p class="section-sub">
+      CommitLLM is not a replacement inference engine. The provider keeps the normal GPU path and produces request-scoped evidence alongside it.
+    </p>
+    <div class="compat-grid">
+      <div class="compat-item">
+        <div class="compat-label compat-label--green">Supported now</div>
+        <h3>Continuous batching and paged attention</h3>
+        <p>Many user requests can share the same GPU microbatch. CommitLLM still produces per-request receipts and per-request audits.</p>
+      </div>
+      <div class="compat-item">
+        <div class="compat-label compat-label--green">Supported now</div>
+        <h3>Tensor parallelism and fused kernels</h3>
+        <p>The tracing layer follows the existing execution path instead of replacing production kernels with proof-friendly substitutes.</p>
+      </div>
+      <div class="compat-item">
+        <div class="compat-label compat-label--green">Supported now</div>
+        <h3>Quantized serving</h3>
+        <p>Quantization metadata is receipt-bound, and the kept path is measured on production-style W8A8 checkpoints.</p>
+      </div>
+      <div class="compat-item compat-item--warn">
+        <div class="compat-label compat-label--red">Not the current story</div>
+        <h3>Cross-request cache reuse and shortcut decoding</h3>
+        <p>Cross-request prefix caching, speculative decoding, and other semantics-changing shortcuts need more protocol work. Unsupported paths should fail closed.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="rule">
 
 <!-- ── What it binds ─────────────────────────────── -->
 <section class="section" id="binding">
@@ -466,6 +558,9 @@
   <div class="container">
     <div class="section-label">Repository</div>
     <h2 class="section-title">Code layout</h2>
+    <p class="section-sub">
+      The public project name is CommitLLM. Some internal crate and package paths still use the legacy <code>verilm-*</code> prefix while the rename is being completed.
+    </p>
     <div class="table-wrap">
       <table class="specs-table">
         <thead><tr><th>Component</th><th>Path</th></tr></thead>

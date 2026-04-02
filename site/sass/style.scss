@@ -408,6 +408,87 @@ code {
   p { font-size: 0.9rem; color: $text-dim; line-height: 1.55; }
 }
 
+// ── Audit modes ────────────────────────────────────
+.audit-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-top: 2rem;
+  @media (max-width: 760px) { grid-template-columns: 1fr; }
+}
+
+.audit-card {
+  padding: 1.5rem;
+  border: 1px solid $border;
+  border-radius: 4px;
+  background: $bg;
+
+  &--highlight { background: $bg-warm; }
+
+  h3 {
+    font-size: 1.08rem;
+    font-weight: 600;
+    color: $text-bright;
+    margin-bottom: 0.35rem;
+  }
+
+  p {
+    font-size: 0.92rem;
+    color: $text-dim;
+    line-height: 1.55;
+    margin-bottom: 1rem;
+    max-width: 32em;
+  }
+}
+
+.audit-label {
+  font-family: $mono;
+  font-size: 0.66rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: $text-dim;
+  margin-bottom: 0.4rem;
+}
+
+.audit-points {
+  list-style: none;
+
+  li {
+    position: relative;
+    padding-left: 1rem;
+    font-size: 0.88rem;
+    color: $text;
+    line-height: 1.5;
+    margin-bottom: 0.45rem;
+
+    &::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 0.58rem;
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: $link;
+    }
+
+    &:last-child { margin-bottom: 0; }
+  }
+}
+
+.audit-note {
+  margin-top: 1rem;
+  padding: 0.95rem 1.1rem;
+  border-left: 3px solid $border;
+  background: $bg-warm;
+  color: $text-dim;
+  font-size: 0.9rem;
+  line-height: 1.55;
+
+  strong { color: $text-bright; font-weight: 600; }
+}
+
 // ── Protocol timeline ───────────────────────────────
 .timeline {
   margin-top: 2rem;
@@ -673,6 +754,40 @@ code {
   @media (max-width: 700px) { grid-template-columns: 1fr; }
 }
 
+.bench-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.85rem;
+  margin-top: 1.5rem;
+  @media (max-width: 760px) { grid-template-columns: 1fr; }
+}
+
+.bench-fact {
+  padding: 0.9rem 1rem;
+  border: 1px solid rgba(#ccc5b8, 0.16);
+  border-radius: 4px;
+  background: rgba(#fff, 0.025);
+
+  strong {
+    display: block;
+    color: #ece5d8;
+    font-size: 0.9rem;
+    font-weight: 600;
+    line-height: 1.45;
+  }
+}
+
+.bench-fact-label {
+  display: block;
+  font-family: $mono;
+  font-size: 0.62rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #908878;
+  margin-bottom: 0.35rem;
+}
+
 .bench-panel {
   h3 {
     font-family: $mono;
@@ -748,6 +863,50 @@ code {
     color: $text-bright;
     white-space: nowrap;
   }
+}
+
+// ── Deployment fit ─────────────────────────────────
+.compat-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-top: 2rem;
+  @media (max-width: 760px) { grid-template-columns: 1fr; }
+}
+
+.compat-item {
+  padding: 1.35rem 1.5rem;
+  border: 1px solid $border;
+  border-radius: 4px;
+  background: $bg;
+
+  &--warn { background: mix($bg, #fff2ed, 70%); }
+
+  h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: $text-bright;
+    margin-bottom: 0.3rem;
+  }
+
+  p {
+    font-size: 0.9rem;
+    color: $text-dim;
+    line-height: 1.55;
+    max-width: 32em;
+  }
+}
+
+.compat-label {
+  font-family: $mono;
+  font-size: 0.64rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 0.35rem;
+
+  &--green { color: $green; }
+  &--red { color: $red; }
 }
 
 // ── Use cases ───────────────────────────────────────
