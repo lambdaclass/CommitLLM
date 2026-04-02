@@ -109,6 +109,27 @@ The kept canonical sampled path already exists in the live server. The shell/tai
 73. [ ] Explain benchmark methodology and regression gates in the paper and docs, done when the published docs say what hardware and workloads were used and how protocol-strengthening tradeoffs were benchmark-gated.
 74. [ ] Publish only when the story is coherent, done when the code, benchmarks, docs, and claims all line up on the same kept path and any unfinished strengthening work is explicitly scoped as follow-on rather than implied to be landed.
 
+## Serving-Optimization Compatibility
+
+These items validate that CommitLLM works correctly with standard production serving optimizations. The protocol is designed to support request-local, semantics-preserving optimizations; the work here is confirming that empirically and fixing any integration issues.
+
+### Already supported — needs explicit testing
+
+86. [ ] Test continuous batching / batched prefill / batched decode under verified mode, done when the tracer correctly splits batched prefill rows into per-token traces and commit+audit+verify passes on real GPU with concurrent batched requests. The tracer already handles this in `sidecar/verilm/trace.py` but lacks dedicated integration tests.
+87. [ ] Test paged attention under verified mode, done when paged KV management does not interfere with committed KV transcript integrity and commit+audit+verify passes with paged attention enabled on real GPU.
+88. [ ] Test tensor parallelism (multi-GPU) under verified mode, done when TP=2 and TP=4 configurations produce valid receipts and pass verification. The startup hook patches TP workers in `sidecar/verilm/_startup.py` and `sidecar/verilm/worker.py` but this needs real multi-GPU confirmation.
+89. [ ] Test fused GEMM / fused projection kernels under verified mode, done when fused QKV and fused gate-up projections produce correct shell accumulators and pass Freivalds checks. The capture layer wraps `cutlass_scaled_mm` in `sidecar/verilm/capture.py` but needs explicit fused-kernel test coverage.
+90. [ ] Test FlashAttention v2/v3 under verified mode, done when FlashAttention-based serving produces attention outputs within the established corridor bounds and commit+audit+verify passes. The protocol already treats attention as the approximate region so this should work, but needs measurement confirmation.
+91. [ ] Test INT8/W8A8 quantization families beyond Qwen and Llama, done when at least one additional W8A8 model family passes the full corridor measurement and verification pipeline. Overlaps with roadmap items #7 and #8.
+
+### Supportable with protocol extensions
+
+92. [ ] Design protocol extension for cross-request prefix caching, done when a committed prefix receipt can be referenced by subsequent requests without recomputing shared KV state. This is the highest-impact unsupported optimization (~2-5x TTFT for shared-prefix workloads). The fundamental challenge is that shared prefix state breaks the per-request commitment model; the prefix cache itself needs to become a first-class committed object.
+93. [ ] Design protocol extension for CUDA graph compatibility, done when the capture/tracing layer can operate within CUDA graph replay rather than requiring Python-level kernel interception. Current capture hooks in `sidecar/verilm/capture.py` are bypassed by CUDA graph replay. Options include driver-level interception or a graph-capture-aware wrapper. Impact: ~10-30% decode latency reduction.
+94. [ ] Design protocol extension for speculative decoding, done when the protocol can commit draft model identity, draft tokens, acceptance masks, and prove that final tokens match what the target model would have produced at accepted positions. This requires a new sub-protocol for the accept/reject transcript and decode binding. Impact: ~2-3x generation latency reduction.
+95. [ ] Add GPTQ / AWQ / grouped quantization support, done when at least one non-W8A8 quantization family has a fully validated replay path in the verifier. The manifest already binds `quant_family`, `scale_derivation`, and `quant_block_size`. Overlaps with roadmap item #5.
+96. [ ] Add LoRA / adapter / merged checkpoint verification, done when the verifier can confirm that served weights match `base + adapter` for a committed adapter identity. The model spec already hashes adapter identity. Overlaps with roadmap item #80.
+
 ## Ecosystem / Future
 
 75. [ ] Write a receipt-format specification, done when the receipt and audit binary format is documented independently of the implementation code.
