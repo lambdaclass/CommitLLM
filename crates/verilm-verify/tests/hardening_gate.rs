@@ -22,11 +22,11 @@
 //! | `fiat_shamir_soundness.rs`      | verilm-test-vectors| Challenge binding, domain separation        |
 //! | `quantization_parity.rs`        | verilm-core        | Requantize/SiLU boundary correctness        |
 //!
-//! ## Remote (GPU, `make gpu-test-adversarial`)
+//! ## Remote (GPU, `make redteam-gpu` or `make gpu-test-adversarial`)
 //!
 //! | Suite                           | Location           | What it covers                              |
 //! |---------------------------------|--------------------|---------------------------------------------|
-//! | `test_adversarial.py`           | scripts/modal/     | 36 tamper/splice/cross-proof GPU scenarios  |
+//! | `test_adversarial.py`           | redteam/modal/     | 36 tamper/splice/cross-proof GPU scenarios  |
 //!
 //! # Gate rule
 //!
@@ -34,12 +34,25 @@
 //! may land unless:
 //!
 //! 1. `make hardening-gate` passes (all local Rust suites)
-//! 2. `make gpu-test-adversarial` passes (GPU adversarial suite) — when
+//! 2. `make redteam-gpu` passes (GPU adversarial suite) — when
 //!    the change touches the verification path, capture path, or protocol
 //!    semantics
 //!
 //! This is enforced by convention, not CI. The gate exists so that the
 //! check is explicit, named, and runnable rather than implicit.
+
+/// Verify the dedicated red-team surface exists.
+#[test]
+fn gate_redteam_surface_exists() {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap().parent().unwrap();
+    assert!(workspace.join("redteam/README.md").exists(), "redteam README must exist");
+    assert!(workspace.join("redteam/attack_matrix.md").exists(), "redteam attack matrix must exist");
+    assert!(workspace.join("redteam/modal/test_model_substitution.py").exists(),
+        "redteam model-substitution runner must exist");
+    assert!(workspace.join("redteam/modal/test_freshness_gap.py").exists(),
+        "redteam freshness-gap runner must exist");
+}
 
 /// Verify the boundary_fuzz suite exists and has the expected test count.
 #[test]
@@ -96,8 +109,8 @@ fn gate_v4_e2e_exists() {
 fn gate_gpu_adversarial_exists() {
     let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent().unwrap().parent().unwrap();
-    let path = workspace.join("scripts/modal/test_adversarial.py");
-    assert!(path.exists(), "scripts/modal/test_adversarial.py must exist");
+    let path = workspace.join("redteam/modal/test_adversarial.py");
+    assert!(path.exists(), "redteam/modal/test_adversarial.py must exist");
 
     let content = std::fs::read_to_string(&path).unwrap();
     // The adversarial suite is a single-file script with inline assertions,
@@ -106,7 +119,7 @@ fn gate_gpu_adversarial_exists() {
         + content.matches("assert(").count();
     assert!(
         assert_count >= 10,
-        "test_adversarial.py has only {} assertions — expected >= 10",
+        "redteam/modal/test_adversarial.py has only {} assertions — expected >= 10",
         assert_count
     );
 }

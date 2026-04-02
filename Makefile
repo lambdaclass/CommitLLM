@@ -1,4 +1,5 @@
-.PHONY: build test check clean hardening-gate gpu-test-adversarial \
+.PHONY: build test check clean hardening-gate gpu-test-adversarial redteam-gpu \
+       redteam-model-substitution redteam-freshness-gap \
        paper paper-watch paper-clean paper-stamp lean-build lean-clean \
        gpu-test gpu-test-e2e gpu-test-sampled gpu-test-stability gpu-test-modal gpu-terminate \
        gpu-bench-hooks gpu-bench-hooks-modal gpu-bench-ab gpu-bench-ab-parallel gpu-bench-ab-modal gpu-bench-ab-terminate
@@ -31,8 +32,17 @@ hardening-gate:
 	@echo "=== Hardening gate: PASSED ==="
 
 # GPU adversarial suite (requires Modal or RunPod)
+redteam-gpu:
+	modal run --detach redteam/modal/test_adversarial.py
+
+redteam-model-substitution:
+	modal run --detach redteam/modal/test_model_substitution.py
+
+redteam-freshness-gap:
+	modal run --detach redteam/modal/test_freshness_gap.py
+
 gpu-test-adversarial:
-	modal run --detach scripts/modal/test_adversarial.py
+	$(MAKE) redteam-gpu
 
 # GPU tests — RunPod (persistent pod, fast iteration)
 # Requires: export RUNPOD_API_KEY=...

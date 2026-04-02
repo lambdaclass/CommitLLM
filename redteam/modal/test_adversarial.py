@@ -1,9 +1,13 @@
 """
-Adversarial tamper test: try to break every verifier check on real GPU data.
+Red-team adversarial campaign: try to break verifier checks on real GPU data.
 
 Runs honest inference on a real W8A8 model, obtains a valid audit proof,
 then systematically tampers with each verifier boundary and asserts the
 verifier rejects the proof **for the right reason** (roadmap #21, #25).
+
+This lives under `redteam/` on purpose: it is not an ordinary correctness
+test. Correctness tests ask whether an honest provider passes. This campaign
+asks whether a dishonest provider can cheat and still pass verification.
 
 Wire format (V4AuditResponse):
   - token_index, token_id, prev_io_hash           (top-level)
@@ -41,7 +45,7 @@ Each test tampers one field and checks that verification fails with a
 failure message containing an expected substring (the "right reason").
 
 Usage:
-    modal run --detach scripts/modal/test_adversarial.py
+    modal run --detach redteam/modal/test_adversarial.py
 """
 
 import modal
