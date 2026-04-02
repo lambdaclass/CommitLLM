@@ -17,6 +17,19 @@ app = modal.App("verilm-redteam-freshness-gap")
 MODEL_ID = "neuralmagic/Qwen2.5-7B-Instruct-quantized.w8a8"
 PROMPT = "What is the capital of France?"
 MAX_TOKENS = 24
+BUILD_IGNORE = [
+    ".git",
+    "target",
+    "lean",
+    "article",
+    "docs",
+    "paper",
+    "research",
+    "site",
+    "scripts/__pycache__",
+    "*.pdf",
+    "CHANGELOG.md",
+]
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -35,9 +48,7 @@ image = (
         "pip install -e /opt/verilm",
         "python3 -c 'import site, os; open(os.path.join(site.getsitepackages()[0], \"verilm_capture.pth\"), \"w\").write(\"import verilm._startup\\n\")'",
     )
-    .add_local_dir(".", remote_path="/build", copy=True, ignore=[
-        ".git", "target", "scripts/__pycache__", "*.pdf", "CHANGELOG.md",
-    ])
+    .add_local_dir(".", remote_path="/build", copy=True, ignore=BUILD_IGNORE)
     .run_commands(
         "cd /build/crates/verilm-py && maturin build --release",
         "bash -c 'pip install /build/target/wheels/verilm_rs-*.whl'",
@@ -99,22 +110,22 @@ def _run_test():
             "token_index": 0,
             "layer_indices": list(range(n_layers)),
             "tier": "full",
-            "binary": False,
+            "binary": True,
         })
         assert resp.status_code == 200, f"audit failed: {resp.status_code}"
-        return chat, resp.text
+        return chat, resp.content
 
-    first_chat, first_audit_json = chat_and_audit()
-    first_report = verilm_rs.verify_v4(first_audit_json, key_json)
+    first_chat, first_audit_binary = chat_and_audit()
+    first_report = verilm_rs.verify_v4_binary(first_audit_binary, key_json)
     assert first_report["passed"], f"baseline audit must pass: {first_report['failures']}"
 
-    second_chat, second_audit_json = chat_and_audit()
-    second_report = verilm_rs.verify_v4(second_audit_json, key_json)
+    second_chat, second_audit_binary = chat_and_audit()
+    second_report = verilm_rs.verify_v4_binary(second_audit_binary, key_json)
     assert second_report["passed"], f"second baseline audit must pass: {second_report['failures']}"
 
     assert first_chat["request_id"] != second_chat["request_id"], "need distinct requests to probe replay/freshness"
 
-    replay_report = verilm_rs.verify_v4(first_audit_json, key_json)
+    replay_report = verilm_rs.verify_v4_binary(first_audit_binary, key_json)
     replay_accepted = replay_report["passed"]
     assert replay_accepted, "expected replayed honest audit to remain valid without freshness binding"
 

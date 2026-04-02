@@ -46,7 +46,11 @@ fn setup_full_bridge() -> (
 
     let n_mt = MatrixType::PER_LAYER.len();
     let weight_scales: Vec<Vec<f32>> = (0..cfg.n_layers)
-        .map(|l| (0..n_mt).map(|m| 0.01 + 0.001 * (l * n_mt + m) as f32).collect())
+        .map(|l| {
+            (0..n_mt)
+                .map(|m| 0.01 + 0.001 * (l * n_mt + m) as f32)
+                .collect()
+        })
         .collect();
 
     let rmsnorm_attn: Vec<Vec<f32>> = (0..cfg.n_layers)
@@ -73,17 +77,27 @@ fn setup_full_bridge() -> (
     key.rmsnorm_ffn_weights = rmsnorm_ffn.clone();
     key.rmsnorm_eps = 1e-5;
 
-    (cfg, model, key, weight_scales, rmsnorm_attn, rmsnorm_ffn, initial_residual)
+    (
+        cfg,
+        model,
+        key,
+        weight_scales,
+        rmsnorm_attn,
+        rmsnorm_ffn,
+        initial_residual,
+    )
 }
 
 fn bridge_scales(cfg: &ModelConfig) -> Vec<(f32, f32, f32, f32)> {
     (0..cfg.n_layers)
-        .map(|l| (
-            0.3 + 0.05 * l as f32,
-            0.5 + 0.1 * l as f32,
-            0.4 + 0.07 * l as f32,
-            0.6 + 0.03 * l as f32,
-        ))
+        .map(|l| {
+            (
+                0.3 + 0.05 * l as f32,
+                0.5 + 0.1 * l as f32,
+                0.4 + 0.07 * l as f32,
+                0.6 + 0.03 * l as f32,
+            )
+        })
         .collect()
 }
 
@@ -130,33 +144,53 @@ fn full_bridge_forward(
 
         let attn_out = matmul_i32(&lw.wo, &a, cfg.hidden_dim, cfg.hidden_dim);
         let x_ffn = bridge_residual_rmsnorm(
-            &attn_out, ws(MatrixType::Wo), scale_a,
-            &mut residual, &rmsnorm_ffn[l], eps, scale_x_ffn,
+            &attn_out,
+            ws(MatrixType::Wo),
+            scale_a,
+            &mut residual,
+            &rmsnorm_ffn[l],
+            eps,
+            scale_x_ffn,
         );
 
         let g = matmul_i32(&lw.wg, &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
         let u = matmul_i32(&lw.wu, &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
         let h = verilm_core::silu::compute_h_scaled(
-            &g, &u, ws(MatrixType::Wg), ws(MatrixType::Wu), scale_x_ffn, scale_h,
+            &g,
+            &u,
+            ws(MatrixType::Wg),
+            ws(MatrixType::Wu),
+            scale_x_ffn,
+            scale_h,
         );
         let ffn_out = matmul_i32(&lw.wd, &h, cfg.hidden_dim, cfg.ffn_dim);
 
         if l + 1 < rmsnorm_attn.len() {
             let next_scale = scales.get(l + 1).map(|s| s.0).unwrap_or(1.0);
             bridge_residual_rmsnorm(
-                &ffn_out, ws(MatrixType::Wd), scale_h,
-                &mut residual, &rmsnorm_attn[l + 1], eps, next_scale,
+                &ffn_out,
+                ws(MatrixType::Wd),
+                scale_h,
+                &mut residual,
+                &rmsnorm_attn[l + 1],
+                eps,
+                next_scale,
             );
         } else {
             dequant_add_residual(&ffn_out, ws(MatrixType::Wd), scale_h, &mut residual);
         }
 
         layers.push(RetainedLayerState {
-            a, scale_a,
+            a,
+            scale_a,
             x_attn_i8: Some(x_attn),
             scale_x_attn: Some(scale_x_attn),
         });
-        captured_scales.push(CapturedLayerScales { scale_x_attn, scale_x_ffn, scale_h });
+        captured_scales.push(CapturedLayerScales {
+            scale_x_attn,
+            scale_x_ffn,
+            scale_h,
+        });
     }
 
     (RetainedTokenState { layers }, captured_scales)
@@ -245,7 +279,14 @@ fn build_canonical_audit(
     key.embedding_merkle_root = Some(root);
 
     let (retained, captured_scales) = full_bridge_forward(
-        &cfg, &model, &initial_residual, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+        &cfg,
+        &model,
+        &initial_residual,
+        &rmsnorm_attn,
+        &rmsnorm_ffn,
+        &ws,
+        &scales,
+        1e-5,
     );
 
     let proof = verilm_core::merkle::prove(&tree, token_id as usize);
@@ -264,10 +305,27 @@ fn build_canonical_audit(
         manifest,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales], None, None);
+    let (_commitment, state) = commit_minimal(
+        vec![retained],
+        &params,
+        None,
+        vec![captured_scales],
+        None,
+        None,
+    );
     let response = open_v4(
-        &state, 0, &ToyWeights(&model), &cfg, &ws,
-        &[], Some(&bridge), None, None, None, false, false,
+        &state,
+        0,
+        &ToyWeights(&model),
+        &cfg,
+        &ws,
+        &[],
+        Some(&bridge),
+        None,
+        None,
+        None,
+        false,
+        false,
     );
 
     let binary = verilm_core::serialize::serialize_v4_audit(&response);
@@ -290,7 +348,14 @@ fn build_canonical_audit_with_response(
     key.embedding_merkle_root = Some(root);
 
     let (retained, captured_scales) = full_bridge_forward(
-        &cfg, &model, &initial_residual, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+        &cfg,
+        &model,
+        &initial_residual,
+        &rmsnorm_attn,
+        &rmsnorm_ffn,
+        &ws,
+        &scales,
+        1e-5,
     );
 
     let proof = verilm_core::merkle::prove(&tree, token_id as usize);
@@ -309,10 +374,95 @@ fn build_canonical_audit_with_response(
         manifest,
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(vec![retained], &params, None, vec![captured_scales], None, None);
+    let (_commitment, state) = commit_minimal(
+        vec![retained],
+        &params,
+        None,
+        vec![captured_scales],
+        None,
+        None,
+    );
     let response = open_v4(
-        &state, 0, &ToyWeights(&model), &cfg, &ws,
-        &[], Some(&bridge), None, None, None, false, false,
+        &state,
+        0,
+        &ToyWeights(&model),
+        &cfg,
+        &ws,
+        &[],
+        Some(&bridge),
+        None,
+        None,
+        None,
+        false,
+        false,
+    );
+
+    (key, response)
+}
+
+fn build_canonical_audit_with_response_n_prompt(
+    manifest: Option<&DeploymentManifest>,
+    n_prompt_tokens: u32,
+) -> (
+    verilm_core::types::VerifierKey,
+    verilm_core::types::V4AuditResponse,
+) {
+    let (cfg, model, mut key, ws, rmsnorm_attn, rmsnorm_ffn, initial_residual) =
+        setup_full_bridge();
+    let scales = bridge_scales(&cfg);
+    let token_id = 42u32;
+
+    let (tree, root) = setup_embedding_tree(&initial_residual, token_id, 128);
+    key.embedding_merkle_root = Some(root);
+
+    let (retained, captured_scales) = full_bridge_forward(
+        &cfg,
+        &model,
+        &initial_residual,
+        &rmsnorm_attn,
+        &rmsnorm_ffn,
+        &ws,
+        &scales,
+        1e-5,
+    );
+
+    let proof = verilm_core::merkle::prove(&tree, token_id as usize);
+    let bridge = BridgeParams {
+        rmsnorm_attn_weights: &rmsnorm_attn,
+        rmsnorm_ffn_weights: &rmsnorm_ffn,
+        rmsnorm_eps: 1e-5,
+        initial_residual: &initial_residual,
+        embedding_proof: Some(proof),
+    };
+
+    let params = FullBindingParams {
+        token_ids: &[token_id],
+        prompt: b"canonical test",
+        sampling_seed: [7u8; 32],
+        manifest,
+        n_prompt_tokens: Some(n_prompt_tokens),
+    };
+    let (_commitment, state) = commit_minimal(
+        vec![retained],
+        &params,
+        None,
+        vec![captured_scales],
+        None,
+        None,
+    );
+    let response = open_v4(
+        &state,
+        0,
+        &ToyWeights(&model),
+        &cfg,
+        &ws,
+        &[],
+        Some(&bridge),
+        None,
+        None,
+        None,
+        false,
+        false,
     );
 
     (key, response)
@@ -331,9 +481,18 @@ fn canonical_full_bridge_pass() {
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, binary) = build_canonical_audit(Some(&manifest));
     let report = verify_binary(&key, &binary, None, None).unwrap();
-    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "failures: {:?}",
+        report.failures
+    );
     // Full bridge: structural + embedding + spec hashes + per-layer Freivalds
-    assert!(report.checks_run >= 12, "too few checks: {}", report.checks_run);
+    assert!(
+        report.checks_run >= 12,
+        "too few checks: {}",
+        report.checks_run
+    );
 }
 
 #[test]
@@ -341,7 +500,10 @@ fn canonical_missing_manifest_rejected() {
     let (key, binary) = build_canonical_audit(None);
     let report = verify_binary(&key, &binary, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.message.contains("manifest")));
+    assert!(report
+        .failures
+        .iter()
+        .any(|f| f.message.contains("manifest")));
 }
 
 #[test]
@@ -349,9 +511,18 @@ fn canonical_full_bridge_with_manifest_pass() {
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, binary) = build_canonical_audit(Some(&manifest));
     let report = verify_binary(&key, &binary, None, None).unwrap();
-    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "failures: {:?}",
+        report.failures
+    );
     // Should include spec hash checks
-    assert!(report.checks_run >= 12, "too few checks with manifest: {}", report.checks_run);
+    assert!(
+        report.checks_run >= 12,
+        "too few checks with manifest: {}",
+        report.checks_run
+    );
 }
 
 #[test]
@@ -360,7 +531,10 @@ fn canonical_binary_magic_validated() {
     // Bad magic
     let err = verify_binary(&key, b"XXXX1234567890", None, None);
     assert!(err.is_err(), "should reject bad magic");
-    assert!(err.unwrap_err().contains("magic"), "error should mention magic");
+    assert!(
+        err.unwrap_err().contains("magic"),
+        "error should mention magic"
+    );
 }
 
 #[test]
@@ -389,7 +563,10 @@ fn canonical_missing_shell_opening_rejected() {
     let binary = to_binary(&response);
     let report = verify_binary(&key, &binary, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.message.contains("shell_opening")));
+    assert!(report
+        .failures
+        .iter()
+        .any(|f| f.message.contains("shell_opening")));
 }
 
 #[test]
@@ -400,7 +577,10 @@ fn canonical_missing_initial_residual_rejected() {
     let binary = to_binary(&response);
     let report = verify_binary(&key, &binary, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.message.contains("initial_residual")));
+    assert!(report
+        .failures
+        .iter()
+        .any(|f| f.message.contains("initial_residual")));
 }
 
 #[test]
@@ -410,7 +590,10 @@ fn canonical_missing_embedding_proof_rejected() {
     let binary = to_binary(&response);
     let report = verify_binary(&key, &binary, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.message.contains("embedding_proof")));
+    assert!(report
+        .failures
+        .iter()
+        .any(|f| f.message.contains("embedding_proof")));
 }
 
 // ---------------------------------------------------------------------------
@@ -425,7 +608,10 @@ fn canonical_tampered_attn_out_detected() {
     let binary = to_binary(&response);
     let report = verify_binary(&key, &binary, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.message.contains("Freivalds")));
+    assert!(report
+        .failures
+        .iter()
+        .any(|f| f.message.contains("Freivalds")));
 }
 
 #[test]
@@ -436,7 +622,10 @@ fn canonical_tampered_ffn_out_detected() {
     let binary = to_binary(&response);
     let report = verify_binary(&key, &binary, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| f.message.contains("Freivalds")));
+    assert!(report
+        .failures
+        .iter()
+        .any(|f| f.message.contains("Freivalds")));
 }
 
 #[test]
@@ -446,9 +635,10 @@ fn canonical_tampered_seed_detected() {
     let binary = to_binary(&response);
     let report = verify_binary(&key, &binary, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| {
-        f.code == verilm_verify::FailureCode::SeedMismatch
-    }));
+    assert!(report
+        .failures
+        .iter()
+        .any(|f| { f.code == verilm_verify::FailureCode::SeedMismatch }));
 }
 
 #[test]
@@ -459,9 +649,10 @@ fn canonical_tampered_embedding_detected() {
     let binary = to_binary(&response);
     let report = verify_binary(&key, &binary, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| {
-        f.code == verilm_verify::FailureCode::EmbeddingProofFailed
-    }));
+    assert!(report
+        .failures
+        .iter()
+        .any(|f| { f.code == verilm_verify::FailureCode::EmbeddingProofFailed }));
 }
 
 // ---------------------------------------------------------------------------
@@ -476,14 +667,25 @@ fn canonical_tampered_revealed_scale_x_attn_rejected() {
     shell.layers[0].scale_x_attn *= 2.0; // wrong QKV input quantization
     let binary = to_binary(&response);
     let report = verify_binary(&key, &binary, None, None).unwrap();
-    assert_eq!(report.verdict, Verdict::Fail,
-        "tampered scale_x_attn must cause rejection via bridge equations");
+    assert_eq!(
+        report.verdict,
+        Verdict::Fail,
+        "tampered scale_x_attn must cause rejection via bridge equations"
+    );
     // With check-and-gate, BridgeScaleMismatch catches the tampered shell scale.
     // Freivalds may still pass since the gated x_attn uses the committed value.
-    assert!(report.failures.iter().any(|f|
-        f.message.contains("Freivalds")
-        || matches!(f.code, FailureCode::BridgeScaleMismatch | FailureCode::BridgeXAttnMismatch)),
-        "rejection should come from Freivalds or bridge mismatch, got: {:?}", report.failures);
+    assert!(
+        report
+            .failures
+            .iter()
+            .any(|f| f.message.contains("Freivalds")
+                || matches!(
+                    f.code,
+                    FailureCode::BridgeScaleMismatch | FailureCode::BridgeXAttnMismatch
+                )),
+        "rejection should come from Freivalds or bridge mismatch, got: {:?}",
+        report.failures
+    );
 }
 
 #[test]
@@ -493,10 +695,19 @@ fn canonical_tampered_revealed_scale_x_ffn_rejected() {
     shell.layers[0].scale_x_ffn *= 2.0; // wrong gate_up input quantization
     let binary = to_binary(&response);
     let report = verify_binary(&key, &binary, None, None).unwrap();
-    assert_eq!(report.verdict, Verdict::Fail,
-        "tampered scale_x_ffn must cause rejection via bridge equations");
-    assert!(report.failures.iter().any(|f| f.message.contains("Freivalds")),
-        "rejection should come from Freivalds mismatch, got: {:?}", report.failures);
+    assert_eq!(
+        report.verdict,
+        Verdict::Fail,
+        "tampered scale_x_ffn must cause rejection via bridge equations"
+    );
+    assert!(
+        report
+            .failures
+            .iter()
+            .any(|f| f.message.contains("Freivalds")),
+        "rejection should come from Freivalds mismatch, got: {:?}",
+        report.failures
+    );
 }
 
 #[test]
@@ -506,10 +717,19 @@ fn canonical_tampered_revealed_scale_h_rejected() {
     shell.layers[0].scale_h *= 2.0; // wrong down projection input quantization
     let binary = to_binary(&response);
     let report = verify_binary(&key, &binary, None, None).unwrap();
-    assert_eq!(report.verdict, Verdict::Fail,
-        "tampered scale_h must cause rejection via bridge equations");
-    assert!(report.failures.iter().any(|f| f.message.contains("Freivalds")),
-        "rejection should come from Freivalds mismatch, got: {:?}", report.failures);
+    assert_eq!(
+        report.verdict,
+        Verdict::Fail,
+        "tampered scale_h must cause rejection via bridge equations"
+    );
+    assert!(
+        report
+            .failures
+            .iter()
+            .any(|f| f.message.contains("Freivalds")),
+        "rejection should come from Freivalds mismatch, got: {:?}",
+        report.failures
+    );
 }
 
 #[test]
@@ -518,8 +738,12 @@ fn canonical_correct_revealed_scales_pass() {
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, binary) = build_canonical_audit(Some(&manifest));
     let report = verify_binary(&key, &binary, None, None).unwrap();
-    assert_eq!(report.verdict, Verdict::Pass,
-        "correct revealed scales must pass: {:?}", report.failures);
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "correct revealed scales must pass: {:?}",
+        report.failures
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -531,7 +755,12 @@ fn canonical_manifest_spec_hash_verified() {
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, binary) = build_canonical_audit(Some(&manifest));
     let report = verify_binary(&key, &binary, None, None).unwrap();
-    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "failures: {:?}",
+        report.failures
+    );
 }
 
 #[test]
@@ -541,9 +770,10 @@ fn canonical_unsupported_sampler_rejected() {
     let (key, binary) = build_canonical_audit(Some(&manifest));
     let report = verify_binary(&key, &binary, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| {
-        f.code == verilm_verify::FailureCode::UnsupportedSamplerVersion
-    }));
+    assert!(report
+        .failures
+        .iter()
+        .any(|f| { f.code == verilm_verify::FailureCode::UnsupportedSamplerVersion }));
 }
 
 #[test]
@@ -553,9 +783,10 @@ fn canonical_unsupported_repetition_penalty_rejected() {
     let (key, binary) = build_canonical_audit(Some(&manifest));
     let report = verify_binary(&key, &binary, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| {
-        f.code == verilm_verify::FailureCode::UnsupportedDecodeFeature
-    }));
+    assert!(report
+        .failures
+        .iter()
+        .any(|f| { f.code == verilm_verify::FailureCode::UnsupportedDecodeFeature }));
 }
 
 #[test]
@@ -565,9 +796,10 @@ fn canonical_decode_mode_inconsistency_rejected() {
     let (key, binary) = build_canonical_audit(Some(&manifest));
     let report = verify_binary(&key, &binary, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
-    assert!(report.failures.iter().any(|f| {
-        f.code == verilm_verify::FailureCode::DecodeModeTempInconsistent
-    }));
+    assert!(report
+        .failures
+        .iter()
+        .any(|f| { f.code == verilm_verify::FailureCode::DecodeModeTempInconsistent }));
 }
 
 // ---------------------------------------------------------------------------
@@ -627,7 +859,11 @@ fn canonical_frozen_fullbridge_passes() {
         "canonical frozen fullbridge fixture must pass: {:?}",
         report.failures
     );
-    assert!(report.checks_run >= 20, "expected >= 20 checks, got {}", report.checks_run);
+    assert!(
+        report.checks_run >= 20,
+        "expected >= 20 checks, got {}",
+        report.checks_run
+    );
 }
 
 // ===========================================================================
@@ -659,7 +895,8 @@ fn assert_parity(
         assert!(
             !canonical.failures.is_empty(),
             "legacy failed but canonical has no failures\n  legacy: {:?}\n  canonical: {:?}",
-            legacy.failures, canonical.failures,
+            legacy.failures,
+            canonical.failures,
         );
     }
 }
@@ -699,7 +936,13 @@ fn parity_tampered_seed() {
 fn parity_tampered_embedding() {
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
-    response.shell_opening.as_mut().unwrap().initial_residual.as_mut().unwrap()[0] += 1.0;
+    response
+        .shell_opening
+        .as_mut()
+        .unwrap()
+        .initial_residual
+        .as_mut()
+        .unwrap()[0] += 1.0;
     assert_parity(&key, &response);
 }
 
@@ -776,8 +1019,12 @@ fn phase1_io_chain_tampered_rejected() {
     let report = verify_response(&key, &response, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::IoChainMismatch),
-        "should have IoChainMismatch: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::IoChainMismatch),
+        "should have IoChainMismatch: {:?}",
+        report.failures,
     );
 }
 
@@ -792,8 +1039,12 @@ fn phase1_n_prompt_tokens_mismatch_rejected() {
     let report = verify_response(&key, &response, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::NPromptTokensMismatch),
-        "should have NPromptTokensMismatch: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::NPromptTokensMismatch),
+        "should have NPromptTokensMismatch: {:?}",
+        report.failures,
     );
 }
 
@@ -807,8 +1058,12 @@ fn phase1_missing_seed_commitment_rejected() {
     let report = verify_response(&key, &response, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::MissingSeedCommitment),
-        "should have MissingSeedCommitment: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::MissingSeedCommitment),
+        "should have MissingSeedCommitment: {:?}",
+        report.failures,
     );
 }
 
@@ -822,8 +1077,12 @@ fn phase1_prompt_hash_mismatch_rejected() {
     let report = verify_response(&key, &response, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::PromptHashMismatch),
-        "should have PromptHashMismatch: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::PromptHashMismatch),
+        "should have PromptHashMismatch: {:?}",
+        report.failures,
     );
 }
 
@@ -837,14 +1096,21 @@ fn phase1_prefix_count_mismatch_rejected() {
     // check_io_chain can iterate without panic, but count mismatches.
     response.prefix_leaf_hashes.push([0u8; 32]);
     response.prefix_token_ids.push(0);
-    response.prefix_merkle_proofs.push(
-        verilm_core::merkle::MerkleProof { leaf_index: 0, siblings: vec![] },
-    );
+    response
+        .prefix_merkle_proofs
+        .push(verilm_core::merkle::MerkleProof {
+            leaf_index: 0,
+            siblings: vec![],
+        });
     let report = verify_response(&key, &response, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::PrefixTokenCountMismatch),
-        "should have PrefixTokenCountMismatch: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::PrefixTokenCountMismatch),
+        "should have PrefixTokenCountMismatch: {:?}",
+        report.failures,
     );
 }
 
@@ -858,8 +1124,12 @@ fn phase1_merkle_proof_tampered_rejected() {
     let report = verify_response(&key, &response, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::MerkleProofFailed),
-        "should have MerkleProofFailed: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::MerkleProofFailed),
+        "should have MerkleProofFailed: {:?}",
+        report.failures,
     );
 }
 
@@ -877,9 +1147,13 @@ fn phase2_embedding_leaf_mismatch_rejected() {
     let report = verify_response(&key, &response, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::EmbeddingLeafMismatch
-            || f.code == FailureCode::EmbeddingProofFailed),
-        "should have embedding failure: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::EmbeddingLeafMismatch
+                || f.code == FailureCode::EmbeddingProofFailed),
+        "should have embedding failure: {:?}",
+        report.failures,
     );
 }
 
@@ -893,8 +1167,12 @@ fn phase3_manifest_hash_mismatch_rejected() {
     let report = verify_response(&key, &response, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::ManifestHashMismatch),
-        "should have ManifestHashMismatch: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::ManifestHashMismatch),
+        "should have ManifestHashMismatch: {:?}",
+        report.failures,
     );
 }
 
@@ -908,8 +1186,12 @@ fn phase3_missing_spec_hash_rejected() {
     let report = verify_response(&key, &response, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::MissingSpecHash),
-        "should have MissingSpecHash: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::MissingSpecHash),
+        "should have MissingSpecHash: {:?}",
+        report.failures,
     );
 }
 
@@ -927,9 +1209,13 @@ fn phase5_freivalds_wq_tampered_rejected() {
     let report = verify_response(&key, &response, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::FreivaldsFailed
-            && f.context.matrix.as_deref() == Some("Wq")),
-        "should have FreivaldsFailed on Wq: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::FreivaldsFailed
+                && f.context.matrix.as_deref() == Some("Wq")),
+        "should have FreivaldsFailed on Wq: {:?}",
+        report.failures,
     );
 }
 
@@ -946,30 +1232,42 @@ fn phase5_bridge_residual_chain_broken() {
     assert_eq!(report.verdict, Verdict::Fail);
     // Tampered attn_out breaks the residual chain, causing downstream Freivalds failures
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::FreivaldsFailed),
-        "should have FreivaldsFailed from broken residual chain: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::FreivaldsFailed),
+        "should have FreivaldsFailed from broken residual chain: {:?}",
+        report.failures,
     );
 }
 
 // ---------------------------------------------------------------------------
-// Phase 5b: Token-0 attention replay
+// Phase 5b: opened-token attention boundary
 // ---------------------------------------------------------------------------
 
 #[test]
-fn phase5_token0_attention_replay_pass() {
-    // Clean token-0 audit: attention replay should pass (already covered by
-    // canonical_full_bridge_pass, but this explicitly checks extra check count).
+fn phase5_first_traced_prompt_token_passes_without_attention_failure() {
     let manifest = make_manifest(0.0, 0, 1.0);
-    let (key, binary) = build_canonical_audit(Some(&manifest));
-    let report = verify_binary(&key, &binary, None, None).unwrap();
-    assert_eq!(report.verdict, Verdict::Pass, "failures: {:?}", report.failures);
-    // Attention replay adds one check per layer (toy model has 2 layers).
-    assert!(report.checks_run >= 14, "expected attention replay checks: {}", report.checks_run);
+    let (key, response) = build_canonical_audit_with_response_n_prompt(Some(&manifest), 2);
+    let report = verify_response(&key, &response, None, None);
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "failures: {:?}",
+        report.failures
+    );
+    assert!(
+        !report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::AttentionReplayMismatch),
+        "first traced prompt token should not trigger impossible self-attention replay: {:?}",
+        report.failures,
+    );
 }
 
 #[test]
-fn phase5_token0_attention_tampered_a_rejected() {
-    // Tamper retained.a to break the attention replay check.
+fn phase5_tampered_a_is_caught_by_exact_shell_checks() {
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
     // Flip a byte in layer 0's attention output.
@@ -977,8 +1275,12 @@ fn phase5_token0_attention_tampered_a_rejected() {
     let report = verify_response(&key, &response, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::AttentionReplayMismatch),
-        "should have AttentionReplayMismatch: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::FreivaldsFailed),
+        "tampering retained.a should still be caught by exact shell checks: {:?}",
+        report.failures,
     );
 }
 
@@ -996,8 +1298,12 @@ fn phase4_ignore_eos_violated() {
     let report = verify_response(&key, &response, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::IgnoreEosViolated),
-        "should have IgnoreEosViolated: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::IgnoreEosViolated),
+        "should have IgnoreEosViolated: {:?}",
+        report.failures,
     );
 }
 
@@ -1010,8 +1316,12 @@ fn phase4_unknown_eos_policy() {
     let report = verify_response(&key, &response, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::UnknownEosPolicy),
-        "should have UnknownEosPolicy: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::UnknownEosPolicy),
+        "should have UnknownEosPolicy: {:?}",
+        report.failures,
     );
 }
 
@@ -1025,8 +1335,12 @@ fn phase4_missing_eos_token_id() {
     let report = verify_response(&key, &response, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::MissingEosTokenId),
-        "should have MissingEosTokenId: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::MissingEosTokenId),
+        "should have MissingEosTokenId: {:?}",
+        report.failures,
     );
 }
 
@@ -1040,8 +1354,12 @@ fn phase4_min_tokens_violated() {
     let report = verify_response(&key, &response, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::MinTokensViolated),
-        "should have MinTokensViolated: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::MinTokensViolated),
+        "should have MinTokensViolated: {:?}",
+        report.failures,
     );
 }
 
@@ -1063,8 +1381,12 @@ fn phase6_missing_logits_rejected() {
     let report = verify_response(&key, &response, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::MissingLogits),
-        "should have MissingLogits: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::MissingLogits),
+        "should have MissingLogits: {:?}",
+        report.failures,
     );
 }
 
@@ -1088,8 +1410,37 @@ fn phase6_missing_final_hidden_rejected() {
     let report = verify_response(&key, &response, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::MissingFinalHidden),
-        "should have MissingFinalHidden: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::MissingFinalHidden),
+        "should have MissingFinalHidden: {:?}",
+        report.failures,
+    );
+}
+
+#[test]
+fn phase6_incompatible_key_dimensions_fail_closed_without_panic() {
+    let manifest = make_manifest(0.0, 0, 1.0);
+    let (mut key, response) = build_canonical_audit_with_response(Some(&manifest));
+
+    key.config.hidden_dim += 512;
+    key.rmsnorm_attn_weights = vec![vec![1.0; key.config.hidden_dim]; key.config.n_layers];
+    key.rmsnorm_ffn_weights = vec![vec![1.0; key.config.hidden_dim]; key.config.n_layers];
+    key.final_norm_weights = Some(vec![1.0; key.config.hidden_dim]);
+
+    let result = std::panic::catch_unwind(|| verify_response(&key, &response, None, None));
+    assert!(result.is_ok(), "dimension-mismatched key must not panic");
+
+    let report = result.unwrap();
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::SpecFieldMismatch),
+        "should fail closed with SpecFieldMismatch: {:?}",
+        report.failures,
     );
 }
 
@@ -1104,7 +1455,12 @@ fn phase7_deep_prefix_count_mismatch() {
     // Inject mismatched deep prefix arrays.
     // prefix_leaf_hashes has 0 entries; prefix_retained has 1 → mismatch.
     response.prefix_retained = Some(vec![RetainedTokenState {
-        layers: vec![RetainedLayerState { a: vec![0i8; key.config.hidden_dim], scale_a: 1.0, x_attn_i8: None, scale_x_attn: None }],
+        layers: vec![RetainedLayerState {
+            a: vec![0i8; key.config.hidden_dim],
+            scale_a: 1.0,
+            x_attn_i8: None,
+            scale_x_attn: None,
+        }],
     }]);
     response.prefix_shell_openings = Some(vec![verilm_core::types::ShellTokenOpening {
         layers: vec![],
@@ -1118,8 +1474,12 @@ fn phase7_deep_prefix_count_mismatch() {
     let report = verify_response(&key, &response, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::PrefixCountMismatch),
-        "should have PrefixCountMismatch: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::PrefixCountMismatch),
+        "should have PrefixCountMismatch: {:?}",
+        report.failures,
     );
 }
 
@@ -1146,12 +1506,18 @@ fn phase8_tokenizer_count_mismatch() {
     // Tokenizer returns 3 tokens but n_prompt_tokens=1 → PromptTokenCountMismatch
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, response) = build_canonical_audit_with_response(Some(&manifest));
-    let tokenizer = MockTokenizer { result: Ok(vec![10, 20, 30]) };
+    let tokenizer = MockTokenizer {
+        result: Ok(vec![10, 20, 30]),
+    };
     let report = verify_response(&key, &response, Some(&tokenizer), None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::PromptTokenCountMismatch),
-        "should have PromptTokenCountMismatch: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::PromptTokenCountMismatch),
+        "should have PromptTokenCountMismatch: {:?}",
+        report.failures,
     );
 }
 
@@ -1159,12 +1525,18 @@ fn phase8_tokenizer_count_mismatch() {
 fn phase8_tokenizer_error() {
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, response) = build_canonical_audit_with_response(Some(&manifest));
-    let tokenizer = MockTokenizer { result: Err("mock tokenizer failure".into()) };
+    let tokenizer = MockTokenizer {
+        result: Err("mock tokenizer failure".into()),
+    };
     let report = verify_response(&key, &response, Some(&tokenizer), None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::TokenizerError),
-        "should have TokenizerError: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::TokenizerError),
+        "should have TokenizerError: {:?}",
+        report.failures,
     );
 }
 
@@ -1177,11 +1549,7 @@ struct MockDetokenizer {
 }
 
 impl Detokenizer for MockDetokenizer {
-    fn decode(
-        &self,
-        _token_ids: &[u32],
-        _policy: Option<&str>,
-    ) -> Result<String, String> {
+    fn decode(&self, _token_ids: &[u32], _policy: Option<&str>) -> Result<String, String> {
         self.result.clone()
     }
 }
@@ -1192,12 +1560,18 @@ fn phase9_missing_output_text() {
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
     response.output_text = None; // explicitly no output text
-    let detokenizer = MockDetokenizer { result: Ok("decoded".into()) };
+    let detokenizer = MockDetokenizer {
+        result: Ok("decoded".into()),
+    };
     let report = verify_response(&key, &response, None, Some(&detokenizer));
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::MissingOutputText),
-        "should have MissingOutputText: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::MissingOutputText),
+        "should have MissingOutputText: {:?}",
+        report.failures,
     );
 }
 
@@ -1207,12 +1581,18 @@ fn phase9_detokenization_mismatch() {
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
     response.output_text = Some("wrong output".into());
-    let detokenizer = MockDetokenizer { result: Ok("decoded".into()) };
+    let detokenizer = MockDetokenizer {
+        result: Ok("decoded".into()),
+    };
     let report = verify_response(&key, &response, None, Some(&detokenizer));
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::DetokenizationMismatch),
-        "should have DetokenizationMismatch: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::DetokenizationMismatch),
+        "should have DetokenizationMismatch: {:?}",
+        report.failures,
     );
 }
 
@@ -1221,12 +1601,18 @@ fn phase9_detokenizer_error() {
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
     response.output_text = Some("claimed".into());
-    let detokenizer = MockDetokenizer { result: Err("mock detokenizer failure".into()) };
+    let detokenizer = MockDetokenizer {
+        result: Err("mock detokenizer failure".into()),
+    };
     let report = verify_response(&key, &response, None, Some(&detokenizer));
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::DetokenizerError),
-        "should have DetokenizerError: {:?}", report.failures,
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::DetokenizerError),
+        "should have DetokenizerError: {:?}",
+        report.failures,
     );
 }
 
@@ -1260,8 +1646,9 @@ fn multi_token_forward_with_attention(
 
     let n_tokens = initial_residuals.len();
     // Per-layer KV cache: kv_caches[layer] = (all_k_i8, all_v_i8)
-    let mut kv_caches: Vec<(Vec<Vec<i8>>, Vec<Vec<i8>>)> =
-        (0..cfg.n_layers).map(|_| (Vec::new(), Vec::new())).collect();
+    let mut kv_caches: Vec<(Vec<Vec<i8>>, Vec<Vec<i8>>)> = (0..cfg.n_layers)
+        .map(|_| (Vec::new(), Vec::new()))
+        .collect();
     let mut results = Vec::with_capacity(n_tokens);
 
     for t in 0..n_tokens {
@@ -1280,15 +1667,16 @@ fn multi_token_forward_with_attention(
             let x_attn = quantize_f64_to_i8(&normed, scale_x_attn as f64);
 
             // QKV projections
-            let q_i8 = verilm_core::requantize(
-                &matmul_i32(&lw.wq, &x_attn, cfg.hidden_dim, cfg.hidden_dim),
-            );
-            let k_i8 = verilm_core::requantize(
-                &matmul_i32(&lw.wk, &x_attn, cfg.kv_dim, cfg.hidden_dim),
-            );
-            let v_i8 = verilm_core::requantize(
-                &matmul_i32(&lw.wv, &x_attn, cfg.kv_dim, cfg.hidden_dim),
-            );
+            let q_i8 = verilm_core::requantize(&matmul_i32(
+                &lw.wq,
+                &x_attn,
+                cfg.hidden_dim,
+                cfg.hidden_dim,
+            ));
+            let k_i8 =
+                verilm_core::requantize(&matmul_i32(&lw.wk, &x_attn, cfg.kv_dim, cfg.hidden_dim));
+            let v_i8 =
+                verilm_core::requantize(&matmul_i32(&lw.wv, &x_attn, cfg.kv_dim, cfg.hidden_dim));
 
             kv_caches[l].0.push(k_i8);
             kv_caches[l].1.push(v_i8);
@@ -1298,29 +1686,53 @@ fn multi_token_forward_with_attention(
 
             let attn_out = matmul_i32(&lw.wo, &a, cfg.hidden_dim, cfg.hidden_dim);
             let x_ffn = bridge_residual_rmsnorm(
-                &attn_out, ws(MatrixType::Wo), scale_a,
-                &mut residual, &rmsnorm_ffn[l], eps, scale_x_ffn,
+                &attn_out,
+                ws(MatrixType::Wo),
+                scale_a,
+                &mut residual,
+                &rmsnorm_ffn[l],
+                eps,
+                scale_x_ffn,
             );
 
             let g = matmul_i32(&lw.wg, &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
             let u = matmul_i32(&lw.wu, &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
             let h = verilm_core::silu::compute_h_scaled(
-                &g, &u, ws(MatrixType::Wg), ws(MatrixType::Wu), scale_x_ffn, scale_h,
+                &g,
+                &u,
+                ws(MatrixType::Wg),
+                ws(MatrixType::Wu),
+                scale_x_ffn,
+                scale_h,
             );
             let ffn_out = matmul_i32(&lw.wd, &h, cfg.hidden_dim, cfg.ffn_dim);
 
             if l + 1 < rmsnorm_attn.len() {
                 let next_scale = scales.get(l + 1).map(|s| s.0).unwrap_or(1.0);
                 bridge_residual_rmsnorm(
-                    &ffn_out, ws(MatrixType::Wd), scale_h,
-                    &mut residual, &rmsnorm_attn[l + 1], eps, next_scale,
+                    &ffn_out,
+                    ws(MatrixType::Wd),
+                    scale_h,
+                    &mut residual,
+                    &rmsnorm_attn[l + 1],
+                    eps,
+                    next_scale,
                 );
             } else {
                 dequant_add_residual(&ffn_out, ws(MatrixType::Wd), scale_h, &mut residual);
             }
 
-            layers.push(RetainedLayerState { a, scale_a, x_attn_i8: None, scale_x_attn: None });
-            captured.push(CapturedLayerScales { scale_x_attn, scale_x_ffn, scale_h });
+            layers.push(RetainedLayerState {
+                a,
+                scale_a,
+                x_attn_i8: None,
+                scale_x_attn: None,
+            });
+            captured.push(CapturedLayerScales {
+                scale_x_attn,
+                scale_x_ffn,
+                scale_h,
+            });
         }
 
         results.push((RetainedTokenState { layers }, captured));
@@ -1416,29 +1828,53 @@ fn multi_token_forward_with_rope(
 
             let attn_out = matmul_i32(&lw.wo, &a, cfg.hidden_dim, cfg.hidden_dim);
             let x_ffn = bridge_residual_rmsnorm(
-                &attn_out, ws(MatrixType::Wo), scale_a,
-                &mut residual, &rmsnorm_ffn[l], eps, scale_x_ffn,
+                &attn_out,
+                ws(MatrixType::Wo),
+                scale_a,
+                &mut residual,
+                &rmsnorm_ffn[l],
+                eps,
+                scale_x_ffn,
             );
 
             let g = matmul_i32(&lw.wg, &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
             let u = matmul_i32(&lw.wu, &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
             let h = verilm_core::silu::compute_h_scaled(
-                &g, &u, ws(MatrixType::Wg), ws(MatrixType::Wu), scale_x_ffn, scale_h,
+                &g,
+                &u,
+                ws(MatrixType::Wg),
+                ws(MatrixType::Wu),
+                scale_x_ffn,
+                scale_h,
             );
             let ffn_out = matmul_i32(&lw.wd, &h, cfg.hidden_dim, cfg.ffn_dim);
 
             if l + 1 < rmsnorm_attn.len() {
                 let next_scale = scales.get(l + 1).map(|s| s.0).unwrap_or(1.0);
                 bridge_residual_rmsnorm(
-                    &ffn_out, ws(MatrixType::Wd), scale_h,
-                    &mut residual, &rmsnorm_attn[l + 1], eps, next_scale,
+                    &ffn_out,
+                    ws(MatrixType::Wd),
+                    scale_h,
+                    &mut residual,
+                    &rmsnorm_attn[l + 1],
+                    eps,
+                    next_scale,
                 );
             } else {
                 dequant_add_residual(&ffn_out, ws(MatrixType::Wd), scale_h, &mut residual);
             }
 
-            layers.push(RetainedLayerState { a, scale_a, x_attn_i8: None, scale_x_attn: None });
-            captured.push(CapturedLayerScales { scale_x_attn, scale_x_ffn, scale_h });
+            layers.push(RetainedLayerState {
+                a,
+                scale_a,
+                x_attn_i8: None,
+                scale_x_attn: None,
+            });
+            captured.push(CapturedLayerScales {
+                scale_x_attn,
+                scale_x_ffn,
+                scale_h,
+            });
         }
 
         results.push((RetainedTokenState { layers }, captured));
@@ -1486,7 +1922,14 @@ fn build_deep_prefix_audit() -> (
 
     // Multi-token forward with proper attention
     let all_results = multi_token_forward_with_attention(
-        &cfg, &model, &residuals, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+        &cfg,
+        &model,
+        &residuals,
+        &rmsnorm_attn,
+        &rmsnorm_ffn,
+        &ws,
+        &scales,
+        1e-5,
     );
     let (all_retained, all_scales): (Vec<_>, Vec<_>) = all_results.into_iter().unzip();
 
@@ -1530,7 +1973,7 @@ fn build_deep_prefix_audit() -> (
         None,
         None,
         Some(&lookup),
-        true, // deep_prefix
+        true,  // deep_prefix
         false, // use_captured_x_attn
     );
 
@@ -1541,8 +1984,14 @@ fn build_deep_prefix_audit() -> (
 fn phase7b_deep_prefix_attention_replay_pass() {
     let (key, response) = build_deep_prefix_audit();
     // Verify prefix data is present
-    assert!(response.prefix_retained.is_some(), "should have prefix_retained");
-    assert!(response.prefix_shell_openings.is_some(), "should have prefix_shell_openings");
+    assert!(
+        response.prefix_retained.is_some(),
+        "should have prefix_retained"
+    );
+    assert!(
+        response.prefix_shell_openings.is_some(),
+        "should have prefix_shell_openings"
+    );
     let prefix_len = response.prefix_retained.as_ref().unwrap().len();
     assert_eq!(prefix_len, 2, "token 2 should have 2 prefix tokens");
 
@@ -1566,7 +2015,10 @@ fn phase7b_deep_prefix_tampered_attention_rejected() {
     let report = verify_response(&key, &response, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::AttentionReplayMismatch),
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::AttentionReplayMismatch),
         "should have AttentionReplayMismatch from tampered prefix attention: {:?}",
         report.failures,
     );
@@ -1627,13 +2079,27 @@ fn build_routine_audit_with_fake_a() -> (
 
     // Honest multi-token forward (proper attention with KV cache)
     let honest_results = multi_token_forward_with_attention(
-        &cfg, &model, &residuals, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+        &cfg,
+        &model,
+        &residuals,
+        &rmsnorm_attn,
+        &rmsnorm_ffn,
+        &ws,
+        &scales,
+        1e-5,
     );
     let honest_a_layer0 = honest_results[1].0.layers[0].a.clone();
 
     // Fake: single-token forward for token 1 (ignores KV cache from token 0)
     let (fake_retained_1, fake_scales_1) = full_bridge_forward(
-        &cfg, &model, &residuals[1], &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+        &cfg,
+        &model,
+        &residuals[1],
+        &rmsnorm_attn,
+        &rmsnorm_ffn,
+        &ws,
+        &scales,
+        1e-5,
     );
     let fake_a_layer0 = fake_retained_1.layers[0].a.clone();
 
@@ -1661,8 +2127,18 @@ fn build_routine_audit_with_fake_a() -> (
         embedding_proof: Some(proof),
     };
     let response = open_v4(
-        &state, 1, &ToyWeights(&model), &cfg, &ws,
-        &[], Some(&bridge), None, None, None, false, false,
+        &state,
+        1,
+        &ToyWeights(&model),
+        &cfg,
+        &ws,
+        &[],
+        Some(&bridge),
+        None,
+        None,
+        None,
+        false,
+        false,
     );
 
     (key, response, honest_a_layer0, fake_a_layer0)
@@ -1782,13 +2258,27 @@ fn build_deep_prefix_audit_fake_opened_a() -> (
 
     // Honest multi-token forward
     let honest_results = multi_token_forward_with_attention(
-        &cfg, &model, &residuals, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+        &cfg,
+        &model,
+        &residuals,
+        &rmsnorm_attn,
+        &rmsnorm_ffn,
+        &ws,
+        &scales,
+        1e-5,
     );
     let honest_a_layer0 = honest_results[2].0.layers[0].a.clone();
 
     // Fake: single-token forward for token 2 (ignores KV cache from tokens 0,1)
     let (fake_retained_2, fake_scales_2) = full_bridge_forward(
-        &cfg, &model, &residuals[2], &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+        &cfg,
+        &model,
+        &residuals[2],
+        &rmsnorm_attn,
+        &rmsnorm_ffn,
+        &ws,
+        &scales,
+        1e-5,
     );
     let fake_a_layer0 = fake_retained_2.layers[0].a.clone();
 
@@ -1833,8 +2323,18 @@ fn build_deep_prefix_audit_fake_opened_a() -> (
         embedding_proof: Some(proof),
     };
     let response = open_v4(
-        &state, 2, &ToyWeights(&model), &cfg, &ws,
-        &[], Some(&bridge), None, None, Some(&lookup), true, false,
+        &state,
+        2,
+        &ToyWeights(&model),
+        &cfg,
+        &ws,
+        &[],
+        Some(&bridge),
+        None,
+        None,
+        Some(&lookup),
+        true,
+        false,
     );
 
     (key, response, honest_a_layer0, fake_a_layer0)
@@ -1857,8 +2357,14 @@ fn full_bridge_forward_with_rope(
     position: usize,
 ) -> (RetainedTokenState, Vec<CapturedLayerScales>) {
     let results = multi_token_forward_with_rope(
-        cfg, model, &[initial_residual.to_vec()],
-        rmsnorm_attn, rmsnorm_ffn, weight_scales, scales, eps,
+        cfg,
+        model,
+        &[initial_residual.to_vec()],
+        rmsnorm_attn,
+        rmsnorm_ffn,
+        weight_scales,
+        scales,
+        eps,
     );
     // The forward ran at t=0 internally, but the real position matters only for
     // RoPE. For a single-token shortcut, the attacker would process position 0.
@@ -1903,7 +2409,14 @@ fn build_deep_prefix_audit_roped() -> (
     key.embedding_merkle_root = Some(tree.root);
 
     let all_results = multi_token_forward_with_rope(
-        &cfg, &model, &residuals, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+        &cfg,
+        &model,
+        &residuals,
+        &rmsnorm_attn,
+        &rmsnorm_ffn,
+        &ws,
+        &scales,
+        1e-5,
     );
     let (all_retained, all_scales): (Vec<_>, Vec<_>) = all_results.into_iter().unzip();
 
@@ -1912,7 +2425,9 @@ fn build_deep_prefix_audit_roped() -> (
         let proof = verilm_core::merkle::prove(&tree, tid as usize);
         lookup_entries.insert(tid, (residuals[i].clone(), proof));
     }
-    let lookup = TestEmbeddingLookup { entries: lookup_entries };
+    let lookup = TestEmbeddingLookup {
+        entries: lookup_entries,
+    };
 
     let manifest = make_manifest(0.0, 0, 1.0);
     let params = FullBindingParams {
@@ -1933,8 +2448,18 @@ fn build_deep_prefix_audit_roped() -> (
         embedding_proof: Some(proof),
     };
     let response = open_v4(
-        &state, 2, &ToyWeights(&model), &cfg, &ws,
-        &[], Some(&bridge), None, None, Some(&lookup), true, false,
+        &state,
+        2,
+        &ToyWeights(&model),
+        &cfg,
+        &ws,
+        &[],
+        Some(&bridge),
+        None,
+        None,
+        Some(&lookup),
+        true,
+        false,
     );
 
     (key, response)
@@ -1953,7 +2478,11 @@ fn rope_deep_prefix_attention_replay_pass() {
         report.failures,
     );
     // Should have attention checks from both prefix and opened token
-    assert!(report.checks_run >= 20, "expected >= 20 checks, got {}", report.checks_run);
+    assert!(
+        report.checks_run >= 20,
+        "expected >= 20 checks, got {}",
+        report.checks_run
+    );
 }
 
 /// Build a 3-token audit with RoPE where the opened token uses a single-token
@@ -1996,13 +2525,28 @@ fn build_deep_prefix_audit_roped_fake_a() -> (
 
     // Honest multi-token forward with RoPE
     let honest_results = multi_token_forward_with_rope(
-        &cfg, &model, &residuals, &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5,
+        &cfg,
+        &model,
+        &residuals,
+        &rmsnorm_attn,
+        &rmsnorm_ffn,
+        &ws,
+        &scales,
+        1e-5,
     );
     let honest_a_layer0 = honest_results[2].0.layers[0].a.clone();
 
     // Fake: single-token RoPE forward for token 2 (ignores KV cache from tokens 0,1)
     let (fake_retained_2, fake_scales_2) = full_bridge_forward_with_rope(
-        &cfg, &model, &residuals[2], &rmsnorm_attn, &rmsnorm_ffn, &ws, &scales, 1e-5, 2,
+        &cfg,
+        &model,
+        &residuals[2],
+        &rmsnorm_attn,
+        &rmsnorm_ffn,
+        &ws,
+        &scales,
+        1e-5,
+        2,
     );
     let fake_a_layer0 = fake_retained_2.layers[0].a.clone();
 
@@ -2022,7 +2566,9 @@ fn build_deep_prefix_audit_roped_fake_a() -> (
         let proof = verilm_core::merkle::prove(&tree, tid as usize);
         lookup_entries.insert(tid, (residuals[i].clone(), proof));
     }
-    let lookup = TestEmbeddingLookup { entries: lookup_entries };
+    let lookup = TestEmbeddingLookup {
+        entries: lookup_entries,
+    };
 
     let manifest = make_manifest(0.0, 0, 1.0);
     let params = FullBindingParams {
@@ -2043,8 +2589,18 @@ fn build_deep_prefix_audit_roped_fake_a() -> (
         embedding_proof: Some(proof),
     };
     let response = open_v4(
-        &state, 2, &ToyWeights(&model), &cfg, &ws,
-        &[], Some(&bridge), None, None, Some(&lookup), true, false,
+        &state,
+        2,
+        &ToyWeights(&model),
+        &cfg,
+        &ws,
+        &[],
+        Some(&bridge),
+        None,
+        None,
+        Some(&lookup),
+        true,
+        false,
     );
 
     (key, response, honest_a_layer0, fake_a_layer0)
@@ -2068,8 +2624,7 @@ fn rope_deep_prefix_fake_a_caught() {
     );
     assert!(
         report.failures.iter().any(|f| {
-            f.code == FailureCode::AttentionReplayMismatch
-                && f.message.contains("opened token")
+            f.code == FailureCode::AttentionReplayMismatch && f.message.contains("opened token")
         }),
         "should have AttentionReplayMismatch for opened token: {:?}",
         report.failures,
@@ -2099,8 +2654,7 @@ fn deep_prefix_opened_token_fake_a_caught() {
     );
     assert!(
         report.failures.iter().any(|f| {
-            f.code == FailureCode::AttentionReplayMismatch
-                && f.message.contains("opened token")
+            f.code == FailureCode::AttentionReplayMismatch && f.message.contains("opened token")
         }),
         "should have AttentionReplayMismatch for opened token: {:?}",
         report.failures,
@@ -2114,7 +2668,10 @@ fn deep_prefix_opened_token_fake_a_caught() {
 #[test]
 fn corridor_toy_model_all_diffs_zero() {
     let (key, response) = build_deep_prefix_audit();
-    assert!(!key.rope_aware_replay, "toy model should not use RoPE replay");
+    assert!(
+        !key.rope_aware_replay,
+        "toy model should not use RoPE replay"
+    );
 
     let report = verilm_verify::corridor::measure_corridor(&key, &response, None).unwrap();
     assert_eq!(
@@ -2123,8 +2680,16 @@ fn corridor_toy_model_all_diffs_zero() {
         report.measurements,
     );
     for m in &report.measurements {
-        assert_eq!(m.linf, 0, "layer {} pos {}: expected zero linf", m.layer, m.token_position);
-        assert_eq!(m.frac_eq, 1.0, "layer {} pos {}: expected all equal", m.layer, m.token_position);
+        assert_eq!(
+            m.linf, 0,
+            "layer {} pos {}: expected zero linf",
+            m.layer, m.token_position
+        );
+        assert_eq!(
+            m.frac_eq, 1.0,
+            "layer {} pos {}: expected all equal",
+            m.layer, m.token_position
+        );
         assert_eq!(m.histogram[0], m.n_elements);
     }
     assert!(!report.measurements.is_empty(), "should have measurements");
@@ -2184,7 +2749,11 @@ fn corridor_aggregation_with_known_diffs() {
     let report = verilm_verify::corridor::measure_corridor(&key, &response, None).unwrap();
 
     // global_linf should be 5 (the larger tamper)
-    assert_eq!(report.global_linf, 5, "global_linf: {:?}", report.per_layer_max_linf);
+    assert_eq!(
+        report.global_linf, 5,
+        "global_linf: {:?}",
+        report.per_layer_max_linf
+    );
 
     // per_layer_max_linf: layer 0 should be 3, layer 1 should be 5
     assert!(report.per_layer_max_linf.len() >= 2);
@@ -2195,12 +2764,16 @@ fn corridor_aggregation_with_known_diffs() {
     // pos=2 (diff=5). They're sorted by position.
     assert!(report.per_position_max_linf.len() >= 2);
     // Find the max linf for each position from measurements directly
-    let pos1_max = report.measurements.iter()
+    let pos1_max = report
+        .measurements
+        .iter()
         .filter(|m| m.token_position == 1)
         .map(|m| m.linf)
         .max()
         .unwrap_or(0);
-    let pos2_max = report.measurements.iter()
+    let pos2_max = report
+        .measurements
+        .iter()
         .filter(|m| m.token_position == 2)
         .map(|m| m.linf)
         .max()
@@ -2214,7 +2787,9 @@ fn corridor_aggregation_with_known_diffs() {
     }
 
     // Check that the tampered measurement for layer 0 / pos 1 has correct frac fields
-    let m_l0_p1 = report.measurements.iter()
+    let m_l0_p1 = report
+        .measurements
+        .iter()
         .find(|m| m.layer == 0 && m.token_position == 1)
         .expect("should have measurement for layer 0, pos 1");
     assert_eq!(m_l0_p1.linf, 3);
@@ -2223,13 +2798,15 @@ fn corridor_aggregation_with_known_diffs() {
     assert!(
         (m_l0_p1.frac_eq - expected_frac_eq).abs() < 1e-10,
         "frac_eq: got {} expected {}",
-        m_l0_p1.frac_eq, expected_frac_eq,
+        m_l0_p1.frac_eq,
+        expected_frac_eq,
     );
     // frac_le_2 should also be (n-1)/n since the one tampered element has diff=3
     assert!(
         (m_l0_p1.frac_le_2 - expected_frac_eq).abs() < 1e-10,
         "frac_le_2: got {} expected {}",
-        m_l0_p1.frac_le_2, expected_frac_eq,
+        m_l0_p1.frac_le_2,
+        expected_frac_eq,
     );
 }
 
@@ -2245,12 +2822,19 @@ fn bridge_check_and_gate_exact_match_passes() {
     // full_bridge_forward now populates x_attn_i8 + scale_x_attn — should pass.
     let binary = to_binary(&response);
     let report = verify_binary(&key, &binary, None, None).unwrap();
-    assert_eq!(report.verdict, Verdict::Pass,
-        "exact-match committed x_attn should pass: {:?}", report.failures);
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "exact-match committed x_attn should pass: {:?}",
+        report.failures
+    );
     assert!(
-        !report.failures.iter().any(|f| matches!(f.code,
-            FailureCode::BridgeXAttnMismatch | FailureCode::BridgeScaleMismatch)),
-        "no bridge mismatch expected: {:?}", report.failures
+        !report.failures.iter().any(|f| matches!(
+            f.code,
+            FailureCode::BridgeXAttnMismatch | FailureCode::BridgeScaleMismatch
+        )),
+        "no bridge mismatch expected: {:?}",
+        report.failures
     );
 }
 
@@ -2269,8 +2853,12 @@ fn bridge_check_and_gate_tampered_x_attn_rejected() {
     let report = verify_binary(&key, &binary, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::BridgeXAttnMismatch),
-        "tampered x_attn should produce BridgeXAttnMismatch: {:?}", report.failures
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::BridgeXAttnMismatch),
+        "tampered x_attn should produce BridgeXAttnMismatch: {:?}",
+        report.failures
     );
 }
 
@@ -2284,8 +2872,12 @@ fn bridge_check_and_gate_tampered_scale_rejected() {
     let report = verify_binary(&key, &binary, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::BridgeScaleMismatch),
-        "tampered scale should produce BridgeScaleMismatch: {:?}", report.failures
+        report
+            .failures
+            .iter()
+            .any(|f| f.code == FailureCode::BridgeScaleMismatch),
+        "tampered scale should produce BridgeScaleMismatch: {:?}",
+        report.failures
     );
 }
 
@@ -2297,21 +2889,26 @@ fn bridge_hash_v3_includes_x_attn() {
     let a = vec![1i8, 2, 3, 4];
     let with_xa = RetainedTokenState {
         layers: vec![RetainedLayerState {
-            a: a.clone(), scale_a: 1.0,
+            a: a.clone(),
+            scale_a: 1.0,
             x_attn_i8: Some(vec![10i8, 20, 30, 40]),
             scale_x_attn: Some(0.5),
         }],
     };
     let without_xa = RetainedTokenState {
         layers: vec![RetainedLayerState {
-            a: a.clone(), scale_a: 1.0,
+            a: a.clone(),
+            scale_a: 1.0,
             x_attn_i8: None,
             scale_x_attn: None,
         }],
     };
     let h1 = verilm_core::merkle::hash_retained_state_direct(&with_xa);
     let h2 = verilm_core::merkle::hash_retained_state_direct(&without_xa);
-    assert_ne!(h1, h2, "committed vs uncommitted x_attn must produce different hashes");
+    assert_ne!(
+        h1, h2,
+        "committed vs uncommitted x_attn must produce different hashes"
+    );
 }
 
 /// Verify that different committed x_attn values produce different hashes.
@@ -2321,14 +2918,18 @@ fn bridge_hash_v3_different_x_attn_different_hash() {
 
     let make = |xa: Vec<i8>| RetainedTokenState {
         layers: vec![RetainedLayerState {
-            a: vec![1i8; 4], scale_a: 1.0,
+            a: vec![1i8; 4],
+            scale_a: 1.0,
             x_attn_i8: Some(xa),
             scale_x_attn: Some(0.5),
         }],
     };
     let h1 = verilm_core::merkle::hash_retained_state_direct(&make(vec![10, 20, 30, 40]));
     let h2 = verilm_core::merkle::hash_retained_state_direct(&make(vec![11, 20, 30, 40]));
-    assert_ne!(h1, h2, "different x_attn values must produce different hashes");
+    assert_ne!(
+        h1, h2,
+        "different x_attn values must produce different hashes"
+    );
 }
 
 // ===========================================================================
@@ -2395,7 +2996,9 @@ fn kv_merkle_tree_roundtrip() {
     ];
 
     let layer = 0;
-    let leaves: Vec<[u8; 32]> = entries.iter().enumerate()
+    let leaves: Vec<[u8; 32]> = entries
+        .iter()
+        .enumerate()
         .map(|(pos, (k, v))| merkle::hash_kv_entry(layer, pos, k, v))
         .collect();
 
@@ -2442,16 +3045,20 @@ fn kv_commit_e2e_toy_autoregressive() {
     let traces = verilm_test_vectors::forward_pass_autoregressive(&cfg, &model, &initial, 3);
     let kv_entries = verilm_test_vectors::kv_entries_from_traces(&cfg, &traces);
 
-    let all_retained: Vec<_> = traces.iter().map(|token_traces| {
-        verilm_core::types::RetainedTokenState {
-            layers: token_traces.iter().map(|lt| RetainedLayerState {
-                a: lt.a.clone(),
-                scale_a: lt.scale_a.unwrap_or(1.0),
-                x_attn_i8: None,
-                scale_x_attn: None,
-            }).collect(),
-        }
-    }).collect();
+    let all_retained: Vec<_> = traces
+        .iter()
+        .map(|token_traces| verilm_core::types::RetainedTokenState {
+            layers: token_traces
+                .iter()
+                .map(|lt| RetainedLayerState {
+                    a: lt.a.clone(),
+                    scale_a: lt.scale_a.unwrap_or(1.0),
+                    x_attn_i8: None,
+                    scale_x_attn: None,
+                })
+                .collect(),
+        })
+        .collect();
 
     let params = verilm_prover::FullBindingParams {
         token_ids: &[10, 20, 30],
@@ -2461,12 +3068,24 @@ fn kv_commit_e2e_toy_autoregressive() {
         n_prompt_tokens: Some(1),
     };
     let scales = vec![
-        vec![verilm_prover::CapturedLayerScales { scale_x_attn: 1.0, scale_x_ffn: 1.0, scale_h: 1.0 }; cfg.n_layers];
+        vec![
+            verilm_prover::CapturedLayerScales {
+                scale_x_attn: 1.0,
+                scale_x_ffn: 1.0,
+                scale_h: 1.0
+            };
+            cfg.n_layers
+        ];
         3
     ];
 
     let (commitment, _state) = commit_minimal(
-        all_retained, &params, None, scales, None, Some(kv_entries.clone()),
+        all_retained,
+        &params,
+        None,
+        scales,
+        None,
+        Some(kv_entries.clone()),
     );
 
     // kv_roots must have one root per layer.
@@ -2474,12 +3093,17 @@ fn kv_commit_e2e_toy_autoregressive() {
 
     // Each root must match independently computed root.
     for (layer_idx, layer_entries) in kv_entries.iter().enumerate() {
-        let leaves: Vec<[u8; 32]> = layer_entries.iter().enumerate()
+        let leaves: Vec<[u8; 32]> = layer_entries
+            .iter()
+            .enumerate()
             .map(|(pos, e)| merkle::hash_kv_entry(layer_idx, pos, &e.k_roped, &e.v_deq))
             .collect();
         let expected_root = merkle::compute_root(&leaves);
-        assert_eq!(commitment.kv_roots[layer_idx], expected_root,
-            "kv_root mismatch at layer {}", layer_idx);
+        assert_eq!(
+            commitment.kv_roots[layer_idx], expected_root,
+            "kv_root mismatch at layer {}",
+            layer_idx
+        );
     }
 
     // Each layer should have 3 entries (one per token).
@@ -2517,16 +3141,20 @@ fn kv_open_produces_valid_merkle_proofs() {
     let traces = verilm_test_vectors::forward_pass_autoregressive(&cfg, &model, &initial, 3);
     let kv_entries = verilm_test_vectors::kv_entries_from_traces(&cfg, &traces);
 
-    let all_retained: Vec<_> = traces.iter().map(|token_traces| {
-        verilm_core::types::RetainedTokenState {
-            layers: token_traces.iter().map(|lt| RetainedLayerState {
-                a: lt.a.clone(),
-                scale_a: lt.scale_a.unwrap_or(1.0),
-                x_attn_i8: None,
-                scale_x_attn: None,
-            }).collect(),
-        }
-    }).collect();
+    let all_retained: Vec<_> = traces
+        .iter()
+        .map(|token_traces| verilm_core::types::RetainedTokenState {
+            layers: token_traces
+                .iter()
+                .map(|lt| RetainedLayerState {
+                    a: lt.a.clone(),
+                    scale_a: lt.scale_a.unwrap_or(1.0),
+                    x_attn_i8: None,
+                    scale_x_attn: None,
+                })
+                .collect(),
+        })
+        .collect();
 
     let params = verilm_prover::FullBindingParams {
         token_ids: &[10, 20, 30],
@@ -2536,35 +3164,76 @@ fn kv_open_produces_valid_merkle_proofs() {
         n_prompt_tokens: Some(1),
     };
     let scales = vec![
-        vec![verilm_prover::CapturedLayerScales { scale_x_attn: 1.0, scale_x_ffn: 1.0, scale_h: 1.0 }; cfg.n_layers];
+        vec![
+            verilm_prover::CapturedLayerScales {
+                scale_x_attn: 1.0,
+                scale_x_ffn: 1.0,
+                scale_h: 1.0
+            };
+            cfg.n_layers
+        ];
         3
     ];
 
-    let (_commitment, state) = commit_minimal(
-        all_retained, &params, None, scales, None, Some(kv_entries),
-    );
+    let (_commitment, state) =
+        commit_minimal(all_retained, &params, None, scales, None, Some(kv_entries));
 
     // Open audit for token 2 (last token) — should include KV for positions 0..=2.
     let response = verilm_prover::open_v4(
-        &state, 2, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false,
+        &state,
+        2,
+        &ToyWeights(&model),
+        &cfg,
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
     );
 
     // Verify KV entries and proofs are present.
-    let kv_entries = response.kv_entries.as_ref().expect("kv_entries must be present");
-    let kv_proofs = response.kv_proofs.as_ref().expect("kv_proofs must be present");
-    assert_eq!(kv_entries.len(), cfg.n_layers, "one set of entries per layer");
+    let kv_entries = response
+        .kv_entries
+        .as_ref()
+        .expect("kv_entries must be present");
+    let kv_proofs = response
+        .kv_proofs
+        .as_ref()
+        .expect("kv_proofs must be present");
+    assert_eq!(
+        kv_entries.len(),
+        cfg.n_layers,
+        "one set of entries per layer"
+    );
     assert_eq!(kv_proofs.len(), cfg.n_layers, "one set of proofs per layer");
 
     // Each layer should have 3 entries (positions 0, 1, 2).
     for (layer_idx, (entries, proofs)) in kv_entries.iter().zip(kv_proofs.iter()).enumerate() {
-        assert_eq!(entries.len(), 3, "layer {} should have 3 KV entries", layer_idx);
-        assert_eq!(proofs.len(), 3, "layer {} should have 3 KV proofs", layer_idx);
+        assert_eq!(
+            entries.len(),
+            3,
+            "layer {} should have 3 KV entries",
+            layer_idx
+        );
+        assert_eq!(
+            proofs.len(),
+            3,
+            "layer {} should have 3 KV proofs",
+            layer_idx
+        );
 
         let root = response.commitment.kv_roots[layer_idx];
         for (pos, (entry, proof)) in entries.iter().zip(proofs.iter()).enumerate() {
             let leaf = merkle::hash_kv_entry(layer_idx, pos, &entry.k_roped, &entry.v_deq);
-            assert!(merkle::verify(&root, &leaf, proof),
-                "KV proof invalid at layer {} pos {}", layer_idx, pos);
+            assert!(
+                merkle::verify(&root, &leaf, proof),
+                "KV proof invalid at layer {} pos {}",
+                layer_idx,
+                pos
+            );
         }
     }
 }
@@ -2581,16 +3250,20 @@ fn kv_tampered_entry_fails_proof() {
     let traces = verilm_test_vectors::forward_pass_autoregressive(&cfg, &model, &initial, 2);
     let kv_entries = verilm_test_vectors::kv_entries_from_traces(&cfg, &traces);
 
-    let all_retained: Vec<_> = traces.iter().map(|token_traces| {
-        verilm_core::types::RetainedTokenState {
-            layers: token_traces.iter().map(|lt| RetainedLayerState {
-                a: lt.a.clone(),
-                scale_a: lt.scale_a.unwrap_or(1.0),
-                x_attn_i8: None,
-                scale_x_attn: None,
-            }).collect(),
-        }
-    }).collect();
+    let all_retained: Vec<_> = traces
+        .iter()
+        .map(|token_traces| verilm_core::types::RetainedTokenState {
+            layers: token_traces
+                .iter()
+                .map(|lt| RetainedLayerState {
+                    a: lt.a.clone(),
+                    scale_a: lt.scale_a.unwrap_or(1.0),
+                    x_attn_i8: None,
+                    scale_x_attn: None,
+                })
+                .collect(),
+        })
+        .collect();
 
     let params = verilm_prover::FullBindingParams {
         token_ids: &[10, 20],
@@ -2600,16 +3273,33 @@ fn kv_tampered_entry_fails_proof() {
         n_prompt_tokens: Some(1),
     };
     let scales = vec![
-        vec![verilm_prover::CapturedLayerScales { scale_x_attn: 1.0, scale_x_ffn: 1.0, scale_h: 1.0 }; cfg.n_layers];
+        vec![
+            verilm_prover::CapturedLayerScales {
+                scale_x_attn: 1.0,
+                scale_x_ffn: 1.0,
+                scale_h: 1.0
+            };
+            cfg.n_layers
+        ];
         2
     ];
 
-    let (_commitment, state) = commit_minimal(
-        all_retained, &params, None, scales, None, Some(kv_entries),
-    );
+    let (_commitment, state) =
+        commit_minimal(all_retained, &params, None, scales, None, Some(kv_entries));
 
     let mut response = verilm_prover::open_v4(
-        &state, 1, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false,
+        &state,
+        1,
+        &ToyWeights(&model),
+        &cfg,
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
     );
 
     // Tamper with KV entry at layer 0, position 0.
@@ -2620,8 +3310,10 @@ fn kv_tampered_entry_fails_proof() {
     let proofs = response.kv_proofs.as_ref().unwrap();
     let tampered_leaf = merkle::hash_kv_entry(0, 0, &kv[0][0].k_roped, &kv[0][0].v_deq);
     let root = response.commitment.kv_roots[0];
-    assert!(!merkle::verify(&root, &tampered_leaf, &proofs[0][0]),
-        "tampered KV entry must fail Merkle proof");
+    assert!(
+        !merkle::verify(&root, &tampered_leaf, &proofs[0][0]),
+        "tampered KV entry must fail Merkle proof"
+    );
 }
 
 // ===========================================================================
@@ -2631,14 +3323,16 @@ fn kv_tampered_entry_fails_proof() {
 /// Helper: produce a toy audit response with KV entries committed and opened.
 fn kv_toy_response(
     n_tokens: usize,
-) -> (verilm_core::types::VerifierKey, verilm_core::types::V4AuditResponse) {
+) -> (
+    verilm_core::types::VerifierKey,
+    verilm_core::types::V4AuditResponse,
+) {
     let cfg = ModelConfig::toy();
     let model = generate_model(&cfg, 42);
     let key = generate_key(&cfg, &model, [1u8; 32]);
     let initial: Vec<i8> = (0..cfg.hidden_dim as i8).collect();
 
-    let traces =
-        verilm_test_vectors::forward_pass_autoregressive(&cfg, &model, &initial, n_tokens);
+    let traces = verilm_test_vectors::forward_pass_autoregressive(&cfg, &model, &initial, n_tokens);
     let kv_entries = verilm_test_vectors::kv_entries_from_traces(&cfg, &traces);
 
     let all_retained: Vec<_> = traces
@@ -2680,8 +3374,20 @@ fn kv_toy_response(
         commit_minimal(all_retained, &params, None, scales, None, Some(kv_entries));
 
     let last_token = n_tokens - 1;
-    let response =
-        open_v4(&state, last_token as u32, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false);
+    let response = open_v4(
+        &state,
+        last_token as u32,
+        &ToyWeights(&model),
+        &cfg,
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    );
 
     (key, response)
 }
@@ -2698,15 +3404,21 @@ fn kv_canonical_valid_proofs_pass() {
     let kv_failures: Vec<_> = report
         .failures
         .iter()
-        .filter(|f| matches!(
-            f.code,
-            FailureCode::KvRootsCountMismatch
-                | FailureCode::KvEntriesCountMismatch
-                | FailureCode::KvProofInvalid
-                | FailureCode::KvProofCountMismatch
-        ))
+        .filter(|f| {
+            matches!(
+                f.code,
+                FailureCode::KvRootsCountMismatch
+                    | FailureCode::KvEntriesCountMismatch
+                    | FailureCode::KvProofInvalid
+                    | FailureCode::KvProofCountMismatch
+            )
+        })
         .collect();
-    assert!(kv_failures.is_empty(), "unexpected KV failures: {:?}", kv_failures);
+    assert!(
+        kv_failures.is_empty(),
+        "unexpected KV failures: {:?}",
+        kv_failures
+    );
 }
 
 #[test]
@@ -2767,6 +3479,33 @@ fn kv_canonical_entries_without_proofs_rejected() {
 }
 
 #[test]
+fn kv_roots_without_opened_entries_are_allowed() {
+    let (key, mut response) = kv_toy_response(3);
+
+    response.kv_entries = None;
+    response.kv_proofs = None;
+
+    let report = verify_response(&key, &response, None, None);
+    let kv_failures: Vec<_> = report
+        .failures
+        .iter()
+        .filter(|f| {
+            matches!(
+                f.code,
+                FailureCode::KvRootsCountMismatch
+                    | FailureCode::KvEntriesCountMismatch
+                    | FailureCode::KvProofInvalid
+                    | FailureCode::KvProofCountMismatch
+            )
+        })
+        .collect();
+    assert!(
+        kv_failures.is_empty(),
+        "kv roots without opened entries should remain verifier-acceptable"
+    );
+}
+
+#[test]
 fn kv_canonical_legacy_no_kv_roots_skipped() {
     let (key, mut response) = kv_toy_response(3);
 
@@ -2780,15 +3519,20 @@ fn kv_canonical_legacy_no_kv_roots_skipped() {
     let kv_failures: Vec<_> = report
         .failures
         .iter()
-        .filter(|f| matches!(
-            f.code,
-            FailureCode::KvRootsCountMismatch
-                | FailureCode::KvEntriesCountMismatch
-                | FailureCode::KvProofInvalid
-                | FailureCode::KvProofCountMismatch
-        ))
+        .filter(|f| {
+            matches!(
+                f.code,
+                FailureCode::KvRootsCountMismatch
+                    | FailureCode::KvEntriesCountMismatch
+                    | FailureCode::KvProofInvalid
+                    | FailureCode::KvProofCountMismatch
+            )
+        })
         .collect();
-    assert!(kv_failures.is_empty(), "legacy (no kv_roots) should skip KV phase");
+    assert!(
+        kv_failures.is_empty(),
+        "legacy (no kv_roots) should skip KV phase"
+    );
 }
 
 /// compute_kv_transcript produces the same KV entries as kv_entries_from_traces
@@ -2800,8 +3544,7 @@ fn kv_compute_transcript_matches_traces() {
     let model = generate_model(&cfg, 42);
     let initial: Vec<i8> = (0..cfg.hidden_dim as i8).collect();
 
-    let traces =
-        verilm_test_vectors::forward_pass_autoregressive(&cfg, &model, &initial, 3);
+    let traces = verilm_test_vectors::forward_pass_autoregressive(&cfg, &model, &initial, 3);
 
     // Reference: KV entries from traces (the test-vectors path).
     let reference_kv = verilm_test_vectors::kv_entries_from_traces(&cfg, &traces);
@@ -2809,9 +3552,7 @@ fn kv_compute_transcript_matches_traces() {
     // Build x_attn per token/layer from traces (simulates GPU capture).
     let captured_x_attn: Vec<Vec<Vec<i8>>> = traces
         .iter()
-        .map(|token_traces| {
-            token_traces.iter().map(|lt| lt.x_attn.clone()).collect()
-        })
+        .map(|token_traces| token_traces.iter().map(|lt| lt.x_attn.clone()).collect())
         .collect();
 
     // Build captured scales (toy model uses unit scales).
@@ -2877,15 +3618,12 @@ fn kv_derived_transcript_passes_canonical_verification() {
     let key = generate_key(&cfg, &model, [1u8; 32]);
     let initial: Vec<i8> = (0..cfg.hidden_dim as i8).collect();
 
-    let traces =
-        verilm_test_vectors::forward_pass_autoregressive(&cfg, &model, &initial, 3);
+    let traces = verilm_test_vectors::forward_pass_autoregressive(&cfg, &model, &initial, 3);
 
     // Build x_attn and retained states from traces.
     let captured_x_attn: Vec<Vec<Vec<i8>>> = traces
         .iter()
-        .map(|token_traces| {
-            token_traces.iter().map(|lt| lt.x_attn.clone()).collect()
-        })
+        .map(|token_traces| token_traces.iter().map(|lt| lt.x_attn.clone()).collect())
         .collect();
 
     let all_retained: Vec<_> = traces
@@ -2938,12 +3676,28 @@ fn kv_derived_transcript_passes_canonical_verification() {
     let scales_for_commit = captured_scales;
 
     let (_commitment, state) = commit_minimal(
-        all_retained, &params, None, scales_for_commit, Some(captured_x_attn), Some(kv_transcripts),
+        all_retained,
+        &params,
+        None,
+        scales_for_commit,
+        Some(captured_x_attn),
+        Some(kv_transcripts),
     );
 
     // Open audit for last token.
     let response = open_v4(
-        &state, 2, &ToyWeights(&model), &cfg, &[], &[], None, None, None, None, false, false,
+        &state,
+        2,
+        &ToyWeights(&model),
+        &cfg,
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
     );
 
     // Verify: KV roots present, entries + proofs present.
@@ -2956,13 +3710,15 @@ fn kv_derived_transcript_passes_canonical_verification() {
     let kv_failures: Vec<_> = report
         .failures
         .iter()
-        .filter(|f| matches!(
-            f.code,
-            FailureCode::KvRootsCountMismatch
-                | FailureCode::KvEntriesCountMismatch
-                | FailureCode::KvProofInvalid
-                | FailureCode::KvProofCountMismatch
-        ))
+        .filter(|f| {
+            matches!(
+                f.code,
+                FailureCode::KvRootsCountMismatch
+                    | FailureCode::KvEntriesCountMismatch
+                    | FailureCode::KvProofInvalid
+                    | FailureCode::KvProofCountMismatch
+            )
+        })
         .collect();
     assert!(
         kv_failures.is_empty(),
@@ -2998,7 +3754,12 @@ fn kv_entry_json_round_trip_hash_stability() {
     let restored: KvEntry = serde_json::from_str(&json).unwrap();
 
     // Check bit-exact preservation of every f64
-    for (i, (orig, rt)) in entry.k_roped.iter().zip(restored.k_roped.iter()).enumerate() {
+    for (i, (orig, rt)) in entry
+        .k_roped
+        .iter()
+        .zip(restored.k_roped.iter())
+        .enumerate()
+    {
         assert_eq!(
             orig.to_bits(),
             rt.to_bits(),
@@ -3026,3 +3787,215 @@ fn kv_entry_json_round_trip_hash_stability() {
     );
 }
 
+#[test]
+fn kv_derived_transcript_full_response_json_round_trip_passes() {
+    let cfg = ModelConfig::toy();
+    let model = generate_model(&cfg, 42);
+    let key = generate_key(&cfg, &model, [1u8; 32]);
+    let initial: Vec<i8> = (0..cfg.hidden_dim as i8).collect();
+
+    let traces = verilm_test_vectors::forward_pass_autoregressive(&cfg, &model, &initial, 3);
+
+    let captured_x_attn: Vec<Vec<Vec<i8>>> = traces
+        .iter()
+        .map(|token_traces| token_traces.iter().map(|lt| lt.x_attn.clone()).collect())
+        .collect();
+
+    let all_retained: Vec<_> = traces
+        .iter()
+        .map(|token_traces| RetainedTokenState {
+            layers: token_traces
+                .iter()
+                .map(|lt| RetainedLayerState {
+                    a: lt.a.clone(),
+                    scale_a: lt.scale_a.unwrap_or(1.0),
+                    x_attn_i8: None,
+                    scale_x_attn: None,
+                })
+                .collect(),
+        })
+        .collect();
+
+    let captured_scales: Vec<Vec<CapturedLayerScales>> = traces
+        .iter()
+        .map(|token_traces| {
+            token_traces
+                .iter()
+                .map(|_| CapturedLayerScales {
+                    scale_x_attn: 1.0,
+                    scale_x_ffn: 1.0,
+                    scale_h: 1.0,
+                })
+                .collect()
+        })
+        .collect();
+
+    let kv_transcripts = verilm_prover::compute_kv_transcript(
+        &captured_x_attn,
+        &ToyWeights(&model),
+        &cfg,
+        &captured_scales,
+        &[],
+        &[],
+        &[],
+    );
+
+    let params = FullBindingParams {
+        token_ids: &[10, 20, 30],
+        prompt: b"kv derived json roundtrip",
+        sampling_seed: [9u8; 32],
+        manifest: None,
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(
+        all_retained,
+        &params,
+        None,
+        captured_scales,
+        Some(captured_x_attn),
+        Some(kv_transcripts),
+    );
+
+    let response = open_v4(
+        &state,
+        2,
+        &ToyWeights(&model),
+        &cfg,
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    );
+
+    let json = serde_json::to_string(&response).unwrap();
+    let restored: verilm_core::types::V4AuditResponse = serde_json::from_str(&json).unwrap();
+    let report = verify_response(&key, &restored, None, None);
+    let kv_failures: Vec<_> = report
+        .failures
+        .iter()
+        .filter(|f| {
+            matches!(
+                f.code,
+                FailureCode::KvRootsCountMismatch
+                    | FailureCode::KvEntriesCountMismatch
+                    | FailureCode::KvProofInvalid
+                    | FailureCode::KvProofCountMismatch
+            )
+        })
+        .collect();
+    assert!(
+        kv_failures.is_empty(),
+        "full-response JSON round-trip should preserve derived KV transcript: {:?}",
+        report.failures,
+    );
+}
+
+#[test]
+fn kv_derived_transcript_binary_round_trip_passes() {
+    let cfg = ModelConfig::toy();
+    let model = generate_model(&cfg, 42);
+    let key = generate_key(&cfg, &model, [1u8; 32]);
+    let initial: Vec<i8> = (0..cfg.hidden_dim as i8).collect();
+
+    let traces = verilm_test_vectors::forward_pass_autoregressive(&cfg, &model, &initial, 3);
+
+    let captured_x_attn: Vec<Vec<Vec<i8>>> = traces
+        .iter()
+        .map(|token_traces| token_traces.iter().map(|lt| lt.x_attn.clone()).collect())
+        .collect();
+
+    let all_retained: Vec<_> = traces
+        .iter()
+        .map(|token_traces| RetainedTokenState {
+            layers: token_traces
+                .iter()
+                .map(|lt| RetainedLayerState {
+                    a: lt.a.clone(),
+                    scale_a: lt.scale_a.unwrap_or(1.0),
+                    x_attn_i8: None,
+                    scale_x_attn: None,
+                })
+                .collect(),
+        })
+        .collect();
+
+    let captured_scales: Vec<Vec<CapturedLayerScales>> = traces
+        .iter()
+        .map(|token_traces| {
+            token_traces
+                .iter()
+                .map(|_| CapturedLayerScales {
+                    scale_x_attn: 1.0,
+                    scale_x_ffn: 1.0,
+                    scale_h: 1.0,
+                })
+                .collect()
+        })
+        .collect();
+
+    let kv_transcripts = verilm_prover::compute_kv_transcript(
+        &captured_x_attn,
+        &ToyWeights(&model),
+        &cfg,
+        &captured_scales,
+        &[],
+        &[],
+        &[],
+    );
+
+    let params = FullBindingParams {
+        token_ids: &[10, 20, 30],
+        prompt: b"kv derived binary roundtrip",
+        sampling_seed: [9u8; 32],
+        manifest: None,
+        n_prompt_tokens: Some(1),
+    };
+    let (_commitment, state) = commit_minimal(
+        all_retained,
+        &params,
+        None,
+        captured_scales,
+        Some(captured_x_attn),
+        Some(kv_transcripts),
+    );
+
+    let response = open_v4(
+        &state,
+        2,
+        &ToyWeights(&model),
+        &cfg,
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        false,
+        false,
+    );
+
+    let binary = verilm_core::serialize::serialize_v4_audit(&response);
+    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let kv_failures: Vec<_> = report
+        .failures
+        .iter()
+        .filter(|f| {
+            matches!(
+                f.code,
+                FailureCode::KvRootsCountMismatch
+                    | FailureCode::KvEntriesCountMismatch
+                    | FailureCode::KvProofInvalid
+                    | FailureCode::KvProofCountMismatch
+            )
+        })
+        .collect();
+    assert!(
+        kv_failures.is_empty(),
+        "binary round-trip should preserve derived KV transcript: {:?}",
+        report.failures,
+    );
+}

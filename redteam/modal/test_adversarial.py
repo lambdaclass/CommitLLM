@@ -1,13 +1,19 @@
 """
 Red-team adversarial campaign: try to break verifier checks on real GPU data.
 
-Runs honest inference on a real W8A8 model, obtains a valid audit proof,
-then systematically tampers with each verifier boundary and asserts the
-verifier rejects the proof **for the right reason** (roadmap #21, #25).
+Runs honest inference on a real W8A8 model, validates the canonical binary
+audit path, then systematically tampers with verifier-acceptable JSON debug
+snapshots and asserts the verifier rejects the proof **for the right reason**
+(roadmap #21, #25).
 
 This lives under `redteam/` on purpose: it is not an ordinary correctness
 test. Correctness tests ask whether an honest provider passes. This campaign
 asks whether a dishonest provider can cheat and still pass verification.
+
+The production receipt format is binary. The JSON form is a debug mutation
+surface only, and this script strips opened committed-KV payloads from that
+surface so real-model attacks do not depend on the non-canonical transport
+path.
 
 Wire format (V4AuditResponse):
   - token_index, token_id, prev_io_hash           (top-level)
@@ -53,6 +59,19 @@ import modal
 app = modal.App("verilm-test-adversarial")
 
 MODEL_ID = "neuralmagic/Qwen2.5-7B-Instruct-quantized.w8a8"
+BUILD_IGNORE = [
+    ".git",
+    "target",
+    "lean",
+    "article",
+    "docs",
+    "paper",
+    "research",
+    "site",
+    "scripts/__pycache__",
+    "*.pdf",
+    "CHANGELOG.md",
+]
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -71,9 +90,7 @@ image = (
         "pip install -e /opt/verilm",
         "python3 -c 'import site, os; open(os.path.join(site.getsitepackages()[0], \"verilm_capture.pth\"), \"w\").write(\"import verilm._startup\\n\")'",
     )
-    .add_local_dir(".", remote_path="/build", copy=True, ignore=[
-        ".git", "target", "scripts/__pycache__", "*.pdf", "CHANGELOG.md",
-    ])
+    .add_local_dir(".", remote_path="/build", copy=True, ignore=BUILD_IGNORE)
     .run_commands(
         "cd /build/crates/verilm-py && maturin build --release",
         "bash -c 'pip install /build/target/wheels/verilm_rs-*.whl'",
@@ -118,6 +135,26 @@ def _run_test():
     seed = hashlib.sha256(PROMPT.encode()).digest()
     key_json = verilm_rs.generate_key(model_dir, seed)
 
+    def fetch_audit(request_id, token_index, *, binary, deep_prefix=False):
+        resp = http.post("/audit", json={
+            "request_id": request_id,
+            "token_index": token_index,
+            "layer_indices": list(range(n_layers)),
+            "tier": "full",
+            "binary": binary,
+            "deep_prefix": deep_prefix,
+        })
+        assert resp.status_code == 200, f"audit failed: {resp.status_code}"
+        return resp
+
+    def sanitize_debug_audit(audit_dict):
+        # Keep JSON mutation campaigns on a verifier-acceptable shell-only path.
+        # Canonical production coverage is exercised separately via binary audits.
+        sanitized = json.loads(json.dumps(audit_dict))
+        sanitized.pop("kv_entries", None)
+        sanitized.pop("kv_proofs", None)
+        return sanitized
+
     # ── Baseline: honest greedy chat + full audit ──
     print("\nBaseline: honest greedy chat + full audit")
     resp = http.post("/chat", json={
@@ -127,20 +164,17 @@ def _run_test():
     chat = resp.json()
     print(f"  generated {chat['n_tokens']} tokens: {chat.get('generated_text', '')[:60]}")
 
-    resp = http.post("/audit", json={
-        "request_id": chat["request_id"],
-        "token_index": 0,
-        "layer_indices": list(range(n_layers)),
-        "tier": "full",
-        "binary": False,
-    })
-    assert resp.status_code == 200, f"audit failed: {resp.status_code}"
-    honest_json = resp.text
-    honest_audit = json.loads(honest_json)
+    honest_binary = fetch_audit(chat["request_id"], 0, binary=True).content
+    report_bin = verilm_rs.verify_v4_binary(honest_binary, key_json)
+    assert report_bin["passed"], f"honest greedy binary audit must pass: {report_bin['failures']}"
+    print(f"  binary baseline: {report_bin['checks_passed']}/{report_bin['checks_run']} checks passed")
+
+    honest_audit = sanitize_debug_audit(fetch_audit(chat["request_id"], 0, binary=False).json())
+    honest_json = json.dumps(honest_audit)
 
     report = verilm_rs.verify_v4(honest_json, key_json)
-    assert report["passed"], f"honest greedy audit must pass: {report['failures']}"
-    print(f"  baseline: {report['checks_passed']}/{report['checks_run']} checks passed")
+    assert report["passed"], f"honest greedy JSON mutation base must pass: {report['failures']}"
+    print(f"  json mutation base: {report['checks_passed']}/{report['checks_run']} checks passed")
 
     # ── Baseline: honest sampled chat + full audit ──
     print("\nBaseline: honest sampled chat + full audit")
@@ -150,19 +184,16 @@ def _run_test():
     })
     assert resp_s.status_code == 200
     chat_s = resp_s.json()
-    resp_sa = http.post("/audit", json={
-        "request_id": chat_s["request_id"],
-        "token_index": 0,
-        "layer_indices": list(range(n_layers)),
-        "tier": "full",
-        "binary": False,
-    })
-    assert resp_sa.status_code == 200
-    sampled_json = resp_sa.text
-    sampled_audit = json.loads(sampled_json)
+    sampled_binary = fetch_audit(chat_s["request_id"], 0, binary=True).content
+    report_s_bin = verilm_rs.verify_v4_binary(sampled_binary, key_json)
+    assert report_s_bin["passed"], f"honest sampled binary audit must pass: {report_s_bin['failures']}"
+    print(f"  binary baseline: {report_s_bin['checks_passed']}/{report_s_bin['checks_run']} checks passed")
+
+    sampled_audit = sanitize_debug_audit(fetch_audit(chat_s["request_id"], 0, binary=False).json())
+    sampled_json = json.dumps(sampled_audit)
     report_s = verilm_rs.verify_v4(sampled_json, key_json)
-    assert report_s["passed"], f"honest sampled audit must pass: {report_s['failures']}"
-    print(f"  baseline: {report_s['checks_passed']}/{report_s['checks_run']} checks passed")
+    assert report_s["passed"], f"honest sampled JSON mutation base must pass: {report_s['failures']}"
+    print(f"  json mutation base: {report_s['checks_passed']}/{report_s['checks_run']} checks passed")
 
     # ── Tamper test harness ──
 
@@ -446,25 +477,21 @@ def _run_test():
     splice_idx_b = min(gen_start_b + 3, n_gen_b - 1)
     print(f"  gen_start: A={gen_start_a}, B={gen_start_b}; auditing at A[{splice_idx_a}], B[{splice_idx_b}]")
 
-    resp_ab = http.post("/audit", json={
-        "request_id": chat_b["request_id"], "token_index": splice_idx_b,
-        "layer_indices": list(range(n_layers)), "tier": "full", "binary": False,
-    })
-    assert resp_ab.status_code == 200
-    audit_b = resp_ab.json()
+    audit_b = sanitize_debug_audit(
+        fetch_audit(chat_b["request_id"], splice_idx_b, binary=False).json()
+    )
     audit_b_json = json.dumps(audit_b)
     report_b = verilm_rs.verify_v4(audit_b_json, key_json)
+    assert report_b["passed"], f"splice baseline B must pass: {report_b['failures']}"
     print(f"  splice baseline B (prompt_b, tok={splice_idx_b}): "
           f"{report_b['checks_passed']}/{report_b['checks_run']} checks passed")
 
-    resp_ga = http.post("/audit", json={
-        "request_id": chat["request_id"], "token_index": splice_idx_a,
-        "layer_indices": list(range(n_layers)), "tier": "full", "binary": False,
-    })
-    assert resp_ga.status_code == 200
-    audit_a_gen = resp_ga.json()
+    audit_a_gen = sanitize_debug_audit(
+        fetch_audit(chat["request_id"], splice_idx_a, binary=False).json()
+    )
     audit_a_gen_json = json.dumps(audit_a_gen)
     report_a_gen = verilm_rs.verify_v4(audit_a_gen_json, key_json)
+    assert report_a_gen["passed"], f"splice baseline A must pass: {report_a_gen['failures']}"
     print(f"  splice baseline A (prompt_a, tok={splice_idx_a}): "
           f"{report_a_gen['checks_passed']}/{report_a_gen['checks_run']} checks passed")
 
@@ -496,17 +523,11 @@ def _run_test():
         for i in range(gen_floor, max_scan):
             if i == splice_idx_a:
                 continue  # already checked
-            ra = http.post("/audit", json={
-                "request_id": chat["request_id"], "token_index": i,
-                "layer_indices": list(range(n_layers)), "tier": "full", "binary": False,
-            })
-            rb = http.post("/audit", json={
-                "request_id": chat_b["request_id"], "token_index": i,
-                "layer_indices": list(range(n_layers)), "tier": "full", "binary": False,
-            })
+            ra = fetch_audit(chat["request_id"], i, binary=False)
+            rb = fetch_audit(chat_b["request_id"], i, binary=False)
             if ra.status_code == 200 and rb.status_code == 200:
-                aa = ra.json()
-                ab = rb.json()
+                aa = sanitize_debug_audit(ra.json())
+                ab = sanitize_debug_audit(rb.json())
                 if aa["token_id"] != ab["token_id"]:
                     splice_a_json = json.dumps(aa)
                     splice_b_json = json.dumps(ab)
@@ -565,15 +586,9 @@ def _run_test():
     # pick a later one so there are prefix tokens before it.
     gen_start_multi = max(n_prompt_multi - 1, 0)
     tok_idx = min(gen_start_multi + 3, n_gen - 1)
-    resp_audit_multi = http.post("/audit", json={
-        "request_id": chat_multi["request_id"],
-        "token_index": tok_idx,
-        "layer_indices": list(range(n_layers)),
-        "tier": "full",
-        "binary": False,
-    })
-    assert resp_audit_multi.status_code == 200
-    multi_audit = resp_audit_multi.json()
+    multi_audit = sanitize_debug_audit(
+        fetch_audit(chat_multi["request_id"], tok_idx, binary=False).json()
+    )
     multi_json = json.dumps(multi_audit)
     report_multi = verilm_rs.verify_v4(multi_json, key_json)
     assert report_multi["passed"], f"multi-token audit must pass: {report_multi['failures']}"

@@ -94,7 +94,11 @@ impl<'a> Ctx<'a> {
         tokenizer: Option<&'a dyn PromptTokenizer>,
         detokenizer: Option<&'a dyn Detokenizer>,
     ) -> Self {
-        let n_prompt = r.commitment.n_prompt_tokens.or(r.n_prompt_tokens).unwrap_or(0);
+        let n_prompt = r
+            .commitment
+            .n_prompt_tokens
+            .or(r.n_prompt_tokens)
+            .unwrap_or(0);
         Self {
             key,
             r,
@@ -114,8 +118,15 @@ struct St {
 }
 
 impl St {
-    fn new() -> Self { Self { checks: 0, failures: Vec::new() } }
-    fn check(&mut self) { self.checks += 1; }
+    fn new() -> Self {
+        Self {
+            checks: 0,
+            failures: Vec::new(),
+        }
+    }
+    fn check(&mut self) {
+        self.checks += 1;
+    }
     fn fail(&mut self, code: FailureCode, msg: impl Into<String>) {
         self.failures.push(VerificationFailure {
             category: code.category(),
@@ -163,8 +174,8 @@ fn run(ctx: &Ctx) -> V4VerifyReport {
         phase_lm_head(ctx, shell, &bridge, &specs, &mut st);
     }
 
-    phase_deep_prefix(ctx, &mut st);
-    phase_kv_transcript(ctx, &mut st);
+    let kv_transcript_ok = phase_kv_transcript(ctx, &mut st);
+    phase_deep_prefix(ctx, kv_transcript_ok, &mut st);
     phase_tokenization(ctx, &specs, &mut st);
     phase_detokenization(ctx, &specs, &mut st);
 
@@ -184,10 +195,7 @@ fn phase_structural<'a>(ctx: &'a Ctx, st: &mut St) -> StructuralState<'a> {
 
     let shell = match &ctx.r.shell_opening {
         Some(s) => {
-            let checked = s
-                .layer_indices
-                .as_ref()
-                .map_or(s.layers.len(), |v| v.len());
+            let checked = s.layer_indices.as_ref().map_or(s.layers.len(), |v| v.len());
             let coverage = if checked >= ctx.key.config.n_layers {
                 AuditCoverage::Full {
                     layers_checked: checked,
@@ -249,7 +257,10 @@ fn check_prompt_hash(ctx: &Ctx, st: &mut St) {
     match (&ctx.r.prompt, ctx.r.commitment.prompt_hash) {
         (Some(prompt), Some(committed)) => {
             if merkle::hash_prompt(prompt) != committed {
-                st.fail(FailureCode::PromptHashMismatch, "hash(prompt) != prompt_hash");
+                st.fail(
+                    FailureCode::PromptHashMismatch,
+                    "hash(prompt) != prompt_hash",
+                );
             }
         }
         (None, Some(_)) => st.fail(
@@ -469,8 +480,7 @@ fn check_rich_prefix_embeddings(ctx: &Ctx, st: &mut St) {
         _ => return,
     };
 
-    if rows.len() != ctx.r.prefix_token_ids.len() || proofs.len() != ctx.r.prefix_token_ids.len()
-    {
+    if rows.len() != ctx.r.prefix_token_ids.len() || proofs.len() != ctx.r.prefix_token_ids.len() {
         st.check();
         st.fail(
             FailureCode::PrefixCountMismatch,
@@ -564,8 +574,8 @@ fn phase_specs(ctx: &Ctx, st: &mut St) -> SpecState {
 
 fn check_spec_hashes(ctx: &Ctx, hashes: &[[u8; 32]; 4], st: &mut St) {
     let pairs: [(&str, Option<[u8; 32]>, [u8; 32]); 4] = [
-        ("input",  ctx.r.commitment.input_spec_hash,  hashes[0]),
-        ("model",  ctx.r.commitment.model_spec_hash,  hashes[1]),
+        ("input", ctx.r.commitment.input_spec_hash, hashes[0]),
+        ("model", ctx.r.commitment.model_spec_hash, hashes[1]),
         ("decode", ctx.r.commitment.decode_spec_hash, hashes[2]),
         ("output", ctx.r.commitment.output_spec_hash, hashes[3]),
     ];
@@ -596,25 +606,36 @@ fn check_spec_hashes(ctx: &Ctx, hashes: &[[u8; 32]; 4], st: &mut St) {
 fn check_manifest_hash(ctx: &Ctx, hashes: &[[u8; 32]; 4], st: &mut St) {
     st.check();
     match ctx.r.commitment.manifest_hash {
-        None => st.fail(FailureCode::MissingManifestHash, "commitment missing manifest_hash"),
+        None => st.fail(
+            FailureCode::MissingManifestHash,
+            "commitment missing manifest_hash",
+        ),
         Some(committed) => {
-            if merkle::hash_manifest_composed(hashes[0], hashes[1], hashes[2], hashes[3]) != committed {
+            if merkle::hash_manifest_composed(hashes[0], hashes[1], hashes[2], hashes[3])
+                != committed
+            {
                 st.fail(FailureCode::ManifestHashMismatch, "manifest hash mismatch");
             }
         }
     }
 }
 
-fn cross_check_model_vs_key(
-    ctx: &Ctx,
-    spec: &verilm_core::types::ModelSpec,
-    st: &mut St,
-) {
+fn cross_check_model_vs_key(ctx: &Ctx, spec: &verilm_core::types::ModelSpec, st: &mut St) {
     xcheck_f64(st, "rmsnorm_eps", spec.rmsnorm_eps, ctx.key.rmsnorm_eps);
     xcheck_f64(st, "rope_theta", spec.rope_theta, ctx.key.config.rope_theta);
-    xcheck_hash(st, "rope_config_hash", spec.rope_config_hash, ctx.key.rope_config_hash);
+    xcheck_hash(
+        st,
+        "rope_config_hash",
+        spec.rope_config_hash,
+        ctx.key.rope_config_hash,
+    );
     xcheck_hash(st, "weight_hash", spec.weight_hash, ctx.key.weight_hash);
-    xcheck_hash(st, "embedding_merkle_root", spec.embedding_merkle_root, ctx.key.embedding_merkle_root);
+    xcheck_hash(
+        st,
+        "embedding_merkle_root",
+        spec.embedding_merkle_root,
+        ctx.key.embedding_merkle_root,
+    );
     xcheck_dim(st, "n_layers", spec.n_layers, ctx.key.config.n_layers);
     xcheck_dim(st, "hidden_dim", spec.hidden_dim, ctx.key.config.hidden_dim);
     xcheck_dim(st, "vocab_size", spec.vocab_size, ctx.key.config.vocab_size);
@@ -623,8 +644,18 @@ fn cross_check_model_vs_key(
     xcheck_dim(st, "d_head", spec.d_head, ctx.key.config.d_head);
     xcheck_dim(st, "n_q_heads", spec.n_q_heads, ctx.key.config.n_q_heads);
     xcheck_dim(st, "n_kv_heads", spec.n_kv_heads, ctx.key.config.n_kv_heads);
-    xcheck_str(st, "quant_family", spec.quant_family.as_deref(), ctx.key.quant_family.as_deref());
-    xcheck_str(st, "scale_derivation", spec.scale_derivation.as_deref(), ctx.key.scale_derivation.as_deref());
+    xcheck_str(
+        st,
+        "quant_family",
+        spec.quant_family.as_deref(),
+        ctx.key.quant_family.as_deref(),
+    );
+    xcheck_str(
+        st,
+        "scale_derivation",
+        spec.scale_derivation.as_deref(),
+        ctx.key.scale_derivation.as_deref(),
+    );
     if let (Some(m), Some(k)) = (spec.quant_block_size, ctx.key.quant_block_size) {
         st.check();
         if m != k {
@@ -661,7 +692,10 @@ fn check_decode_features(
         match dm.as_str() {
             "greedy" if decode.temperature != 0.0 => st.fail(
                 FailureCode::DecodeModeTempInconsistent,
-                format!("decode_mode='greedy' but temperature={}", decode.temperature),
+                format!(
+                    "decode_mode='greedy' but temperature={}",
+                    decode.temperature
+                ),
             ),
             "sampled" if decode.temperature == 0.0 => st.fail(
                 FailureCode::DecodeModeTempInconsistent,
@@ -676,13 +710,55 @@ fn check_decode_features(
     }
 
     st.check();
-    reject_feature(st, decode.repetition_penalty != 1.0, "repetition_penalty", &format!("{}", decode.repetition_penalty), "1.0");
-    reject_feature(st, decode.frequency_penalty != 0.0, "frequency_penalty", &format!("{}", decode.frequency_penalty), "0.0");
-    reject_feature(st, decode.presence_penalty != 0.0, "presence_penalty", &format!("{}", decode.presence_penalty), "0.0");
-    reject_feature(st, !decode.logit_bias.is_empty(), "logit_bias", &format!("{} entries", decode.logit_bias.len()), "empty");
-    reject_feature(st, !decode.bad_word_ids.is_empty(), "bad_word_ids", &format!("{} entries", decode.bad_word_ids.len()), "empty");
-    reject_feature(st, !decode.guided_decoding.is_empty(), "guided_decoding", &decode.guided_decoding, "empty");
-    reject_feature(st, !output.stop_sequences.is_empty(), "stop_sequences", &format!("{} entries", output.stop_sequences.len()), "empty");
+    reject_feature(
+        st,
+        decode.repetition_penalty != 1.0,
+        "repetition_penalty",
+        &format!("{}", decode.repetition_penalty),
+        "1.0",
+    );
+    reject_feature(
+        st,
+        decode.frequency_penalty != 0.0,
+        "frequency_penalty",
+        &format!("{}", decode.frequency_penalty),
+        "0.0",
+    );
+    reject_feature(
+        st,
+        decode.presence_penalty != 0.0,
+        "presence_penalty",
+        &format!("{}", decode.presence_penalty),
+        "0.0",
+    );
+    reject_feature(
+        st,
+        !decode.logit_bias.is_empty(),
+        "logit_bias",
+        &format!("{} entries", decode.logit_bias.len()),
+        "empty",
+    );
+    reject_feature(
+        st,
+        !decode.bad_word_ids.is_empty(),
+        "bad_word_ids",
+        &format!("{} entries", decode.bad_word_ids.len()),
+        "empty",
+    );
+    reject_feature(
+        st,
+        !decode.guided_decoding.is_empty(),
+        "guided_decoding",
+        &decode.guided_decoding,
+        "empty",
+    );
+    reject_feature(
+        st,
+        !output.stop_sequences.is_empty(),
+        "stop_sequences",
+        &format!("{} entries", output.stop_sequences.len()),
+        "empty",
+    );
 }
 
 // --- Phase 4: Output policy
@@ -690,17 +766,26 @@ fn check_decode_features(
 fn phase_output_policy(ctx: &Ctx, os: &OutputSpec, st: &mut St) {
     let r = ctx.r;
     if os.max_tokens > 0 {
-        let n_generated = r.commitment.n_tokens.saturating_sub(ctx.n_prompt.saturating_sub(1));
+        let n_generated = r
+            .commitment
+            .n_tokens
+            .saturating_sub(ctx.n_prompt.saturating_sub(1));
         if r.token_index >= r.commitment.n_tokens {
             st.fail(
                 FailureCode::ExceedsMaxTokens,
-                format!("token_index {} >= n_tokens {}", r.token_index, r.commitment.n_tokens),
+                format!(
+                    "token_index {} >= n_tokens {}",
+                    r.token_index, r.commitment.n_tokens
+                ),
             );
         }
         if n_generated > os.max_tokens {
             st.fail(
                 FailureCode::ExceedsMaxTokens,
-                format!("generated {} tokens > max_tokens {}", n_generated, os.max_tokens),
+                format!(
+                    "generated {} tokens > max_tokens {}",
+                    n_generated, os.max_tokens
+                ),
             );
         }
     }
@@ -726,14 +811,20 @@ fn check_min_tokens(ctx: &Ctx, os: &OutputSpec, eos_id: u32, st: &mut St) {
     if n_generated < os.min_tokens {
         st.fail(
             FailureCode::MinTokensViolated,
-            format!("only {} generated tokens, min_tokens={}", n_generated, os.min_tokens),
+            format!(
+                "only {} generated tokens, min_tokens={}",
+                n_generated, os.min_tokens
+            ),
         );
     }
     let gen_index = r.token_index.saturating_sub(ctx.gen_start);
     if gen_index < os.min_tokens && r.token_id == eos_id {
         st.fail(
             FailureCode::MinTokensViolated,
-            format!("EOS at generation position {} < min_tokens={}", gen_index, os.min_tokens),
+            format!(
+                "EOS at generation position {} < min_tokens={}",
+                gen_index, os.min_tokens
+            ),
         );
     }
 }
@@ -777,16 +868,39 @@ struct BridgeState {
 }
 
 fn phase_bridge(ctx: &Ctx, shell: &ShellTokenOpening, st: &mut St) -> BridgeState {
-    bridge_layers(ctx.key, &ctx.r.retained, shell, ctx.r.token_index, st);
+    if bridge_replay_key_shapes_compatible(ctx, shell, st) {
+        bridge_layers(ctx.key, &ctx.r.retained, shell, st);
+    }
 
     // Derive final_hidden from captured final_residual + final_norm.
     // No shell-replay fallback in canonical path.
-    let final_hidden: Option<Vec<i8>> = match (&shell.final_residual, &ctx.key.final_norm_weights)
-    {
+    let final_hidden: Option<Vec<i8>> = match (&shell.final_residual, &ctx.key.final_norm_weights) {
         (Some(fr), Some(fnw)) => {
+            st.check();
+            if fnw.len() != fr.len() {
+                st.fail_ctx(
+                    FailureCode::SpecFieldMismatch,
+                    format!(
+                        "final_norm_weights len {} != final_residual len {}",
+                        fnw.len(),
+                        fr.len()
+                    ),
+                    FailureContext {
+                        field: Some("final_norm_weights".into()),
+                        ..Default::default()
+                    },
+                );
+                return BridgeState { final_hidden: None };
+            }
             let res_f64: Vec<f64> = fr.iter().map(|&v| v as f64).collect();
-            let normed = verilm_core::rmsnorm::rmsnorm_f64_input(&res_f64, fnw, ctx.key.rmsnorm_eps);
-            Some(normed.iter().map(|&v| v.round().clamp(-128.0, 127.0) as i8).collect())
+            let normed =
+                verilm_core::rmsnorm::rmsnorm_f64_input(&res_f64, fnw, ctx.key.rmsnorm_eps);
+            Some(
+                normed
+                    .iter()
+                    .map(|&v| v.round().clamp(-128.0, 127.0) as i8)
+                    .collect(),
+            )
         }
         (None, Some(_)) if ctx.key.lm_head.is_some() => {
             st.fail(
@@ -799,6 +913,120 @@ fn phase_bridge(ctx: &Ctx, shell: &ShellTokenOpening, st: &mut St) -> BridgeStat
     };
 
     BridgeState { final_hidden }
+}
+
+fn bridge_replay_key_shapes_compatible(ctx: &Ctx, shell: &ShellTokenOpening, st: &mut St) -> bool {
+    let ir = match &shell.initial_residual {
+        Some(ir) => ir,
+        None => return false,
+    };
+    if ctx.key.rmsnorm_attn_weights.is_empty()
+        || ctx.key.rmsnorm_ffn_weights.is_empty()
+        || ctx.r.retained.layers.is_empty()
+    {
+        return false;
+    }
+
+    let hidden_dim = ir.len();
+    let n_layers = shell.layers.len().min(ctx.r.retained.layers.len());
+    let mut ok = true;
+
+    st.check();
+    if hidden_dim != ctx.key.config.hidden_dim {
+        st.fail_ctx(
+            FailureCode::SpecFieldMismatch,
+            format!(
+                "initial_residual len {} != key hidden_dim {}",
+                hidden_dim,
+                ctx.key.config.hidden_dim
+            ),
+            FailureContext {
+                field: Some("hidden_dim".into()),
+                ..Default::default()
+            },
+        );
+        ok = false;
+    }
+
+    st.check();
+    if ctx.key.rmsnorm_attn_weights.len() < n_layers {
+        st.fail_ctx(
+            FailureCode::SpecFieldMismatch,
+            format!(
+                "key has {} attention RMSNorm vectors but bridge replay needs {}",
+                ctx.key.rmsnorm_attn_weights.len(),
+                n_layers
+            ),
+            FailureContext {
+                field: Some("rmsnorm_attn_weights".into()),
+                ..Default::default()
+            },
+        );
+        ok = false;
+    }
+
+    st.check();
+    if ctx.key.rmsnorm_ffn_weights.len() < n_layers {
+        st.fail_ctx(
+            FailureCode::SpecFieldMismatch,
+            format!(
+                "key has {} FFN RMSNorm vectors but bridge replay needs {}",
+                ctx.key.rmsnorm_ffn_weights.len(),
+                n_layers
+            ),
+            FailureContext {
+                field: Some("rmsnorm_ffn_weights".into()),
+                ..Default::default()
+            },
+        );
+        ok = false;
+    }
+
+    for layer_idx in 0..n_layers {
+        st.check();
+        if let Some(weights) = ctx.key.rmsnorm_attn_weights.get(layer_idx) {
+            if weights.len() != hidden_dim {
+                st.fail_ctx(
+                    FailureCode::SpecFieldMismatch,
+                    format!(
+                        "layer {} attention RMSNorm len {} != residual len {}",
+                        layer_idx,
+                        weights.len(),
+                        hidden_dim
+                    ),
+                    FailureContext {
+                        layer: Some(layer_idx),
+                        field: Some("rmsnorm_attn_weights".into()),
+                        ..Default::default()
+                    },
+                );
+                ok = false;
+            }
+        }
+
+        st.check();
+        if let Some(weights) = ctx.key.rmsnorm_ffn_weights.get(layer_idx) {
+            if weights.len() != hidden_dim {
+                st.fail_ctx(
+                    FailureCode::SpecFieldMismatch,
+                    format!(
+                        "layer {} FFN RMSNorm len {} != residual len {}",
+                        layer_idx,
+                        weights.len(),
+                        hidden_dim
+                    ),
+                    FailureContext {
+                        layer: Some(layer_idx),
+                        field: Some("rmsnorm_ffn_weights".into()),
+                        ..Default::default()
+                    },
+                );
+                ok = false;
+            }
+        }
+    }
+
+    ok
 }
 
 /// Validate bridge shape: layer_indices contiguity and count match.
@@ -845,7 +1073,6 @@ fn bridge_layers(
     key: &VerifierKey,
     retained: &RetainedTokenState,
     shell: &ShellTokenOpening,
-    token_index: u32,
     st: &mut St,
 ) {
     let ir = match &shell.initial_residual {
@@ -864,12 +1091,16 @@ fn bridge_layers(
         return;
     }
 
-    let (mut residual, derived_x_attn) =
-        init_residual_chain(ir, key, shell.layers[0].scale_x_attn);
+    let (mut residual, derived_x_attn) = init_residual_chain(ir, key, shell.layers[0].scale_x_attn);
 
     // Check-and-gate layer 0: compare committed x_attn against canonical derivation.
     let mut x_attn = check_and_gate_x_attn(
-        st, key, 0, &derived_x_attn, &retained.layers[0], shell.layers[0].scale_x_attn,
+        st,
+        key,
+        0,
+        &derived_x_attn,
+        &retained.layers[0],
+        shell.layers[0].scale_x_attn,
     );
 
     let n_layers = shell.layers.len().min(retained.layers.len());
@@ -879,11 +1110,6 @@ fn bridge_layers(
 
         // QKV Freivalds uses the gated x_attn (committed when available).
         check_qkv(key, st, layer_idx, sl, &x_attn);
-        // Token-0 attention replay: with seq_len=1, softmax is trivial,
-        // so we can verify a = GQA_expand(requant(Wv·x)) at zero extra cost.
-        if token_index == 0 {
-            check_attention_token0(key, st, layer_idx, sl, rs);
-        }
         // Downstream exact checks continue from committed `rs.a`.
         check_wo(key, st, layer_idx, &rs.a, &sl.attn_out);
         let x_ffn = bridge_attn_to_ffn(key, layer_idx, rs, sl, &sl.attn_out, &mut residual);
@@ -893,74 +1119,21 @@ fn bridge_layers(
             .get(layer_idx + 1)
             .map(|s| s.scale_x_attn)
             .unwrap_or(1.0);
-        let derived_next = bridge_ffn_to_next(key, layer_idx, sl, &sl.ffn_out, &mut residual, next_scale);
+        let derived_next =
+            bridge_ffn_to_next(key, layer_idx, sl, &sl.ffn_out, &mut residual, next_scale);
         // Check-and-gate at layer boundary: compare committed vs derived.
         if layer_idx + 1 < retained.layers.len() {
             x_attn = check_and_gate_x_attn(
-                st, key, layer_idx + 1, &derived_next,
-                &retained.layers[layer_idx + 1], next_scale,
+                st,
+                key,
+                layer_idx + 1,
+                &derived_next,
+                &retained.layers[layer_idx + 1],
+                next_scale,
             );
         } else {
             x_attn = derived_next;
         }
-    }
-}
-
-/// Token-0 attention replay: verify retained `a` matches replay from QKV.
-///
-/// For token_index == 0 the KV cache has exactly one entry (self), so
-/// softmax([score]) = [1.0] and the attention output is simply the GQA
-/// head-expanded requantized V projection. This costs no extra data —
-/// Q, K, V accumulators are already in the shell opening.
-///
-/// Two paths:
-/// - **Toy/reference** (`rope_aware_replay == false`): raw `requantize` i32→i8, no RoPE.
-/// - **Production** (`rope_aware_replay == true`): dequantize using weight+activation
-///   scales, apply RoPE (identity at position 0), replay in f64, requantize with `scale_a`.
-fn check_attention_token0(
-    key: &VerifierKey,
-    st: &mut St,
-    layer_idx: usize,
-    sl: &verilm_core::types::ShellLayerOpening,
-    rs: &verilm_core::types::RetainedLayerState,
-) {
-    let (q_acc, k_acc, v_acc) = match (&sl.q, &sl.k, &sl.v) {
-        (Some(q), Some(k), Some(v)) => (q, k, v),
-        _ => return, // QKV missing — already reported by check_qkv
-    };
-
-    st.check();
-
-    let expected_a = if key.rope_aware_replay {
-        let (q_roped, k_roped, v_deq) =
-            dequant_rope_qkv(key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, 0);
-        verilm_core::attention::replay_attention_roped(
-            &q_roped, &[k_roped], &[v_deq], rs.scale_a as f64, &key.config,
-        )
-    } else {
-        let q_i8 = verilm_core::requantize(q_acc);
-        let k_i8 = verilm_core::requantize(k_acc);
-        let v_i8 = verilm_core::requantize(v_acc);
-        verilm_core::attention::replay_attention_reference(
-            &q_i8, &[k_i8], &[v_i8], &key.config,
-        )
-    };
-
-    let tolerance = attention_tolerance(key);
-    if let Some(max_diff) = verilm_core::attention::compare_attention_output(
-        &rs.a, &expected_a, &tolerance,
-    ) {
-        st.fail_ctx(
-            FailureCode::AttentionReplayMismatch,
-            format!(
-                "layer {}: token-0 attention replay mismatch (max_diff={})",
-                layer_idx, max_diff
-            ),
-            FailureContext {
-                layer: Some(layer_idx),
-                ..Default::default()
-            },
-        );
     }
 }
 
@@ -1084,7 +1257,9 @@ fn check_and_gate_x_attn(
                     FailureCode::BridgeXAttnMismatch,
                     format!(
                         "layer {}: committed x_attn len {} != derived len {}",
-                        layer_idx, committed_xa.len(), derived_x_attn.len()
+                        layer_idx,
+                        committed_xa.len(),
+                        derived_x_attn.len()
                     ),
                     FailureContext {
                         layer: Some(layer_idx),
@@ -1092,7 +1267,9 @@ fn check_and_gate_x_attn(
                     },
                 );
             } else {
-                let max_diff: i16 = committed_xa.iter().zip(derived_x_attn.iter())
+                let max_diff: i16 = committed_xa
+                    .iter()
+                    .zip(derived_x_attn.iter())
                     .map(|(&a, &b)| (a as i16 - b as i16).abs())
                     .max()
                     .unwrap_or(0);
@@ -1147,7 +1324,10 @@ fn check_qkv(
             Some(z) => verify_freivalds(key, st, layer_idx, mt, x_attn, z),
             None => st.fail_ctx(
                 FailureCode::MissingQkv,
-                format!("layer {} {:?}: QKV required in canonical path", layer_idx, mt),
+                format!(
+                    "layer {} {:?}: QKV required in canonical path",
+                    layer_idx, mt
+                ),
                 FailureContext {
                     layer: Some(layer_idx),
                     matrix: Some(format!("{:?}", mt)),
@@ -1158,13 +1338,7 @@ fn check_qkv(
     }
 }
 
-fn check_wo(
-    key: &VerifierKey,
-    st: &mut St,
-    layer_idx: usize,
-    a: &[i8],
-    attn_out: &[i32],
-) {
+fn check_wo(key: &VerifierKey, st: &mut St, layer_idx: usize, a: &[i8], attn_out: &[i32]) {
     verify_freivalds(key, st, layer_idx, MatrixType::Wo, a, attn_out);
 }
 
@@ -1177,8 +1351,14 @@ fn bridge_attn_to_ffn(
     residual: &mut Vec<f64>,
 ) -> Vec<i8> {
     bridge_dequant_rmsnorm(
-        key, layer_idx, MatrixType::Wo, attn_out, rs.scale_a,
-        residual, &key.rmsnorm_ffn_weights[layer_idx], sl.scale_x_ffn,
+        key,
+        layer_idx,
+        MatrixType::Wo,
+        attn_out,
+        rs.scale_a,
+        residual,
+        &key.rmsnorm_ffn_weights[layer_idx],
+        sl.scale_x_ffn,
     )
 }
 
@@ -1196,13 +1376,20 @@ fn check_ffn(
         key.per_channel_scales_for(layer_idx, MatrixType::Wu),
     ) {
         (Some(pc_g), Some(pc_u)) => verilm_core::silu::compute_h_per_channel(
-            &sl.g, &sl.u, pc_g, pc_u, sl.scale_x_ffn, sl.scale_h,
+            &sl.g,
+            &sl.u,
+            pc_g,
+            pc_u,
+            sl.scale_x_ffn,
+            sl.scale_h,
         ),
         _ => verilm_core::silu::compute_h_scaled(
-            &sl.g, &sl.u,
+            &sl.g,
+            &sl.u,
             key.weight_scale_for(layer_idx, MatrixType::Wg),
             key.weight_scale_for(layer_idx, MatrixType::Wu),
-            sl.scale_x_ffn, sl.scale_h,
+            sl.scale_x_ffn,
+            sl.scale_h,
         ),
     };
     verify_freivalds(key, st, layer_idx, MatrixType::Wd, &h, &sl.ffn_out);
@@ -1218,12 +1405,25 @@ fn bridge_ffn_to_next(
 ) -> Vec<i8> {
     if layer_idx + 1 < key.rmsnorm_attn_weights.len() {
         bridge_dequant_rmsnorm(
-            key, layer_idx, MatrixType::Wd, ffn_out, sl.scale_h,
-            residual, &key.rmsnorm_attn_weights[layer_idx + 1], next_scale,
+            key,
+            layer_idx,
+            MatrixType::Wd,
+            ffn_out,
+            sl.scale_h,
+            residual,
+            &key.rmsnorm_attn_weights[layer_idx + 1],
+            next_scale,
         )
     } else {
         // Last layer: update residual, no next-layer RMSNorm
-        dequant_add_residual_dispatch(key, layer_idx, MatrixType::Wd, ffn_out, sl.scale_h, residual);
+        dequant_add_residual_dispatch(
+            key,
+            layer_idx,
+            MatrixType::Wd,
+            ffn_out,
+            sl.scale_h,
+            residual,
+        );
         Vec::new()
     }
 }
@@ -1241,7 +1441,8 @@ fn bridge_dequant_rmsnorm(
     scale_next: f32,
 ) -> Vec<i8> {
     dequant_add_residual_dispatch(key, layer_idx, mt, acc, scale_x, residual);
-    let normed = verilm_core::rmsnorm::rmsnorm_f64_input(residual, rmsnorm_weights, key.rmsnorm_eps);
+    let normed =
+        verilm_core::rmsnorm::rmsnorm_f64_input(residual, rmsnorm_weights, key.rmsnorm_eps);
     verilm_core::rmsnorm::quantize_f64_to_i8(&normed, scale_next as f64)
 }
 
@@ -1264,7 +1465,13 @@ fn dequant_add_residual_dispatch(
 
 // --- Phase 6: LM-head + token replay
 
-fn phase_lm_head(ctx: &Ctx, shell: &ShellTokenOpening, bridge: &BridgeState, specs: &SpecState, st: &mut St) {
+fn phase_lm_head(
+    ctx: &Ctx,
+    shell: &ShellTokenOpening,
+    bridge: &BridgeState,
+    specs: &SpecState,
+    st: &mut St,
+) {
     // LM-head Freivalds
     let r_lm = ctx.key.r_for(MatrixType::LmHead);
     if r_lm.is_empty() || ctx.key.v_lm_head.is_none() {
@@ -1301,7 +1508,10 @@ fn phase_lm_head(ctx: &Ctx, shell: &ShellTokenOpening, bridge: &BridgeState, spe
                 if expected != ctx.r.token_id {
                     st.fail(
                         FailureCode::TokenSelectionMismatch,
-                        format!("lm_head: expected token {} but got {}", expected, ctx.r.token_id),
+                        format!(
+                            "lm_head: expected token {} but got {}",
+                            expected, ctx.r.token_id
+                        ),
                     );
                 }
             }
@@ -1319,9 +1529,8 @@ fn phase_lm_head(ctx: &Ctx, shell: &ShellTokenOpening, bridge: &BridgeState, spe
 
 // --- Phase 7: Deep prefix
 
-fn phase_deep_prefix(ctx: &Ctx, st: &mut St) {
-    let (prefix_ret, prefix_shells) = match (&ctx.r.prefix_retained, &ctx.r.prefix_shell_openings)
-    {
+fn phase_deep_prefix(ctx: &Ctx, kv_transcript_ok: bool, st: &mut St) {
+    let (prefix_ret, prefix_shells) = match (&ctx.r.prefix_retained, &ctx.r.prefix_shell_openings) {
         (Some(ret), Some(shells)) => (ret, shells),
         _ => return,
     };
@@ -1364,11 +1573,9 @@ fn phase_deep_prefix(ctx: &Ctx, st: &mut St) {
             continue;
         }
 
-        // Shell Freivalds + bridge (reuses bridge_layers).
-        // Note: bridge_layers already does token-0 attention replay for j==0
-        // via check_attention_token0. The multi-token replay below handles j>0.
+        // Shell Freivalds + bridge.
         let before = st.failures.len();
-        bridge_layers(ctx.key, ret_j, shell_j, j as u32, st);
+        bridge_layers(ctx.key, ret_j, shell_j, st);
         for failure in &mut st.failures[before..] {
             failure.message = format!("prefix token {}: {}", j, failure.message);
             if failure.context.token_index.is_none() {
@@ -1378,9 +1585,8 @@ fn phase_deep_prefix(ctx: &Ctx, st: &mut St) {
     }
 
     // Deep-prefix attention replay: verify retained `a` for all prefix tokens
-    // using the accumulated KV cache from prior tokens' shell openings.
-    // Token 0 is already covered by check_attention_token0 inside bridge_layers.
-    replay_deep_prefix_attention(ctx, prefix_ret, prefix_shells, st);
+    // whose full attention context is available inside the committed chain.
+    replay_deep_prefix_attention(ctx, prefix_ret, prefix_shells, kv_transcript_ok, st);
 }
 
 /// Deep-prefix attention replay: verify `a` for prefix tokens j >= 1 and
@@ -1391,11 +1597,11 @@ fn phase_deep_prefix(ctx: &Ctx, st: &mut St) {
 /// - **Production** (`rope_aware_replay == true`): dequantize → RoPE → f64 replay
 ///   → requantize with `scale_a`.
 ///
-/// Token 0 is already checked by `check_attention_token0` inside `bridge_layers`.
 fn replay_deep_prefix_attention(
     ctx: &Ctx,
     prefix_ret: &[RetainedTokenState],
     prefix_shells: &[ShellTokenOpening],
+    kv_transcript_ok: bool,
     st: &mut St,
 ) {
     if prefix_shells.is_empty() {
@@ -1413,7 +1619,11 @@ fn replay_deep_prefix_attention(
 
     // Use committed KV entries (already verified by phase_kv_transcript)
     // instead of reconstructing K/V from shell accumulators.
-    let committed_kv = ctx.r.kv_entries.as_deref();
+    let committed_kv = if kv_transcript_ok {
+        ctx.r.kv_entries.as_deref()
+    } else {
+        None
+    };
 
     if ctx.key.rope_aware_replay {
         replay_deep_prefix_roped(ctx, prefix_ret, prefix_shells, n_layers, committed_kv, st);
@@ -1443,7 +1653,9 @@ fn replay_deep_prefix_toy(
         let mut kv_v: Vec<Vec<i8>> = Vec::new();
 
         for (j, (shell_j, ret_j)) in prefix_shells.iter().zip(prefix_ret.iter()).enumerate() {
-            if layer_idx >= ret_j.layers.len() { break; }
+            if layer_idx >= ret_j.layers.len() {
+                break;
+            }
             let sl = &shell_j.layers[layer_idx];
             let rs = &ret_j.layers[layer_idx];
 
@@ -1463,7 +1675,9 @@ fn replay_deep_prefix_toy(
                 kv_v.push(verilm_core::requantize(v_acc));
             }
 
-            if j == 0 { continue; } // token 0 handled by check_attention_token0
+            if j == 0 {
+                continue;
+            }
 
             // Q always comes from shell accumulators.
             let q_acc = match &sl.q {
@@ -1473,10 +1687,17 @@ fn replay_deep_prefix_toy(
 
             st.check();
             let q_i8 = verilm_core::requantize(q_acc);
-            let expected_a = verilm_core::attention::replay_attention_reference(
-                &q_i8, &kv_k, &kv_v, cfg,
+            let expected_a =
+                verilm_core::attention::replay_attention_reference(&q_i8, &kv_k, &kv_v, cfg);
+            check_attention_result(
+                ctx.key,
+                st,
+                &rs.a,
+                &expected_a,
+                "prefix token",
+                j,
+                layer_idx,
             );
-            check_attention_result(ctx.key, st, &rs.a, &expected_a, "prefix token", j, layer_idx);
         }
 
         // Opened token replay
@@ -1494,9 +1715,8 @@ fn replay_deep_prefix_toy(
             }
             st.check();
             let q_i8 = verilm_core::requantize(q_acc);
-            let expected_a = verilm_core::attention::replay_attention_reference(
-                &q_i8, &kv_k, &kv_v, cfg,
-            );
+            let expected_a =
+                verilm_core::attention::replay_attention_reference(&q_i8, &kv_k, &kv_v, cfg);
             check_attention_result_opened(ctx, ctx.key, st, &rs.a, &expected_a, layer_idx);
         }
     }
@@ -1522,7 +1742,9 @@ fn replay_deep_prefix_roped(
         let mut kv_v: Vec<Vec<f64>> = Vec::new();
 
         for (j, (shell_j, ret_j)) in prefix_shells.iter().zip(prefix_ret.iter()).enumerate() {
-            if layer_idx >= ret_j.layers.len() { break; }
+            if layer_idx >= ret_j.layers.len() {
+                break;
+            }
             let sl = &shell_j.layers[layer_idx];
             let rs = &ret_j.layers[layer_idx];
 
@@ -1538,13 +1760,22 @@ fn replay_deep_prefix_roped(
                     (Some(q), Some(k), Some(v)) => (q, k, v),
                     _ => break,
                 };
-                let (_, k_roped, v_deq) =
-                    dequant_rope_qkv(ctx.key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, j);
+                let (_, k_roped, v_deq) = dequant_rope_qkv(
+                    ctx.key,
+                    layer_idx,
+                    q_acc,
+                    k_acc,
+                    v_acc,
+                    sl.scale_x_attn,
+                    j + 1,
+                );
                 kv_k.push(k_roped);
                 kv_v.push(v_deq);
             }
 
-            if j == 0 { continue; }
+            if j == 0 {
+                continue;
+            }
 
             // Q always comes from shell accumulators.
             let q_acc = match &sl.q {
@@ -1553,11 +1784,23 @@ fn replay_deep_prefix_roped(
             };
 
             st.check();
-            let q_roped = dequant_rope_q(ctx.key, layer_idx, q_acc, sl.scale_x_attn, j);
+            let q_roped = dequant_rope_q(ctx.key, layer_idx, q_acc, sl.scale_x_attn, j + 1);
             let expected_a = verilm_core::attention::replay_attention_roped(
-                &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
+                &q_roped,
+                &kv_k,
+                &kv_v,
+                rs.scale_a as f64,
+                cfg,
             );
-            check_attention_result(ctx.key, st, &rs.a, &expected_a, "prefix token", j, layer_idx);
+            check_attention_result(
+                ctx.key,
+                st,
+                &rs.a,
+                &expected_a,
+                "prefix token",
+                j,
+                layer_idx,
+            );
         }
 
         // Opened token replay
@@ -1565,6 +1808,7 @@ fn replay_deep_prefix_roped(
             let shell = ctx.r.shell_opening.as_ref().unwrap();
             let sl = &shell.layers[layer_idx];
             let pos = ctx.r.token_index as usize;
+            let absolute_pos = pos + 1;
 
             if let Some(entry) = committed_kv
                 .and_then(|kv| kv.get(layer_idx))
@@ -1573,16 +1817,27 @@ fn replay_deep_prefix_roped(
                 kv_k.push(entry.k_roped.clone());
                 kv_v.push(entry.v_deq.clone());
             } else {
-                let (_, k_roped, v_deq) =
-                    dequant_rope_qkv(ctx.key, layer_idx, q_acc, k_acc, v_acc, sl.scale_x_attn, pos);
+                let (_, k_roped, v_deq) = dequant_rope_qkv(
+                    ctx.key,
+                    layer_idx,
+                    q_acc,
+                    k_acc,
+                    v_acc,
+                    sl.scale_x_attn,
+                    absolute_pos,
+                );
                 kv_k.push(k_roped);
                 kv_v.push(v_deq);
             }
 
             st.check();
-            let q_roped = dequant_rope_q(ctx.key, layer_idx, q_acc, sl.scale_x_attn, pos);
+            let q_roped = dequant_rope_q(ctx.key, layer_idx, q_acc, sl.scale_x_attn, absolute_pos);
             let expected_a = verilm_core::attention::replay_attention_roped(
-                &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
+                &q_roped,
+                &kv_k,
+                &kv_v,
+                rs.scale_a as f64,
+                cfg,
             );
             check_attention_result_opened(ctx, ctx.key, st, &rs.a, &expected_a, layer_idx);
         }
@@ -1593,7 +1848,12 @@ fn replay_deep_prefix_roped(
 fn opened_token_qkv<'a>(
     ctx: &'a Ctx,
     layer_idx: usize,
-) -> Option<(&'a [i32], &'a [i32], &'a [i32], &'a verilm_core::types::RetainedLayerState)> {
+) -> Option<(
+    &'a [i32],
+    &'a [i32],
+    &'a [i32],
+    &'a verilm_core::types::RetainedLayerState,
+)> {
     let shell = ctx.r.shell_opening.as_ref()?;
     if layer_idx >= shell.layers.len() || layer_idx >= ctx.r.retained.layers.len() {
         return None;
@@ -1681,10 +1941,10 @@ fn check_attention_result_opened(
 /// opened during audit are exactly the values committed at generation time.
 ///
 /// Skipped silently when `kv_roots` is empty (legacy / no KV commitment).
-fn phase_kv_transcript(ctx: &Ctx, st: &mut St) {
+fn phase_kv_transcript(ctx: &Ctx, st: &mut St) -> bool {
     let kv_roots = &ctx.r.commitment.kv_roots;
     if kv_roots.is_empty() {
-        return; // Legacy response without KV commitment — nothing to verify.
+        return true; // Legacy response without KV commitment — nothing to verify.
     }
 
     let n_layers = ctx.key.config.n_layers;
@@ -1705,7 +1965,7 @@ fn phase_kv_transcript(ctx: &Ctx, st: &mut St) {
                 ..Default::default()
             },
         );
-        return;
+        return false;
     }
 
     // If there are no opened KV entries, nothing more to verify — the roots
@@ -1713,7 +1973,7 @@ fn phase_kv_transcript(ctx: &Ctx, st: &mut St) {
     // verifier didn't request deep-prefix KV opening for this token).
     let (entries, proofs) = match (&ctx.r.kv_entries, &ctx.r.kv_proofs) {
         (Some(e), Some(p)) => (e, p),
-        (None, None) => return,
+        (None, None) => return true,
         _ => {
             // One is present but not the other — structural error.
             st.check();
@@ -1721,7 +1981,7 @@ fn phase_kv_transcript(ctx: &Ctx, st: &mut St) {
                 FailureCode::KvProofCountMismatch,
                 "kv_entries and kv_proofs must both be present or both absent",
             );
-            return;
+            return false;
         }
     };
 
@@ -1736,11 +1996,11 @@ fn phase_kv_transcript(ctx: &Ctx, st: &mut St) {
                 proofs.len()
             ),
         );
-        return;
+        return false;
     }
 
-    for (group_idx, (layer_entries, layer_proofs)) in
-        entries.iter().zip(proofs.iter()).enumerate()
+    let mut ok = true;
+    for (group_idx, (layer_entries, layer_proofs)) in entries.iter().zip(proofs.iter()).enumerate()
     {
         // Entries and proofs must be paired.
         st.check();
@@ -1758,12 +2018,11 @@ fn phase_kv_transcript(ctx: &Ctx, st: &mut St) {
                     ..Default::default()
                 },
             );
+            ok = false;
             continue;
         }
 
-        for (pos, (entry, proof)) in
-            layer_entries.iter().zip(layer_proofs.iter()).enumerate()
-        {
+        for (pos, (entry, proof)) in layer_entries.iter().zip(layer_proofs.iter()).enumerate() {
             // Determine the actual layer index from the proof's leaf_index
             // domain separator. The prover opens layers in order, so
             // group_idx maps to challenged layers. For now, the prover opens
@@ -1775,18 +2034,22 @@ fn phase_kv_transcript(ctx: &Ctx, st: &mut St) {
                 st.check();
                 st.fail_ctx(
                     FailureCode::KvEntriesCountMismatch,
-                    format!("layer group {} exceeds kv_roots count {}", group_idx, kv_roots.len()),
+                    format!(
+                        "layer group {} exceeds kv_roots count {}",
+                        group_idx,
+                        kv_roots.len()
+                    ),
                     FailureContext {
                         layer: Some(group_idx),
                         ..Default::default()
                     },
                 );
+                ok = false;
                 break;
             }
 
             st.check();
-            let leaf_hash =
-                merkle::hash_kv_entry(layer_idx, pos, &entry.k_roped, &entry.v_deq);
+            let leaf_hash = merkle::hash_kv_entry(layer_idx, pos, &entry.k_roped, &entry.v_deq);
             if !merkle::verify(&kv_roots[layer_idx], &leaf_hash, proof) {
                 st.fail_ctx(
                     FailureCode::KvProofInvalid,
@@ -1800,9 +2063,11 @@ fn phase_kv_transcript(ctx: &Ctx, st: &mut St) {
                         ..Default::default()
                     },
                 );
+                ok = false;
             }
         }
     }
+    ok
 }
 
 // --- Phase 8: Tokenization
@@ -1914,7 +2179,14 @@ fn finish(ctx: &Ctx, st: St, coverage: AuditCoverage) -> V4VerifyReport {
 
 // --- Small helpers
 
-fn verify_freivalds(key: &VerifierKey, st: &mut St, layer: usize, mt: MatrixType, input: &[i8], accum: &[i32]) {
+fn verify_freivalds(
+    key: &VerifierKey,
+    st: &mut St,
+    layer: usize,
+    mt: MatrixType,
+    input: &[i8],
+    accum: &[i32],
+) {
     st.check();
     if !freivalds::check(key.v_for(layer, mt), input, key.r_for(mt), accum) {
         st.fail_ctx(
@@ -1936,7 +2208,10 @@ fn xcheck_f64(st: &mut St, name: &str, manifest: Option<f64>, key: f64) {
             st.fail_ctx(
                 FailureCode::SpecFieldMismatch,
                 format!("{} mismatch: manifest={} key={}", name, v, key),
-                FailureContext { field: Some(name.into()), ..Default::default() },
+                FailureContext {
+                    field: Some(name.into()),
+                    ..Default::default()
+                },
             );
         }
     }
@@ -1948,7 +2223,10 @@ fn xcheck_hash(st: &mut St, name: &str, manifest: Option<[u8; 32]>, key: Option<
             st.fail_ctx(
                 FailureCode::SpecFieldMismatch,
                 format!("{} mismatch: manifest != key", name),
-                FailureContext { field: Some(name.into()), ..Default::default() },
+                FailureContext {
+                    field: Some(name.into()),
+                    ..Default::default()
+                },
             );
         }
     }
@@ -1960,7 +2238,10 @@ fn xcheck_dim(st: &mut St, name: &str, manifest: Option<u32>, key: usize) {
             st.fail_ctx(
                 FailureCode::SpecFieldMismatch,
                 format!("{} mismatch: manifest={} key={}", name, v, key),
-                FailureContext { field: Some(name.into()), ..Default::default() },
+                FailureContext {
+                    field: Some(name.into()),
+                    ..Default::default()
+                },
             );
         }
     }
@@ -1972,7 +2253,10 @@ fn xcheck_str(st: &mut St, name: &str, manifest: Option<&str>, key: Option<&str>
             st.fail_ctx(
                 FailureCode::SpecFieldMismatch,
                 format!("{} mismatch: manifest='{}' key='{}'", name, m, k),
-                FailureContext { field: Some(name.into()), ..Default::default() },
+                FailureContext {
+                    field: Some(name.into()),
+                    ..Default::default()
+                },
             );
         }
     }
@@ -1981,8 +2265,14 @@ fn reject_feature(st: &mut St, rejected: bool, field: &str, actual: &str, expect
     if rejected {
         st.fail_ctx(
             FailureCode::UnsupportedDecodeFeature,
-            format!("unsupported {}={} (canonical requires {})", field, actual, expected),
-            FailureContext { field: Some(field.into()), ..Default::default() },
+            format!(
+                "unsupported {}={} (canonical requires {})",
+                field, actual, expected
+            ),
+            FailureContext {
+                field: Some(field.into()),
+                ..Default::default()
+            },
         );
     }
 }
@@ -2036,8 +2326,14 @@ mod tests {
         V4AuditResponse {
             token_index,
             retained: RetainedTokenState { layers: vec![] },
-            merkle_proof: MerkleProof { leaf_index: 0, siblings: vec![] },
-            io_proof: MerkleProof { leaf_index: 0, siblings: vec![] },
+            merkle_proof: MerkleProof {
+                leaf_index: 0,
+                siblings: vec![],
+            },
+            io_proof: MerkleProof {
+                leaf_index: 0,
+                siblings: vec![],
+            },
             token_id: 0,
             prev_io_hash: [0u8; 32],
             prefix_leaf_hashes: vec![],

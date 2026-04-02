@@ -16,6 +16,19 @@ SERVED_MODEL_ID = "neuralmagic/Qwen2.5-7B-Instruct-quantized.w8a8"
 ALT_MODEL_ID = "neuralmagic/Meta-Llama-3.1-8B-Instruct-quantized.w8a8"
 PROMPT = "What is the capital of France?"
 MAX_TOKENS = 24
+BUILD_IGNORE = [
+    ".git",
+    "target",
+    "lean",
+    "article",
+    "docs",
+    "paper",
+    "research",
+    "site",
+    "scripts/__pycache__",
+    "*.pdf",
+    "CHANGELOG.md",
+]
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -34,9 +47,7 @@ image = (
         "pip install -e /opt/verilm",
         "python3 -c 'import site, os; open(os.path.join(site.getsitepackages()[0], \"verilm_capture.pth\"), \"w\").write(\"import verilm._startup\\n\")'",
     )
-    .add_local_dir(".", remote_path="/build", copy=True, ignore=[
-        ".git", "target", "scripts/__pycache__", "*.pdf", "CHANGELOG.md",
-    ])
+    .add_local_dir(".", remote_path="/build", copy=True, ignore=BUILD_IGNORE)
     .run_commands(
         "cd /build/crates/verilm-py && maturin build --release",
         "bash -c 'pip install /build/target/wheels/verilm_rs-*.whl'",
@@ -102,22 +113,29 @@ def _run_test():
         "token_index": 0,
         "layer_indices": list(range(n_layers)),
         "tier": "full",
-        "binary": False,
+        "binary": True,
     })
     assert resp.status_code == 200, f"audit failed: {resp.status_code}"
-    audit_json = resp.text
+    audit_binary = resp.content
 
-    honest = verilm_rs.verify_v4(audit_json, served_key_json)
+    honest = verilm_rs.verify_v4_binary(audit_binary, served_key_json)
     assert honest["passed"], f"honest audit must pass under served-model key: {honest['failures']}"
     print(f"Baseline pass: {honest['checks_passed']}/{honest['checks_run']} checks")
 
-    substituted = verilm_rs.verify_v4(audit_json, alt_key_json)
+    substituted = verilm_rs.verify_v4_binary(audit_binary, alt_key_json)
     assert not substituted["passed"], "cross-model substitution must be rejected"
 
     classified = substituted.get("classified_failures", [])
     assert len(classified) > 0, "model substitution rejection should produce classified failures"
 
-    accepted_categories = {"SpecMismatch", "CryptographicBinding", "Structural"}
+    accepted_categories = {
+        "SpecMismatch",
+        "CryptographicBinding",
+        "Structural",
+        "spec_mismatch",
+        "cryptographic_binding",
+        "structural",
+    }
     seen_categories = {cf.get("category") for cf in classified}
     assert seen_categories & accepted_categories, (
         f"expected model substitution to fail as spec/binding mismatch, got {classified}"
