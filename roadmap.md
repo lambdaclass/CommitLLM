@@ -14,6 +14,7 @@ These gate the first public release. Do them in this order.
 
 | # | Item | Status |
 |---|------|--------|
+| 114 | **Adversarial methodology research** — move from defender testing (flip bits, check rejection) to attacker simulation (white-box forgery, adaptive adversary, composition attacks, probabilistic security curves). See [`research/adversarial-methodology.md`](./research/adversarial-methodology.md). | open |
 | 49 | **Rename to CommitLLM** — all docs, APIs, CLI, scripts, packages use `CommitLLM`. Do first. | open |
 | 50 | **Remove V4/V5 naming** — public surface uses one canonical release name, not internal version numbers | open |
 | 6 | **Unify attention path** — one `x_attn` boundary, one QKV replay story across prover/verifier/corridor. No silent mixing of bridge-derived Q with committed K/V. | open |
