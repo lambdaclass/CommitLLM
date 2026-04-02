@@ -57,7 +57,7 @@ code {
 // Practical Typography: 45–90 characters per line.
 // At 18px Source Serif, ~620px gives ~70 chars.
 .container {
-  max-width: 960px;
+  max-width: 1040px;
   margin: 0 auto;
   // Practical Typography: generous margins, don't fear whitespace.
   padding: 0 2.5rem;
@@ -65,7 +65,7 @@ code {
 
 .section {
   // Practical Typography: space between sections, not decoration.
-  padding: 4rem 0;
+  padding: 3rem 0;
 }
 
 .section--dark {
@@ -109,54 +109,127 @@ code {
 .nav {
   position: fixed; top: 0; left: 0; right: 0;
   z-index: 100;
-  padding: 0.7rem 2.5rem;
+  padding: 0.85rem 2rem;
   display: flex; align-items: center; justify-content: space-between;
+  gap: 1rem;
   background: rgba($bg, 0.95);
   backdrop-filter: blur(8px);
   border-bottom: 1px solid $border;
+  @media (max-width: 900px) {
+    padding: 0.8rem 1rem;
+    align-items: flex-start;
+    flex-direction: column;
+  }
 
   &-logo {
+    text-decoration: none;
     font-family: $mono;
     font-weight: 500;
-    font-size: 0.88rem;
+    font-size: 0.92rem;
     color: $text-bright;
     span { color: $link; }
+    &:hover { text-decoration: none; }
+  }
+
+  &-group {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-left: auto;
+    @media (max-width: 900px) {
+      width: 100%;
+      flex-direction: column;
+      align-items: stretch;
+      margin-left: 0;
+      gap: 0.55rem;
+    }
   }
 
   &-links {
-    display: flex; gap: 1.5rem; list-style: none;
+    display: flex; gap: 1.15rem; list-style: none;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    @media (max-width: 900px) {
+      width: 100%;
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      padding-bottom: 0.15rem;
+      scrollbar-width: none;
+      &::-webkit-scrollbar { display: none; }
+    }
     a {
       font-family: $mono;
-      font-size: 0.72rem;
-      font-weight: 400;
+      font-size: 0.75rem;
+      font-weight: 500;
       color: $text-dim;
+      white-space: nowrap;
       &:hover { color: $text-bright; text-decoration: none; }
     }
+  }
+
+  &-cta {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-shrink: 0;
+    @media (max-width: 900px) {
+      width: 100%;
+      justify-content: flex-start;
+    }
+  }
+}
+
+.nav-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: $mono;
+  font-size: 0.72rem;
+  font-weight: 500;
+  padding: 0.45rem 0.8rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  text-decoration: none;
+  white-space: nowrap;
+  &:hover { text-decoration: none; }
+
+  &--paper {
+    background: $text-bright;
+    color: $bg;
+    &:hover { opacity: 0.88; }
+  }
+
+  &--ghost {
+    color: $text;
+    border-color: $border;
+    &:hover { border-color: $text-dim; }
   }
 }
 
 // ── Hero ────────────────────────────────────────────
 .hero {
-  min-height: 92vh;
-  display: flex; align-items: center;
-  padding-top: 3.5rem;
+  min-height: auto;
+  display: flex; align-items: flex-start;
+  padding: 5.5rem 0 3.5rem;
+  @media (max-width: 900px) { padding: 6rem 0 3rem; }
 
   &-grid {
     display: grid;
     grid-template-columns: 1fr 320px;
-    gap: 3.5rem;
-    align-items: center;
-    @media (max-width: 860px) { grid-template-columns: 1fr; }
+    gap: 2.75rem;
+    align-items: start;
+    @media (max-width: 860px) { grid-template-columns: 1fr; gap: 1.5rem; }
   }
 
   // Practical Typography: heading size — smallest effective increment.
   h1 {
-    font-size: 2.4rem;
+    font-size: clamp(2rem, 4vw, 2.5rem);
     font-weight: 600;
     color: $text-bright;
-    line-height: 1.18;
-    margin-bottom: 1.2rem;
-    letter-spacing: -0.015em;
+    line-height: 1.15;
+    margin-bottom: 0.85rem;
+    letter-spacing: -0.02em;
     em {
       font-style: italic;
       color: $text-bright;
@@ -167,33 +240,64 @@ code {
   &-badge {
     display: inline-block;
     font-family: $mono;
-    font-size: 0.68rem;
+    font-size: 0.65rem;
     font-weight: 400;
     color: $text-dim;
-    border: 1px solid $border;
-    border-radius: 2px;
-    padding: 0.2rem 0.6rem;
-    margin-bottom: 1.5rem;
+    margin-bottom: 0.75rem;
   }
 
   &-desc {
-    font-size: 1.05rem;
+    font-size: 1.02rem;
     color: $text-dim;
-    // Practical Typography: line length.
-    max-width: 32em;
+    max-width: 31em;
     line-height: 1.55;
-    margin-bottom: 1.75rem;
+    margin-bottom: 0.85rem;
   }
 
-  &-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+  &-actions { display: flex; gap: 0.7rem; flex-wrap: wrap; }
 
   &-aside {
     background: $bg-warm;
     border: 1px solid $border;
     border-radius: 4px;
-    padding: 1.25rem 1.5rem;
-    @media (max-width: 860px) { display: none; }
+    padding: 1rem 1.25rem;
+    @media (max-width: 860px) { display: block; max-width: 520px; }
   }
+}
+
+.hero-proofline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  max-width: 42rem;
+  margin-bottom: 1rem;
+}
+
+.proof-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2rem;
+  padding: 0.32rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid $border;
+  background: $bg-warm;
+  font-family: $mono;
+  font-size: 0.68rem;
+  line-height: 1.35;
+
+  &--exact { color: $green; }
+  &--approx { color: $orange; }
+  &--stat { color: $blue; }
+}
+
+.aside-kicker {
+  font-family: $mono;
+  font-size: 0.64rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: $text-dim;
+  margin-bottom: 0.6rem;
 }
 
 .stat-list {
@@ -217,9 +321,9 @@ code {
 .btn {
   display: inline-flex; align-items: center; gap: 0.35rem;
   font-family: $mono;
-  font-size: 0.76rem;
+  font-size: 0.8rem;
   font-weight: 500;
-  padding: 0.55rem 1.15rem;
+  padding: 0.62rem 1.2rem;
   border-radius: 3px;
   border: 1px solid transparent;
   cursor: pointer;
@@ -381,8 +485,10 @@ code {
   }
 
   &--exact .pipe-tag { color: $green; }
+  &--alg .pipe-tag { color: $link; }
   &--approx .pipe-tag { color: $orange; }
   &--stat .pipe-tag { color: $blue; }
+  &--fail .pipe-tag { color: $red; }
 }
 
 .pipeline-legend {
@@ -391,6 +497,7 @@ code {
   margin-top: 0.75rem;
   font-size: 0.75rem;
   color: $text-dim;
+  flex-wrap: wrap;
 
   span {
     display: flex; align-items: center; gap: 0.3rem;
@@ -401,8 +508,10 @@ code {
     }
   }
   .legend-exact::before { background: $green; }
+  .legend-alg::before { background: $link; }
   .legend-approx::before { background: $orange; }
   .legend-stat::before { background: $blue; }
+  .legend-fail::before { background: $red; }
 }
 
 // ── Approximate note ────────────────────────────────
@@ -594,10 +703,15 @@ code {
 }
 
 // ── Specs table ─────────────────────────────────────
+.table-wrap {
+  overflow-x: auto;
+}
+
 .specs-table {
   margin-top: 2rem;
   width: 100%;
   border-collapse: collapse;
+  min-width: 640px;
 
   th, td { padding: 0.6rem 0.75rem; text-align: left; border-bottom: 1px solid $border; }
   th {
@@ -645,6 +759,7 @@ code {
   width: 100%;
   border-collapse: collapse;
   font-size: 0.88rem;
+  min-width: 700px;
 
   th, td { padding: 0.6rem 0.75rem; text-align: left; border-bottom: 1px solid $border; }
   th {

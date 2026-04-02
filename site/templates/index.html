@@ -7,19 +7,23 @@
   <meta name="description" content="A cryptographic commit-and-audit protocol for open-weight LLM inference.">
   <link rel="stylesheet" href="{{ get_url(path='style.css') | safe }}">
 </head>
-<body>
+<body id="top">
 
 <nav class="nav">
-  <div class="nav-logo">Commit<span>LLM</span></div>
-  <ul class="nav-links">
-    <li><a href="#protocol">Protocol</a></li>
-    <li><a href="#guarantees">Guarantees</a></li>
-    <li><a href="#benchmarks">Benchmarks</a></li>
-    <li><a href="#usecases">Use cases</a></li>
-    <li><a href="#abstract">Paper</a></li>
-    <li><a href="#code">Code</a></li>
-    <li><a href="https://github.com/lambdaclass/CommitLLM">GitHub</a></li>
-  </ul>
+  <a class="nav-logo" href="#top">Commit<span>LLM</span></a>
+  <div class="nav-group">
+    <ul class="nav-links">
+      <li><a href="#protocol">Protocol</a></li>
+      <li><a href="#guarantees">Guarantees</a></li>
+      <li><a href="#benchmarks">Benchmarks</a></li>
+      <li><a href="#binding">Binding</a></li>
+      <li><a href="#usecases">Use cases</a></li>
+    </ul>
+    <div class="nav-cta">
+      <a class="nav-btn nav-btn--paper" href="https://github.com/lambdaclass/CommitLLM/blob/main/paper/main.pdf">Paper</a>
+      <a class="nav-btn nav-btn--ghost" href="https://github.com/lambdaclass/CommitLLM">GitHub</a>
+    </div>
+  </div>
 </nav>
 
 <main>
@@ -32,14 +36,21 @@
         <div class="hero-badge">Active development &middot; Lean 4 formalization in progress</div>
         <h1>Cryptographic provenance for <em>LLM&nbsp;inference</em></h1>
         <p class="hero-desc">
-          When you call an LLM provider, you have no proof they ran the model they claim, with the configuration they advertise, or that the output wasn&rsquo;t tampered with. CommitLLM closes that gap: the provider serves responses normally on GPU and returns a compact receipt. A verifier checks the opening on CPU against committed model weights, deployment configuration, and decode policy.
+          You have no proof your LLM provider ran the model they claim. CommitLLM is a cryptographic commit-and-audit protocol that closes that gap: the provider serves normally on GPU and returns a compact receipt. A verifier checks it on CPU.
         </p>
+        <div class="hero-proofline">
+          <span class="proof-chip proof-chip--exact">Linear shell: algebraic checks</span>
+          <span class="proof-chip proof-chip--exact">Nonlinear shell: canonical replay</span>
+          <span class="proof-chip proof-chip--approx">Attention: bounded approximate replay</span>
+          <span class="proof-chip proof-chip--stat">Prefix/KV: statistical unless deep audit</span>
+        </div>
         <div class="hero-actions">
-          <a href="https://github.com/lambdaclass/CommitLLM" class="btn btn-primary">View source</a>
-          <a href="https://github.com/lambdaclass/CommitLLM/blob/main/paper/main.pdf" class="btn btn-ghost">Read the paper</a>
+          <a href="https://github.com/lambdaclass/CommitLLM" class="btn btn-primary">GitHub</a>
+          <a href="https://github.com/lambdaclass/CommitLLM/blob/main/paper/main.pdf" class="btn btn-ghost">Paper (PDF)</a>
         </div>
       </div>
       <div class="hero-aside">
+        <div class="aside-kicker">Measured on the kept path</div>
         <ul class="stat-list">
           <li class="stat-row">
             <span class="stat-key">Online tracing overhead</span>
@@ -90,7 +101,7 @@
       <div class="three-col-item three-col-item--highlight">
         <div class="col-label col-label--green">CommitLLM</div>
         <h3>Commit-and-audit</h3>
-        <p>Commitment-bound end-to-end. Algebraic checks for linear layers, canonical replay for nonlinear components. No proving circuit. CPU-only verification.</p>
+        <p>Commitment-bound end-to-end. Information-theoretically sound algebraic checks for large linear layers, canonical replay for supported nonlinear components, CPU-only verification.</p>
       </div>
       <div class="three-col-item">
         <div class="col-label col-label--orange">Impractical</div>
@@ -150,19 +161,21 @@
       <div class="pipeline">
         <div class="pipe pipe--exact"><div class="pipe-name">Input</div><div class="pipe-tag">Exact</div></div>
         <div class="pipe pipe--exact"><div class="pipe-name">Embedding</div><div class="pipe-tag">Exact</div></div>
-        <div class="pipe pipe--exact"><div class="pipe-name">Shell matmuls</div><div class="pipe-tag">Freivalds</div></div>
+        <div class="pipe pipe--alg"><div class="pipe-name">Shell matmuls</div><div class="pipe-tag">Freivalds</div></div>
         <div class="pipe pipe--exact"><div class="pipe-name">INT8 bridges</div><div class="pipe-tag">Exact</div></div>
         <div class="pipe pipe--stat"><div class="pipe-name">Prefix/KV</div><div class="pipe-tag">Statistical*</div></div>
         <div class="pipe pipe--approx"><div class="pipe-name">Attention</div><div class="pipe-tag">Approximate</div></div>
         <div class="pipe pipe--exact"><div class="pipe-name">Final tail</div><div class="pipe-tag">Exact</div></div>
-        <div class="pipe pipe--exact"><div class="pipe-name">LM head</div><div class="pipe-tag">Freivalds</div></div>
-        <div class="pipe pipe--exact"><div class="pipe-name">Decode</div><div class="pipe-tag">Fail-closed</div></div>
+        <div class="pipe pipe--alg"><div class="pipe-name">LM head</div><div class="pipe-tag">Freivalds</div></div>
+        <div class="pipe pipe--fail"><div class="pipe-name">Decode</div><div class="pipe-tag">Fail-closed</div></div>
       </div>
     </div>
     <div class="pipeline-legend">
-      <span class="legend-exact">Exact / information-theoretic</span>
+      <span class="legend-exact">Exact / canonical replay</span>
+      <span class="legend-alg">Algebraic checks</span>
       <span class="legend-approx">Approximate (FP16/BF16)</span>
       <span class="legend-stat">Statistical &rarr; exact in deep audit</span>
+      <span class="legend-fail">Fail-closed</span>
     </div>
 
     <div class="approx-note">
@@ -306,15 +319,17 @@
     <p class="section-sub">
       CommitLLM binds the entire deployment surface that affects outputs&mdash;not just &ldquo;some model ran.&rdquo;
     </p>
-    <table class="specs-table">
-      <thead><tr><th>Spec</th><th>What it binds</th></tr></thead>
-      <tbody>
-        <tr><td>input_spec_hash</td><td>Tokenizer, chat template, BOS/EOS, truncation, padding, system prompt</td></tr>
-        <tr><td>model_spec_hash</td><td>Checkpoint identity R<sub>W</sub>, quantization, LoRA/adapter, RoPE config, RMSNorm&nbsp;&epsilon;</td></tr>
-        <tr><td>decode_spec_hash</td><td>Sampler, temperature, top-k/p, penalties, logit bias, grammar, stop rules</td></tr>
-        <tr><td>output_spec_hash</td><td>Detokenization, cleanup, whitespace normalization</td></tr>
-      </tbody>
-    </table>
+    <div class="table-wrap">
+      <table class="specs-table">
+        <thead><tr><th>Spec</th><th>What it binds</th></tr></thead>
+        <tbody>
+          <tr><td>input_spec_hash</td><td>Tokenizer, chat template, BOS/EOS, truncation, padding, system prompt</td></tr>
+          <tr><td>model_spec_hash</td><td>Checkpoint identity R<sub>W</sub>, quantization, LoRA/adapter, RoPE config, RMSNorm&nbsp;&epsilon;</td></tr>
+          <tr><td>decode_spec_hash</td><td>Sampler, temperature, top-k/p, penalties, logit bias, grammar, stop rules</td></tr>
+          <tr><td>output_spec_hash</td><td>Detokenization, cleanup, whitespace normalization</td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 </section>
 
@@ -343,29 +358,6 @@
         <p>When an agent takes action, which model produced the decision becomes a liability and governance question.</p>
       </div>
     </div>
-  </div>
-</section>
-
-<hr class="rule">
-
-<!-- ── Comparison ─────────────────────────────────── -->
-<section class="section" id="comparison">
-  <div class="container">
-    <div class="section-label">Design space</div>
-    <h2 class="section-title">CommitLLM vs. alternatives</h2>
-    <table class="cmp-table">
-      <thead>
-        <tr><th>Property</th><th>Fingerprinting</th><th>ZK proofs</th><th>CommitLLM</th></tr>
-      </thead>
-      <tbody>
-        <tr><td>Per-response verification</td><td class="no">Statistical</td><td class="yes">Exact</td><td class="yes">Exact + bounded</td></tr>
-        <tr><td>Provider overhead</td><td class="yes">Minimal</td><td class="no">Very high</td><td class="yes">~12&ndash;14%</td></tr>
-        <tr><td>CPU-only verifier</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
-        <tr><td>Third-party transferable</td><td class="no">No</td><td class="yes">Succinct proof</td><td class="mid">Disclosed transcript</td></tr>
-        <tr><td>Production serving</td><td class="yes">Yes</td><td class="no">Circuit overhead</td><td class="yes">Normal GPU path</td></tr>
-        <tr><td>Model identity binding</td><td class="no">Indirect</td><td class="yes">Full</td><td class="yes">Merkle + Freivalds</td></tr>
-      </tbody>
-    </table>
   </div>
 </section>
 
@@ -401,43 +393,33 @@
   <div class="container">
     <div class="section-label">Repository</div>
     <h2 class="section-title">Code layout</h2>
-    <table class="specs-table">
-      <thead><tr><th>Component</th><th>Path</th></tr></thead>
-      <tbody>
-        <tr><td>Core types and traits</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-core">crates/verilm-core</a></td></tr>
-        <tr><td>Key generation</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-keygen">crates/verilm-keygen</a></td></tr>
-        <tr><td>Verifier</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-verify">crates/verilm-verify</a></td></tr>
-        <tr><td>Prover (Rust)</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-prover">crates/verilm-prover</a></td></tr>
-        <tr><td>Python sidecar</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/sidecar">sidecar/</a></td></tr>
-        <tr><td>Python bindings</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-py">crates/verilm-py</a></td></tr>
-        <tr><td>Test vectors</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-test-vectors">crates/verilm-test-vectors</a></td></tr>
-        <tr><td>Lean formalization</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/lean">lean/</a></td></tr>
-        <tr><td>Paper</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/paper">paper/</a></td></tr>
-      </tbody>
-    </table>
+    <div class="table-wrap">
+      <table class="specs-table">
+        <thead><tr><th>Component</th><th>Path</th></tr></thead>
+        <tbody>
+          <tr><td>Core types and traits</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-core">crates/verilm-core</a></td></tr>
+          <tr><td>Key generation</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-keygen">crates/verilm-keygen</a></td></tr>
+          <tr><td>Verifier</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-verify">crates/verilm-verify</a></td></tr>
+          <tr><td>Prover (Rust)</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-prover">crates/verilm-prover</a></td></tr>
+          <tr><td>Python sidecar</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/sidecar">sidecar/</a></td></tr>
+          <tr><td>Python bindings</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-py">crates/verilm-py</a></td></tr>
+          <tr><td>Test vectors</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-test-vectors">crates/verilm-test-vectors</a></td></tr>
+          <tr><td>Lean formalization</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/lean">lean/</a></td></tr>
+          <tr><td>Paper</td><td><a href="https://github.com/lambdaclass/CommitLLM/blob/main/paper/main.pdf">paper/main.pdf</a></td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 </section>
 
 <hr class="rule">
 
-<!-- ── CTA ────────────────────────────────────────── -->
-<section class="cta-section">
-  <div class="container">
-    <h2>Read the paper, try the code</h2>
-    <p>The protocol is open source. The paper is available. Lean 4 formalization is in progress.</p>
-    <div class="cta-btns">
-      <a href="https://github.com/lambdaclass/CommitLLM" class="btn btn-primary">GitHub</a>
-      <a href="https://github.com/lambdaclass/CommitLLM/blob/main/paper/main.pdf" class="btn btn-ghost">Paper (PDF)</a>
-    </div>
-  </div>
-</section>
-
 <footer class="section" style="padding: 0;">
   <div class="container">
     <div class="footer">
-      <div class="footer-left">CommitLLM &middot; <a href="https://lambdaclass.com">Lambda Class</a></div>
+      <div class="footer-left">CommitLLM &middot; <a href="https://lambdaclass.com">Lambda Class</a> &middot; <a href="https://ccsd.uba.ar/">CCSD&nbsp;UBA</a></div>
       <div class="footer-right">
-        <a href="https://github.com/lambdaclass/CommitLLM">Source</a>
+        <a href="https://github.com/lambdaclass/CommitLLM">GitHub</a>
         <a href="https://github.com/lambdaclass/CommitLLM/blob/main/paper/main.pdf">Paper</a>
       </div>
     </div>
