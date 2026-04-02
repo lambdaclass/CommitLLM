@@ -25,7 +25,7 @@ Provider precomputes or caches honest responses to avoid real-time computation.
 
 | Attack | Why it matters |
 |--------|---------------|
-| Replay honest receipt for known prompt | Without freshness binding (#106), cached receipts verify indefinitely |
+| Replay honest receipt for known prompt | Without freshness binding (#16), cached receipts verify indefinitely |
 | Prefix-sharing forgery | Precompute receipt for common prefix, graft onto new suffix |
 | Selective honest/dishonest | Honest for audited fraction, dishonest for the rest — directly attacks sampling rate |
 
@@ -186,9 +186,9 @@ Given white-box access to the verifier, use optimization (gradient descent or se
 
 ## References
 
-- Roadmap #97: Adversarial testing (in progress)
-- Roadmap #98: Formal security argument
-- Roadmap #99: Fuzz binary parsers
-- Roadmap #112: Cheating-incentive analysis
-- Roadmap #114: Adversarial methodology research (this document)
+- Roadmap #8: Adversarial testing (in progress)
+- Roadmap #14: Formal security argument
+- Roadmap #9: Fuzz binary parsers
+- Roadmap #66: Cheating-incentive analysis
+- Roadmap #1: Adversarial methodology research (this document)
 - `redteam/attack_matrix.md`: current attack coverage inventory
