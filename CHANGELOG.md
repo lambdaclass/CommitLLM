@@ -4,6 +4,12 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 
 Historical references below to “roadmap #N” refer to the pre-2026-03-30 roadmap numbering. On 2026-03-30 the roadmap was renumbered into a single linear open-items-only sequence.
 
+## 2026-04-03
+
+### Measured
+
+- **RMSNorm contraction ratio on real checkpoints (roadmap #1, measured)**: ρ_j = γ·‖W_o‖₂/RMS(x^(j)) measured via Modal A100-40GB on two families. **Qwen-7B W8A8**: 24/28 layers contract (86%), 4 early layers expand (ρ up to 63.8), accumulated drift/residual=0.63. **Llama-3.1-8B fp16**: 0/32 layers contract, every layer expands (ρ 1.7–691), accumulated drift bound diverges (10^13). RMSNorm contraction alone does NOT close the corridor for Llama — the small residual norms (~1.5–2.0) and large γ weights (~1.0) prevent dampening. Score witnessing (#7) and W_o conditioning (#8) confirmed critical, not optional. Measurement script: `redteam/modal/measure_contraction.py`.
+
 ## 2026-03-31
 
 ### Added
