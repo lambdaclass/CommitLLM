@@ -135,16 +135,24 @@ pub fn build_retained_from_captures(
                 let a_dim = entry.a_i8.len() / batch_size;
                 let a = entry.a_i8[b * a_dim..(b + 1) * a_dim].to_vec();
 
-                if let Some(ref xa) = entry.x_attn_i8 {
+                let layer_x_attn_i8 = if let Some(ref xa) = entry.x_attn_i8 {
                     let x_dim = xa.len() / batch_size;
-                    token_x_attn.push(xa[b * x_dim..(b + 1) * x_dim].to_vec());
-                }
-
+                    let extracted = xa[b * x_dim..(b + 1) * x_dim].to_vec();
+                    token_x_attn.push(extracted.clone());
+                    Some(extracted)
+                } else {
+                    None
+                };
+                let layer_scale_x_attn = if layer_x_attn_i8.is_some() {
+                    Some(entry.scale_x_attn[b])
+                } else {
+                    None
+                };
                 layers.push(RetainedLayerState {
                     a,
                     scale_a: entry.scale_a[b],
-                    x_attn_i8: None,
-                    scale_x_attn: None,
+                    x_attn_i8: layer_x_attn_i8,
+                    scale_x_attn: layer_scale_x_attn,
                 });
                 token_scales.push(CapturedLayerScales {
                     scale_x_attn: entry.scale_x_attn[b],
@@ -1160,17 +1168,15 @@ pub fn open_v4(
     use_captured_x_attn: bool,
 ) -> V4AuditResponse {
     let mut response = open_v4_structural(state, token_index);
-    // When use_captured_x_attn is false (default / Freivalds path), the shell
-    // opening uses bridge-derived x_attn so QKV accumulators match the
-    // verifier's own derivation.  When true (corridor measurement), GPU-captured
-    // x_attn is used so Q matches the same boundary as committed K/V.
-    let cxa = if use_captured_x_attn {
-        state.captured_x_attn.as_ref()
-            .and_then(|all| all.get(token_index as usize))
-            .map(|v| v.as_slice())
-    } else {
-        None
-    };
+    // Use GPU-captured x_attn for shell QKV when available. This makes the
+    // shell accumulators match the GPU's actual computation, so Freivalds
+    // verifies the committed x_attn and check_attention_token0 can replay
+    // against the GPU's retained `a` with matching inputs.
+    // Falls back to bridge-derived when captured x_attn is absent (toy models).
+    let _ = use_captured_x_attn; // kept for API compat; captured always preferred
+    let cxa = state.captured_x_attn.as_ref()
+        .and_then(|all| all.get(token_index as usize))
+        .map(|v| v.as_slice());
     let mut shell = compute_shell_opening(
         &state.all_retained[token_index as usize], weights, cfg, weight_scales,
         per_channel_weight_scales, bridge,
@@ -1228,13 +1234,9 @@ pub fn open_v4(
                         initial_residual: &emb_row,
                         embedding_proof: None, // prefix tokens don't carry individual proofs in shell
                     };
-                    let cxa_j = if use_captured_x_attn {
-                        state.captured_x_attn.as_ref()
-                            .and_then(|all| all.get(j))
-                            .map(|v| v.as_slice())
-                    } else {
-                        None
-                    };
+                    let cxa_j = state.captured_x_attn.as_ref()
+                        .and_then(|all| all.get(j))
+                        .map(|v| v.as_slice());
                     let mut shell_j = compute_shell_opening(
                         retained_j, weights, cfg, weight_scales, per_channel_weight_scales,
                         Some(&bridge_j), layer_filter, &state.captured_scales[j],

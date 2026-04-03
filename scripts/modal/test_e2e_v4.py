@@ -79,6 +79,18 @@ def _run_e2e():
         else:
             print(f"  OK: {msg}")
 
+    def print_verify_diagnostics(report, label=""):
+        """Print classified failure details for any verification report."""
+        cf = report.get("classified_failures", [])
+        if cf:
+            print(f"  {label}classified failures ({len(cf)}):")
+            for f in cf[:20]:  # cap at 20 to avoid flooding
+                ctx = f.get("context", {})
+                ctx_str = ", ".join(f"{k}={v}" for k, v in ctx.items()) if ctx else ""
+                print(f"    [{f['code']}] {f['message']}" + (f"  ({ctx_str})" if ctx_str else ""))
+            if len(cf) > 20:
+                print(f"    ... and {len(cf) - 20} more")
+
     # ── Step 1: Chat (capture + commit) ──
     print("\n1. Chat (capture + commit)...")
     cap._capture_mode = "minimal"
@@ -136,12 +148,60 @@ def _run_e2e():
     print("\n3b. Verify (full tier)...")
     report_full = verilm_rs.verify_v4(audit_full_json, key_json)
     assert_true(report_full["passed"], f"full verify passed ({report_full['checks_passed']}/{report_full['checks_run']} checks)")
-    if not report_full["passed"]:
-        print(f"  failures: {report_full['failures']}")
+    print_verify_diagnostics(report_full, "full JSON: ")
     # Coverage semantics (#12): full audit must report "full" coverage.
     cov_full = report_full.get("coverage", {})
     assert_true(cov_full.get("level") == "full", f"full audit coverage: {cov_full}")
     print(f"  coverage: {cov_full}")
+    # ── Diagnostic: inspect layer-0 attention replay inputs ──
+    if audit_full.get("shell_opening") and audit_full["shell_opening"].get("layers"):
+        print("\n  === Layer-0 attention replay diagnostic ===")
+        sl0 = audit_full["shell_opening"]["layers"][0]
+        rs0 = audit_full.get("retained", {}).get("layers", [{}])[0]
+        key_data = json.loads(key_json)
+        config = key_data.get("config", {})
+
+        scale_a_0 = rs0.get("scale_a", "?")
+        scale_x_attn_0 = sl0.get("scale_x_attn", "?")
+        a_vals = rs0.get("a", [])[:8]
+        v_acc = sl0.get("v", [])[:8] if sl0.get("v") else "None"
+
+        print(f"  scale_a[0] = {scale_a_0}")
+        print(f"  scale_x_attn[0] = {scale_x_attn_0}")
+        print(f"  rs.a[0][:8] = {a_vals}")
+        print(f"  sl.v[0][:8] = {v_acc}")
+        print(f"  config: hidden={config.get('hidden_dim')}, kv_dim={config.get('kv_dim')}, "
+              f"n_q_heads={config.get('n_q_heads')}, n_kv_heads={config.get('n_kv_heads')}, d_head={config.get('d_head')}")
+
+        # Manual V dequant + requant for first 4 elements (using per-channel scales from key)
+        pc_scales = key_data.get("per_channel_weight_scales", [])
+        if pc_scales and len(pc_scales) > 0 and len(pc_scales[0]) > 2:
+            # pc_scales[layer][matrix_idx] where Wv is index 2
+            v_scales = pc_scales[0][2][:4] if len(pc_scales[0][2]) > 0 else []
+            v_i32 = sl0.get("v", [])[:4] if sl0.get("v") else []
+            if v_i32 and v_scales and isinstance(scale_x_attn_0, (int, float)):
+                print(f"  v_proj.weight_scale[0][:4] = {v_scales}")
+                v_deq = [v_i32[i] * v_scales[i] * scale_x_attn_0 for i in range(min(4, len(v_i32), len(v_scales)))]
+                print(f"  v_deq[0][:4] (manual) = {v_deq}")
+
+                # Check bias
+                biases = key_data.get("qkv_biases", [])
+                if biases and len(biases) > 0 and len(biases[0]) > 2:
+                    v_bias = biases[0][2][:4] if len(biases[0][2]) > 0 else []
+                    if v_bias:
+                        v_deq_biased = [v_deq[i] + v_bias[i] for i in range(min(4, len(v_deq), len(v_bias)))]
+                        print(f"  v_bias[0][:4] = {v_bias}")
+                        print(f"  v_deq + bias [:4] = {v_deq_biased}")
+                        v_deq = v_deq_biased
+
+                if isinstance(scale_a_0, (int, float)) and scale_a_0 != 0:
+                    v_requant = [int(max(-128, min(127, round(v / scale_a_0)))) for v in v_deq]
+                    print(f"  v_requant[:4] (round(v_deq/scale_a)) = {v_requant}")
+                    print(f"  rs.a[:4] (GPU)                       = {a_vals[:4]}")
+                    diffs = [abs(v_requant[i] - a_vals[i]) for i in range(min(4, len(v_requant), len(a_vals)))]
+                    print(f"  diffs[:4] = {diffs}")
+        print("  === end diagnostic ===\n")
+
     # Classified failures (#11): empty on pass, but field must exist.
     cf_full = report_full.get("classified_failures", None)
     assert_true(cf_full is not None, "classified_failures field present")
@@ -231,8 +291,7 @@ def _run_e2e():
         report_routine["passed"],
         f"routine verify passed ({report_routine['checks_passed']}/{report_routine['checks_run']} checks)"
     )
-    if not report_routine["passed"]:
-        print(f"  failures: {report_routine['failures']}")
+    print_verify_diagnostics(report_routine, "routine JSON: ")
     # Coverage semantics (#12): routine audit must report "routine" coverage.
     cov_routine = report_routine.get("coverage", {})
     assert_true(cov_routine.get("level") == "routine", f"routine audit coverage: {cov_routine}")
@@ -270,8 +329,7 @@ def _run_e2e():
         report_binary["passed"],
         f"binary verify passed ({report_binary['checks_passed']}/{report_binary['checks_run']} checks)"
     )
-    if not report_binary["passed"]:
-        print(f"  failures: {report_binary['failures']}")
+    print_verify_diagnostics(report_binary, "binary: ")
     # Coverage + classified_failures must be present on binary path too.
     cov_binary = report_binary.get("coverage", {})
     assert_true(cov_binary.get("level") == "full", f"binary audit coverage: {cov_binary}")
@@ -324,8 +382,7 @@ def _run_e2e():
     )
     eos_report = verilm_rs.verify_v4(eos_audit_json, key_json)
     assert_true(eos_report["passed"], f"EOS trim: verify passed ({eos_report['checks_passed']}/{eos_report['checks_run']} checks)")
-    if not eos_report["passed"]:
-        print(f"  failures: {eos_report['failures']}")
+    print_verify_diagnostics(eos_report, "EOS JSON: ")
 
     # ── Step 8: Deep-prefix replay with committed KV (binary path) ──
     # x_attn capture is now on by default, so committed KV is always

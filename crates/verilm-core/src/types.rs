@@ -916,12 +916,69 @@ pub struct RetainedTokenState {
 ///
 /// Committed per-layer under `kv_roots[layer]` so the verifier can replay
 /// attention from committed values without re-deriving from weights.
+///
+/// The f64 fields use hex-encoded raw LE bytes in JSON to guarantee
+/// bit-exact round-trip (bincode is unaffected).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KvEntry {
     /// Post-RoPE K vector, length kv_dim. f64 for deterministic hashing.
+    #[serde(with = "f64_vec_hex")]
     pub k_roped: Vec<f64>,
     /// Dequantized V vector (no RoPE), length kv_dim.
+    #[serde(with = "f64_vec_hex")]
     pub v_deq: Vec<f64>,
+}
+
+/// Serde helper: hex-encode `Vec<f64>` as raw LE bytes for human-readable
+/// formats (JSON), preserving bit-exact round-trip. Binary formats (bincode)
+/// use default serialization unchanged.
+mod f64_vec_hex {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(data: &[f64], serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            let hex: String = data
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .map(|b| format!("{:02x}", b))
+                .collect();
+            hex.serialize(serializer)
+        } else {
+            data.serialize(serializer)
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<f64>, D::Error> {
+        if deserializer.is_human_readable() {
+            let hex = String::deserialize(deserializer)?;
+            let bytes = hex_decode(&hex).map_err(serde::de::Error::custom)?;
+            if bytes.len() % 8 != 0 {
+                return Err(serde::de::Error::custom(format!(
+                    "f64 hex bytes length {} not a multiple of 8",
+                    bytes.len()
+                )));
+            }
+            Ok(bytes
+                .chunks_exact(8)
+                .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+                .collect())
+        } else {
+            Vec::<f64>::deserialize(deserializer)
+        }
+    }
+
+    fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
+        if s.len() % 2 != 0 {
+            return Err("odd-length hex string".into());
+        }
+        (0..s.len())
+            .step_by(2)
+            .map(|i| {
+                u8::from_str_radix(&s[i..i + 2], 16)
+                    .map_err(|e| format!("hex decode at offset {}: {}", i, e))
+            })
+            .collect()
+    }
 }
 
 /// Per-layer shell intermediates opened by the prover at audit time.

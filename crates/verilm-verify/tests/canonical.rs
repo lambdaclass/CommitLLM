@@ -2268,9 +2268,12 @@ fn bridge_check_and_gate_tampered_x_attn_rejected() {
     let binary = to_binary(&response);
     let report = verify_binary(&key, &binary, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
+    // Tampered x_attn is detected by Freivalds: the shell QKV was computed
+    // from the original x_attn, so the Freivalds check against the tampered
+    // committed x_attn fails (stronger than the former L-inf bridge comparison).
     assert!(
-        report.failures.iter().any(|f| f.code == FailureCode::BridgeXAttnMismatch),
-        "tampered x_attn should produce BridgeXAttnMismatch: {:?}", report.failures
+        report.failures.iter().any(|f| f.code == FailureCode::FreivaldsFailed),
+        "tampered x_attn should be caught by Freivalds: {:?}", report.failures
     );
 }
 

@@ -236,4 +236,79 @@ mod tests {
     fn test_v4_audit_bad_magic() {
         assert!(deserialize_v4_audit(b"BAAD1234").is_err());
     }
+
+    /// Verify that KvEntry f64 fields survive JSON round-trip bit-for-bit.
+    ///
+    /// This is the regression test for the known JSON f64 precision issue
+    /// that caused KV Merkle proof failures when using the JSON debug path.
+    #[test]
+    fn test_kv_entry_json_roundtrip_bit_exact() {
+        use crate::merkle;
+        use crate::types::KvEntry;
+
+        // Use values that historically failed decimal round-trip:
+        // subnormals, negative zero, values near rounding boundaries.
+        let entries = vec![
+            KvEntry {
+                k_roped: vec![
+                    0.1_f64,
+                    -0.0_f64,
+                    f64::MIN_POSITIVE,
+                    1.0000000000000002_f64,
+                    std::f64::consts::PI,
+                    -1.23456789012345e-100,
+                ],
+                v_deq: vec![
+                    f64::MAX,
+                    f64::MIN,
+                    5e-324_f64, // smallest subnormal
+                    0.30000000000000004_f64, // classic 0.1 + 0.2
+                ],
+            },
+        ];
+
+        for entry in &entries {
+            let json = serde_json::to_string(entry).unwrap();
+            let restored: KvEntry = serde_json::from_str(&json).unwrap();
+
+            // Bit-exact comparison via to_bits (catches -0.0 vs +0.0, NaN payloads, etc.)
+            for (orig, rest) in entry.k_roped.iter().zip(restored.k_roped.iter()) {
+                assert_eq!(
+                    orig.to_bits(),
+                    rest.to_bits(),
+                    "k_roped bit mismatch: {orig} ({:#018x}) vs {rest} ({:#018x})",
+                    orig.to_bits(),
+                    rest.to_bits(),
+                );
+            }
+            for (orig, rest) in entry.v_deq.iter().zip(restored.v_deq.iter()) {
+                assert_eq!(
+                    orig.to_bits(),
+                    rest.to_bits(),
+                    "v_deq bit mismatch: {orig} ({:#018x}) vs {rest} ({:#018x})",
+                    orig.to_bits(),
+                    rest.to_bits(),
+                );
+            }
+
+            // Hash must match after round-trip (the actual production invariant).
+            let hash_before = merkle::hash_kv_entry(0, 0, &entry.k_roped, &entry.v_deq);
+            let hash_after = merkle::hash_kv_entry(0, 0, &restored.k_roped, &restored.v_deq);
+            assert_eq!(hash_before, hash_after, "KV Merkle hash changed after JSON round-trip");
+        }
+    }
+
+    /// Verify that KvEntry bincode round-trip is also bit-exact (sanity check).
+    #[test]
+    fn test_kv_entry_bincode_roundtrip_bit_exact() {
+        use crate::types::KvEntry;
+
+        let entry = KvEntry {
+            k_roped: vec![0.1, -0.0, std::f64::consts::PI],
+            v_deq: vec![f64::MAX, 5e-324],
+        };
+        let bytes = bincode::serialize(&entry).unwrap();
+        let restored: KvEntry = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(entry, restored);
+    }
 }
