@@ -182,7 +182,9 @@ Script: `redteam/modal/measure_sensitivity_v2.py`
 
 ## 3. Open experiments
 
-Ordered by expected decision value.
+Two separate goals:
+- **Shrink the honest corridor**: make τ smaller (reduce the gap at the source)
+- **Shrink adversarial freedom**: make passing within τ less useful (reduce what the adversary can do with the gap)
 
 ### ~~3a. Multi-prompt sensitivity~~ DONE (1e)
 
@@ -190,43 +192,124 @@ Ordered by expected decision value.
 
 ### ~~3c. All-layers-simultaneously~~ DONE (1e)
 
-### 3d. Constrained adversarial optimization
+---
 
-For the top-5 dangerous layers, solve: maximize logit drift subject to ‖Δa‖∞ ≤ τ using projected gradient descent on real traces. Compare to the SVD-aligned heuristic.
+### Shrink the honest corridor (make τ smaller)
 
-**Why**: the SVD-aligned perturbation may not be the true worst case under L∞ constraint.
+### 3d. Better `a` boundary quantization
 
-### 3e. Multi-token accumulation
+Keep the same protocol shape, but store attention output with a tighter boundary:
+- **Per-head scales** instead of one tensor-wide scale
+- **INT16 or FP16 retained `a`** instead of INT8
 
-Generate a 50-token sequence with and without per-token ±τ perturbations. Measure whether small per-token drifts accumulate into semantic divergence.
+This is probably the cleanest way to reduce the honest corridor without changing the whole protocol. INT16 gives 256× finer granularity; per-head scales eliminate the worst-case dimension from dominating the global scale.
 
-**Why**: single-token analysis may underestimate the risk for longer generations.
+**Why**: the current ±τ in i8 units maps to a large float perturbation because per-tensor scale is driven by the max across all heads. Per-head or higher-precision storage directly shrinks the float-space perturbation.
 
-### 3f. Head-subspace analysis
+### 3e. Alternative attention backends
+
+Measure the honest corridor under:
+- Current eager path (`attn_implementation="eager"`)
+- Less fused / more numerically stable backend
+- Deterministic kernel if available (`torch.use_deterministic_algorithms(True)`)
+
+Eager execution alone does not guarantee τ=0, but a more stable backend may reduce mismatch significantly.
+
+**Why**: the L∞=8-9 corridor comes from FlashAttention nondeterminism. If eager gives L∞=0-1, the problem shrinks dramatically.
+
+### 3f. Layer-specific and head-specific tolerances
+
+Don't use one global τ. Calibrate by:
+- Model family
+- Layer (tight on dangerous layers 24-25/31, loose on safe ones)
+- Head group (if some heads are consistently noisier)
+
+**Why**: if only 3–6 layers are dangerous, tighten those to τ=1 and leave the rest at τ=10. The dangerous layers drive the exploitability.
+
+---
+
+### Shrink adversarial freedom (make ±τ less useful)
+
+### 3g. Generated-token exactness
+
+Always strengthen the current token being returned. The cheapest strong version:
+- Exact or stronger evidence on the generated token (always witness, don't sample)
+- Weaker sampled checks on earlier prefix tokens
+
+**Why**: much more value than sampling random tokens uniformly. The generated token is the one the adversary wants to flip.
+
+### 3h. Partial score witnessing
+
+Before full score witnessing, test:
+- Worst layers only (3 bad layers per model)
+- Worst heads only (if head-subspace analysis shows concentration)
+- Top-k scores + certified tail bound (see 3k)
+
+**Why**: may capture most of the security gain at much lower payload cost.
+
+### 3i. Head-subspace analysis
 
 Measure whether the dangerous perturbation directions (those that cause flips) lie in specific attention head subspaces. If yes, per-head score witnessing may suffice.
 
 **Why**: could reduce score witnessing cost from O(all heads) to O(dangerous heads).
 
-### 3g. Logit-margin translation
+### 3j. State-replacing on bad layers only
+
+Canonicalize the hidden state after the 3 most dangerous layers (replace committed state with replay result). Cheaper than full state-replacing, breaks the compounding chain where it matters most.
+
+**Why**: eliminates compounding drift at the critical points without requiring full inference state.
+
+### 3k. Post-W_o verification
+
+Check the residual delta (after W_o projection) instead of pre-W_o attention output. The W_o amplification is the core problem; checking after it catches the amplified value directly.
+
+**Why**: moves the verification boundary to after the amplification step.
+
+---
+
+### Remaining analysis experiments
+
+### 3l. Multi-token accumulation
+
+Generate a 50-token sequence with and without per-token ±τ perturbations. Measure whether small per-token drifts accumulate into semantic divergence across autoregressive decode.
+
+**Why**: single-token analysis may underestimate the risk. The verifier follows committed state forward, so even small per-token drift may compound into semantic divergence.
+
+### 3m. Constrained adversarial optimization
+
+For the top-5 dangerous layers, solve: maximize logit drift subject to ‖Δa‖∞ ≤ τ using projected gradient descent on real traces. Compare to the SVD-aligned heuristic.
+
+**Why**: the SVD-aligned perturbation may not be the true worst case under L∞ constraint.
+
+### 3n. Logit-margin translation
 
 For each layer, compute the maximum logit change per unit hidden-state drift using the actual LM head matrix. Map the corridor tolerance directly to a logit-space bound.
 
 **Why**: provides an operational safety criterion without needing the full composed theorem.
 
-### 3h. Fiat-Shamir / random audit conditioning
+### 3o. Fiat-Shamir / random audit conditioning
 
-Model the adversary's optimization problem under random layer sampling. If the auditor opens k of L layers uniformly, the adversary must choose which layers to perturb without knowing k. Compute the expected detection probability as a function of (perturbation strategy, sampling rate).
+Model the adversary's optimization problem under random layer sampling. Compute expected detection probability as f(perturbation strategy, sampling rate).
 
-**Why**: worst-case single-layer analysis assumes the adversary can target the most dangerous layer. Random sampling forces them to hedge, reducing effective risk.
+**Why**: quantifies the probabilistic security that sampling provides on top of score witnessing.
 
-### 3i. State-replacing verifier feasibility
+### 3p. KV tightening in parallel
 
-Analyze whether the verifier could canonicalize the hidden state after each layer check (replace committed state with replay result). This would eliminate compounding drift but requires the verifier to maintain full inference state during verification.
+Even perfect current-token attention only proves correctness relative to the committed prefix. Unless KV provenance (#6) is strong, the adversary can manipulate the prefix state that feeds into the verified attention computation.
 
-**Why**: if feasible, this architectural change could close the attention gap without score witnessing.
+**Why**: attention gap and KV provenance are complementary — closing one without the other leaves a path open.
 
-### 3j. Score witnessing payload and verification cost
+### 3q. State-replacing verifier feasibility (full)
+
+Analyze whether the verifier could canonicalize the hidden state after every layer check. Would eliminate compounding drift entirely but requires the verifier to maintain full inference state.
+
+**Why**: if feasible, closes the attention gap without score witnessing. Big architectural change.
+
+---
+
+### Payload and cost experiments
+
+### 3r. Score witnessing payload and verification cost
 
 Measure actual CPU verification time for score witness replay in the Rust verifier path. Back-of-envelope FLOP estimates are unreliable because verification is likely memory-bound (softmax, serialization, audit plumbing), not FLOP-bound. Must benchmark, not estimate.
 
