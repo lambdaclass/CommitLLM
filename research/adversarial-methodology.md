@@ -25,7 +25,7 @@ Provider precomputes or caches honest responses to avoid real-time computation.
 
 | Attack | Why it matters |
 |--------|---------------|
-| Replay honest receipt for known prompt | Without freshness binding (#16), cached receipts verify indefinitely |
+| Replay honest receipt for known prompt | Without freshness binding (#23), cached receipts verify indefinitely |
 | Prefix-sharing forgery | Precompute receipt for common prefix, graft onto new suffix |
 | Selective honest/dishonest | Honest for audited fraction, dishonest for the rest — directly attacks sampling rate |
 
@@ -104,7 +104,7 @@ Replace "does this attack get caught?" with "what fraction of cheating strategie
 - **Security curve**: P(detect) as a function of (cheating fraction, audit rate)
 - **Break-even analysis**: at what cheating fraction does the expected gain exceed the expected penalty?
 - **Minimum audit rate**: for a given target detection probability (e.g., 99%), what audit rate is required?
-- Feed results into #66 (cheating-incentive analysis) and #14 (formal security argument)
+- Feed results into #70 (cheating-incentive analysis) and #4 (formal security argument)
 
 ---
 
@@ -186,9 +186,9 @@ Given white-box access to the verifier, use optimization (gradient descent or se
 
 ## References
 
-- Roadmap #8: Adversarial testing (in progress)
-- Roadmap #14: Formal security argument
-- Roadmap #9: Fuzz binary parsers
-- Roadmap #66: Cheating-incentive analysis
-- Roadmap #1: Adversarial methodology research (this document)
+- Roadmap #3: Adversarial testing (in progress)
+- Roadmap #4: Formal security argument
+- Roadmap #17: Fuzz binary parsers
+- Roadmap #70: Cheating-incentive analysis
+- Roadmap #16: Adversarial methodology research (this document)
 - `redteam/attack_matrix.md`: current attack coverage inventory
