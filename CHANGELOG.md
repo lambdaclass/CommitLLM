@@ -19,6 +19,17 @@ Historical references below to “roadmap #N” refer to the pre-2026-03-30 road
   - **Conclusion**: corridor tolerance is not safe without score witnessing on either model. Perturbations are not merely theoretical — they flip real tokens on real weights.
   - Measurement script: `redteam/modal/measure_sensitivity.py`.
 
+- **Multi-prompt sensitivity + MLP propagation (roadmap #1, #2)**: extended sensitivity measurement across 6 diverse prompts (factual, code, math, uncertain, long-context, true/false) with MLP propagation and all-layers-simultaneously experiments. See [`research/attention-gap.md`](./research/attention-gap.md) §1e–1g. Key results:
+  - **Qwen**: 28/28 layers flip the token on every prompt tested. The corridor is structurally exploitable, not edge-case. Layers 24–25 consistently most dangerous.
+  - **Llama**: 0–6 single-layer flips depending on prompt. High-margin prompts (fibonacci, margin=9.81) survive all single-layer attacks. Layer 31 is top-3 dangerous on all 6 prompts.
+  - **MLP dampens perturbations on Llama** (ratio 0.67), neutral on Qwen. MLP is not a threat channel.
+  - **All-layers-simultaneously flips every prompt on both models.** Compounding drift is real — the verifier follows committed state forward (`canonical.rs:1223, 1904`), so ±τ errors accumulate across layers.
+  - Measurement script: `redteam/modal/measure_sensitivity_v2.py`.
+
+### Added
+
+- **Attention gap research document** (`research/attention-gap.md`): comprehensive analysis of corridor sensitivity with all measurement results, interpretation, protocol implications, and remaining open experiments.
+
 ## 2026-03-31
 
 ### Added
