@@ -226,6 +226,32 @@ Analyze whether the verifier could canonicalize the hidden state after each laye
 
 **Why**: if feasible, this architectural change could close the attention gap without score witnessing.
 
+### 3j. Score witnessing payload and verification cost
+
+Measure actual CPU verification time for score witness replay in the Rust verifier path. Back-of-envelope FLOP estimates are unreliable because verification is likely memory-bound (softmax, serialization, audit plumbing), not FLOP-bound. Must benchmark, not estimate.
+
+**Payload formula**: `bytes = sampled_tokens × witnessed_layers × avg_prefix_len × n_q_heads × bytes_per_score`. Note: for Fiat-Shamir-sampled decode tokens, the relevant prefix length is the **average prefix** (tokens span the decode window), not always the max context. This can halve worst-case estimates.
+
+Approximate payload at different scales (fp16, 28 heads):
+
+| Strategy | seq=4K | seq=32K | seq=128K |
+|----------|--------|---------|----------|
+| 64 tok × 3 bad layers | ~41 MB | ~330 MB | ~1.3 GB |
+| 8 tok × 3 bad layers | ~5 MB | ~41 MB | ~164 MB |
+
+Long-context deployments need payload compression.
+
+### 3k. Top-k score sparsification with tail certification
+
+Commit only top-k pre-softmax scores per head instead of full seq_len. This makes payload constant in sequence length. However, **top-k alone is not sound**: the tail of the softmax can still carry manipulated probability mass. A sound variant requires:
+
+- Top-k scores per head
+- **Plus** a certified tail bound or tail mass summary (e.g., log-sum-exp of tail scores)
+
+This ensures the verifier can confirm that the committed top-k scores, combined with the tail bound, fully determine the softmax output to within a provable tolerance.
+
+**Status**: promising compression idea, not yet a drop-in protocol replacement for full score witnessing. Add to research agenda, not mainline roadmap.
+
 ---
 
 ## 4. Relationship to protocol design
@@ -242,6 +268,13 @@ Analyze whether the verifier could canonicalize the hidden state after each laye
 | All-layers flips on every prompt | Compounding drift is real and dangerous |
 | Verifier follows committed state | State-replacing design would eliminate compounding |
 | Random audit conditioning (unmeasured) | Probabilistic security argument (#5) should quantify |
+| Fiat-Shamir alone doesn't fix corridor | ±τ perturbations pass all checks regardless of sampling |
+| Fiat-Shamir IS useful for | Cost reduction, shell/KV statistical coverage, making score witnessing affordable |
+| Score witnessing on generated token | Closes attention gap for that token (τ=0); always witness, don't sample |
+| Fiat-Shamir on prefix tokens | Probabilistic coverage for prefix integrity |
+| CPU verification time unknown | Back-of-envelope FLOP estimates unreliable; must benchmark in verifier |
+| Top-k score sparsification | Promising but requires certified tail bound; research, not mainline yet |
+| Payload scales with context | Long-context (32K+) needs bad-layer targeting or compression |
 
 ---
 
