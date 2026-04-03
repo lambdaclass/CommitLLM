@@ -27,16 +27,17 @@ cuda_image = (
         "transformers>=4.44",
         "accelerate",
         "numpy",
+        "compressed-tensors",
     )
 )
 
 
 @app.function(
     image=cuda_image,
-    gpu=modal.gpu.A100(count=1, size="40GB"),
+    gpu="A100-40GB",
     timeout=1800,
 )
-def measure_contraction(model_name: str = "Qwen/Qwen2.5-7B"):
+def measure_contraction(model_name: str = "neuralmagic/Qwen2.5-7B-Instruct-quantized.w8a8"):
     import torch
     import numpy as np
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -162,8 +163,8 @@ def measure_contraction(model_name: str = "Qwen/Qwen2.5-7B"):
 def main():
     # Run on both target models
     for model_name in [
-        "Qwen/Qwen2.5-7B",
-        "meta-llama/Llama-3.1-8B",
+        "neuralmagic/Qwen2.5-7B-Instruct-quantized.w8a8",
+        "NousResearch/Meta-Llama-3.1-8B-Instruct",
     ]:
         print(f"\n{'='*75}")
         print(f"  Measuring contraction for {model_name}")
