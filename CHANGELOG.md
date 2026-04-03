@@ -8,7 +8,16 @@ Historical references below to “roadmap #N” refer to the pre-2026-03-30 road
 
 ### Measured
 
-- **RMSNorm contraction ratio on real checkpoints (roadmap #1, measured)**: ρ_j = γ·‖W_o‖₂/RMS(x^(j)) measured via Modal A100-40GB on two families. **Qwen-7B W8A8**: 24/28 layers contract (86%), 4 early layers expand (ρ up to 63.8), accumulated drift/residual=0.63. **Llama-3.1-8B fp16**: 0/32 layers contract, every layer expands (ρ 1.7–691), accumulated drift bound diverges (10^13). RMSNorm contraction alone does NOT close the corridor for Llama — the small residual norms (~1.5–2.0) and large γ weights (~1.0) prevent dampening. Score witnessing (#7) and W_o conditioning (#8) confirmed critical, not optional. Measurement script: `redteam/modal/measure_contraction.py`.
+- **RMSNorm contraction ratio on real checkpoints (roadmap #1, partial)**: ρ_j = γ·‖W_o‖₂/RMS(x^(j)) measured via Modal A100-40GB on two families. **Qwen-7B W8A8**: 24/28 layers contract (86%), 4 early layers expand (ρ up to 63.8), accumulated drift/residual=0.63. **Llama-3.1-8B fp16**: 0/32 layers contract, every layer expands (ρ 1.7–691), accumulated drift bound diverges (10^13). RMSNorm contraction alone does NOT close the corridor for Llama — the small residual norms (~1.5–2.0) and large γ weights (~1.0) prevent dampening. Score witnessing (#7) and W_o conditioning (#8) confirmed critical, not optional. Measurement script: `redteam/modal/measure_contraction.py`.
+
+- **Advanced corridor sensitivity (roadmap #1, #2, #8)**: local operator norm, finite-difference sensitivity, and bad-layer localization measured via Modal A100-40GB. See [`research/attention-gap.md`](./research/attention-gap.md) for full analysis. Key results:
+  - **Local operator norm** ‖J_RMSNorm(x)·W_o‖ is 2–4× tighter than crude ρ. Qwen: 21/28 layers < 1.0. Llama: 0/32 < 1.0 (still all expanding).
+  - **Finite-difference token flips**: injecting worst-case ±τ=8 perturbations through W_o at a single layer flips the output token on **3/28 layers** (Qwen) and **6/32 layers** (Llama). Layers 0, 1, 27 (Qwen) and 3, 7, 8, 16, 17, 30, 31 (Llama) are the most dangerous.
+  - **Logit margin**: Qwen margin=1.69, Llama margin=0.11. Even middle layers consume 70–115% of Qwen's margin and 500–1700% of Llama's.
+  - **Per-head W_o norms**: max per-head spectral norm ~2–4.5 (both models), confirming head substructure matters.
+  - **L∞→L∞ induced norm**: 87–331 (Qwen), 98–190 (Llama) — much larger than spectral norms, confirming L∞ corridor metric needs L∞-compatible analysis.
+  - **Conclusion**: corridor tolerance is not safe without score witnessing on either model. Perturbations are not merely theoretical — they flip real tokens on real weights.
+  - Measurement script: `redteam/modal/measure_sensitivity.py`.
 
 ## 2026-03-31
 
