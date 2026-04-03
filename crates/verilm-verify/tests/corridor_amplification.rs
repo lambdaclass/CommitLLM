@@ -713,6 +713,58 @@ fn full_bridge_forward_perturbed(
     residual
 }
 
+/// Compute the spectral norm (largest singular value) of an i8 matrix
+/// via power iteration. Suitable for small matrices in toy tests.
+fn spectral_norm_i8(w: &[i8], rows: usize, cols: usize) -> f64 {
+    assert_eq!(w.len(), rows * cols);
+    // Start with random unit vector
+    let mut v: Vec<f64> = (0..cols).map(|i| ((i * 7 + 3) % 13) as f64).collect();
+    let norm: f64 = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+    for x in &mut v {
+        *x /= norm;
+    }
+
+    let mut sigma = 0.0;
+    for _ in 0..100 {
+        // u = W·v
+        let mut u = vec![0.0f64; rows];
+        for r in 0..rows {
+            for c in 0..cols {
+                u[r] += w[r * cols + c] as f64 * v[c];
+            }
+        }
+        let u_norm = u.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if u_norm < 1e-12 {
+            return 0.0;
+        }
+        for x in &mut u {
+            *x /= u_norm;
+        }
+
+        // v = W^T·u
+        v = vec![0.0f64; cols];
+        for r in 0..rows {
+            for c in 0..cols {
+                v[c] += w[r * cols + c] as f64 * u[r];
+            }
+        }
+        sigma = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if sigma < 1e-12 {
+            return 0.0;
+        }
+        for x in &mut v {
+            *x /= sigma;
+        }
+    }
+    sigma
+}
+
+/// Compute RMS of an f64 vector: sqrt(mean(x^2))
+fn rms_f64(x: &[f64]) -> f64 {
+    let n = x.len() as f64;
+    (x.iter().map(|v| v * v).sum::<f64>() / n).sqrt()
+}
+
 /// L-infinity distance between two f64 vectors.
 fn linf_f64(a: &[f64], b: &[f64]) -> f64 {
     a.iter()
@@ -970,5 +1022,176 @@ fn full_bridge_corridor_vs_depth() {
             "{:>8} {:>8}/{} {:>12} {:>12.2}",
             n_layers, flips, n_trials, max_logit_gap, max_residual_gap,
         );
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Test 10: Contraction ratio ρ_j = ‖W_o‖₂ · max(γ) / RMS(residual)
+// ───────────────────────────────────────────────────────────────────
+//
+// RMSNorm Jacobian spectral norm ≈ max(γ_i) / RMS(x).
+// If ρ_j = ‖W_o‖₂ · max(γ_j) / RMS(x^(j)) < 1 at every layer,
+// perturbations decay exponentially instead of amplifying.
+// Measures ρ_j on the toy model. If ρ >> 1 here but ρ < 1 on
+// real models, the corridor amplification attack is an artifact.
+
+#[test]
+fn contraction_ratio_measurement() {
+    let hidden_dim = 64;
+    let n_q_heads = hidden_dim / 2;
+    let n_kv_heads = (n_q_heads / 4).max(1);
+    let kv_dim = n_kv_heads * 2;
+    let ffn_dim = hidden_dim * 2;
+    let n_layers = 28;
+
+    let cfg = ModelConfig {
+        name: "contraction-28L".into(),
+        hidden_dim,
+        kv_dim,
+        ffn_dim,
+        d_head: 2,
+        n_layers,
+        n_q_heads,
+        n_kv_heads,
+        vocab_size: 64,
+        rope_theta: 10000.0,
+        rope_scaling: None,
+    };
+    let model = generate_model(&cfg, 42);
+    let initial_residual: Vec<f32> = (0..hidden_dim)
+        .map(|i| 0.1 * (i as f32 - hidden_dim as f32 / 2.0))
+        .collect();
+    let (rmsnorm_attn, rmsnorm_ffn) = bridge_rmsnorm_weights(n_layers, hidden_dim);
+    let weight_scales = bridge_weight_scales(n_layers);
+    let scales = bridge_activation_scales(n_layers);
+    let eps = 1e-5;
+
+    // Run honest forward pass, recording residual at each layer
+    let mut residual: Vec<f64> = initial_residual.iter().map(|&v| v as f64).collect();
+    let heads_per_kv = cfg.n_q_heads / cfg.n_kv_heads;
+
+    eprintln!("=== Contraction Ratio ρ_j = ‖W_o‖₂ · max(γ) / RMS(residual) ===\n");
+    eprintln!(
+        "{:>5} {:>12} {:>12} {:>12} {:>12} {:>10}",
+        "layer", "‖W_o‖₂", "max(γ_attn)", "RMS(resid)", "ρ_j", "contracts?"
+    );
+
+    let mut all_rho = Vec::new();
+
+    for l in 0..n_layers {
+        let lw = &model[l];
+        let (scale_x_attn, scale_a, scale_x_ffn, scale_h) = scales[l];
+
+        let ws = |mt: MatrixType| -> f32 {
+            let idx = MatrixType::PER_LAYER.iter().position(|&m| m == mt).unwrap();
+            weight_scales[l][idx]
+        };
+
+        // Measure RMS of residual BEFORE this layer's RMSNorm
+        let rms_residual = rms_f64(&residual);
+
+        // Spectral norm of W_o for this layer
+        let wo_spectral = spectral_norm_i8(&lw.wo, hidden_dim, hidden_dim);
+
+        // Max of RMSNorm attention weights for this layer
+        let gamma_max: f64 = rmsnorm_attn[l]
+            .iter()
+            .map(|&g| g as f64)
+            .fold(0.0f64, f64::max);
+
+        // Contraction ratio
+        // Note: we also need to account for dequantization scales.
+        // The perturbation Δa (in i8) propagates as:
+        //   Δresidual = W_o @ Δa * scale_wo * scale_a  (in f64)
+        //   Δx_next ≈ J_RMS · Δresidual
+        // So ρ_j = ‖W_o‖₂ · scale_wo · scale_a · max(γ) / RMS(residual)
+        let scale_wo = ws(MatrixType::Wo) as f64;
+        let rho = wo_spectral * scale_wo * scale_a as f64 * gamma_max / rms_residual;
+
+        all_rho.push(rho);
+
+        eprintln!(
+            "{:>5} {:>12.2} {:>12.4} {:>12.4} {:>12.4} {:>10}",
+            l,
+            wo_spectral,
+            gamma_max,
+            rms_residual,
+            rho,
+            if rho < 1.0 { "YES" } else { "NO" }
+        );
+
+        // Now run the actual layer computation to advance the residual
+        let normed = rmsnorm_f64_input(&residual, &rmsnorm_attn[l], eps);
+        let x_attn = quantize_f64_to_i8(&normed, scale_x_attn as f64);
+
+        let v_acc = matmul_i32(&lw.wv, &x_attn, cfg.kv_dim, cfg.hidden_dim);
+        let v_i8 = verilm_core::requantize(&v_acc);
+        let mut a = vec![0i8; cfg.hidden_dim];
+        for qh in 0..cfg.n_q_heads {
+            let kv_head = qh / heads_per_kv;
+            let src = kv_head * cfg.d_head;
+            let dst = qh * cfg.d_head;
+            a[dst..dst + cfg.d_head].copy_from_slice(&v_i8[src..src + cfg.d_head]);
+        }
+
+        let attn_out = matmul_i32(&lw.wo, &a, cfg.hidden_dim, cfg.hidden_dim);
+        let x_ffn = bridge_residual_rmsnorm(
+            &attn_out,
+            ws(MatrixType::Wo),
+            scale_a,
+            &mut residual,
+            &rmsnorm_ffn[l],
+            eps,
+            scale_x_ffn,
+        );
+
+        let g = matmul_i32(&lw.wg, &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
+        let u = matmul_i32(&lw.wu, &x_ffn, cfg.ffn_dim, cfg.hidden_dim);
+        let h = verilm_core::silu::compute_h_scaled(
+            &g, &u,
+            ws(MatrixType::Wg), ws(MatrixType::Wu),
+            scale_x_ffn, scale_h,
+        );
+        let ffn_out = matmul_i32(&lw.wd, &h, cfg.hidden_dim, cfg.ffn_dim);
+
+        if l + 1 < n_layers {
+            let next_scale = scales[l + 1].0;
+            bridge_residual_rmsnorm(
+                &ffn_out,
+                ws(MatrixType::Wd),
+                scale_h,
+                &mut residual,
+                &rmsnorm_attn[l + 1],
+                eps,
+                next_scale,
+            );
+        } else {
+            dequant_add_residual(&ffn_out, ws(MatrixType::Wd), scale_h, &mut residual);
+        }
+    }
+
+    let rho_max = all_rho.iter().fold(0.0f64, |a, &b| a.max(b));
+    let rho_min = all_rho.iter().fold(f64::MAX, |a, &b| a.min(b));
+    let rho_mean = all_rho.iter().sum::<f64>() / all_rho.len() as f64;
+    let contracting = all_rho.iter().filter(|&&r| r < 1.0).count();
+
+    eprintln!("\n=== Summary ===");
+    eprintln!("ρ range: [{:.4}, {:.4}], mean={:.4}", rho_min, rho_max, rho_mean);
+    eprintln!(
+        "Contracting layers: {}/{} ({:.0}%)",
+        contracting,
+        n_layers,
+        contracting as f64 / n_layers as f64 * 100.0,
+    );
+    if contracting == n_layers {
+        eprintln!("ALL layers contract — corridor amplification should decay exponentially.");
+        eprintln!("If this holds on real models, the attack is a toy-model artifact.");
+    } else {
+        eprintln!(
+            "{} layers EXPAND (ρ > 1) — corridor amplification is plausible.",
+            n_layers - contracting,
+        );
+        eprintln!("Toy model has random weights with large spectral norms — expected.");
+        eprintln!("The critical question: does this hold on trained models (Qwen/Llama)?");
     }
 }

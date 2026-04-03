@@ -104,7 +104,7 @@ Replace "does this attack get caught?" with "what fraction of cheating strategie
 - **Security curve**: P(detect) as a function of (cheating fraction, audit rate)
 - **Break-even analysis**: at what cheating fraction does the expected gain exceed the expected penalty?
 - **Minimum audit rate**: for a given target detection probability (e.g., 99%), what audit rate is required?
-- Feed results into #112 (cheating-incentive analysis) and #98 (formal security argument)
+- Feed results into #66 (cheating-incentive analysis) and #14 (formal security argument)
 
 ---
 
