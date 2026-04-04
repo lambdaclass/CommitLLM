@@ -23,7 +23,7 @@ VLLM_SPEC = os.environ.get("VERILM_VLLM_SPEC", "vllm==0.18.0")
 TORCH_SPEC = os.environ.get("VERILM_TORCH_SPEC", "torch")
 TRANSFORMERS_SPEC = os.environ.get("VERILM_TRANSFORMERS_SPEC", "transformers<5")
 COMPRESSED_TENSORS_SPEC = os.environ.get(
-    "VERILM_COMPRESSED_TENSORS_SPEC", "compressed-tensors"
+    "VERILM_COMPRESSED_TENSORS_SPEC", "compressed-tensors==0.13.0"
 )
 PREFILL_MAX_LINF = int(os.environ.get("VERILM_PREFILL_MAX_LINF", "2"))
 DECODE_MAX_LINF = int(os.environ.get("VERILM_DECODE_MAX_LINF", "12"))

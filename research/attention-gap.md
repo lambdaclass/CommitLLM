@@ -271,7 +271,7 @@ All four precision levels produce L∞ within ±2 of each other across all workl
 2. **The gap is entirely upstream of the attention inner loop** — in the capture/dequant/requant pipeline, not in how QK^T/softmax/V-sum is computed.
 3. This rules out the "over-precise verifier" hypothesis and the "fp16 input truncation" hypothesis simultaneously.
 
-**Note on absolute L∞**: These runs showed L∞=100-186 (vs the previous L∞=8-9 in §1i). This is a separate capture/runtime regression under investigation (see §1i note below), NOT a precision effect. The precision comparison is valid regardless — it depends on relative differences, not absolute magnitudes.
+**Note on absolute L∞**: These runs were taken before the RoPE off-by-one fix (§1k) and showed L∞=100-186 due to that bug. With the fix applied, absolute L∞ returns to 8-9 (§1i). The precision comparison remains valid regardless — it depends on relative differences, not absolute magnitudes.
 
 Script: `redteam/modal/measure_corridor_precision.py`
 Results: Modal volume `corridor-results/qwen_precision_ab.json`
@@ -293,7 +293,50 @@ Results: Modal volume `corridor-results/qwen_precision_ab.json`
 - Sidecar capture code (unchanged since initial snapshot, Rust hook path correct)
 - C++ native capture .max() reduction (not in critical path)
 
-**Status**: Fix applied locally. Needs GPU re-measurement to confirm L∞ returns to 8-9.
+**GPU confirmation (2026-04-04)**: Re-ran `test_decode_corridor_regression.py` on A100-80GB with the fix:
+
+| Model | Position | L∞ | Threshold |
+|-------|----------|-----|-----------|
+| Qwen 7B W8A8 | prefill (pos=0) | 1 | ≤ 2 |
+| Qwen 7B W8A8 | first_gen (pos=6) | 4 | ≤ 12 |
+| Qwen 7B W8A8 | first_decode (pos=7) | 8 | ≤ 12 |
+| Llama 8B W8A8 | prefill (pos=0) | 1 | ≤ 2 |
+| Llama 8B W8A8 | first_gen (pos=7) | 4 | ≤ 12 |
+| Llama 8B W8A8 | first_decode (pos=8) | 2 | ≤ 12 |
+
+**Status**: Fixed and confirmed. L∞ is back to single digits, consistent with §1i.
+
+### 1l. Per-head `scale_a` boundary simulation (2026-04-04)
+
+**Question**: Would replacing the current tensor-wide `scale_a` with one scale per Q-head materially shrink the honest corridor or the adversarial float-space room?
+
+**Method**: Keep the same audit payloads and replay path, but simulate an alternative retained boundary:
+- current protocol: one tensor-wide `scale_a`
+- alternative: one `scale_a` per Q-head
+
+Measure:
+- L∞ under the simulated INT8 boundary
+- head-scale distribution relative to the tensor scale
+- worst-case float-space room ratio
+
+**Results**:
+
+| Metric | Qwen 7B | Llama 8B |
+|--------|---------|----------|
+| Tensor L∞ | 11 | 6 |
+| Per-head L∞ | 44 | 47 |
+| Worst float room ratio | 1.06 | 1.05 |
+| Head scale max ratio | 1.00 | 1.05 |
+| Head scale median ratio | 0.39 | 0.30 |
+
+**Interpretation**:
+1. **Per-head `scale_a` does not reduce the worst-case adversarial room.** One head always saturates the tensor-wide scale, so the worst head's room stays essentially unchanged (`ratio ≈ 1.0`).
+2. **The honest INT8 corridor gets worse.** Smaller heads get smaller scales, which magnifies the same float mismatch when re-expressed in INT8 units. The simulated per-head L∞ is 4–8× larger.
+3. **The scale distribution is genuinely skewed.** Most heads are only 30–40% of the tensor scale, but that does not help because the dominant head still sets the attack surface.
+
+**Conclusion**: Per-head `scale_a` is a dead end as a τ-reduction path for the current protocol. The remaining realistic retained-boundary candidate is **INT16 / FP16 retained `a`**.
+
+Script: `redteam/modal/simulate_perhead_boundary.py`
 
 ---
 
@@ -317,7 +360,8 @@ Results: Modal volume `corridor-results/qwen_precision_ab.json`
 14. **The honest corridor is dominated by fp16-to-f64 arithmetic mismatch**, not by backend non-determinism (which is zero) or stochastic variation. Reducing τ requires matching arithmetic precision, not just fixing backends.
 15. **Worst-case layers are model-specific**: Qwen layers 1, 27; Llama-8B layer 25; Llama-70B layers 7, 13, 70. Sequence length weakly increases the gap.
 16. **Replay precision is NOT the gap source (§1j).** All four replay precisions (f64, f32, fp16+f32, bf16+f32) produce L∞ within ±2 of each other. The gap is entirely upstream of the attention inner loop — in the capture/dequant/requant pipeline, not in how QK^T/softmax/V-sum is computed.
-17. **The L∞ regression was a RoPE position off-by-one (§1k).** The `absolute_pos = token_pos + 1` bug in `compute_kv_transcript` shifted all committed KV RoPE positions by +1, producing L∞=100-186 for decode tokens. Prefill (pos=0) was unaffected because single-entry softmax is trivially [1.0]. Fix: revert to `token_pos`. Pending GPU confirmation.
+17. **The L∞ regression was a RoPE position off-by-one (§1k).** The `absolute_pos = token_pos + 1` bug in `compute_kv_transcript` shifted all committed KV RoPE positions by +1, producing L∞=100-186 for decode tokens. Prefill (pos=0) was unaffected because single-entry softmax is trivially [1.0]. Fix: revert to `token_pos`. **GPU-confirmed**: L∞ returns to 1-8 (Qwen) and 1-4 (Llama).
+18. **Per-head `scale_a` is ruled out (§1l).** It does not shrink the worst-case float room because one head always matches the tensor-wide maximum, and it makes the INT8 corridor substantially worse on the quieter heads.
 
 ### What is NOT yet established
 
@@ -326,8 +370,8 @@ Results: Modal volume `corridor-results/qwen_precision_ab.json`
 3. **Fiat-Shamir / random sampling conditioning**: the adversary doesn't know which layers will be audited until after commitment. If deep audit samples layers randomly, the adversary must hedge across all layers rather than concentrating on the most dangerous ones. This probabilistic conditioning may substantially reduce effective risk compared to worst-case single-layer analysis.
 4. **Whether a state-replacing verifier is feasible**: if the verifier canonicalized after each check, drift wouldn't compound. Cost and design implications are unexplored.
 5. **Cross-hardware stability.** A100 vs H100 (or other GPU generations) may differ in floating-point behavior even with the same backend. Untested.
-6. **Whether τ reduction paths actually work.** Per-head scales and INT16 are plausible but unmeasured. fp16 replay is **ruled out** (§1j — it doesn't help). The remaining paths' implementation cost and τ improvement are unknown.
-7. ~~**Root cause of the L∞ regression — FOUND (§1k).**~~ Off-by-one in `compute_kv_transcript`: `absolute_pos = token_pos + 1` shifted all KV RoPE positions by +1. Fixed by reverting to `token_pos`. See §1k.
+6. **Whether INT16 / FP16 retained `a` materially works.** fp16 replay is **ruled out** (§1j — it doesn't help) and per-head scales are **ruled out** (§1l — they do not shrink worst-case room). The remaining path's implementation cost and τ improvement are unknown.
+7. ~~**Root cause of the L∞ regression — FIXED and GPU-CONFIRMED (§1k).**~~ Off-by-one in `compute_kv_transcript`: `absolute_pos = token_pos + 1` shifted all KV RoPE positions by +1. Fixed by reverting to `token_pos`. GPU-confirmed on A100: L∞ returns to single digits. See §1k.
 
 ### Protocol implications
 
@@ -336,7 +380,7 @@ Results: Modal volume `corridor-results/qwen_precision_ab.json`
 - **Score witnessing remains load-bearing.** With τ=9, the sensitivity analysis (§1c–1g) shows single-layer perturbations can flip tokens. The corridor cannot be closed by backend alignment alone.
 - **For W8A8 models, mandate SDPA and fail closed on eager.** Eager produces wrong outputs with compressed_tensors.
 - **For fp16 models, backend choice barely matters** on the prover side — eager vs SDPA differs by only L∞=0.004 with identical tokens.
-- **Reducing τ is now the priority.** Two remaining paths: (a) per-head quantization scales, (b) INT16/FP16 retained state. fp16 verifier replay is ruled out (§1j — precision matching doesn't help).
+- **Reducing τ is now the priority.** The remaining retained-boundary path is **INT16/FP16 retained state**. fp16 verifier replay is ruled out (§1j — precision matching doesn't help) and per-head scales are ruled out (§1l — one head always dominates).
 - **KV provenance remains critical regardless.** Even perfect current-token attention only proves consistency with the committed prefix, not true earlier execution.
 - **Bad-layer targeting** could make score witnessing cheaper: Llama layer 31 alone accounts for the largest adversarial risk; Qwen layers 24-25 are consistently worst. Corridor worst layers (Qwen 1/27, Llama 25) are partially different from adversarial worst layers.
 - **Random audit sampling provides probabilistic conditioning**: an adversary who doesn't know which layers will be opened must spread risk, reducing the expected payoff from corridor exploitation.
@@ -347,11 +391,11 @@ Results: Modal volume `corridor-results/qwen_precision_ab.json`
 1. ~~**Done**: Bind attention backend in the manifest/protocol.~~ `attn_backend`, `attn_dtype` in manifest/key/verifier. SDPA mandated for W8A8, fail closed on eager and unknown.
 2. ~~**Done**: Measure the real protocol gap — sidecar-to-verifier.~~ L∞=8–9 on A100. See §1i.
 3. ~~**Done**: Replay precision ladder.~~ fp16/f32/bf16 replay does not reduce the gap (§1j). Precision matching is ruled out as a τ-reduction path.
-4. ~~**Done**: Fix the L∞ regression.~~ Root cause: off-by-one RoPE position in `compute_kv_transcript` (`absolute_pos = token_pos + 1`). Reverted to `token_pos`. See §1k. Needs GPU re-measurement to confirm L∞ returns to 8-9.
+4. ~~**Done**: Fix the L∞ regression.~~ Root cause: off-by-one RoPE position in `compute_kv_transcript` (`absolute_pos = token_pos + 1`). Reverted to `token_pos`. See §1k. GPU-confirmed: L∞ returns to single digits on both Qwen and Llama.
 5. **Next**: Cross-hardware checks — same backend on A100 vs H100. If hardware changes the gap, τ must accommodate hardware diversity.
 6. **Next**: Investigate τ reduction paths (priority order):
-   a. Per-head quantization scales (simplest, directly reduces outlier magnitude)
-   b. INT16 retained state (256× finer granularity, moderate protocol change)
+   a. INT16 retained state (256× finer granularity, moderate protocol change)
+   b. FP16 retained state (same storage as INT16, different rounding / compatibility tradeoffs)
 7. **Keep regardless**: Score witnessing until τ < adversarial sensitivity threshold (~4–5). KV provenance — independent of attention gap resolution.
 
 ---
@@ -375,12 +419,11 @@ Two separate goals:
 ### 3d. Better `a` boundary quantization
 
 Keep the same protocol shape, but store attention output with a tighter boundary:
-- **Per-head scales** instead of one tensor-wide scale
 - **INT16 or FP16 retained `a`** instead of INT8
 
-This is probably the cleanest way to reduce the honest corridor without changing the whole protocol. INT16 gives 256× finer granularity; per-head scales eliminate the worst-case dimension from dominating the global scale.
+This is probably the cleanest remaining way to reduce the honest corridor without changing the whole protocol. INT16 gives 256× finer granularity. Per-head scales looked attractive in theory but were ruled out empirically in §1l.
 
-**Why**: the current ±τ in i8 units maps to a large float perturbation because per-tensor scale is driven by the max across all heads. Per-head or higher-precision storage directly shrinks the float-space perturbation.
+**Why**: the current ±τ in i8 units maps to a large float perturbation because the retained INT8 boundary is coarse. Higher-precision storage directly shrinks the float-space perturbation.
 
 ### ~~3e. Alternative attention backends~~ PARTIALLY DONE (1h)
 

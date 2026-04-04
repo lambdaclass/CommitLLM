@@ -1779,6 +1779,82 @@ fn measure_corridor_committed_kv_f32(
     measure_corridor_precision(audit_binary, key_json, "f32", scale_overrides_json)
 }
 
+/// Simulate per-head vs per-tensor boundary strategies on audit data.
+///
+/// Replays attention for each layer and compares requantization under:
+///   - per-tensor scale (current protocol)
+///   - per-head scale (simulated)
+///
+/// Reports corridor L-inf under each strategy and float-space adversarial room.
+///
+/// Args:
+///     audit_binary: bytes — bincode-serialized V4AuditResponse.
+///     key_json: str — JSON-serialized VerifierKey.
+///     scale_overrides_json: Optional[str] — JSON-serialized CorridorScaleOverrides.
+///
+/// Returns:
+///     str — JSON-serialized BoundarySimReport.
+#[pyfunction]
+#[pyo3(signature = (audit_binary, key_json, scale_overrides_json=None))]
+fn simulate_boundary_strategies(
+    audit_binary: &[u8],
+    key_json: &str,
+    scale_overrides_json: Option<&str>,
+) -> PyResult<String> {
+    let key: VerifierKey = serde_json::from_str(key_json)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize key: {}", e)))?;
+    let response = verilm_core::serialize::deserialize_v4_audit(audit_binary)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize audit: {}", e)))?;
+    let overrides = scale_overrides_json
+        .map(|json| {
+            serde_json::from_str::<verilm_verify::corridor::CorridorScaleOverrides>(json).map_err(
+                |e| PyValueError::new_err(format!("failed to deserialize scale overrides: {}", e)),
+            )
+        })
+        .transpose()?;
+    let report = verilm_verify::corridor::simulate_boundary_strategies(
+        &key,
+        &response,
+        overrides.as_ref(),
+    )
+    .map_err(|e| PyValueError::new_err(format!("boundary simulation failed: {}", e)))?;
+    serde_json::to_string(&report)
+        .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+}
+
+/// Simulate INT16 retained `a` against the current INT8 boundary.
+///
+/// Uses the same audit payload and committed-KV replay path as the corridor
+/// tooling, but evaluates whether an INT16 retained boundary would reduce the
+/// honest float-space mismatch.
+#[pyfunction]
+#[pyo3(signature = (audit_binary, key_json, scale_overrides_json=None))]
+fn simulate_int16_boundary(
+    audit_binary: &[u8],
+    key_json: &str,
+    scale_overrides_json: Option<&str>,
+) -> PyResult<String> {
+    let key: VerifierKey = serde_json::from_str(key_json)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize key: {}", e)))?;
+    let response = verilm_core::serialize::deserialize_v4_audit(audit_binary)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize audit: {}", e)))?;
+    let overrides = scale_overrides_json
+        .map(|json| {
+            serde_json::from_str::<verilm_verify::corridor::CorridorScaleOverrides>(json).map_err(
+                |e| PyValueError::new_err(format!("failed to deserialize scale overrides: {}", e)),
+            )
+        })
+        .transpose()?;
+    let report = verilm_verify::corridor::simulate_int16_boundary(
+        &key,
+        &response,
+        overrides.as_ref(),
+    )
+    .map_err(|e| PyValueError::new_err(format!("int16 boundary simulation failed: {}", e)))?;
+    serde_json::to_string(&report)
+        .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+}
+
 #[pymodule]
 fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(commit_minimal_from_captures, m)?)?;
@@ -1797,6 +1873,8 @@ fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(measure_corridor_committed_kv, m)?)?;
     m.add_function(wrap_pyfunction!(measure_corridor_precision, m)?)?;
     m.add_function(wrap_pyfunction!(measure_corridor_committed_kv_f32, m)?)?;
+    m.add_function(wrap_pyfunction!(simulate_boundary_strategies, m)?)?;
+    m.add_function(wrap_pyfunction!(simulate_int16_boundary, m)?)?;
     m.add_class::<CaptureHook>()?;
     m.add_function(wrap_pyfunction!(verify_input_tokenization, m)?)?;
     Ok(())

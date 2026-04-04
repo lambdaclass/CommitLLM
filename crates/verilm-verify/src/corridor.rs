@@ -880,6 +880,444 @@ pub fn measure_corridor_committed_kv_f32(
     measure_corridor_committed_kv_precision(key, response, scale_overrides, ReplayPrecision::F32)
 }
 
+/// Per-head boundary simulation results for a single layer+position.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BoundarySimEntry {
+    pub layer: usize,
+    pub token_position: usize,
+    /// Per-tensor scale (current protocol).
+    pub scale_a_tensor: f64,
+    /// Per-head scales (simulated).
+    pub scale_a_per_head: Vec<f64>,
+    /// Current corridor: L-inf under per-tensor requantization.
+    pub linf_tensor: i16,
+    /// Simulated corridor: max over heads of per-head L-inf.
+    pub linf_per_head: i16,
+    /// Per-head L-inf breakdown (one per Q-head).
+    pub linf_per_head_detail: Vec<i16>,
+    /// Float-space adversarial room under current τ=10.
+    /// Per-tensor: τ * scale_a_tensor.
+    pub float_room_tensor: f64,
+    /// Max per-head float room: max_h(τ * scale_a_per_head[h]).
+    pub float_room_per_head_max: f64,
+    /// Mean per-head float room.
+    pub float_room_per_head_mean: f64,
+    /// Ratio: float_room_per_head_max / float_room_tensor (< 1 means improvement).
+    pub float_room_ratio: f64,
+}
+
+/// Full boundary simulation report across all layers/positions.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BoundarySimReport {
+    pub entries: Vec<BoundarySimEntry>,
+    /// Summary: global max L-inf under per-tensor.
+    pub global_linf_tensor: i16,
+    /// Summary: global max L-inf under per-head.
+    pub global_linf_per_head: i16,
+    /// Summary: worst-case float room ratio across all entries.
+    pub worst_float_room_ratio: f64,
+    /// Summary: mean float room ratio across all entries.
+    pub mean_float_room_ratio: f64,
+}
+
+/// INT16 retained-boundary simulation for a single layer+position.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Int16BoundaryEntry {
+    pub layer: usize,
+    pub token_position: usize,
+    /// Current protocol scale (INT8 retained `a`).
+    pub scale_a_int8: f64,
+    /// Simulated INT16 scale for the same replayed tensor.
+    pub scale_a_int16: f64,
+    /// Current corridor in retained INT8 units.
+    pub linf_int8: i16,
+    /// Simulated corridor in retained INT16 units.
+    pub linf_int16: i32,
+    /// Honest float-space gap under current INT8 boundary.
+    pub float_linf_int8: f64,
+    /// Honest float-space gap under simulated INT16 boundary.
+    pub float_linf_int16: f64,
+    /// Ratio: float_linf_int16 / float_linf_int8 (< 1 means improvement).
+    pub float_linf_ratio: f64,
+    /// Ratio: scale_a_int16 / scale_a_int8 (~1/258 if INT16 helps ideally).
+    pub scale_ratio: f64,
+}
+
+/// Full INT16 retained-boundary simulation report.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Int16BoundaryReport {
+    pub entries: Vec<Int16BoundaryEntry>,
+    pub global_linf_int8: i16,
+    pub global_linf_int16: i32,
+    pub global_float_linf_int8: f64,
+    pub global_float_linf_int16: f64,
+    pub worst_float_linf_ratio: f64,
+    pub mean_float_linf_ratio: f64,
+    pub worst_scale_ratio: f64,
+    pub mean_scale_ratio: f64,
+}
+
+/// Simulate per-head vs per-tensor boundary strategies on committed KV audit data.
+///
+/// For each layer, replays attention to get `a_f64`, then:
+///   1. Requantizes with the original per-tensor `scale_a` → current corridor
+///   2. Computes per-head scales from `a_f64`, requantizes → simulated corridor
+///   3. Compares float-space adversarial room under both strategies
+///
+/// This is a measurement-only simulation — no protocol changes required.
+pub fn simulate_boundary_strategies(
+    key: &VerifierKey,
+    response: &V4AuditResponse,
+    scale_overrides: Option<&CorridorScaleOverrides>,
+) -> Result<BoundarySimReport, String> {
+    let kv_entries = response
+        .kv_entries
+        .as_ref()
+        .ok_or("no kv_entries in audit response")?;
+    let shell = response
+        .shell_opening
+        .as_ref()
+        .ok_or("no shell_opening for opened token")?;
+
+    let cfg = &key.config;
+    let n_layers = cfg.n_layers.min(kv_entries.len()).min(shell.layers.len());
+    let token_pos = response.token_index as usize;
+    let d_head = cfg.d_head;
+    let n_q_heads = cfg.n_q_heads;
+    let tau = 10.0_f64; // Current protocol tolerance
+
+    let mut entries = Vec::new();
+
+    for layer_idx in 0..n_layers {
+        let layer_kv = &kv_entries[layer_idx];
+        let n_positions = (token_pos + 1).min(layer_kv.len());
+        let kv_k: Vec<Vec<f64>> = layer_kv[..n_positions]
+            .iter()
+            .map(|e| e.k_roped.clone())
+            .collect();
+        let kv_v: Vec<Vec<f64>> = layer_kv[..n_positions]
+            .iter()
+            .map(|e| e.v_deq.clone())
+            .collect();
+        if kv_k.is_empty() {
+            continue;
+        }
+
+        let sl = &shell.layers[layer_idx];
+        let rs = &response.retained.layers[layer_idx];
+        let q_acc = match &sl.q {
+            Some(q) => q,
+            None => continue,
+        };
+
+        let q_f64 = dequant_one(
+            key,
+            layer_idx,
+            MatrixType::Wq,
+            q_acc,
+            sl.scale_x_attn,
+            scale_overrides.map(|o| o.wq[layer_idx].as_slice()),
+        );
+        let q_f64 = add_qkv_bias(key, layer_idx, MatrixType::Wq, q_f64);
+        let q_roped = verilm_core::rope::apply_rope_q(&q_f64, token_pos, cfg);
+
+        // Replay to get raw f64 attention output + per-tensor i8
+        let (_replayed_i8, a_f64) = verilm_core::attention::replay_attention_roped_raw(
+            &q_roped,
+            &kv_k,
+            &kv_v,
+            rs.scale_a as f64,
+            cfg,
+        );
+
+        let scale_a_tensor = rs.scale_a as f64;
+        let inv_tensor = if scale_a_tensor.abs() > 1e-30 {
+            1.0 / scale_a_tensor
+        } else {
+            1.0
+        };
+
+        // --- Strategy 1: per-tensor (current) ---
+        // Requantize verifier's a_f64 with per-tensor scale, compare to GPU's a_i8
+        let mut linf_tensor: i16 = 0;
+        for i in 0..rs.a.len().min(a_f64.len()) {
+            let rep = (a_f64[i] * inv_tensor).round().clamp(-128.0, 127.0) as i8;
+            let diff = (rs.a[i] as i16 - rep as i16).abs();
+            if diff > linf_tensor {
+                linf_tensor = diff;
+            }
+        }
+
+        // --- Strategy 2: per-head ---
+        // Compute per-head scale from GPU's a_i8 dequantized (best we can do)
+        // GPU's float output ≈ a_i8 * scale_a (lossy but close)
+        let mut scale_per_head = vec![0.0f64; n_q_heads];
+        for qh in 0..n_q_heads {
+            let start = qh * d_head;
+            let end = (start + d_head).min(a_f64.len());
+            let mut max_abs = 0.0f64;
+            for i in start..end {
+                // Use verifier's a_f64 as proxy for GPU's float output
+                let abs_val = a_f64[i].abs();
+                if abs_val > max_abs {
+                    max_abs = abs_val;
+                }
+            }
+            scale_per_head[qh] = max_abs / 127.0;
+        }
+
+        // Requantize GPU's claimed output with per-head scales
+        // GPU's float ≈ a_i8_gpu * scale_a_tensor
+        let mut linf_per_head_detail = vec![0i16; n_q_heads];
+        for qh in 0..n_q_heads {
+            let start = qh * d_head;
+            let end = (start + d_head).min(rs.a.len()).min(a_f64.len());
+            let sh = scale_per_head[qh];
+            let inv_sh = if sh.abs() > 1e-30 { 1.0 / sh } else { 1.0 };
+
+            for i in start..end {
+                // GPU's float output (approximated from claimed i8)
+                let gpu_float = rs.a[i] as f64 * scale_a_tensor;
+                let gpu_perhead = (gpu_float * inv_sh).round().clamp(-128.0, 127.0) as i8;
+
+                // Verifier's replayed output requantized with per-head scale
+                let ver_perhead = (a_f64[i] * inv_sh).round().clamp(-128.0, 127.0) as i8;
+
+                let diff = (gpu_perhead as i16 - ver_perhead as i16).abs();
+                if diff > linf_per_head_detail[qh] {
+                    linf_per_head_detail[qh] = diff;
+                }
+            }
+        }
+        let linf_per_head = linf_per_head_detail.iter().copied().max().unwrap_or(0);
+
+        // Float-space adversarial room
+        let float_room_tensor = tau * scale_a_tensor;
+        let float_room_per_head_max = scale_per_head
+            .iter()
+            .map(|&s| tau * s)
+            .fold(0.0f64, f64::max);
+        let float_room_per_head_mean =
+            scale_per_head.iter().map(|&s| tau * s).sum::<f64>() / n_q_heads as f64;
+        let float_room_ratio = if float_room_tensor.abs() > 1e-30 {
+            float_room_per_head_max / float_room_tensor
+        } else {
+            1.0
+        };
+
+        entries.push(BoundarySimEntry {
+            layer: layer_idx,
+            token_position: token_pos,
+            scale_a_tensor,
+            scale_a_per_head: scale_per_head,
+            linf_tensor,
+            linf_per_head,
+            linf_per_head_detail,
+            float_room_tensor,
+            float_room_per_head_max,
+            float_room_per_head_mean,
+            float_room_ratio,
+        });
+    }
+
+    let global_linf_tensor = entries.iter().map(|e| e.linf_tensor).max().unwrap_or(0);
+    let global_linf_per_head = entries.iter().map(|e| e.linf_per_head).max().unwrap_or(0);
+    let worst_float_room_ratio = entries
+        .iter()
+        .map(|e| e.float_room_ratio)
+        .fold(0.0f64, f64::max);
+    let mean_float_room_ratio = if entries.is_empty() {
+        1.0
+    } else {
+        entries.iter().map(|e| e.float_room_ratio).sum::<f64>() / entries.len() as f64
+    };
+
+    Ok(BoundarySimReport {
+        entries,
+        global_linf_tensor,
+        global_linf_per_head,
+        worst_float_room_ratio,
+        mean_float_room_ratio,
+    })
+}
+
+/// Simulate INT16 retained `a` with the same per-tensor boundary structure.
+///
+/// This does not change protocol code paths. It approximates the provider's
+/// float output using `claimed_i8 * scale_a_int8`, then asks:
+/// if the same tensor had been retained as INT16 with a fresh tensor-wide
+/// scale, how much would the honest float-space corridor shrink?
+pub fn simulate_int16_boundary(
+    key: &VerifierKey,
+    response: &V4AuditResponse,
+    scale_overrides: Option<&CorridorScaleOverrides>,
+) -> Result<Int16BoundaryReport, String> {
+    let kv_entries = response
+        .kv_entries
+        .as_ref()
+        .ok_or("no kv_entries in audit response")?;
+    let shell = response
+        .shell_opening
+        .as_ref()
+        .ok_or("no shell_opening for opened token")?;
+
+    let cfg = &key.config;
+    let n_layers = cfg.n_layers.min(kv_entries.len()).min(shell.layers.len());
+    let token_pos = response.token_index as usize;
+
+    let mut entries = Vec::new();
+
+    for layer_idx in 0..n_layers {
+        let layer_kv = &kv_entries[layer_idx];
+        let n_positions = (token_pos + 1).min(layer_kv.len());
+        let kv_k: Vec<Vec<f64>> = layer_kv[..n_positions]
+            .iter()
+            .map(|e| e.k_roped.clone())
+            .collect();
+        let kv_v: Vec<Vec<f64>> = layer_kv[..n_positions]
+            .iter()
+            .map(|e| e.v_deq.clone())
+            .collect();
+        if kv_k.is_empty() {
+            continue;
+        }
+
+        let sl = &shell.layers[layer_idx];
+        let rs = &response.retained.layers[layer_idx];
+        let q_acc = match &sl.q {
+            Some(q) => q,
+            None => continue,
+        };
+
+        let q_f64 = dequant_one(
+            key,
+            layer_idx,
+            MatrixType::Wq,
+            q_acc,
+            sl.scale_x_attn,
+            scale_overrides.map(|o| o.wq[layer_idx].as_slice()),
+        );
+        let q_f64 = add_qkv_bias(key, layer_idx, MatrixType::Wq, q_f64);
+        let q_roped = verilm_core::rope::apply_rope_q(&q_f64, token_pos, cfg);
+
+        let (_replayed_i8, a_f64) = verilm_core::attention::replay_attention_roped_raw(
+            &q_roped,
+            &kv_k,
+            &kv_v,
+            rs.scale_a as f64,
+            cfg,
+        );
+
+        let scale_a_int8 = rs.scale_a as f64;
+        let inv_int8 = if scale_a_int8.abs() > 1e-30 {
+            1.0 / scale_a_int8
+        } else {
+            1.0
+        };
+
+        let mut linf_int8: i16 = 0;
+        for i in 0..rs.a.len().min(a_f64.len()) {
+            let replay_q = (a_f64[i] * inv_int8).round().clamp(-128.0, 127.0) as i8;
+            let diff = (rs.a[i] as i16 - replay_q as i16).abs();
+            if diff > linf_int8 {
+                linf_int8 = diff;
+            }
+        }
+        let float_linf_int8 = linf_int8 as f64 * scale_a_int8;
+
+        // Use the larger of replay and dequantized claimed magnitudes so the
+        // simulated INT16 scale can faithfully represent either side.
+        let mut max_abs = 0.0f64;
+        for i in 0..rs.a.len().min(a_f64.len()) {
+            let gpu_float_proxy = rs.a[i] as f64 * scale_a_int8;
+            max_abs = max_abs.max(a_f64[i].abs()).max(gpu_float_proxy.abs());
+        }
+        let scale_a_int16 = if max_abs > 0.0 { max_abs / 32767.0 } else { 1.0 };
+        let inv_int16 = if scale_a_int16.abs() > 1e-30 {
+            1.0 / scale_a_int16
+        } else {
+            1.0
+        };
+
+        let mut linf_int16: i32 = 0;
+        for i in 0..rs.a.len().min(a_f64.len()) {
+            let gpu_float_proxy = rs.a[i] as f64 * scale_a_int8;
+            let gpu_q = (gpu_float_proxy * inv_int16)
+                .round()
+                .clamp(-32768.0, 32767.0) as i32;
+            let replay_q = (a_f64[i] * inv_int16)
+                .round()
+                .clamp(-32768.0, 32767.0) as i32;
+            let diff = (gpu_q - replay_q).abs();
+            if diff > linf_int16 {
+                linf_int16 = diff;
+            }
+        }
+        let float_linf_int16 = linf_int16 as f64 * scale_a_int16;
+        let float_linf_ratio = if float_linf_int8.abs() > 1e-30 {
+            float_linf_int16 / float_linf_int8
+        } else {
+            1.0
+        };
+        let scale_ratio = if scale_a_int8.abs() > 1e-30 {
+            scale_a_int16 / scale_a_int8
+        } else {
+            1.0
+        };
+
+        entries.push(Int16BoundaryEntry {
+            layer: layer_idx,
+            token_position: token_pos,
+            scale_a_int8,
+            scale_a_int16,
+            linf_int8,
+            linf_int16,
+            float_linf_int8,
+            float_linf_int16,
+            float_linf_ratio,
+            scale_ratio,
+        });
+    }
+
+    let global_linf_int8 = entries.iter().map(|e| e.linf_int8).max().unwrap_or(0);
+    let global_linf_int16 = entries.iter().map(|e| e.linf_int16).max().unwrap_or(0);
+    let global_float_linf_int8 = entries
+        .iter()
+        .map(|e| e.float_linf_int8)
+        .fold(0.0f64, f64::max);
+    let global_float_linf_int16 = entries
+        .iter()
+        .map(|e| e.float_linf_int16)
+        .fold(0.0f64, f64::max);
+    let worst_float_linf_ratio = entries
+        .iter()
+        .map(|e| e.float_linf_ratio)
+        .fold(0.0f64, f64::max);
+    let mean_float_linf_ratio = if entries.is_empty() {
+        1.0
+    } else {
+        entries.iter().map(|e| e.float_linf_ratio).sum::<f64>() / entries.len() as f64
+    };
+    let worst_scale_ratio = entries.iter().map(|e| e.scale_ratio).fold(0.0f64, f64::max);
+    let mean_scale_ratio = if entries.is_empty() {
+        1.0
+    } else {
+        entries.iter().map(|e| e.scale_ratio).sum::<f64>() / entries.len() as f64
+    };
+
+    Ok(Int16BoundaryReport {
+        entries,
+        global_linf_int8,
+        global_linf_int16,
+        global_float_linf_int8,
+        global_float_linf_int16,
+        worst_float_linf_ratio,
+        mean_float_linf_ratio,
+        worst_scale_ratio,
+        mean_scale_ratio,
+    })
+}
+
 fn build_report(
     measurements: Vec<AttentionDiffStats>,
     n_layers: usize,
