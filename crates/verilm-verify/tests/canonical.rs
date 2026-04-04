@@ -250,6 +250,8 @@ fn make_manifest(temperature: f32, top_k: u32, top_p: f32) -> DeploymentManifest
         quant_family: None,
         scale_derivation: None,
         quant_block_size: None,
+        attn_backend: None,
+        attn_dtype: None,
         kv_dim: None,
         ffn_dim: None,
         d_head: None,
@@ -803,6 +805,109 @@ fn canonical_decode_mode_inconsistency_rejected() {
 }
 
 // ---------------------------------------------------------------------------
+// Attention backend binding
+// ---------------------------------------------------------------------------
+
+#[test]
+fn canonical_attn_backend_mismatch_rejected() {
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.attn_backend = Some("eager".into());
+    let (mut key, binary) = build_canonical_audit(Some(&manifest));
+    key.attn_backend = Some("sdpa".into());
+    let report = verify_binary(&key, &binary, None, None).unwrap();
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report
+        .failures
+        .iter()
+        .any(|f| f.code == verilm_verify::FailureCode::SpecFieldMismatch
+            && f.context.field.as_deref() == Some("attn_backend")));
+}
+
+#[test]
+fn canonical_w8a8_eager_rejected() {
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.quant_family = Some("W8A8".into());
+    manifest.attn_backend = Some("eager".into());
+    let (mut key, binary) = build_canonical_audit(Some(&manifest));
+    // Key also says W8A8 + eager — the fail-closed policy should reject regardless
+    key.quant_family = Some("W8A8".into());
+    key.attn_backend = Some("eager".into());
+    let report = verify_binary(&key, &binary, None, None).unwrap();
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report
+        .failures
+        .iter()
+        .any(|f| f.code == verilm_verify::FailureCode::SpecFieldMismatch
+            && f.context.field.as_deref() == Some("attn_backend")));
+}
+
+#[test]
+fn canonical_w8a8_sdpa_accepted() {
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.quant_family = Some("W8A8".into());
+    manifest.attn_backend = Some("sdpa".into());
+    let (mut key, binary) = build_canonical_audit(Some(&manifest));
+    key.quant_family = Some("W8A8".into());
+    key.attn_backend = Some("sdpa".into());
+    let report = verify_binary(&key, &binary, None, None).unwrap();
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "W8A8+sdpa should be accepted, failures: {:?}",
+        report.failures
+    );
+}
+
+#[test]
+fn canonical_attn_backend_match_accepted() {
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.attn_backend = Some("sdpa".into());
+    let (mut key, binary) = build_canonical_audit(Some(&manifest));
+    key.attn_backend = Some("sdpa".into());
+    let report = verify_binary(&key, &binary, None, None).unwrap();
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "matching attn_backend should pass, failures: {:?}",
+        report.failures
+    );
+}
+
+#[test]
+fn canonical_w8a8_missing_backend_rejected() {
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.quant_family = Some("W8A8".into());
+    manifest.attn_backend = None; // missing
+    let (mut key, binary) = build_canonical_audit(Some(&manifest));
+    key.quant_family = Some("W8A8".into());
+    key.attn_backend = None;
+    let report = verify_binary(&key, &binary, None, None).unwrap();
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report
+        .failures
+        .iter()
+        .any(|f| f.code == verilm_verify::FailureCode::SpecFieldMismatch
+            && f.context.field.as_deref() == Some("attn_backend")));
+}
+
+#[test]
+fn canonical_w8a8_unknown_backend_rejected() {
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.quant_family = Some("W8A8".into());
+    manifest.attn_backend = Some("custom_kernel".into());
+    let (mut key, binary) = build_canonical_audit(Some(&manifest));
+    key.quant_family = Some("W8A8".into());
+    key.attn_backend = Some("custom_kernel".into());
+    let report = verify_binary(&key, &binary, None, None).unwrap();
+    assert_eq!(report.verdict, Verdict::Fail);
+    assert!(report
+        .failures
+        .iter()
+        .any(|f| f.code == verilm_verify::FailureCode::SpecFieldMismatch
+            && f.context.field.as_deref() == Some("attn_backend")));
+}
+
+// ---------------------------------------------------------------------------
 // Coverage reporting
 // ---------------------------------------------------------------------------
 
@@ -863,6 +968,28 @@ fn canonical_frozen_fullbridge_passes() {
         report.checks_run >= 20,
         "expected >= 20 checks, got {}",
         report.checks_run
+    );
+}
+
+#[test]
+fn corridor_precision_f64_matches_legacy_committed_kv_on_toy_kv_response() {
+    let (key, response) = kv_toy_response(3);
+
+    let legacy = verilm_verify::corridor::measure_corridor_committed_kv(&key, &response, None)
+        .expect("legacy committed-KV corridor must succeed on toy KV response");
+    let precision = verilm_verify::corridor::measure_corridor_committed_kv_precision(
+        &key,
+        &response,
+        None,
+        verilm_core::attention::ReplayPrecision::F64,
+    )
+    .expect("precision-dispatch committed-KV corridor must succeed on toy KV response");
+
+    let legacy_json = serde_json::to_value(&legacy).unwrap();
+    let precision_json = serde_json::to_value(&precision).unwrap();
+    assert_eq!(
+        legacy_json, precision_json,
+        "precision-dispatch F64 path must exactly match legacy committed-KV corridor output"
     );
 }
 

@@ -11,9 +11,18 @@ Usage:
     modal run --detach scripts/modal/diag_bias_check.py
 """
 
+import os
+
 import modal
 
 app = modal.App("verilm-bias-check")
+
+VLLM_SPEC = os.environ.get("VERILM_VLLM_SPEC", "vllm==0.18.0")
+TORCH_SPEC = os.environ.get("VERILM_TORCH_SPEC", "torch")
+TRANSFORMERS_SPEC = os.environ.get("VERILM_TRANSFORMERS_SPEC", "transformers<5")
+COMPRESSED_TENSORS_SPEC = os.environ.get(
+    "VERILM_COMPRESSED_TENSORS_SPEC", "compressed-tensors==0.9.3"
+)
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -26,7 +35,15 @@ image = (
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
         "VERILM_CAPTURE": "1",
     })
-    .pip_install("vllm>=0.8", "torch", "numpy", "fastapi", "maturin")
+    .pip_install(
+        VLLM_SPEC,
+        TORCH_SPEC,
+        TRANSFORMERS_SPEC,
+        COMPRESSED_TENSORS_SPEC,
+        "numpy",
+        "fastapi",
+        "maturin",
+    )
     .add_local_dir("sidecar", remote_path="/opt/verilm", copy=True)
     .run_commands(
         "pip install -e /opt/verilm",
@@ -82,6 +99,8 @@ def check_bias():
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
     import verilm_rs
+    import torch
+    import vllm
     from vllm import LLM
 
     from verilm import capture as cap
@@ -95,6 +114,11 @@ def check_bias():
     print(f"QKV Bias Fix Spot-Check")
     print(f"Model: {model_id}")
     print(f"{'='*70}")
+    print(
+        "Pinned runtime specs: "
+        f"vllm={VLLM_SPEC}, transformers={TRANSFORMERS_SPEC}, "
+        f"compressed_tensors={COMPRESSED_TENSORS_SPEC}, torch={TORCH_SPEC}"
+    )
 
     llm = LLM(
         model=model_id, dtype="auto", max_model_len=4096,
@@ -102,6 +126,10 @@ def check_bias():
     )
     server = VerifiedInferenceServer(llm)
     n_layers = cap._n_layers
+    print(
+        f"Runtime: vllm={vllm.__version__} torch={torch.__version__} "
+        f"backend={server._attn_backend} dtype={server._attn_dtype}"
+    )
 
     # Warmup
     cap._capture_mode = "minimal"

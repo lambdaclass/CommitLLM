@@ -4,6 +4,16 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 
 Historical references below to “roadmap #N” refer to the pre-2026-03-30 roadmap numbering. On 2026-03-30 the roadmap was renumbered into a single linear open-items-only sequence.
 
+## 2026-04-04
+
+### Measured
+
+- **Sidecar-to-verifier gap — the real protocol metric (roadmap #2b)**: measured the actual L∞ between GPU-committed attention outputs (vLLM sidecar, SDPA, A100-80GB) and Rust verifier CPU f64 replay. **Qwen 7B W8A8**: L∞=8, 92.8% exact. **Llama 8B W8A8**: L∞=9, 95.6% exact. **Llama 70B W8A8**: L∞=9, 96.8% exact. >99.9% of elements within ±1 across all models. Gap grows weakly with sequence length. Worst-case layers: Qwen 1/27, Llama-8B 25, Llama-70B 7/13/70. **The honest corridor is NOT zero — τ≥9 required for honest providers.** Gap is from GPU fp16 vs CPU f64 arithmetic, not backend non-determinism (which is zero). Score witnessing remains load-bearing until τ < adversarial sensitivity threshold (~4–5). See [`research/attention-gap.md`](./research/attention-gap.md) §1i. Script: `scripts/modal/measure_corridor.py`. Results: Modal volume `corridor-results/`.
+
+### Added
+
+- **Attention backend binding in protocol (roadmap #2a)**: `attn_backend` and `attn_dtype` fields added to `DeploymentManifest`, `ModelSpec`, and `VerifierKey`. Canonical verifier cross-checks these between manifest and key. W8A8 mandates SDPA — fail closed on `eager`, unknown, and missing `attn_backend`. Keygen auto-populates `attn_backend=sdpa` for W8A8 models and `attn_dtype` from `config.json:torch_dtype`. Tests: `canonical_w8a8_eager_rejected`, `canonical_w8a8_sdpa_accepted`, `canonical_w8a8_missing_backend_rejected`, `canonical_w8a8_unknown_backend_rejected`, `canonical_attn_backend_mismatch_rejected`, `canonical_attn_backend_match_accepted`.
+
 ## 2026-04-03
 
 ### Measured
@@ -25,6 +35,8 @@ Historical references below to “roadmap #N” refer to the pre-2026-03-30 road
   - **MLP dampens perturbations on Llama** (ratio 0.67), neutral on Qwen. MLP is not a threat channel.
   - **All-layers-simultaneously flips every prompt on both models.** Compounding drift is real — the verifier follows committed state forward (`canonical.rs:1223, 1904`), so ±τ errors accumulate across layers.
   - Measurement script: `redteam/modal/measure_sensitivity_v2.py`.
+
+- **Backend determinism comparison (roadmap #2)**: measured attention output mismatch and run-to-run determinism across eager, SDPA, and eager+deterministic backends on both Qwen W8A8 and Llama fp16. **All backends are bit-exact run-to-run on the prover side** (L∞ = 0.0). Backend mismatch appears to dominate the previously measured honest corridor — not stochastic non-determinism. This makes deterministic, backend-aligned replay a much more promising path. **Caveat**: prover-side determinism does not yet prove protocol-level τ=0 — the verifier does CPU FP64 replay, not the same GPU backend; vLLM sidecar path and cross-hardware (A100 vs H100) are untested. Eager attention is broken with W8A8 compressed_tensors (wrong tokens); SDPA is the only correct backend for quantized models. For fp16 (Llama), eager vs SDPA differs by only L∞=0.004 with identical tokens. See [`research/attention-gap.md`](./research/attention-gap.md) §1h. Measurement script: `redteam/modal/measure_corridor_backends.py`.
 
 ### Added
 

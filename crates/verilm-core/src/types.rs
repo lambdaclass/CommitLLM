@@ -242,6 +242,14 @@ pub struct DeploymentManifest {
     #[serde(default)]
     pub quant_block_size: Option<u32>,
 
+    // --- Attention runtime fields that flow through to ModelSpec ---
+    /// Attention backend (e.g. "sdpa", "eager", "flash_attention_2").
+    #[serde(default)]
+    pub attn_backend: Option<String>,
+    /// Effective dtype for attention computation (e.g. "float16", "bfloat16").
+    #[serde(default)]
+    pub attn_dtype: Option<String>,
+
     // --- Remaining architecture fields that flow through to ModelSpec (#8) ---
     /// KV dimension (n_kv_heads * d_head).
     #[serde(default)]
@@ -395,6 +403,17 @@ pub struct ModelSpec {
     #[serde(default)]
     pub quant_block_size: Option<u32>,
 
+    // --- Attention runtime semantics ---
+    /// Attention backend (e.g. "sdpa", "eager", "flash_attention_2").
+    /// Binds the provider's attention implementation so the verifier can
+    /// confirm arithmetic-path alignment. W8A8 models MUST use "sdpa"
+    /// (eager produces incorrect outputs with compressed_tensors).
+    #[serde(default)]
+    pub attn_backend: Option<String>,
+    /// Effective dtype used for attention computation (e.g. "float16", "bfloat16").
+    #[serde(default)]
+    pub attn_dtype: Option<String>,
+
     // --- Remaining architecture knobs (#8) ---
     /// KV dimension (n_kv_heads * d_head).
     #[serde(default)]
@@ -431,6 +450,8 @@ impl From<&DeploymentManifest> for ModelSpec {
             quant_family: m.quant_family.clone(),
             scale_derivation: m.scale_derivation.clone(),
             quant_block_size: m.quant_block_size,
+            attn_backend: m.attn_backend.clone(),
+            attn_dtype: m.attn_dtype.clone(),
             kv_dim: m.kv_dim,
             ffn_dim: m.ffn_dim,
             d_head: m.d_head,
@@ -671,6 +692,14 @@ pub struct VerifierKey {
     /// Cross-checked against the manifest's `quant_block_size` when both are present.
     #[serde(default)]
     pub quant_block_size: Option<u32>,
+    /// Expected attention backend (e.g. "sdpa", "eager").
+    /// Cross-checked against the manifest's `attn_backend` when both are present.
+    #[serde(default)]
+    pub attn_backend: Option<String>,
+    /// Expected attention compute dtype (e.g. "float16", "bfloat16").
+    /// Cross-checked against the manifest's `attn_dtype` when both are present.
+    #[serde(default)]
+    pub attn_dtype: Option<String>,
 
     /// When true, attention replay dequantizes Q/K accumulators using weight
     /// and activation scales, applies RoPE at each token position, and replays

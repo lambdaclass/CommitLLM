@@ -267,6 +267,7 @@ struct ModelJsonConfig {
     rope_theta: f64,
     model_type: Option<String>,
     rope_scaling: Option<verilm_core::constants::RopeScaling>,
+    torch_dtype: Option<String>,
 }
 
 fn read_model_config_json(dir: &Path) -> ModelJsonConfig {
@@ -277,6 +278,7 @@ fn read_model_config_json(dir: &Path) -> ModelJsonConfig {
             rope_theta: 10000.0,
             model_type: None,
             rope_scaling: None,
+            torch_dtype: None,
         };
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else {
@@ -285,6 +287,7 @@ fn read_model_config_json(dir: &Path) -> ModelJsonConfig {
             rope_theta: 10000.0,
             model_type: None,
             rope_scaling: None,
+            torch_dtype: None,
         };
     };
     let eps = v
@@ -333,11 +336,17 @@ fn read_model_config_json(dir: &Path) -> ModelJsonConfig {
         }
     });
 
+    let torch_dtype = v
+        .get("torch_dtype")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     ModelJsonConfig {
         rmsnorm_eps: eps,
         rope_theta,
         model_type,
         rope_scaling,
+        torch_dtype,
     }
 }
 
@@ -700,9 +709,16 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         rope_config_hash: None,
         embedding_merkle_root,
         final_norm_weights,
+        quant_block_size: None,
+        attn_backend: if quant_family.as_deref() == Some("W8A8") {
+            // W8A8 (compressed_tensors) requires SDPA — eager produces incorrect outputs.
+            Some("sdpa".to_string())
+        } else {
+            None
+        },
+        attn_dtype: json_cfg.torch_dtype.clone(),
         quant_family,
         scale_derivation,
-        quant_block_size: None,
         rope_aware_replay,
         qkv_biases,
         verification_profile,

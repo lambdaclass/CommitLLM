@@ -9,7 +9,7 @@
 //! but calls [`verilm_core::attention::measure_attention_diff`] instead
 //! of [`verilm_core::attention::compare_attention_output`].
 
-use verilm_core::attention::{measure_attention_diff, AttentionDiffStats};
+use verilm_core::attention::{measure_attention_diff, AttentionDiffStats, ReplayPrecision};
 use verilm_core::constants::MatrixType;
 use verilm_core::types::{V4AuditResponse, VerifierKey};
 
@@ -788,6 +788,96 @@ pub fn measure_corridor_committed_kv(
     }
 
     build_report(all_stats, n_layers)
+}
+
+/// Like [`measure_corridor_committed_kv`] but with selectable replay precision.
+///
+/// Uses [`verilm_core::attention::replay_attention_roped_precision`] to test
+/// how different arithmetic precisions affect the corridor gap:
+///
+/// - `F64`: current verifier default (over-precise vs GPU)
+/// - `F32`: tests whether f32 accumulation alone closes the gap
+/// - `Fp16InputsF32Accum`: fp16 input truncation + f32 accumulation (closest to GPU SDPA)
+/// - `Bf16InputsF32Accum`: bf16 input truncation + f32 accumulation (for bf16 models)
+pub fn measure_corridor_committed_kv_precision(
+    key: &VerifierKey,
+    response: &V4AuditResponse,
+    scale_overrides: Option<&CorridorScaleOverrides>,
+    precision: ReplayPrecision,
+) -> Result<CorridorReport, String> {
+    let kv_entries = response
+        .kv_entries
+        .as_ref()
+        .ok_or("no kv_entries in audit response (committed KV not present)")?;
+
+    let shell = response
+        .shell_opening
+        .as_ref()
+        .ok_or("no shell_opening for opened token")?;
+
+    let cfg = &key.config;
+    let n_layers = cfg.n_layers.min(kv_entries.len()).min(shell.layers.len());
+    let token_pos = response.token_index as usize;
+
+    let mut all_stats = Vec::new();
+
+    for layer_idx in 0..n_layers {
+        let layer_kv = &kv_entries[layer_idx];
+        let n_positions = (token_pos + 1).min(layer_kv.len());
+        let kv_k: Vec<Vec<f64>> = layer_kv[..n_positions]
+            .iter()
+            .map(|e| e.k_roped.clone())
+            .collect();
+        let kv_v: Vec<Vec<f64>> = layer_kv[..n_positions]
+            .iter()
+            .map(|e| e.v_deq.clone())
+            .collect();
+
+        if kv_k.is_empty() {
+            continue;
+        }
+
+        let sl = &shell.layers[layer_idx];
+        let rs = &response.retained.layers[layer_idx];
+        let q_acc = match &sl.q {
+            Some(q) => q,
+            None => continue,
+        };
+
+        let q_f64 = dequant_one(
+            key,
+            layer_idx,
+            MatrixType::Wq,
+            q_acc,
+            sl.scale_x_attn,
+            scale_overrides.map(|o| o.wq[layer_idx].as_slice()),
+        );
+        let q_f64 = add_qkv_bias(key, layer_idx, MatrixType::Wq, q_f64);
+        let q_roped = verilm_core::rope::apply_rope_q(&q_f64, token_pos, cfg);
+
+        let replayed = verilm_core::attention::replay_attention_roped_precision(
+            &q_roped,
+            &kv_k,
+            &kv_v,
+            rs.scale_a as f64,
+            cfg,
+            precision,
+        );
+        all_stats.push(measure_attention_diff(
+            &rs.a, &replayed, layer_idx, token_pos,
+        )?);
+    }
+
+    build_report(all_stats, n_layers)
+}
+
+/// Backwards-compatible wrapper: f32 corridor measurement.
+pub fn measure_corridor_committed_kv_f32(
+    key: &VerifierKey,
+    response: &V4AuditResponse,
+    scale_overrides: Option<&CorridorScaleOverrides>,
+) -> Result<CorridorReport, String> {
+    measure_corridor_committed_kv_precision(key, response, scale_overrides, ReplayPrecision::F32)
 }
 
 fn build_report(

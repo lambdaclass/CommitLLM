@@ -10,3 +10,4 @@ rand_chacha = "0.3"
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
 zstd = "0.13"
+half = "2"

@@ -146,6 +146,155 @@ A hypothetical **state-replacing** verifier (replace committed state with canoni
 
 Script: `redteam/modal/measure_sensitivity_v2.py`
 
+### 1h. Backend determinism comparison (2026-04-03)
+
+Measured attention output mismatch between backends (eager, SDPA, eager+deterministic) and run-to-run determinism for each backend on both models.
+
+**Llama-3.1-8B** (fp16):
+
+| Comparison | Max L∞ | Mean L∞ | Tokens |
+|------------|--------|---------|--------|
+| eager vs eager_det | **0.000000** | 0.000000 | SAME |
+| eager vs sdpa | **0.003906** | 0.001011 | SAME |
+| eager_det vs sdpa | **0.003906** | 0.001011 | SAME |
+
+Run-to-run determinism:
+- eager: **BIT-EXACT** (L∞ = 0.0, 32/32 layers)
+- eager_det: **BIT-EXACT** (L∞ = 0.0, 32/32 layers)
+- sdpa: **BIT-EXACT** (L∞ = 0.0, 32/32 layers)
+
+All backends produce correct, identical tokens (`a`, `fibonacci`, `the`).
+
+**Qwen-7B W8A8**:
+
+| Comparison | Max L∞ | Mean L∞ | Tokens |
+|------------|--------|---------|--------|
+| eager vs eager_det | **0.000000** | 0.000000 | SAME |
+| eager vs sdpa | **1.468750** | 0.256953 | DIFFER |
+| eager_det vs sdpa | **1.468750** | 0.256953 | DIFFER |
+
+Run-to-run determinism:
+- eager: **BIT-EXACT** (L∞ = 0.0, 27/28 layers)
+- eager_det: **BIT-EXACT** (L∞ = 0.0, 27/28 layers)
+- sdpa: **BIT-EXACT** (L∞ = 0.0, 28/28 layers)
+
+**Critical**: Eager produces wrong tokens (`!` for all prompts) with W8A8 compressed_tensors. SDPA produces correct tokens (`Paris`, `fibonacci`, `the`). Eager attention is **incompatible** with compressed_tensors W8A8.
+
+**Key finding**: Every backend is **bit-exact run-to-run on the prover side**. Backend mismatch (e.g., FlashAttention vs eager) appears to dominate the previously measured honest corridor, not stochastic non-determinism. This makes deterministic, backend-aligned replay a much more promising path than previously thought.
+
+**Caveats — this does not yet prove protocol-level τ=0**:
+1. The current verifier does CPU-side FP64 replay, not the same GPU backend as the provider. Prover-side determinism alone does not close the gap unless the verifier matches the same arithmetic/kernel semantics.
+2. This measures HuggingFace backend behavior (`AutoModelForCausalLM`), not the full vLLM sidecar path used in production.
+3. Same-backend requires same arithmetic spec, same hardware class (or a proved cross-hardware equivalence), and same implementation on both prover and verifier.
+4. Cross-hardware stability (A100 vs H100) is untested.
+
+**What must be tested before changing the protocol story**:
+- Reproduce in the actual vLLM sidecar path
+- Compare provider output to verifier CPU replay (not just provider vs provider)
+- Check cross-hardware stability (at least A100 vs H100)
+
+Script: `redteam/modal/measure_corridor_backends.py`
+
+### 1i. Sidecar-to-verifier gap (GPU fp16 SDPA → Rust CPU f64 replay)
+
+**Measured the actual protocol gap**: vLLM sidecar with SDPA attention on A100-80GB, committed INT8 attention outputs, compared against the Rust verifier's CPU f64 replay using `measure_corridor_committed_kv()`. This is the real decision metric for τ.
+
+**Hardware**: A100-80GB (Modal), SDPA attention backend, W8A8 compressed_tensors quantization.
+
+**Results (L∞ = max |GPU_committed_a_i8 − verifier_replayed_a_i8|)**:
+
+| Model | Global max L∞ | Typical L∞ | frac_eq | frac≤1 | frac≤2 |
+|-------|--------------|------------|---------|--------|--------|
+| Qwen 7B W8A8 | **8** | 3–5 | 92.8% | 99.93% | 99.99% |
+| Llama 8B W8A8 | **9** | 3–5 | 95.6% | 99.97% | 99.99% |
+| Llama 70B W8A8 | **9** | 3–5 | 96.8% | 99.99% | 99.99% |
+
+**Histogram (aggregate across all workloads/positions)**:
+
+| diff | Qwen 7B | Llama 8B | Llama 70B |
+|------|---------|----------|-----------|
+| =0 | 92.79% | 95.61% | 96.76% |
+| =1 | 7.13% | 4.37% | 3.23% |
+| =2 | 0.063% | 0.017% | 0.010% |
+| =3 | 0.009% | 0.002% | 0.001% |
+| =4 | 0.002% | 0.0005% | 0.0001% |
+| ≥5 | 0.0008% | 0.0004% | 0.0001% |
+
+**Per-model worst-case layers**:
+- **Qwen 7B**: layer 1 (L∞=8), layer 27 (L∞=7). Early and final layers worst.
+- **Llama 8B**: layer 25 (L∞=9). Concentrated in a single layer; grows with sequence length (pos=1165 has worst case).
+- **Llama 70B**: layer 70 (L∞=9), layer 7 (L∞=6), layer 13 (L∞=6). Scattered across depth.
+
+**Sequence length trend**: L∞ weakly increases with sequence length. Worst cases consistently appear at the longest positions tested (pos=1165 for 1K-token generations). This suggests softmax precision diverges more with longer KV caches.
+
+**Key interpretation**:
+1. **The honest corridor is NOT zero.** τ ≥ 9 is required for honest W8A8 providers on A100 with SDPA. This is the same magnitude as the previously measured adversarial sensitivity threshold.
+2. **~93–97% of elements are exactly equal** between GPU and verifier. The gap is concentrated in rare outliers, not systemic drift.
+3. **>99.9% of elements are within ±1.** The bulk of the distribution is tight; only a few elements per layer per token reach diff≥5.
+4. **The gap is NOT from backend non-determinism** (which was shown to be zero in §1h). It's from GPU fp16 + SDPA vs CPU f64 arithmetic — different rounding, different softmax intermediate precision, different accumulation order.
+5. **Score witnessing remains load-bearing.** With τ=9, the sensitivity analysis from §1c–1g shows single-layer perturbations can flip tokens. The corridor cannot be closed by backend alignment alone.
+
+**What this means for the protocol**:
+- The current honest corridor (τ≈8–9) is dominated by the fp16-to-f64 arithmetic mismatch, not by stochastic variation or backend differences.
+- Reducing τ requires either: (a) matching the verifier's arithmetic to the GPU's (fp16 replay), (b) using higher-precision retained state (INT16/FP16), or (c) per-head quantization scales.
+- Until τ can be reduced below the adversarial sensitivity threshold (~4–5 for single-layer attacks), score witnessing or a state-replacing verifier remains necessary.
+
+Script: `scripts/modal/measure_corridor.py`
+Results: Modal volume `corridor-results/` (`qwen_corridor.json`, `llama_corridor.json`, `llama70b_corridor.json`)
+
+### 1j. Replay precision ladder (2026-04-04)
+
+**Question**: Can the sidecar-to-verifier gap be reduced by matching the verifier's replay precision to the GPU's?
+
+**Method**: Parameterized replay with 4 precision levels:
+- `F64` — current verifier default (over-precise vs GPU)
+- `F32` — tests whether f32 accumulation alone closes the gap
+- `Fp16InputsF32Accum` — fp16 input truncation + f32 accumulation (closest to GPU SDPA with fp16 tensors)
+- `Bf16InputsF32Accum` — bf16 input truncation + f32 accumulation (for bf16 models)
+
+Implementation: `ReplayPrecision` enum in `verilm_core::attention`, `measure_corridor_committed_kv_precision()` in `verilm_verify::corridor`, `measure_corridor_precision()` PyO3 binding. Uses `half` crate for real IEEE fp16/bf16 round-trips.
+
+**Invariant check**: On real GPU audit payloads, `measure_corridor_precision(..., "f64")` is **exactly equal** to the legacy `measure_corridor_committed_kv(...)`. The new dispatch path is verified correct.
+
+**Results** (vLLM 0.18.0 V1 engine, A100-80GB, Qwen 7B + Llama 8B W8A8):
+
+| Precision | Max delta vs f64 (L∞) |
+|-----------|----------------------|
+| f64 → f32 | **0** (identical everywhere) |
+| f64 → fp16_f32 | **±1** |
+| f64 → bf16_f32 | **±2** |
+
+All four precision levels produce L∞ within ±2 of each other across all workloads, positions, layers, and both models.
+
+**Interpretation**:
+1. **Replay precision is definitively NOT the gap source.** Changing from f64 to f32 makes zero difference. Adding fp16/bf16 input truncation changes L∞ by at most ±2.
+2. **The gap is entirely upstream of the attention inner loop** — in the capture/dequant/requant pipeline, not in how QK^T/softmax/V-sum is computed.
+3. This rules out the "over-precise verifier" hypothesis and the "fp16 input truncation" hypothesis simultaneously.
+
+**Note on absolute L∞**: These runs showed L∞=100-186 (vs the previous L∞=8-9 in §1i). This is a separate capture/runtime regression under investigation (see §1i note below), NOT a precision effect. The precision comparison is valid regardless — it depends on relative differences, not absolute magnitudes.
+
+Script: `redteam/modal/measure_corridor_precision.py`
+Results: Modal volume `corridor-results/qwen_precision_ab.json`
+
+### 1k. L-inf regression root cause (2026-04-04)
+
+**Problem**: §1i showed L∞=8-9 on the original code. Subsequent runs showed L∞=100-186 for decode tokens while prefill (pos=0) remained L∞=1.
+
+**Root cause**: An off-by-one error in `compute_kv_transcript()` (`crates/verilm-prover/src/lib.rs`). The line `let absolute_pos = token_pos + 1` was introduced after the initial snapshot, shifting all KV RoPE positions by +1 relative to the GPU's actual positions.
+
+**Why pos=0 was unaffected**: With a single KV entry, softmax is trivially [1.0] regardless of the score. The RoPE offset on K doesn't affect the attention output because there's only one entry to attend to — the output is just V. With multiple entries (decode tokens), the wrong RoPE positions produce wrong QK^T inner products, wrong attention distributions, and L∞=100+ differences.
+
+**Fix**: Reverted `absolute_pos = token_pos + 1` back to `token_pos`, matching the original code. All 480+ workspace tests pass.
+
+**Eliminated during investigation**:
+- vLLM V1 vs V0 engine (both showed same L∞)
+- vLLM version bisection 0.8.3–0.18.0 (all pinned same torch/compressed-tensors)
+- Replay precision (f64/f32/fp16/bf16 — all within ±2)
+- Sidecar capture code (unchanged since initial snapshot, Rust hook path correct)
+- C++ native capture .max() reduction (not in critical path)
+
+**Status**: Fix applied locally. Needs GPU re-measurement to confirm L∞ returns to 8-9.
+
 ---
 
 ## 2. Interpretation
@@ -161,6 +310,14 @@ Script: `redteam/modal/measure_sensitivity_v2.py`
 7. **MLP dampens perturbations on Llama** (ratio 0.67) and is neutral on Qwen (ratio 1.0). MLP amplification is NOT a concern.
 8. **All-layers-simultaneously always flips tokens** on both models across all prompts. Compounding drift is real.
 9. **Drift compounds because the verifier is non-state-replacing**: it follows the committed state forward, accepting ±τ per layer.
+10. **All attention backends (eager, SDPA, eager+det) are bit-exact run-to-run on the prover side.** Backend mismatch appears to dominate the previously measured honest corridor. This makes deterministic, backend-aligned replay a much more promising path. But this does NOT yet prove protocol-level τ=0 — the verifier does CPU FP64 replay, not the same GPU backend.
+11. **Eager attention is broken with W8A8 compressed_tensors** — produces wrong tokens. SDPA is the only correct backend for W8A8.
+12. **For fp16 models (Llama), eager vs SDPA differs by only L∞=0.004** — and produces identical tokens. Backend choice barely matters for fp16.
+13. **The sidecar-to-verifier gap is L∞=8–9 for W8A8 models on A100.** Measured on the actual vLLM sidecar path with SDPA attention vs Rust verifier CPU f64 replay. The gap is NOT zero — it matches the previously measured adversarial sensitivity threshold. ~93–97% of elements are exact, but outliers reach diff=8–9 in specific layers.
+14. **The honest corridor is dominated by fp16-to-f64 arithmetic mismatch**, not by backend non-determinism (which is zero) or stochastic variation. Reducing τ requires matching arithmetic precision, not just fixing backends.
+15. **Worst-case layers are model-specific**: Qwen layers 1, 27; Llama-8B layer 25; Llama-70B layers 7, 13, 70. Sequence length weakly increases the gap.
+16. **Replay precision is NOT the gap source (§1j).** All four replay precisions (f64, f32, fp16+f32, bf16+f32) produce L∞ within ±2 of each other. The gap is entirely upstream of the attention inner loop — in the capture/dequant/requant pipeline, not in how QK^T/softmax/V-sum is computed.
+17. **The L∞ regression was a RoPE position off-by-one (§1k).** The `absolute_pos = token_pos + 1` bug in `compute_kv_transcript` shifted all committed KV RoPE positions by +1, producing L∞=100-186 for decode tokens. Prefill (pos=0) was unaffected because single-entry softmax is trivially [1.0]. Fix: revert to `token_pos`. Pending GPU confirmation.
 
 ### What is NOT yet established
 
@@ -168,15 +325,34 @@ Script: `redteam/modal/measure_sensitivity_v2.py`
 2. **Constrained adversarial optimization**: the SVD-aligned perturbation is a heuristic worst case under L∞ constraint. True worst-case requires solving a constrained optimization problem on real layers.
 3. **Fiat-Shamir / random sampling conditioning**: the adversary doesn't know which layers will be audited until after commitment. If deep audit samples layers randomly, the adversary must hedge across all layers rather than concentrating on the most dangerous ones. This probabilistic conditioning may substantially reduce effective risk compared to worst-case single-layer analysis.
 4. **Whether a state-replacing verifier is feasible**: if the verifier canonicalized after each check, drift wouldn't compound. Cost and design implications are unexplored.
+5. **Cross-hardware stability.** A100 vs H100 (or other GPU generations) may differ in floating-point behavior even with the same backend. Untested.
+6. **Whether τ reduction paths actually work.** Per-head scales and INT16 are plausible but unmeasured. fp16 replay is **ruled out** (§1j — it doesn't help). The remaining paths' implementation cost and τ improvement are unknown.
+7. ~~**Root cause of the L∞ regression — FOUND (§1k).**~~ Off-by-one in `compute_kv_transcript`: `absolute_pos = token_pos + 1` shifted all KV RoPE positions by +1. Fixed by reverting to `token_pos`. See §1k.
 
 ### Protocol implications
 
-- **Score witnessing is critical**, not optional. Without it, the corridor tolerance is exploitable on both families.
-- **Bad-layer targeting** could make score witnessing cheaper: Llama layer 31 alone accounts for the largest risk; Qwen layers 24-25 are consistently worst.
-- **The L∞ metric mismatch matters**: corridor is stated in L∞, but most analysis uses L2/spectral norms. Future bounds should use L∞-compatible analysis or explicitly justify the relaxation.
+- **The honest corridor is τ≈8–9, confirmed end-to-end (§1i).** The sidecar-to-verifier measurement shows L∞=8 (Qwen) and L∞=9 (Llama) on A100 with SDPA. This is the actual protocol gap, not a proxy.
+- **The gap is dominated by fp16-to-f64 arithmetic mismatch.** Backend non-determinism is zero (§1h); the remaining gap is from GPU fp16 softmax/accumulation vs CPU f64 replay.
+- **Score witnessing remains load-bearing.** With τ=9, the sensitivity analysis (§1c–1g) shows single-layer perturbations can flip tokens. The corridor cannot be closed by backend alignment alone.
+- **For W8A8 models, mandate SDPA and fail closed on eager.** Eager produces wrong outputs with compressed_tensors.
+- **For fp16 models, backend choice barely matters** on the prover side — eager vs SDPA differs by only L∞=0.004 with identical tokens.
+- **Reducing τ is now the priority.** Two remaining paths: (a) per-head quantization scales, (b) INT16/FP16 retained state. fp16 verifier replay is ruled out (§1j — precision matching doesn't help).
+- **KV provenance remains critical regardless.** Even perfect current-token attention only proves consistency with the committed prefix, not true earlier execution.
+- **Bad-layer targeting** could make score witnessing cheaper: Llama layer 31 alone accounts for the largest adversarial risk; Qwen layers 24-25 are consistently worst. Corridor worst layers (Qwen 1/27, Llama 25) are partially different from adversarial worst layers.
 - **Random audit sampling provides probabilistic conditioning**: an adversary who doesn't know which layers will be opened must spread risk, reducing the expected payoff from corridor exploitation.
-- **MLP is not a threat channel**: it dampens or is neutral, not amplifying.
-- **Compounding drift is the core issue**: even if single-layer perturbations were small, they accumulate because the verifier follows committed state.
+- **Compounding drift is the core issue under τ>0**: even if single-layer perturbations were small, they accumulate because the verifier follows committed state.
+
+### Practical next steps (ordered)
+
+1. ~~**Done**: Bind attention backend in the manifest/protocol.~~ `attn_backend`, `attn_dtype` in manifest/key/verifier. SDPA mandated for W8A8, fail closed on eager and unknown.
+2. ~~**Done**: Measure the real protocol gap — sidecar-to-verifier.~~ L∞=8–9 on A100. See §1i.
+3. ~~**Done**: Replay precision ladder.~~ fp16/f32/bf16 replay does not reduce the gap (§1j). Precision matching is ruled out as a τ-reduction path.
+4. ~~**Done**: Fix the L∞ regression.~~ Root cause: off-by-one RoPE position in `compute_kv_transcript` (`absolute_pos = token_pos + 1`). Reverted to `token_pos`. See §1k. Needs GPU re-measurement to confirm L∞ returns to 8-9.
+5. **Next**: Cross-hardware checks — same backend on A100 vs H100. If hardware changes the gap, τ must accommodate hardware diversity.
+6. **Next**: Investigate τ reduction paths (priority order):
+   a. Per-head quantization scales (simplest, directly reduces outlier magnitude)
+   b. INT16 retained state (256× finer granularity, moderate protocol change)
+7. **Keep regardless**: Score witnessing until τ < adversarial sensitivity threshold (~4–5). KV provenance — independent of attention gap resolution.
 
 ---
 
@@ -206,16 +382,11 @@ This is probably the cleanest way to reduce the honest corridor without changing
 
 **Why**: the current ±τ in i8 units maps to a large float perturbation because per-tensor scale is driven by the max across all heads. Per-head or higher-precision storage directly shrinks the float-space perturbation.
 
-### 3e. Alternative attention backends
+### ~~3e. Alternative attention backends~~ PARTIALLY DONE (1h)
 
-Measure the honest corridor under:
-- Current eager path (`attn_implementation="eager"`)
-- Less fused / more numerically stable backend
-- Deterministic kernel if available (`torch.use_deterministic_algorithms(True)`)
+**Result**: All backends (eager, SDPA, eager+det) are **bit-exact run-to-run on the prover side** (HF backends, A100). Backend mismatch dominates the previously measured corridor. See §1h for full results.
 
-Eager execution alone does not guarantee τ=0, but a more stable backend may reduce mismatch significantly.
-
-**Why**: the L∞=8-9 corridor comes from FlashAttention nondeterminism. If eager gives L∞=0-1, the problem shrinks dramatically.
+**Still open**: (a) reproduce in vLLM sidecar path, (b) measure provider GPU output vs verifier CPU FP64 replay, (c) cross-hardware stability (A100 vs H100).
 
 ### 3f. Layer-specific and head-specific tolerances
 

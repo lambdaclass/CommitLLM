@@ -212,7 +212,6 @@ pub fn compute_kv_transcript(
         .collect();
 
     for (token_pos, token_x_attn) in captured_x_attn.iter().enumerate() {
-        let absolute_pos = token_pos + 1;
         for layer_idx in 0..n_layers.min(token_x_attn.len()) {
             let x_attn = &token_x_attn[layer_idx];
             let scale_x = captured_scales[token_pos][layer_idx].scale_x_attn;
@@ -300,7 +299,7 @@ pub fn compute_kv_transcript(
                     v_f64
                 };
 
-                let k_roped = verilm_core::rope::apply_rope_k(&k_f64, absolute_pos, cfg);
+                let k_roped = verilm_core::rope::apply_rope_k(&k_f64, token_pos, cfg);
                 (k_roped, v_f64)
             } else {
                 // Toy: requantize i32→i8, store as f64 (matches kv_entries_from_traces)

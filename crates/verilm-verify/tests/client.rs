@@ -251,6 +251,8 @@ fn make_manifest(temperature: f32, top_k: u32, top_p: f32) -> DeploymentManifest
         quant_family: None,
         scale_derivation: None,
         quant_block_size: None,
+        attn_backend: None,
+        attn_dtype: None,
         kv_dim: None,
         ffn_dim: None,
         d_head: None,

@@ -669,6 +669,71 @@ fn cross_check_model_vs_key(ctx: &Ctx, spec: &verilm_core::types::ModelSpec, st:
             );
         }
     }
+    xcheck_str(
+        st,
+        "attn_backend",
+        spec.attn_backend.as_deref(),
+        ctx.key.attn_backend.as_deref(),
+    );
+    xcheck_str(
+        st,
+        "attn_dtype",
+        spec.attn_dtype.as_deref(),
+        ctx.key.attn_dtype.as_deref(),
+    );
+
+    // Fail closed: W8A8 requires a known-good attention backend.
+    // - eager is incompatible (compressed_tensors decompression breaks).
+    // - missing/unknown backend is rejected (fail closed).
+    if let Some(qf) = spec.quant_family.as_deref() {
+        if qf == "W8A8" {
+            st.check();
+            match spec.attn_backend.as_deref() {
+                Some("sdpa") | Some("flash_attention_2") => {
+                    // Known-good backends for W8A8.
+                }
+                Some("eager") => {
+                    st.fail_ctx(
+                        FailureCode::SpecFieldMismatch,
+                        "attn_backend=\"eager\" is incompatible with quant_family=\"W8A8\" \
+                         (produces incorrect outputs with compressed_tensors). \
+                         Use \"sdpa\" instead."
+                            .to_string(),
+                        FailureContext {
+                            field: Some("attn_backend".into()),
+                            ..Default::default()
+                        },
+                    );
+                }
+                Some(other) => {
+                    st.fail_ctx(
+                        FailureCode::SpecFieldMismatch,
+                        format!(
+                            "attn_backend=\"{}\" is not a known-good backend for W8A8; \
+                             only \"sdpa\" and \"flash_attention_2\" are accepted",
+                            other
+                        ),
+                        FailureContext {
+                            field: Some("attn_backend".into()),
+                            ..Default::default()
+                        },
+                    );
+                }
+                None => {
+                    st.fail_ctx(
+                        FailureCode::SpecFieldMismatch,
+                        "W8A8 requires attn_backend to be specified (fail closed); \
+                         set attn_backend=\"sdpa\" in the manifest and verifier key"
+                            .to_string(),
+                        FailureContext {
+                            field: Some("attn_backend".into()),
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn check_decode_features(
@@ -2311,6 +2376,8 @@ mod tests {
             quant_family: None,
             scale_derivation: None,
             quant_block_size: None,
+            attn_backend: None,
+            attn_dtype: None,
             rope_aware_replay: false,
             qkv_biases: vec![],
             verification_profile: None,

@@ -107,6 +107,8 @@ mod tests {
             quant_family: None,
             scale_derivation: None,
             quant_block_size: None,
+            attn_backend: None,
+            attn_dtype: None,
             rope_aware_replay: false,
             qkv_biases: Vec::new(),
             verification_profile: None,

@@ -115,6 +115,10 @@ class VerifiedInferenceServer:
         self._n_kv_heads = arch.get("n_kv_heads")
         self._rope_theta = arch.get("rope_theta")
 
+        # Attention runtime semantics.
+        self._attn_backend = self._extract_attn_backend(model)
+        self._attn_dtype = self._extract_attn_dtype(model)
+
         self.buf = get_capture_buffer()
 
         # x_attn capture for committed KV transcript derivation.
@@ -435,6 +439,49 @@ class VerifiedInferenceServer:
         return result
 
     @staticmethod
+    def _extract_attn_backend(model) -> str:
+        """Extract the attention backend from model config.
+
+        Returns the attn_implementation string (e.g. "sdpa", "eager",
+        "flash_attention_2"). Falls back to "unknown" if not detectable.
+        """
+        try:
+            cfg = getattr(model, "config", None)
+            if cfg is not None:
+                # HuggingFace stores the resolved backend in _attn_implementation
+                impl = getattr(cfg, "_attn_implementation", None)
+                if impl is not None:
+                    return str(impl)
+                # Some models store it as attn_implementation
+                impl = getattr(cfg, "attn_implementation", None)
+                if impl is not None:
+                    return str(impl)
+        except Exception:
+            pass
+        return "unknown"
+
+    @staticmethod
+    def _extract_attn_dtype(model) -> str:
+        """Extract the effective attention compute dtype.
+
+        Returns the torch dtype string (e.g. "float16", "bfloat16").
+        Falls back to "unknown" if not detectable.
+        """
+        try:
+            cfg = getattr(model, "config", None)
+            if cfg is not None:
+                # Check torch_dtype on the config
+                td = getattr(cfg, "torch_dtype", None)
+                if td is not None:
+                    import torch
+                    if isinstance(td, torch.dtype):
+                        return str(td).replace("torch.", "")
+                    return str(td)
+        except Exception:
+            pass
+        return "unknown"
+
+    @staticmethod
     def _extract_special_token_policy(llm) -> str:
         """Derive special-token handling from tokenizer config.
 
@@ -736,6 +783,8 @@ class VerifiedInferenceServer:
             "decode_mode": "greedy" if temperature == 0.0 else "sampled",
             # ModelSpec fields.
             "adapter_hash": self._adapter_hash,
+            "attn_backend": self._attn_backend,
+            "attn_dtype": self._attn_dtype,
             "quant_family": self._quant_family,
             "scale_derivation": self._scale_derivation,
             "quant_block_size": self._quant_block_size,

@@ -30,6 +30,33 @@
 //! claimed/opened value so approximation error does not compound across layers.
 
 use crate::constants::ModelConfig;
+use half::f16;
+
+/// Replay precision for attention computation.
+///
+/// Controls the arithmetic precision used in the score/softmax/V-sum loop.
+/// The experiment ladder:
+///   F64 — current baseline (over-precise vs GPU)
+///   F32 — tests whether f32 accumulation alone closes the gap
+///   Fp16InputsF32Accum — fp16 input truncation + f32 accumulation (closest to GPU SDPA)
+///   Bf16InputsF32Accum — bf16 input truncation + f32 accumulation (for bf16 models)
+///
+/// Inputs (Q, K, V) always arrive as f64 from dequant+RoPE. The precision
+/// enum controls how they are narrowed before the attention inner loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ReplayPrecision {
+    /// All arithmetic in f64. Current verifier default.
+    F64,
+    /// Inputs truncated to f32, scores/softmax/V-sum in f32.
+    /// Tests whether over-precise accumulation is the main gap source.
+    F32,
+    /// Inputs truncated to fp16 (via `half` crate), then promoted back to f32.
+    /// Scores/softmax/V-sum in f32. Closest match to GPU SDPA with fp16 tensors.
+    Fp16InputsF32Accum,
+    /// Inputs truncated to bf16 (via `half` crate), then promoted back to f32.
+    /// Scores/softmax/V-sum in f32. For models with `torch_dtype=bfloat16`.
+    Bf16InputsF32Accum,
+}
 
 /// Tolerance configuration for attention output comparison.
 ///
@@ -123,11 +150,10 @@ pub fn replay_attention_reference(
     a
 }
 
-/// RoPE-aware f64 attention replay for production models.
+/// Production attention replay using dequantized+RoPE'd f64 inputs.
 ///
-/// Takes post-RoPE Q and K in f64, dequantized V in f64, and requantizes
-/// the output to i8 using `scale_a`. This is the production counterpart to
-/// [`replay_attention_reference`] which uses raw i8 inputs (toy model).
+/// Thin wrapper around [`replay_attention_roped_precision`] with
+/// [`ReplayPrecision::F64`]. This is the canonical reference replay.
 ///
 /// The caller is responsible for:
 /// - Dequantizing i32 accumulators via [`crate::rope::dequantize_acc`]
@@ -147,56 +173,14 @@ pub fn replay_attention_roped(
     scale_a: f64,
     cfg: &ModelConfig,
 ) -> Vec<i8> {
-    let d_head = cfg.d_head;
-    let heads_per_kv = cfg.n_q_heads / cfg.n_kv_heads;
-    let inv_sqrt_d = 1.0 / (d_head as f64).sqrt();
-    let seq_len = kv_cache_k_roped.len();
-    let inv_scale = if scale_a.abs() > 1e-30 {
-        1.0 / scale_a
-    } else {
-        1.0
-    };
-
-    let mut a = vec![0i8; cfg.hidden_dim];
-
-    for qh in 0..cfg.n_q_heads {
-        let kv_head = qh / heads_per_kv;
-
-        let q_head: Vec<f64> = (0..d_head).map(|i| q_roped[qh * d_head + i]).collect();
-
-        // Attention scores: q · k_t / sqrt(d)
-        let scores: Vec<f64> = (0..seq_len)
-            .map(|t| {
-                let k_t = &kv_cache_k_roped[t];
-                let dot: f64 = (0..d_head)
-                    .map(|i| q_head[i] * k_t[kv_head * d_head + i])
-                    .sum();
-                dot * inv_sqrt_d
-            })
-            .collect();
-
-        // Softmax
-        let max_score = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let exp_scores: Vec<f64> = scores.iter().map(|&s| (s - max_score).exp()).collect();
-        let sum_exp: f64 = exp_scores.iter().sum();
-        let weights: Vec<f64> = exp_scores.iter().map(|&e| e / sum_exp).collect();
-
-        // Weighted sum of V
-        let mut head_out = vec![0.0f64; d_head];
-        for t in 0..seq_len {
-            let v_t = &kv_cache_v_deq[t];
-            for i in 0..d_head {
-                head_out[i] += weights[t] * v_t[kv_head * d_head + i];
-            }
-        }
-
-        // Requantize: a_i8 = round(a_f64 / scale_a)
-        for i in 0..d_head {
-            a[qh * d_head + i] = (head_out[i] * inv_scale).round().clamp(-128.0, 127.0) as i8;
-        }
-    }
-
-    a
+    replay_attention_roped_precision(
+        q_roped,
+        kv_cache_k_roped,
+        kv_cache_v_deq,
+        scale_a,
+        cfg,
+        ReplayPrecision::F64,
+    )
 }
 
 /// Like [`replay_attention_roped`] but also returns the pre-quantization f64 output.
@@ -260,6 +244,177 @@ pub fn replay_attention_roped_raw(
     }
 
     (a_i8, a_f64)
+}
+
+/// Thin wrapper: f32 replay. See [`replay_attention_roped_precision`].
+pub fn replay_attention_roped_f32(
+    q_roped: &[f64],
+    kv_cache_k_roped: &[Vec<f64>],
+    kv_cache_v_deq: &[Vec<f64>],
+    scale_a: f64,
+    cfg: &ModelConfig,
+) -> Vec<i8> {
+    replay_attention_roped_precision(
+        q_roped,
+        kv_cache_k_roped,
+        kv_cache_v_deq,
+        scale_a,
+        cfg,
+        ReplayPrecision::F32,
+    )
+}
+
+/// Narrow an f64 value to the target input precision.
+///
+/// - F32: f64 → f32
+/// - Fp16InputsF32Accum: f64 → f32 → f16 → f32 (real IEEE fp16 round-trip)
+/// - Bf16InputsF32Accum: f64 → f32 → bf16 → f32
+#[inline]
+fn narrow(x: f64, precision: ReplayPrecision) -> f32 {
+    match precision {
+        ReplayPrecision::F64 => unreachable!("narrow() not used for F64 path"),
+        ReplayPrecision::F32 => x as f32,
+        ReplayPrecision::Fp16InputsF32Accum => f16::from_f64(x).to_f32(),
+        ReplayPrecision::Bf16InputsF32Accum => half::bf16::from_f64(x).to_f32(),
+    }
+}
+
+/// Parameterized attention replay with selectable precision.
+///
+/// Inputs (Q, K, V) always arrive as f64 from dequant+RoPE. The `precision`
+/// parameter controls how they are narrowed before the attention inner loop:
+///
+/// - `F64`: all arithmetic in f64. Current verifier default.
+/// - `F32`: inputs truncated to f32, accumulation in f32.
+///   Tests whether over-precise accumulation is the main gap source.
+///   Note: f64→f32 is NOT the same as GPU fp16→f32 — this only tests
+///   whether f32 accumulation alone closes some of the gap.
+/// - `Fp16InputsF32Accum`: inputs truncated to IEEE fp16 via `half` crate,
+///   then promoted to f32 for accumulation. Closest match to GPU SDPA with
+///   fp16 tensors + fp32 internal accumulation.
+/// - `Bf16InputsF32Accum`: same but bf16 input truncation, for bf16 models.
+pub fn replay_attention_roped_precision(
+    q_roped: &[f64],
+    kv_cache_k_roped: &[Vec<f64>],
+    kv_cache_v_deq: &[Vec<f64>],
+    scale_a: f64,
+    cfg: &ModelConfig,
+    precision: ReplayPrecision,
+) -> Vec<i8> {
+    if precision == ReplayPrecision::F64 {
+        return replay_attention_f64(q_roped, kv_cache_k_roped, kv_cache_v_deq, scale_a, cfg);
+    }
+    replay_attention_narrowed(q_roped, kv_cache_k_roped, kv_cache_v_deq, scale_a, cfg, precision)
+}
+
+/// F64 path (original implementation).
+fn replay_attention_f64(
+    q_roped: &[f64],
+    kv_cache_k_roped: &[Vec<f64>],
+    kv_cache_v_deq: &[Vec<f64>],
+    scale_a: f64,
+    cfg: &ModelConfig,
+) -> Vec<i8> {
+    let d_head = cfg.d_head;
+    let heads_per_kv = cfg.n_q_heads / cfg.n_kv_heads;
+    let inv_sqrt_d = 1.0 / (d_head as f64).sqrt();
+    let seq_len = kv_cache_k_roped.len();
+    let inv_scale = if scale_a.abs() > 1e-30 { 1.0 / scale_a } else { 1.0 };
+
+    let mut a = vec![0i8; cfg.hidden_dim];
+
+    for qh in 0..cfg.n_q_heads {
+        let kv_head = qh / heads_per_kv;
+        let q_head: Vec<f64> = (0..d_head).map(|i| q_roped[qh * d_head + i]).collect();
+
+        let scores: Vec<f64> = (0..seq_len)
+            .map(|t| {
+                let k_t = &kv_cache_k_roped[t];
+                let dot: f64 = (0..d_head)
+                    .map(|i| q_head[i] * k_t[kv_head * d_head + i])
+                    .sum();
+                dot * inv_sqrt_d
+            })
+            .collect();
+
+        let max_score = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let exp_scores: Vec<f64> = scores.iter().map(|&s| (s - max_score).exp()).collect();
+        let sum_exp: f64 = exp_scores.iter().sum();
+        let weights: Vec<f64> = exp_scores.iter().map(|&e| e / sum_exp).collect();
+
+        let mut head_out = vec![0.0f64; d_head];
+        for t in 0..seq_len {
+            let v_t = &kv_cache_v_deq[t];
+            for i in 0..d_head {
+                head_out[i] += weights[t] * v_t[kv_head * d_head + i];
+            }
+        }
+
+        for i in 0..d_head {
+            a[qh * d_head + i] = (head_out[i] * inv_scale).round().clamp(-128.0, 127.0) as i8;
+        }
+    }
+
+    a
+}
+
+/// Narrowed-precision path (f32, fp16+f32, bf16+f32).
+///
+/// Inputs are narrowed via [`narrow`] before the inner loop. All
+/// accumulation happens in f32. Final requantization goes through f64.
+fn replay_attention_narrowed(
+    q_roped: &[f64],
+    kv_cache_k_roped: &[Vec<f64>],
+    kv_cache_v_deq: &[Vec<f64>],
+    scale_a: f64,
+    cfg: &ModelConfig,
+    precision: ReplayPrecision,
+) -> Vec<i8> {
+    let d_head = cfg.d_head;
+    let heads_per_kv = cfg.n_q_heads / cfg.n_kv_heads;
+    let inv_sqrt_d: f32 = 1.0 / (d_head as f32).sqrt();
+    let seq_len = kv_cache_k_roped.len();
+    let inv_scale = if scale_a.abs() > 1e-30 { 1.0 / scale_a } else { 1.0 };
+
+    let mut a = vec![0i8; cfg.hidden_dim];
+
+    for qh in 0..cfg.n_q_heads {
+        let kv_head = qh / heads_per_kv;
+
+        let q_head: Vec<f32> = (0..d_head)
+            .map(|i| narrow(q_roped[qh * d_head + i], precision))
+            .collect();
+
+        let scores: Vec<f32> = (0..seq_len)
+            .map(|t| {
+                let k_t = &kv_cache_k_roped[t];
+                let dot: f32 = (0..d_head)
+                    .map(|i| q_head[i] * narrow(k_t[kv_head * d_head + i], precision))
+                    .sum();
+                dot * inv_sqrt_d
+            })
+            .collect();
+
+        let max_score = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let exp_scores: Vec<f32> = scores.iter().map(|&s| (s - max_score).exp()).collect();
+        let sum_exp: f32 = exp_scores.iter().sum();
+        let weights: Vec<f32> = exp_scores.iter().map(|&e| e / sum_exp).collect();
+
+        let mut head_out = vec![0.0f32; d_head];
+        for t in 0..seq_len {
+            let v_t = &kv_cache_v_deq[t];
+            for i in 0..d_head {
+                head_out[i] += weights[t] * narrow(v_t[kv_head * d_head + i], precision);
+            }
+        }
+
+        for i in 0..d_head {
+            let val = (head_out[i] as f64) * inv_scale;
+            a[qh * d_head + i] = val.round().clamp(-128.0, 127.0) as i8;
+        }
+    }
+
+    a
 }
 
 /// Per-element diff statistics between claimed and replayed attention outputs.

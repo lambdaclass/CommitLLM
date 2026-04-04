@@ -13,9 +13,18 @@ Usage:
     modal run --detach scripts/modal/measure_corridor.py
 """
 
+import os
+
 import modal
 
 app = modal.App("verilm-measure-corridor")
+
+VLLM_SPEC = os.environ.get("VERILM_VLLM_SPEC", "vllm==0.18.0")
+TORCH_SPEC = os.environ.get("VERILM_TORCH_SPEC", "torch")
+TRANSFORMERS_SPEC = os.environ.get("VERILM_TRANSFORMERS_SPEC", "transformers<5")
+COMPRESSED_TENSORS_SPEC = os.environ.get(
+    "VERILM_COMPRESSED_TENSORS_SPEC", "compressed-tensors"
+)
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -28,7 +37,15 @@ image = (
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
         "VERILM_CAPTURE": "1",
     })
-    .pip_install("vllm>=0.8", "torch", "numpy", "fastapi", "maturin")
+    .pip_install(
+        VLLM_SPEC,
+        TORCH_SPEC,
+        TRANSFORMERS_SPEC,
+        COMPRESSED_TENSORS_SPEC,
+        "numpy",
+        "fastapi",
+        "maturin",
+    )
     .add_local_dir("sidecar", remote_path="/opt/verilm", copy=True)
     .run_commands(
         "pip install -e /opt/verilm",
@@ -439,6 +456,8 @@ def _run_model(model_id: str):
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
     import verilm_rs
+    import torch
+    import vllm
     from vllm import LLM, SamplingParams
 
     from verilm import capture as cap
@@ -450,6 +469,11 @@ def _run_model(model_id: str):
     print(f"\n{'='*70}")
     print(f"Model: {model_id}")
     print(f"{'='*70}")
+    print(
+        "Pinned runtime specs: "
+        f"vllm={VLLM_SPEC}, transformers={TRANSFORMERS_SPEC}, "
+        f"compressed_tensors={COMPRESSED_TENSORS_SPEC}, torch={TORCH_SPEC}"
+    )
 
     llm = LLM(
         model=model_id, dtype="auto", max_model_len=4096,
@@ -458,6 +482,10 @@ def _run_model(model_id: str):
     server = VerifiedInferenceServer(llm)
     n_layers = cap._n_layers
     model_dir = server._model_dir
+    print(
+        f"Runtime: vllm={vllm.__version__} torch={torch.__version__} "
+        f"backend={server._attn_backend} dtype={server._attn_dtype}"
+    )
 
     # Warmup
     cap._capture_mode = "minimal"

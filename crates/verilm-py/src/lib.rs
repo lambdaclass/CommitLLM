@@ -405,6 +405,16 @@ fn extract_manifest(d: &Bound<'_, PyDict>) -> PyResult<DeploymentManifest> {
             .and_then(|v| if v.is_none() { None } else { Some(v) })
             .map(|v| v.extract())
             .transpose()?,
+        attn_backend: d
+            .get_item("attn_backend")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract::<String>())
+            .transpose()?,
+        attn_dtype: d
+            .get_item("attn_dtype")?
+            .and_then(|v| if v.is_none() { None } else { Some(v) })
+            .map(|v| v.extract::<String>())
+            .transpose()?,
         kv_dim: d
             .get_item("kv_dim")?
             .and_then(|v| if v.is_none() { None } else { Some(v) })
@@ -1706,6 +1716,69 @@ fn measure_corridor_committed_kv(
         .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
 }
 
+/// Measure the attention corridor with selectable replay precision.
+///
+/// Args:
+///     audit_binary: bytes — bincode-serialized V4AuditResponse.
+///     key_json: str — JSON-serialized VerifierKey.
+///     precision: str — one of "f64", "f32", "fp16_f32", "bf16_f32".
+///     scale_overrides_json: Optional[str] — JSON-serialized CorridorScaleOverrides.
+///
+/// Returns:
+///     str — JSON-serialized CorridorReport.
+#[pyfunction]
+#[pyo3(signature = (audit_binary, key_json, precision, scale_overrides_json=None))]
+fn measure_corridor_precision(
+    audit_binary: &[u8],
+    key_json: &str,
+    precision: &str,
+    scale_overrides_json: Option<&str>,
+) -> PyResult<String> {
+    let replay_precision = match precision {
+        "f64" => verilm_core::attention::ReplayPrecision::F64,
+        "f32" => verilm_core::attention::ReplayPrecision::F32,
+        "fp16_f32" => verilm_core::attention::ReplayPrecision::Fp16InputsF32Accum,
+        "bf16_f32" => verilm_core::attention::ReplayPrecision::Bf16InputsF32Accum,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown precision '{}': expected f64, f32, fp16_f32, or bf16_f32",
+                other
+            )));
+        }
+    };
+    let key: VerifierKey = serde_json::from_str(key_json)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize key: {}", e)))?;
+    let response = verilm_core::serialize::deserialize_v4_audit(audit_binary)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize audit: {}", e)))?;
+    let overrides = scale_overrides_json
+        .map(|json| {
+            serde_json::from_str::<verilm_verify::corridor::CorridorScaleOverrides>(json).map_err(
+                |e| PyValueError::new_err(format!("failed to deserialize scale overrides: {}", e)),
+            )
+        })
+        .transpose()?;
+    let report = verilm_verify::corridor::measure_corridor_committed_kv_precision(
+        &key,
+        &response,
+        overrides.as_ref(),
+        replay_precision,
+    )
+    .map_err(|e| PyValueError::new_err(format!("corridor measurement failed: {}", e)))?;
+    serde_json::to_string(&report)
+        .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+}
+
+/// Backwards-compatible wrapper: f32 corridor measurement.
+#[pyfunction]
+#[pyo3(signature = (audit_binary, key_json, scale_overrides_json=None))]
+fn measure_corridor_committed_kv_f32(
+    audit_binary: &[u8],
+    key_json: &str,
+    scale_overrides_json: Option<&str>,
+) -> PyResult<String> {
+    measure_corridor_precision(audit_binary, key_json, "f32", scale_overrides_json)
+}
+
 #[pymodule]
 fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(commit_minimal_from_captures, m)?)?;
@@ -1722,6 +1795,8 @@ fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PackedBatchStateHandle>()?;
     m.add_function(wrap_pyfunction!(measure_corridor, m)?)?;
     m.add_function(wrap_pyfunction!(measure_corridor_committed_kv, m)?)?;
+    m.add_function(wrap_pyfunction!(measure_corridor_precision, m)?)?;
+    m.add_function(wrap_pyfunction!(measure_corridor_committed_kv_f32, m)?)?;
     m.add_class::<CaptureHook>()?;
     m.add_function(wrap_pyfunction!(verify_input_tokenization, m)?)?;
     Ok(())
