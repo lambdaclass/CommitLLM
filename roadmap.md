@@ -61,9 +61,15 @@ Blocks credibility with serious reviewers.
 
 ---
 
-## Tier 2 — Model breadth
+## Tier 2 — Future Coverage After Core Attention Fix
 
-Without broader model support, CommitLLM is a Qwen+Llama demo, not a product.
+These are important scope-expansion tracks, but they are **not** on the
+critical path before the current attention / score-witness story is solid.
+First make one strong protocol work well for the currently supported dense
+decoder slice; then generalize.
+
+Without broader model support, CommitLLM remains a Qwen+Llama-focused protocol
+rather than a general verifier for the full frontier serving stack.
 
 | # | Item |
 |---|------|
@@ -74,6 +80,11 @@ Without broader model support, CommitLLM is a Qwen+Llama demo, not a product.
 | 33 | **Long-context 128K+** — validate corridor at production context lengths where attention numerics are most stressed |
 | 34 | **GPTQ/AWQ/grouped quant** — at least one non-W8A8 family with a fully validated verifier replay path |
 | 35 | **Verification profiles** — per-family configuration (tolerance table, context lengths, audit policy) under the same core protocol |
+| 35a | **FP8 KV cache** — quantify how FP8 KV storage changes the committed-KV / attention corridor and what additional tolerance or deep-audit support is required. Separate from FP8 shell matmuls. |
+| 35b | **MLA support** — support multi-latent attention / non-standard KV cache layouts (older DeepSeek-style MLA). Requires a different committed-cache transcript and verifier replay object. |
+| 35c | **Native sparse attention / NSA** — commit and verify sparsity pattern plus sparse attention transcript for models like GLM-5 / DeepSeek-style sparse attention. |
+| 35d | **MTP / speculative multi-token decoding** — define retained-state and audit semantics for multi-token prediction heads and draft/accept transcripts. |
+| 35e | **Probabilistic / compressed KV schemes** — explicitly classify which KV compression methods are supported, unsupported, or require a weaker proof tier (e.g. randomized projections / QJL-style residuals). |
 
 ---
 
