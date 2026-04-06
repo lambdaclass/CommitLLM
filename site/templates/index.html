@@ -110,15 +110,15 @@
     <div class="hero-grid">
       <div>
         <div class="hero-badge">Active development &middot; Lean 4 formalization in progress</div>
-        <h1>Proof the provider ran the claimed model and returned the <em>untampered answer</em></h1>
+        <h1>Proof the claimed model ran and the answer was <em>not tampered with</em></h1>
         <p class="hero-desc">
-          CommitLLM is a cryptographic commit-and-audit protocol for open-weight LLM inference. The provider serves normally on GPU and returns a compact receipt binding the checkpoint, deployment manifest, prompt, sampling randomness, decode policy, and output formatting. A verifier checks on CPU that the delivered text matches the committed execution path, not a post-hoc rewrite.
+          CommitLLM returns a compact receipt binding the checkpoint, deployment manifest, prompt, sampling randomness, decode policy, and returned-text path. A verifier checks on CPU that the delivered answer matches the committed execution trace, not a post-hoc rewrite.
         </p>
         <div class="hero-proofline">
           <span class="proof-chip proof-chip--exact">Checkpoint + config bound</span>
           <span class="proof-chip proof-chip--alg">Prompt + randomness bound</span>
           <span class="proof-chip proof-chip--approx">Decode policy replayed</span>
-          <span class="proof-chip proof-chip--stat">Output formatting bound</span>
+          <span class="proof-chip proof-chip--stat">Returned text bound</span>
         </div>
         <div class="hero-actions">
           <a href="#binding" class="btn btn-primary">See what the receipt binds</a>
@@ -138,7 +138,7 @@
             <span class="stat-val">replayed</span>
           </li>
           <li class="stat-row">
-            <span class="stat-key">Output formatting</span>
+            <span class="stat-key">Returned text path</span>
             <span class="stat-val">bound</span>
           </li>
           <li class="stat-row">
@@ -155,7 +155,7 @@
           </li>
         </ul>
         <p class="aside-note">
-          Verification checks the returned text against the committed trace, decode policy, and output path, not only checkpoint identity.
+          If a provider rewrites, cleans up, or post-processes the answer after decoding, the receipt no longer verifies.
         </p>
       </div>
     </div>
@@ -167,23 +167,59 @@
 <!-- ── Receipt scope ─────────────────────────────── -->
 <section class="section" id="binding">
   <div class="container">
-    <div class="section-label">Receipt scope</div>
-    <h2 class="section-title">The receipt binds the model, decode path, and returned text</h2>
-    <p class="section-sub">
-      CommitLLM does not only attest that some checkpoint ran. It binds the request, deployment choices, sampling policy, and output path that determine the answer you received.
-    </p>
-    <div class="table-wrap">
-      <table class="specs-table">
-        <thead><tr><th>Receipt field</th><th>What it binds</th></tr></thead>
-        <tbody>
-          <tr><td>input_spec_hash</td><td>Tokenizer, chat template, BOS/EOS, truncation, padding, and system prompt rules</td></tr>
-          <tr><td>request_binding</td><td>Prompt tokens, transcript state, retained audit window, and token count</td></tr>
-          <tr><td>model_spec_hash</td><td>Checkpoint identity R<sub>W</sub>, quantization, LoRA/adapter, RoPE config, RMSNorm &epsilon;</td></tr>
-          <tr><td>decode_spec_hash</td><td>Sampler, temperature, top-k/p, penalties, logit bias, grammar, and stop rules</td></tr>
-          <tr><td>sampling_randomness</td><td>The randomness actually used for non-greedy decoding, committed before replay of the output policy</td></tr>
-          <tr><td>output_spec_hash</td><td>Detokenization, cleanup, whitespace normalization, and output formatting</td></tr>
-        </tbody>
-      </table>
+    <div class="section-split section-split--top">
+      <div class="section-main">
+        <div class="section-label">Receipt scope</div>
+        <h2 class="section-title">The receipt binds the model, decode path, and returned text</h2>
+        <p class="section-sub">
+          CommitLLM does not only attest that some checkpoint ran. It binds the request, deployment choices, sampling policy, and output path that determine the answer you received.
+        </p>
+        <div class="summary-strip">
+          <div class="summary-card">
+            <div class="summary-label">Model + deployment</div>
+            <h3>Which system actually ran</h3>
+            <p>Checkpoint identity, quantization, adapter state, and runtime configuration.</p>
+          </div>
+          <div class="summary-card">
+            <div class="summary-label">Decode policy</div>
+            <h3>How the answer was produced</h3>
+            <p>Sampler, temperature, penalties, grammar constraints, and stop rules.</p>
+          </div>
+          <div class="summary-card">
+            <div class="summary-label">Returned text</div>
+            <h3>What text was actually delivered</h3>
+            <p>Detokenization, cleanup, whitespace handling, and output formatting on the committed path.</p>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="specs-table">
+            <thead><tr><th>Receipt field</th><th>What it binds</th></tr></thead>
+            <tbody>
+              <tr><td>input_spec_hash</td><td>Tokenizer, chat template, BOS/EOS, truncation, padding, and system prompt rules</td></tr>
+              <tr><td>request_binding</td><td>Prompt tokens, transcript state, retained audit window, and token count</td></tr>
+              <tr><td>model_spec_hash</td><td>Checkpoint identity R<sub>W</sub>, quantization, LoRA/adapter, RoPE config, RMSNorm &epsilon;</td></tr>
+              <tr><td>decode_spec_hash</td><td>Sampler, temperature, top-k/p, penalties, logit bias, grammar, and stop rules</td></tr>
+              <tr><td>sampling_randomness</td><td>The randomness actually used for non-greedy decoding, committed before replay of the output policy</td></tr>
+              <tr><td>output_spec_hash</td><td>Detokenization, cleanup, whitespace normalization, and output formatting</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <aside class="section-aside">
+        <div class="aside-card">
+          <div class="aside-card-label">Tamper resistance</div>
+          <h3>What fails verification</h3>
+          <ul class="aside-list">
+            <li>Serving a different checkpoint or quantization plan than the receipt claims</li>
+            <li>Using a different sampler, grammar, or stop rule than the committed decode policy</li>
+            <li>Cleaning up, rewriting, or post-processing the answer off the committed path</li>
+          </ul>
+        </div>
+        <div class="aside-card aside-card--plain">
+          <div class="aside-card-label">Why it matters</div>
+          <p>The receipt is about the delivered answer, not just checkpoint identity. That is the difference between provenance and execution integrity.</p>
+        </div>
+      </aside>
     </div>
     <div class="section-note">
       <strong>Consequence:</strong> if the provider rewrites, reformats, or otherwise tampers with the answer outside the committed execution path, verification fails.
@@ -205,17 +241,17 @@
       <div class="three-col-item">
         <div class="col-label col-label--green">Step 1</div>
         <h3>Serve and commit</h3>
-        <p>The provider runs the normal GPU path and returns the answer plus a compact receipt binding weights, manifest, prompt, sampling randomness, and output policy.</p>
+        <p>The provider stays on the normal GPU path and returns the answer plus a compact receipt binding the model, request, randomness, and output policy.</p>
       </div>
       <div class="three-col-item three-col-item--highlight">
         <div class="col-label col-label--orange">Step 2</div>
         <h3>Open on challenge</h3>
-        <p>The verifier challenges token positions and layers after the commitment. Routine audit samples the retained window; deep audit opens the full retained prefix.</p>
+        <p>The verifier challenges token positions and layers after commitment. Routine audit samples the retained window; deep audit opens more of it.</p>
       </div>
       <div class="three-col-item">
         <div class="col-label col-label--green">Step 3</div>
         <h3>Verify the delivered text</h3>
-        <p>CPU-side checks cover model identity, deployment configuration, decode policy, and the returned answer against the committed execution trace.</p>
+        <p>CPU-side checks tie the delivered text back to model identity, decode policy, and the committed execution trace.</p>
       </div>
     </div>
   </div>
@@ -319,36 +355,49 @@
 <!-- ── Guarantee boundary ────────────────────────── -->
 <section class="section" id="guarantees">
   <div class="container">
-    <div class="section-label">Guarantee boundary</div>
-    <h2 class="section-title">What is exact, approximate, and statistical</h2>
-    <p class="section-sub">
-      Commitment-bound end-to-end, with explicit boundaries for each verification class. Not &ldquo;uniformly exact&rdquo; but precisely delineated.
-    </p>
-    <div class="pipeline-wrap">
-      <div class="pipeline">
-        <div class="pipe pipe--exact"><div class="pipe-name">Input</div><div class="pipe-tag">Exact</div></div>
-        <div class="pipe pipe--exact"><div class="pipe-name">Embedding</div><div class="pipe-tag">Exact</div></div>
-        <div class="pipe pipe--alg"><div class="pipe-name">Shell matmuls</div><div class="pipe-tag">Freivalds</div></div>
-        <div class="pipe pipe--exact"><div class="pipe-name">INT8 bridges</div><div class="pipe-tag">Exact</div></div>
-        <div class="pipe pipe--stat"><div class="pipe-name">Prefix/KV</div><div class="pipe-tag">Statistical*</div></div>
-        <div class="pipe pipe--approx"><div class="pipe-name">Attention</div><div class="pipe-tag">Approximate</div></div>
-        <div class="pipe pipe--exact"><div class="pipe-name">Final tail</div><div class="pipe-tag">Exact</div></div>
-        <div class="pipe pipe--alg"><div class="pipe-name">LM head</div><div class="pipe-tag">Freivalds</div></div>
-        <div class="pipe pipe--fail"><div class="pipe-name">Decode</div><div class="pipe-tag">Fail-closed</div></div>
+    <div class="section-split section-split--top">
+      <div class="section-main">
+        <div class="section-label">Guarantee boundary</div>
+        <h2 class="section-title">What is exact, approximate, and statistical</h2>
+        <p class="section-sub">
+          Commitment-bound end-to-end, with explicit boundaries for each verification class. Not &ldquo;uniformly exact&rdquo; but precisely delineated.
+        </p>
+        <div class="pipeline-wrap">
+          <div class="pipeline">
+            <div class="pipe pipe--exact"><div class="pipe-name">Input</div><div class="pipe-tag">Exact</div></div>
+            <div class="pipe pipe--exact"><div class="pipe-name">Embedding</div><div class="pipe-tag">Exact</div></div>
+            <div class="pipe pipe--alg"><div class="pipe-name">Shell matmuls</div><div class="pipe-tag">Freivalds</div></div>
+            <div class="pipe pipe--exact"><div class="pipe-name">INT8 bridges</div><div class="pipe-tag">Exact</div></div>
+            <div class="pipe pipe--stat"><div class="pipe-name">Prefix/KV</div><div class="pipe-tag">Statistical*</div></div>
+            <div class="pipe pipe--approx"><div class="pipe-name">Attention</div><div class="pipe-tag">Approximate</div></div>
+            <div class="pipe pipe--exact"><div class="pipe-name">Final tail</div><div class="pipe-tag">Exact</div></div>
+            <div class="pipe pipe--alg"><div class="pipe-name">LM head</div><div class="pipe-tag">Freivalds</div></div>
+            <div class="pipe pipe--fail"><div class="pipe-name">Decode</div><div class="pipe-tag">Fail-closed</div></div>
+          </div>
+        </div>
+        <div class="pipeline-legend">
+          <span class="legend-exact">Exact / canonical replay</span>
+          <span class="legend-alg">Algebraic checks</span>
+          <span class="legend-approx">Approximate (FP16/BF16)</span>
+          <span class="legend-stat">Statistical - exact in deep audit</span>
+          <span class="legend-fail">Fail-closed</span>
+        </div>
       </div>
-    </div>
-    <div class="pipeline-legend">
-      <span class="legend-exact">Exact / canonical replay</span>
-      <span class="legend-alg">Algebraic checks</span>
-      <span class="legend-approx">Approximate (FP16/BF16)</span>
-      <span class="legend-stat">Statistical - exact in deep audit</span>
-      <span class="legend-fail">Fail-closed</span>
-    </div>
-
-    <div class="approx-note">
-      <p>
-        The attention interior remains approximate because native GPU FP16/BF16 attention is not bit-reproducible across devices or even across runs. CommitLLM constrains it strongly - shell-verified Q, K, and V on both sides, commitment-verified prefix state, independent verifier replay, cross-layer consistency through the residual stream - but does not pretend it is exact. In routine audit mode, prefix/KV provenance is statistical: Merkle binding is exact, sampled positions are shell-verified exactly, but unopened positions are covered probabilistically. Deep audit upgrades this to exact full-prefix verification.
-      </p>
+      <aside class="section-aside">
+        <div class="aside-card">
+          <div class="aside-card-label">Reading guide</div>
+          <h3>Three guarantee classes</h3>
+          <ul class="aside-list">
+            <li><strong>Exact:</strong> input handling, supported canonical replay, INT8 bridges, final tail, and decode checks are deterministic.</li>
+            <li><strong>Approximate:</strong> attention replay is bounded and auditable, but native FP16/BF16 GPU attention is not bit-reproducible.</li>
+            <li><strong>Statistical:</strong> routine audit samples retained prefix and KV state; deep audit opens the full retained window and makes that region exact.</li>
+          </ul>
+        </div>
+        <div class="aside-card aside-card--plain">
+          <div class="aside-card-label">Interpretation</div>
+          <p>The point is explicit boundaries. The receipt tells you which parts are exact, where approximation begins, and what deep audit upgrades.</p>
+        </div>
+      </aside>
     </div>
   </div>
 </section>
@@ -491,35 +540,54 @@
 
 <hr class="rule">
 
-<!-- ── Detailed protocol ─────────────────────────── -->
-<section class="section" id="protocol">
+<!-- ── Technical appendix ────────────────────────── -->
+<section class="section section--warm" id="protocol">
   <div class="container">
-    <div class="section-label">Detailed protocol</div>
+    <div class="section-label">Technical appendix</div>
     <h2 class="section-title">Setup once. Commit every response. Verify on challenge.</h2>
     <p class="section-sub">
-      The verifier holds a secret key derived from public weights. The provider commits during normal inference. Expensive work happens only when challenged.
+      For readers who want the mechanics rather than the product pitch. The verifier holds a secret key derived from public weights, the provider commits inline during serving, and expensive openings happen only on challenge.
     </p>
-    <div class="timeline">
-      <div class="timeline-step">
-        <div class="timeline-step-label">Phase 0 &middot; Setup</div>
-        <h3>Build the verifier key</h3>
-        <p>From a public checkpoint, the verifier computes a Merkle root over weights, secret Freivalds vectors for eight matrix families (<code>Wq</code>, <code>Wk</code>, <code>Wv</code>, <code>Wo</code>, <code>Wgate</code>, <code>Wup</code>, <code>Wdown</code>, <code>LM_head</code>), and the model configuration needed for canonical replay.</p>
+    <div class="section-split section-split--top">
+      <div class="section-main">
+        <div class="timeline">
+          <div class="timeline-step">
+            <div class="timeline-step-label">Phase 0 &middot; Setup</div>
+            <h3>Build the verifier key</h3>
+            <p>From a public checkpoint, the verifier computes a Merkle root over weights, secret Freivalds vectors for eight matrix families (<code>Wq</code>, <code>Wk</code>, <code>Wv</code>, <code>Wo</code>, <code>Wgate</code>, <code>Wup</code>, <code>Wdown</code>, <code>LM_head</code>), and the model configuration needed for canonical replay.</p>
+          </div>
+          <div class="timeline-step">
+            <div class="timeline-step-label">Phase 1 &middot; Commit</div>
+            <h3>Serve normally, return a receipt</h3>
+            <p>The provider runs inference on the normal GPU path with a tracing sidecar that captures retained state. It returns the response plus a compact receipt binding the execution trace, KV state, deployment manifest, prompt, sampling randomness, output policy, and token count.</p>
+          </div>
+          <div class="timeline-step">
+            <div class="timeline-step-label">Phase 2 &middot; Audit</div>
+            <h3>Challenge specific positions and layers</h3>
+            <p>The verifier challenges token positions and layers after the commitment. The provider opens the requested region. Routine audit samples prefix state; deep audit opens everything in the retained window.</p>
+          </div>
+          <div class="timeline-step">
+            <div class="timeline-step-label">Phase 3 &middot; Verify</div>
+            <h3>CPU-only checks</h3>
+            <p>Embedding Merkle proof. Freivalds on shell matmuls. Exact INT8 bridge recomputation. KV provenance. Attention replay against committed post-attention output. Final-token tail from captured residual. LM-head binding. Decode and output policy replay.</p>
+          </div>
+        </div>
       </div>
-      <div class="timeline-step">
-        <div class="timeline-step-label">Phase 1 &middot; Commit</div>
-        <h3>Serve normally, return a receipt</h3>
-        <p>The provider runs inference on the normal GPU path with a tracing sidecar that captures retained state. It returns the response plus a compact receipt binding the execution trace, KV state, deployment manifest, prompt, sampling randomness, output policy, and token count.</p>
-      </div>
-      <div class="timeline-step">
-        <div class="timeline-step-label">Phase 2 &middot; Audit</div>
-        <h3>Challenge specific positions and layers</h3>
-        <p>The verifier challenges token positions and layers after the commitment. The provider opens the requested region. Routine audit samples prefix state; deep audit opens everything in the retained window.</p>
-      </div>
-      <div class="timeline-step">
-        <div class="timeline-step-label">Phase 3 &middot; Verify</div>
-        <h3>CPU-only checks</h3>
-        <p>Embedding Merkle proof. Freivalds on shell matmuls. Exact INT8 bridge recomputation. KV provenance. Attention replay against committed post-attention output. Final-token tail from captured residual. LM-head binding. Decode and output policy replay.</p>
-      </div>
+      <aside class="section-aside">
+        <div class="aside-card aside-card--plain">
+          <div class="aside-card-label">Cost model</div>
+          <h3>Heavy work is conditional</h3>
+          <ul class="aside-list">
+            <li>Normal GPU serving stays on the kept path while the answer is generated</li>
+            <li>Tracing produces a receipt and retained state inline with that path</li>
+            <li>Larger openings happen only after a verifier challenges a committed region</li>
+          </ul>
+        </div>
+        <div class="aside-card">
+          <div class="aside-card-label">Verification stack</div>
+          <p>Freivalds covers the large matrix multiplications, exact replay covers the supported nonlinear pieces, and decode replay binds the returned text.</p>
+        </div>
+      </aside>
     </div>
   </div>
 </section>
