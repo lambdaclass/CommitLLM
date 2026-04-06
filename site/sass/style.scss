@@ -314,6 +314,29 @@ code {
   margin-bottom: 0.6rem;
 }
 
+.receipt-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-family: $mono;
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: darken($green, 5%);
+  background: rgba($green, 0.1);
+  border: 1px solid rgba($green, 0.2);
+  border-radius: 999px;
+  padding: 0.32rem 0.7rem;
+  margin-bottom: 0.75rem;
+
+  &::before {
+    content: '';
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: $green;
+  }
+}
+
 .stat-list {
   list-style: none;
   .stat-row {
@@ -321,17 +344,27 @@ code {
     padding: 0.45rem 0;
     border-bottom: 1px solid $border;
     &:last-child { border-bottom: none; }
-    &:first-child {
-      .stat-val { font-size: 0.95rem; font-weight: 600; }
-    }
   }
-  .stat-key { font-size: 0.85rem; color: $text-dim; }
+  .stat-key {
+    font-size: 0.85rem;
+    color: $text-dim;
+    padding-right: 0.9rem;
+  }
   .stat-val {
     font-family: $mono;
     font-size: 0.82rem;
     font-weight: 500;
     color: $text-bright;
+    white-space: nowrap;
+    text-align: right;
   }
+}
+
+.aside-note {
+  margin-top: 0.8rem;
+  font-size: 0.84rem;
+  color: $text-dim;
+  line-height: 1.55;
 }
 
 // ── Buttons ─────────────────────────────────────────
@@ -477,6 +510,7 @@ code {
   }
 }
 
+.section-note,
 .audit-note {
   margin-top: 1rem;
   padding: 0.95rem 1.1rem;
@@ -895,6 +929,15 @@ code {
     line-height: 1.55;
     max-width: 32em;
   }
+}
+
+.resource-link {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 0.75rem;
+  font-family: $mono;
+  font-size: 0.72rem;
+  font-weight: 500;
 }
 
 .compat-label {

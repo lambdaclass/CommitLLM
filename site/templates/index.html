@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CommitLLM — Cryptographic provenance for LLM inference</title>
-  <meta name="description" content="CommitLLM is a cryptographic commit-and-audit protocol for open-weight LLM inference. The provider serves normally on GPU and returns a compact receipt. A verifier checks it on CPU. ~12-14% overhead, 1.3 ms/tok routine audit.">
+  <title>CommitLLM — Verifiable execution for LLM inference</title>
+  <meta name="description" content="CommitLLM is a cryptographic commit-and-audit protocol for open-weight LLM inference. Its receipt binds the claimed checkpoint, decode policy, and output path so a verifier can catch post-hoc tampering on CPU. ~12-14% overhead, 1.3 ms/tok routine audit.">
   <meta name="theme-color" content="#fffff8">
 
   <!-- Favicon -->
@@ -16,15 +16,15 @@
 
   <!-- Open Graph -->
   <meta property="og:type" content="website">
-  <meta property="og:title" content="CommitLLM — Cryptographic provenance for LLM inference">
-  <meta property="og:description" content="A cryptographic commit-and-audit protocol for open-weight LLM inference. Freivalds-based algebraic checks, CPU-only verification, ~12-14% online overhead.">
+  <meta property="og:title" content="CommitLLM — Verifiable execution for LLM inference">
+  <meta property="og:description" content="Receipt-bound LLM inference that proves the claimed model ran and the delivered answer was not post-hoc rewritten. CPU-only verification, ~12-14% online overhead.">
   <meta property="og:url" content="https://commitllm.com">
   <meta property="og:site_name" content="CommitLLM">
 
   <!-- Twitter -->
   <meta name="twitter:card" content="summary">
-  <meta name="twitter:title" content="CommitLLM — Cryptographic provenance for LLM inference">
-  <meta name="twitter:description" content="Cryptographic commit-and-audit protocol for open-weight LLM inference. Provider serves on GPU, verifier checks on CPU.">
+  <meta name="twitter:title" content="CommitLLM — Verifiable execution for LLM inference">
+  <meta name="twitter:description" content="CommitLLM binds model identity, decode policy, and output path into a receipt a verifier checks on CPU.">
 
   <!-- Canonical -->
   <link rel="canonical" href="https://commitllm.com">
@@ -35,7 +35,7 @@
     "@context": "https://schema.org",
     "@type": "SoftwareSourceCode",
     "name": "CommitLLM",
-    "description": "A cryptographic commit-and-audit protocol for open-weight LLM inference. Combines Freivalds-style algebraic checks for large matrix products, canonical replay for nonlinear components, and bounded approximate replay for attention — with CPU-only verification.",
+    "description": "A cryptographic commit-and-audit protocol for open-weight LLM inference. CommitLLM binds model identity, deployment configuration, decode policy, and output formatting into a receipt so a verifier can detect post-hoc tampering with CPU-only checks.",
     "url": "https://commitllm.com",
     "codeRepository": "https://github.com/lambdaclass/CommitLLM",
     "programmingLanguage": ["Rust", "Python", "Lean 4"],
@@ -62,7 +62,7 @@
     "@type": "ScholarlyArticle",
     "name": "CommitLLM: A Cryptographic Commit-and-Audit Protocol for Open-Weight LLM Inference",
     "headline": "CommitLLM: A Cryptographic Commit-and-Audit Protocol for Open-Weight LLM Inference",
-    "abstract": "We present CommitLLM, a cryptographic commit-and-audit protocol for open-weight LLM inference. CommitLLM keeps the provider on the normal serving path and keeps verifier work fast and CPU-only. It combines commitment binding, direct audit, and randomized algebraic fingerprints, including Freivalds-style checks for large matrix products.",
+    "abstract": "We present CommitLLM, a cryptographic commit-and-audit protocol for open-weight LLM inference. CommitLLM keeps the provider on the normal serving path and keeps verifier work fast and CPU-only. It binds model identity, deployment configuration, decode policy, and output behavior into a receipt checked by direct audit and randomized algebraic fingerprints, including Freivalds-style checks for large matrix products.",
     "url": "https://raw.githubusercontent.com/lambdaclass/CommitLLM/main/paper/main.pdf",
     "author": [
       {"@type": "Person", "name": "Federico Carrone"},
@@ -86,12 +86,14 @@
   <a class="nav-logo" href="#top">Commit<span>LLM</span></a>
   <div class="nav-group">
     <ul class="nav-links">
-      <li><a href="#protocol">Protocol</a></li>
-      <li><a href="#guarantees">Guarantees</a></li>
-      <li><a href="#audit">Audit</a></li>
+      <li><a href="#binding">Receipt</a></li>
+      <li><a href="#how">How it works</a></li>
       <li><a href="#benchmarks">Benchmarks</a></li>
-      <li><a href="#binding">Binding</a></li>
+      <li><a href="#guarantees">Guarantees</a></li>
+      <li><a href="#deployment">Deployment</a></li>
       <li><a href="#usecases">Use cases</a></li>
+      <li><a href="#protocol">Protocol</a></li>
+      <li><a href="#resources">Resources</a></li>
     </ul>
     <div class="nav-cta">
       <a class="nav-btn nav-btn--paper" href="https://raw.githubusercontent.com/lambdaclass/CommitLLM/main/paper/main.pdf">Paper</a>
@@ -108,49 +110,53 @@
     <div class="hero-grid">
       <div>
         <div class="hero-badge">Active development &middot; Lean 4 formalization in progress</div>
-        <h1>Cryptographic provenance for <em>LLM&nbsp;inference</em></h1>
+        <h1>Proof the provider ran the claimed model and returned the <em>untampered answer</em></h1>
         <p class="hero-desc">
-          You have no proof your LLM provider ran the model they claim. CommitLLM is a cryptographic commit-and-audit protocol that closes that gap: the provider serves normally on GPU and returns a compact receipt. A verifier checks the receipt and opened trace on CPU.
+          CommitLLM is a cryptographic commit-and-audit protocol for open-weight LLM inference. The provider serves normally on GPU and returns a compact receipt binding the checkpoint, deployment manifest, prompt, sampling randomness, decode policy, and output formatting. A verifier checks on CPU that the delivered text matches the committed execution path, not a post-hoc rewrite.
         </p>
         <div class="hero-proofline">
-          <span class="proof-chip proof-chip--alg">Linear shell: algebraic checks</span>
-          <span class="proof-chip proof-chip--exact">Nonlinear shell: canonical replay</span>
-          <span class="proof-chip proof-chip--approx">Attention: bounded approximate replay</span>
-          <span class="proof-chip proof-chip--stat">Prefix/KV: statistical unless deep audit</span>
+          <span class="proof-chip proof-chip--exact">Checkpoint + config bound</span>
+          <span class="proof-chip proof-chip--alg">Prompt + randomness bound</span>
+          <span class="proof-chip proof-chip--approx">Decode policy replayed</span>
+          <span class="proof-chip proof-chip--stat">Output formatting bound</span>
         </div>
         <div class="hero-actions">
-          <a href="https://github.com/lambdaclass/CommitLLM" class="btn btn-primary">GitHub</a>
-          <a href="https://raw.githubusercontent.com/lambdaclass/CommitLLM/main/paper/main.pdf" class="btn btn-ghost">Paper (PDF)</a>
+          <a href="#binding" class="btn btn-primary">See what the receipt binds</a>
+          <a href="#benchmarks" class="btn btn-ghost">Benchmarks</a>
         </div>
       </div>
       <div class="hero-aside">
-        <div class="aside-kicker">Measured on the kept path</div>
+        <div class="aside-kicker">Sample receipt</div>
+        <div class="receipt-status">Response verified</div>
         <ul class="stat-list">
           <li class="stat-row">
-            <span class="stat-key">Routine audit (Llama&nbsp;70B)</span>
-            <span class="stat-val">1.3&nbsp;ms/tok</span>
+            <span class="stat-key">Checkpoint + quantization</span>
+            <span class="stat-val">bound</span>
           </li>
           <li class="stat-row">
-            <span class="stat-key">Online tracing overhead</span>
-            <span class="stat-val">~12&ndash;14%</span>
+            <span class="stat-key">Decode policy</span>
+            <span class="stat-val">replayed</span>
           </li>
           <li class="stat-row">
-            <span class="stat-key">Full audit (1&nbsp;tok, 70B)</span>
-            <span class="stat-val">~10&nbsp;ms</span>
+            <span class="stat-key">Output formatting</span>
+            <span class="stat-val">bound</span>
           </li>
           <li class="stat-row">
-            <span class="stat-key">Within 1&nbsp;quant bucket</span>
-            <span class="stat-val">&gt;99.8%</span>
+            <span class="stat-key">Challenge</span>
+            <span class="stat-val">tok 67 &middot; L7/23/41/58</span>
+          </li>
+          <li class="stat-row">
+            <span class="stat-key">Routine audit</span>
+            <span class="stat-val">1.3 ms/tok</span>
           </li>
           <li class="stat-row">
             <span class="stat-key">Verifier</span>
             <span class="stat-val">CPU only</span>
           </li>
-          <li class="stat-row">
-            <span class="stat-key">Provider</span>
-            <span class="stat-val">Normal GPU</span>
-          </li>
         </ul>
+        <p class="aside-note">
+          Verification checks the returned text against the committed trace, decode policy, and output path, not only checkpoint identity.
+        </p>
       </div>
     </div>
   </div>
@@ -158,29 +164,58 @@
 
 <hr class="rule">
 
-<!-- ── Problem ───────────────────────────────────── -->
-<section class="section" id="problem">
+<!-- ── Receipt scope ─────────────────────────────── -->
+<section class="section" id="binding">
   <div class="container">
-    <div class="section-label">The gap</div>
-    <h2 class="section-title">Between fingerprints and zero-knowledge proofs</h2>
+    <div class="section-label">Receipt scope</div>
+    <h2 class="section-title">The receipt binds the model, decode path, and returned text</h2>
     <p class="section-sub">
-      Two unsatisfying extremes&mdash;and a design point between them where real deployments need to live.
+      CommitLLM does not only attest that some checkpoint ran. It binds the request, deployment choices, sampling policy, and output path that determine the answer you received.
+    </p>
+    <div class="table-wrap">
+      <table class="specs-table">
+        <thead><tr><th>Receipt field</th><th>What it binds</th></tr></thead>
+        <tbody>
+          <tr><td>input_spec_hash</td><td>Tokenizer, chat template, BOS/EOS, truncation, padding, and system prompt rules</td></tr>
+          <tr><td>request_binding</td><td>Prompt tokens, transcript state, retained audit window, and token count</td></tr>
+          <tr><td>model_spec_hash</td><td>Checkpoint identity R<sub>W</sub>, quantization, LoRA/adapter, RoPE config, RMSNorm &epsilon;</td></tr>
+          <tr><td>decode_spec_hash</td><td>Sampler, temperature, top-k/p, penalties, logit bias, grammar, and stop rules</td></tr>
+          <tr><td>sampling_randomness</td><td>The randomness actually used for non-greedy decoding, committed before replay of the output policy</td></tr>
+          <tr><td>output_spec_hash</td><td>Detokenization, cleanup, whitespace normalization, and output formatting</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="section-note">
+      <strong>Consequence:</strong> if the provider rewrites, reformats, or otherwise tampers with the answer outside the committed execution path, verification fails.
+    </div>
+  </div>
+</section>
+
+<hr class="rule">
+
+<!-- ── How it works ──────────────────────────────── -->
+<section class="section" id="how">
+  <div class="container">
+    <div class="section-label">How it works</div>
+    <h2 class="section-title">Serve normally. Open on challenge. Verify on CPU.</h2>
+    <p class="section-sub">
+      CommitLLM stays close to the kept serving path. Expensive work appears only when a verifier asks to inspect a committed region.
     </p>
     <div class="three-col">
       <div class="three-col-item">
-        <div class="col-label col-label--red">Insufficient</div>
-        <h3>Fingerprinting</h3>
-        <p>Statistical heuristics provide evidence but not exact per-response verification. A determined provider can game them.</p>
+        <div class="col-label col-label--green">Step 1</div>
+        <h3>Serve and commit</h3>
+        <p>The provider runs the normal GPU path and returns the answer plus a compact receipt binding weights, manifest, prompt, sampling randomness, and output policy.</p>
       </div>
       <div class="three-col-item three-col-item--highlight">
-        <div class="col-label col-label--green">CommitLLM</div>
-        <h3>Commit-and-audit</h3>
-        <p>Commitment-bound end-to-end. Information-theoretically sound algebraic checks for large linear layers, canonical replay for supported nonlinear components, CPU-only verification.</p>
+        <div class="col-label col-label--orange">Step 2</div>
+        <h3>Open on challenge</h3>
+        <p>The verifier challenges token positions and layers after the commitment. Routine audit samples the retained window; deep audit opens the full retained prefix.</p>
       </div>
       <div class="three-col-item">
-        <div class="col-label col-label--orange">Impractical</div>
-        <h3>ZK proofs</h3>
-        <p>Strong proof objects, but prover costs remain too high for production LLM serving. Impractical at scale today.</p>
+        <div class="col-label col-label--green">Step 3</div>
+        <h3>Verify the delivered text</h3>
+        <p>CPU-side checks cover model identity, deployment configuration, decode policy, and the returned answer against the committed execution trace.</p>
       </div>
     </div>
   </div>
@@ -188,34 +223,92 @@
 
 <hr class="rule">
 
-<!-- ── Protocol ──────────────────────────────────── -->
-<section class="section" id="protocol">
+<!-- ── Benchmarks ─────────────────────────────────── -->
+<section class="section section--dark" id="benchmarks">
   <div class="container">
-    <div class="section-label">Protocol</div>
-    <h2 class="section-title">Setup once. Commit every response. Verify on challenge.</h2>
+    <div class="section-label">Measurements</div>
+    <h2 class="section-title">Measured on the current prototype</h2>
     <p class="section-sub">
-      The verifier holds a secret key derived from public weights. The provider commits during normal inference. Expensive work happens only when challenged.
+      Current figures on the corrected replay path for Qwen2.5-7B-W8A8 and Llama-3.1-8B-W8A8. Routine audit keeps verifier work CPU-only.
     </p>
-    <div class="timeline">
-      <div class="timeline-step">
-        <div class="timeline-step-label">Phase 0 &middot; Setup</div>
-        <h3>Build the verifier key</h3>
-        <p>From a public checkpoint, the verifier computes a Merkle root over weights, secret Freivalds vectors for eight matrix families (<code>Wq</code>, <code>Wk</code>, <code>Wv</code>, <code>Wo</code>, <code>Wgate</code>, <code>Wup</code>, <code>Wdown</code>, <code>LM_head</code>), and the model configuration needed for canonical replay.</p>
+    <div class="bench-facts">
+      <div class="bench-fact">
+        <span class="bench-fact-label">Current measured path</span>
+        <strong>Qwen2.5-7B-W8A8 and Llama-3.1-8B-W8A8</strong>
       </div>
-      <div class="timeline-step">
-        <div class="timeline-step-label">Phase 1 &middot; Commit</div>
-        <h3>Serve normally, return a receipt</h3>
-        <p>The provider runs inference on the normal GPU path with a tracing sidecar that captures retained state. It returns the response plus a compact receipt binding the execution trace, KV state, deployment manifest, prompt, sampling randomness, and token count.</p>
+      <div class="bench-fact">
+        <span class="bench-fact-label">Verifier hardware</span>
+        <strong>CPU only</strong>
       </div>
-      <div class="timeline-step">
-        <div class="timeline-step-label">Phase 2 &middot; Audit</div>
-        <h3>Challenge specific positions and layers</h3>
-        <p>The verifier challenges token positions and layers after the commitment. The provider opens the requested region. Routine audit samples prefix state; deep audit opens everything.</p>
+      <div class="bench-fact">
+        <span class="bench-fact-label">Provider path</span>
+        <strong>Normal GPU serving with tracing</strong>
       </div>
-      <div class="timeline-step">
-        <div class="timeline-step-label">Phase 3 &middot; Verify</div>
-        <h3>CPU-only checks</h3>
-        <p>Embedding Merkle proof. Freivalds on shell matmuls. Exact INT8 bridge recomputation. KV provenance. Attention replay against committed post-attention output. Final-token tail from captured residual. LM-head binding. Decode and output policy replay.</p>
+    </div>
+    <div class="bench-cols">
+      <div class="bench-panel">
+        <h3>Verifier cost &middot; Llama 70B</h3>
+        <div class="metric-row">
+          <span class="metric-row-label">Routine</span>
+          <div class="metric-row-bar"><div class="metric-row-fill metric-row-fill--gold" data-width="13"></div></div>
+          <span class="metric-row-val" style="color:#ccc5b8;">1.3 ms</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-row-label" style="color:#908878;">Full</span>
+          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--blue" data-width="100"></div></div>
+          <span class="metric-row-val" style="color:#ccc5b8;">10 ms</span>
+        </div>
+      </div>
+      <div class="bench-panel">
+        <h3>Online tracing overhead</h3>
+        <div class="metric-row">
+          <span class="metric-row-label" style="color:#908878;">Base</span>
+          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--gold" data-width="78"></div></div>
+          <span class="metric-row-val" style="color:#ccc5b8;">baseline</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-row-label" style="color:#908878;">+Trace</span>
+          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--orange" data-width="90"></div></div>
+          <span class="metric-row-val" style="color:#ccc5b8;">+12-14%</span>
+        </div>
+      </div>
+    </div>
+    <div class="bench-cols" style="margin-top: 1.25rem;">
+      <div class="bench-panel">
+        <h3>Attention corridor &middot; Qwen2.5-7B-W8A8</h3>
+        <div class="metric-row">
+          <span class="metric-row-label" style="color:#908878;">L&#8734;</span>
+          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--orange" data-width="32"></div></div>
+          <span class="metric-row-val" style="color:#ccc5b8;">8</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-row-label" style="color:#908878;">frac_eq</span>
+          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--green" data-width="92"></div></div>
+          <span class="metric-row-val" style="color:#ccc5b8;">&gt;92%</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-row-label" style="color:#908878;">frac&#8804;1</span>
+          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--green" data-width="99"></div></div>
+          <span class="metric-row-val" style="color:#ccc5b8;">&gt;99.8%</span>
+        </div>
+      </div>
+      <div class="bench-panel">
+        <h3>Attention corridor &middot; Llama-3.1-8B-W8A8</h3>
+        <div class="metric-row">
+          <span class="metric-row-label" style="color:#908878;">L&#8734;</span>
+          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--orange" data-width="36"></div></div>
+          <span class="metric-row-val" style="color:#ccc5b8;">9</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-row-label" style="color:#908878;">frac_eq</span>
+          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--green" data-width="95"></div></div>
+          <span class="metric-row-val" style="color:#ccc5b8;">94-96%</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-row-label" style="color:#908878;">frac&#8804;1</span>
+          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--green" data-width="99"></div></div>
+          <span class="metric-row-val" style="color:#ccc5b8;">&gt;99.9%</span>
+        </div>
       </div>
     </div>
   </div>
@@ -229,7 +322,7 @@
     <div class="section-label">Guarantee boundary</div>
     <h2 class="section-title">What is exact, approximate, and statistical</h2>
     <p class="section-sub">
-      Commitment-bound end-to-end, with explicit boundaries for each verification class. Not &ldquo;uniformly exact&rdquo;&mdash;honestly delineated.
+      Commitment-bound end-to-end, with explicit boundaries for each verification class. Not &ldquo;uniformly exact&rdquo; but precisely delineated.
     </p>
     <div class="pipeline-wrap">
       <div class="pipeline">
@@ -248,13 +341,13 @@
       <span class="legend-exact">Exact / canonical replay</span>
       <span class="legend-alg">Algebraic checks</span>
       <span class="legend-approx">Approximate (FP16/BF16)</span>
-      <span class="legend-stat">Statistical &rarr; exact in deep audit</span>
+      <span class="legend-stat">Statistical - exact in deep audit</span>
       <span class="legend-fail">Fail-closed</span>
     </div>
 
     <div class="approx-note">
       <p>
-        The attention interior remains approximate because native GPU FP16/BF16 attention is not bit-reproducible across devices or even across runs. CommitLLM constrains it strongly&mdash;shell-verified Q, K, and V on both sides, commitment-verified prefix state, independent verifier replay, cross-layer consistency through the residual stream&mdash;but does not pretend it is exact. In routine audit mode, prefix/KV provenance is statistical: Merkle binding is exact, sampled positions are shell-verified exactly, but unopened positions are covered probabilistically. Deep audit upgrades this to exact full-prefix verification. The honest claim is not &ldquo;uniformly exact end-to-end&rdquo; but a precisely delineated guarantee boundary.
+        The attention interior remains approximate because native GPU FP16/BF16 attention is not bit-reproducible across devices or even across runs. CommitLLM constrains it strongly - shell-verified Q, K, and V on both sides, commitment-verified prefix state, independent verifier replay, cross-layer consistency through the residual stream - but does not pretend it is exact. In routine audit mode, prefix/KV provenance is statistical: Merkle binding is exact, sampled positions are shell-verified exactly, but unopened positions are covered probabilistically. Deep audit upgrades this to exact full-prefix verification.
       </p>
     </div>
   </div>
@@ -294,147 +387,8 @@
         </ul>
       </div>
     </div>
-    <div class="audit-note">
+    <div class="section-note">
       <strong>Operationally:</strong> routine audit is the default posture; deep audit is the escalation path when a response is high value, disputed, or randomly selected for full review.
-    </div>
-  </div>
-</section>
-
-<hr class="rule">
-
-<!-- ── Freivalds ─────────────────────────────────── -->
-<section class="section" id="freivalds">
-  <div class="container">
-    <div class="section-label">Core mechanism</div>
-    <h2 class="section-title">Verify huge matrix multiplies cheaply</h2>
-    <div class="freivalds-grid">
-      <div class="freivalds-text">
-        <p>
-          The provider claims <code>z = W @ x</code> for a public weight matrix <code>W</code>.
-          Recomputing the full product is expensive. Freivalds&rsquo; algorithm gives a much cheaper check:
-          the verifier precomputes <code>v&nbsp;=&nbsp;r<sup>T</sup>W</code> with a secret random vector <code>r</code>,
-          then checks <code>v&middot;x&nbsp;=?&nbsp;r<sup>T</sup>&middot;z</code> in the finite field
-          F<sub>p</sub> where p&nbsp;=&nbsp;2<sup>32</sup>&minus;5.
-        </p>
-        <p>
-          If <code>z&nbsp;&ne;&nbsp;Wx</code>, the check fails with probability &ge;&nbsp;1&minus;1/p.
-          This is information-theoretically sound. Transformers are mostly matrix multiplication;
-          once those multiplies are cheap to audit, the verifier can check model identity
-          without rerunning the full model.
-        </p>
-        <div class="matrix-tags">
-          <span class="tag">W<sub>q</sub></span>
-          <span class="tag">W<sub>k</sub></span>
-          <span class="tag">W<sub>v</sub></span>
-          <span class="tag">W<sub>o</sub></span>
-          <span class="tag">W<sub>gate</sub></span>
-          <span class="tag">W<sub>up</sub></span>
-          <span class="tag">W<sub>down</sub></span>
-          <span class="tag">LM<sub>head</sub></span>
-        </div>
-      </div>
-      <div class="demo-box" id="freivalds-demo" role="region" aria-label="Freivalds algorithm interactive demo">
-        <div class="demo-header">Interactive demo &middot; 3&times;3 over F<sub>p</sub></div>
-        <div class="demo-output" id="demo-eq"><span class="dim">Click a button to run Freivalds&rsquo; check</span></div>
-        <div class="demo-result" id="demo-result" style="display:none;"></div>
-        <div class="demo-btns">
-          <button class="demo-btn" onclick="runFreivalds(true)">Honest provider</button>
-          <button class="demo-btn" onclick="runFreivalds(false)">Cheating provider</button>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<hr class="rule">
-
-<!-- ── Benchmarks ─────────────────────────────────── -->
-<section class="section section--dark" id="benchmarks">
-  <div class="container">
-    <div class="section-label">Measurements</div>
-    <h2 class="section-title">Performance on the corrected replay path</h2>
-    <p class="section-sub">
-      Measured on Qwen2.5-7B-W8A8 and Llama-3.1-8B-W8A8. Attention mismatch is single-digit and bounded.
-    </p>
-    <div class="bench-facts">
-      <div class="bench-fact">
-        <span class="bench-fact-label">Measured today</span>
-        <strong>Qwen2.5-7B-W8A8 and Llama-3.1-8B-W8A8</strong>
-      </div>
-      <div class="bench-fact">
-        <span class="bench-fact-label">Verifier hardware</span>
-        <strong>CPU only</strong>
-      </div>
-      <div class="bench-fact">
-        <span class="bench-fact-label">Provider path</span>
-        <strong>Normal GPU serving with tracing</strong>
-      </div>
-    </div>
-    <div class="bench-cols">
-      <div class="bench-panel">
-        <h3>Verifier cost &middot; Llama 70B</h3>
-        <div class="metric-row">
-          <span class="metric-row-label">Routine</span>
-          <div class="metric-row-bar"><div class="metric-row-fill metric-row-fill--gold" data-width="13"></div></div>
-          <span class="metric-row-val" style="color:#ccc5b8;">1.3&nbsp;ms</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-row-label" style="color:#908878;">Full</span>
-          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--blue" data-width="100"></div></div>
-          <span class="metric-row-val" style="color:#ccc5b8;">10&nbsp;ms</span>
-        </div>
-      </div>
-      <div class="bench-panel">
-        <h3>Online tracing overhead</h3>
-        <div class="metric-row">
-          <span class="metric-row-label" style="color:#908878;">Base</span>
-          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--gold" data-width="78"></div></div>
-          <span class="metric-row-val" style="color:#ccc5b8;">baseline</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-row-label" style="color:#908878;">+Trace</span>
-          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--orange" data-width="90"></div></div>
-          <span class="metric-row-val" style="color:#ccc5b8;">+12&ndash;14%</span>
-        </div>
-      </div>
-    </div>
-    <div class="bench-cols" style="margin-top: 1.25rem;">
-      <div class="bench-panel">
-        <h3>Attention corridor &middot; Qwen2.5-7B-W8A8</h3>
-        <div class="metric-row">
-          <span class="metric-row-label" style="color:#908878;">L&#8734;</span>
-          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--orange" data-width="32"></div></div>
-          <span class="metric-row-val" style="color:#ccc5b8;">8</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-row-label" style="color:#908878;">frac_eq</span>
-          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--green" data-width="92"></div></div>
-          <span class="metric-row-val" style="color:#ccc5b8;">&gt;92%</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-row-label" style="color:#908878;">frac&#8804;1</span>
-          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--green" data-width="99"></div></div>
-          <span class="metric-row-val" style="color:#ccc5b8;">&gt;99.8%</span>
-        </div>
-      </div>
-      <div class="bench-panel">
-        <h3>Attention corridor &middot; Llama-3.1-8B-W8A8</h3>
-        <div class="metric-row">
-          <span class="metric-row-label" style="color:#908878;">L&#8734;</span>
-          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--orange" data-width="36"></div></div>
-          <span class="metric-row-val" style="color:#ccc5b8;">9</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-row-label" style="color:#908878;">frac_eq</span>
-          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--green" data-width="95"></div></div>
-          <span class="metric-row-val" style="color:#ccc5b8;">94&ndash;96%</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-row-label" style="color:#908878;">frac&#8804;1</span>
-          <div class="metric-row-bar" style="background:#28241e;"><div class="metric-row-fill metric-row-fill--green" data-width="99"></div></div>
-          <span class="metric-row-val" style="color:#ccc5b8;">&gt;99.9%</span>
-        </div>
-      </div>
     </div>
   </div>
 </section>
@@ -476,51 +430,30 @@
 
 <hr class="rule">
 
-<!-- ── What it binds ─────────────────────────────── -->
-<section class="section" id="binding">
-  <div class="container">
-    <div class="section-label">Commitment scope</div>
-    <h2 class="section-title">Four specs, one receipt</h2>
-    <p class="section-sub">
-      CommitLLM binds the entire deployment surface that affects outputs&mdash;not just &ldquo;some model ran.&rdquo;
-    </p>
-    <div class="table-wrap">
-      <table class="specs-table">
-        <thead><tr><th>Spec</th><th>What it binds</th></tr></thead>
-        <tbody>
-          <tr><td>input_spec_hash</td><td>Tokenizer, chat template, BOS/EOS, truncation, padding, system prompt</td></tr>
-          <tr><td>model_spec_hash</td><td>Checkpoint identity R<sub>W</sub>, quantization, LoRA/adapter, RoPE config, RMSNorm&nbsp;&epsilon;</td></tr>
-          <tr><td>decode_spec_hash</td><td>Sampler, temperature, top-k/p, penalties, logit bias, grammar, stop rules</td></tr>
-          <tr><td>output_spec_hash</td><td>Detokenization, cleanup, whitespace normalization</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
-</section>
-
-<hr class="rule">
-
-<!-- ── Use cases ──────────────────────────────────── -->
+<!-- ── Use cases ─────────────────────────────────── -->
 <section class="section" id="usecases">
   <div class="container">
     <div class="section-label">Why it matters</div>
-    <h2 class="section-title">Provenance for every deployment</h2>
+    <h2 class="section-title">Execution integrity for every deployment</h2>
+    <p class="section-sub">
+      Model identity is only part of the story. CommitLLM matters wherever decode policy and delivered text need to be auditable.
+    </p>
     <div class="cases-grid">
       <div class="case-item">
         <h3>Enterprise procurement</h3>
-        <p>Paying for Llama 70B? Get proof the provider actually served that checkpoint, not a smaller distillation.</p>
+        <p>Paying for Llama 70B? Get proof the provider served that checkpoint and did not rewrite the answer after decoding.</p>
       </div>
       <div class="case-item">
         <h3>Regulated deployments</h3>
-        <p>Banks, hospitals, legal teams&mdash;auditable chain from decision to model version, decode policy, and output.</p>
+        <p>Banks, hospitals, and legal teams need an auditable chain from prompt and model version to decode policy and returned text.</p>
       </div>
       <div class="case-item">
         <h3>Decentralized compute</h3>
-        <p>Networks like Gensyn, Ritual, or Bittensor cannot rely on &ldquo;trust the node.&rdquo; CommitLLM provides the missing layer.</p>
+        <p>Networks like Gensyn, Ritual, or Bittensor cannot rely on &ldquo;trust the node.&rdquo; CommitLLM provides the missing verification layer.</p>
       </div>
       <div class="case-item">
         <h3>Agent systems</h3>
-        <p>When an agent takes action, which model produced the decision becomes a liability and governance question.</p>
+        <p>When an agent takes action, model provenance and untampered tool-facing output become governance and liability questions.</p>
       </div>
     </div>
   </div>
@@ -528,54 +461,150 @@
 
 <hr class="rule">
 
-<!-- ── Abstract ───────────────────────────────────── -->
-<section class="section" id="abstract">
+<!-- ── Positioning ───────────────────────────────── -->
+<section class="section" id="problem">
   <div class="container">
-    <div class="section-label">Abstract</div>
-    <h2 class="section-title">Paper summary</h2>
-    <div class="authors">
-      Federico Carrone, Diego Kingston, Manuel Puebla, Mauro Toscano<br>
-      <a href="https://lambdaclass.com">Lambda Class</a> &middot; <a href="https://ccsd.uba.ar/">Centro de Criptograf&iacute;a y Seguridad Digital, UBA</a>
-    </div>
-    <div class="abstract-text">
-      <p>
-        Large language models are increasingly used in settings where integrity matters, but users still lack technical assurance that a provider actually ran the claimed model, decode policy, and output behavior. Fingerprinting and statistical heuristics can provide signals, but not exact per-response verification. Zero-knowledge proof systems provide stronger guarantees, but at prover costs that remain impractical for production LLM serving.
-      </p>
-      <p>
-        We present CommitLLM, a cryptographic commit-and-audit protocol for open-weight LLM inference. CommitLLM keeps the provider on the normal serving path and keeps verifier work fast and CPU-only. It combines commitment binding, direct audit, and randomized algebraic fingerprints, including Freivalds-style checks for large matrix products, rather than per-response proof generation or full re-execution. Its main costs are retained-state memory over the audit window and audit bandwidth, not per-response proving.
-      </p>
-      <p>
-        The protocol is commitment-bound end-to-end. Within that binding, large linear layers are verified by verifier-secret, information-theoretically sound algebraic checks, quantization/dequantization boundaries and supported nonlinear subcomputations are checked by canonical re-execution, attention is verified by bounded approximate replay, and routine prefix-state provenance is statistical unless deep audit is used. Unsupported semantics fail closed.
-      </p>
+    <div class="section-label">Positioning</div>
+    <h2 class="section-title">Between fingerprints and full proving</h2>
+    <p class="section-sub">
+      Heuristics are too weak, full proofs are still too expensive, and deployments need a middle ground that binds the delivered answer.
+    </p>
+    <div class="three-col">
+      <div class="three-col-item">
+        <div class="col-label col-label--red">Too weak</div>
+        <h3>Fingerprinting</h3>
+        <p>Statistical heuristics can provide evidence, but they do not exactly verify a specific response or rule out post-hoc rewriting by a determined provider.</p>
+      </div>
+      <div class="three-col-item three-col-item--highlight">
+        <div class="col-label col-label--green">CommitLLM</div>
+        <h3>Commit-and-audit</h3>
+        <p>Commitment-bound end-to-end. Large linear layers are checked algebraically, supported nonlinear pieces are replayed canonically, and delivered text is tied to the committed path.</p>
+      </div>
+      <div class="three-col-item">
+        <div class="col-label col-label--orange">Too expensive</div>
+        <h3>Full proofs</h3>
+        <p>Strong proof objects are attractive, but prover costs remain too high for production LLM serving at realistic scale today.</p>
+      </div>
     </div>
   </div>
 </section>
 
 <hr class="rule">
 
-<!-- ── Repository layout ─────────────────────────── -->
-<section class="section" id="code">
+<!-- ── Detailed protocol ─────────────────────────── -->
+<section class="section" id="protocol">
   <div class="container">
-    <div class="section-label">Repository</div>
-    <h2 class="section-title">Code layout</h2>
+    <div class="section-label">Detailed protocol</div>
+    <h2 class="section-title">Setup once. Commit every response. Verify on challenge.</h2>
     <p class="section-sub">
-      The public project name is CommitLLM. Some internal crate and package paths still use the legacy <code>verilm-*</code> prefix while the rename is being completed.
+      The verifier holds a secret key derived from public weights. The provider commits during normal inference. Expensive work happens only when challenged.
     </p>
-    <div class="table-wrap">
-      <table class="specs-table">
-        <thead><tr><th>Component</th><th>Path</th></tr></thead>
-        <tbody>
-          <tr><td>Core types and traits</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-core">crates/verilm-core</a></td></tr>
-          <tr><td>Key generation</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-keygen">crates/verilm-keygen</a></td></tr>
-          <tr><td>Verifier</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-verify">crates/verilm-verify</a></td></tr>
-          <tr><td>Prover (Rust)</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-prover">crates/verilm-prover</a></td></tr>
-          <tr><td>Python sidecar</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/sidecar">sidecar/</a></td></tr>
-          <tr><td>Python bindings</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-py">crates/verilm-py</a></td></tr>
-          <tr><td>Test vectors</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/crates/verilm-test-vectors">crates/verilm-test-vectors</a></td></tr>
-          <tr><td>Lean formalization</td><td><a href="https://github.com/lambdaclass/CommitLLM/tree/main/lean">lean/</a></td></tr>
-          <tr><td>Paper</td><td><a href="https://raw.githubusercontent.com/lambdaclass/CommitLLM/main/paper/main.pdf">paper/main.pdf</a></td></tr>
-        </tbody>
-      </table>
+    <div class="timeline">
+      <div class="timeline-step">
+        <div class="timeline-step-label">Phase 0 &middot; Setup</div>
+        <h3>Build the verifier key</h3>
+        <p>From a public checkpoint, the verifier computes a Merkle root over weights, secret Freivalds vectors for eight matrix families (<code>Wq</code>, <code>Wk</code>, <code>Wv</code>, <code>Wo</code>, <code>Wgate</code>, <code>Wup</code>, <code>Wdown</code>, <code>LM_head</code>), and the model configuration needed for canonical replay.</p>
+      </div>
+      <div class="timeline-step">
+        <div class="timeline-step-label">Phase 1 &middot; Commit</div>
+        <h3>Serve normally, return a receipt</h3>
+        <p>The provider runs inference on the normal GPU path with a tracing sidecar that captures retained state. It returns the response plus a compact receipt binding the execution trace, KV state, deployment manifest, prompt, sampling randomness, output policy, and token count.</p>
+      </div>
+      <div class="timeline-step">
+        <div class="timeline-step-label">Phase 2 &middot; Audit</div>
+        <h3>Challenge specific positions and layers</h3>
+        <p>The verifier challenges token positions and layers after the commitment. The provider opens the requested region. Routine audit samples prefix state; deep audit opens everything in the retained window.</p>
+      </div>
+      <div class="timeline-step">
+        <div class="timeline-step-label">Phase 3 &middot; Verify</div>
+        <h3>CPU-only checks</h3>
+        <p>Embedding Merkle proof. Freivalds on shell matmuls. Exact INT8 bridge recomputation. KV provenance. Attention replay against committed post-attention output. Final-token tail from captured residual. LM-head binding. Decode and output policy replay.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="rule">
+
+<!-- ── Freivalds ─────────────────────────────────── -->
+<section class="section" id="freivalds">
+  <div class="container">
+    <div class="section-label">Core mechanism</div>
+    <h2 class="section-title">Verify huge matrix multiplies cheaply</h2>
+    <div class="freivalds-grid">
+      <div class="freivalds-text">
+        <p>
+          The provider claims <code>z = W @ x</code> for a public weight matrix <code>W</code>.
+          Recomputing the full product is expensive. Freivalds&rsquo; algorithm gives a much cheaper check:
+          the verifier precomputes <code>v = r<sup>T</sup>W</code> with a secret random vector <code>r</code>,
+          then checks <code>v &middot; x =? r<sup>T</sup> &middot; z</code> in the finite field
+          F<sub>p</sub> where p = 2<sup>32</sup>-5.
+        </p>
+        <p>
+          If <code>z != Wx</code>, the check fails with probability &ge; 1-1/p.
+          This is information-theoretically sound. Transformers are mostly matrix multiplication;
+          once those multiplies are cheap to audit, the verifier can check model identity
+          without rerunning the full model.
+        </p>
+        <div class="matrix-tags">
+          <span class="tag">W<sub>q</sub></span>
+          <span class="tag">W<sub>k</sub></span>
+          <span class="tag">W<sub>v</sub></span>
+          <span class="tag">W<sub>o</sub></span>
+          <span class="tag">W<sub>gate</sub></span>
+          <span class="tag">W<sub>up</sub></span>
+          <span class="tag">W<sub>down</sub></span>
+          <span class="tag">LM<sub>head</sub></span>
+        </div>
+      </div>
+      <div class="demo-box" id="freivalds-demo" role="region" aria-label="Freivalds algorithm interactive demo">
+        <div class="demo-header">Interactive demo &middot; 3x3 over F<sub>p</sub></div>
+        <div class="demo-output" id="demo-eq"><span class="dim">Click a button to run Freivalds&rsquo; check</span></div>
+        <div class="demo-result" id="demo-result" style="display:none;"></div>
+        <div class="demo-btns">
+          <button class="demo-btn" onclick="runFreivalds(true)">Honest provider</button>
+          <button class="demo-btn" onclick="runFreivalds(false)">Cheating provider</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="rule">
+
+<!-- ── Resources ─────────────────────────────────── -->
+<section class="section" id="resources">
+  <div class="container">
+    <div class="section-label">Resources</div>
+    <h2 class="section-title">Start with the paper, then inspect the implementation</h2>
+    <p class="section-sub">
+      The homepage gives the high-level story. The paper, code, and formalization carry the full technical detail.
+    </p>
+    <div class="compat-grid">
+      <div class="compat-item">
+        <div class="compat-label compat-label--green">Read</div>
+        <h3>Paper (PDF)</h3>
+        <p>Protocol, guarantee boundary, threat model, and measurements in full detail.</p>
+        <a class="resource-link" href="https://raw.githubusercontent.com/lambdaclass/CommitLLM/main/paper/main.pdf">Open paper</a>
+      </div>
+      <div class="compat-item">
+        <div class="compat-label compat-label--green">Inspect</div>
+        <h3>GitHub repository</h3>
+        <p>Reference implementation in Rust, Python, and Lean. Some internal crate paths still use the legacy <code>verilm-*</code> prefix while the rename completes.</p>
+        <a class="resource-link" href="https://github.com/lambdaclass/CommitLLM">Browse repository</a>
+      </div>
+      <div class="compat-item">
+        <div class="compat-label compat-label--green">Formalize</div>
+        <h3>Lean 4 formalization</h3>
+        <p>The formalization tracks the proof obligations behind the protocol and makes the security claims explicit.</p>
+        <a class="resource-link" href="https://github.com/lambdaclass/CommitLLM/tree/main/lean">Open Lean directory</a>
+      </div>
+      <div class="compat-item">
+        <div class="compat-label compat-label--green">Reproduce</div>
+        <h3>Benchmark and repro scripts</h3>
+        <p>Scripts for reproducing measurements on the current prototype, including the corrected replay path and corridor checks.</p>
+        <a class="resource-link" href="https://github.com/lambdaclass/CommitLLM/tree/main/scripts/modal">Open scripts</a>
+      </div>
     </div>
   </div>
 </section>
