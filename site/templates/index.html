@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CommitLLM — Verifiable execution for LLM inference</title>
-  <meta name="description" content="CommitLLM is a cryptographic commit-and-audit protocol for open-weight LLM inference. Its receipt binds the claimed checkpoint, decode policy, and output path so a verifier can catch post-hoc tampering on CPU. ~12-14% overhead, 1.3 ms/tok routine audit.">
+  <meta name="description" content="CommitLLM is a cryptographic commit-and-audit protocol for open-weight LLM inference. Its receipt binds the claimed checkpoint, decode policy, and delivered answer so a verifier can catch post-hoc tampering on CPU. ~12-14% overhead, 1.3 ms/tok routine audit.">
   <meta name="theme-color" content="#fffff8">
 
   <!-- Favicon -->
@@ -24,7 +24,7 @@
   <!-- Twitter -->
   <meta name="twitter:card" content="summary">
   <meta name="twitter:title" content="CommitLLM — Verifiable execution for LLM inference">
-  <meta name="twitter:description" content="CommitLLM binds model identity, decode policy, and output path into a receipt a verifier checks on CPU.">
+  <meta name="twitter:description" content="CommitLLM binds model identity, decode policy, and the delivered answer into a receipt a verifier checks on CPU.">
 
   <!-- Canonical -->
   <link rel="canonical" href="https://commitllm.com">
@@ -35,7 +35,7 @@
     "@context": "https://schema.org",
     "@type": "SoftwareSourceCode",
     "name": "CommitLLM",
-    "description": "A cryptographic commit-and-audit protocol for open-weight LLM inference. CommitLLM binds model identity, deployment configuration, decode policy, and output formatting into a receipt so a verifier can detect post-hoc tampering with CPU-only checks.",
+    "description": "A cryptographic commit-and-audit protocol for open-weight LLM inference. CommitLLM binds model identity, deployment configuration, decode policy, and the delivered answer into a receipt so a verifier can detect post-hoc tampering with CPU-only checks.",
     "url": "https://commitllm.com",
     "codeRepository": "https://github.com/lambdaclass/CommitLLM",
     "programmingLanguage": ["Rust", "Python", "Lean 4"],
@@ -110,19 +110,19 @@
     <div class="hero-grid">
       <div>
         <div class="hero-badge">Active development &middot; Lean 4 formalization in progress</div>
-        <h1>Proof the claimed model ran and the answer was <em>not tampered with</em></h1>
+        <h1>Proof the claimed model ran and the delivered answer was <em>not tampered with</em></h1>
         <p class="hero-desc">
-          CommitLLM returns a compact receipt binding the checkpoint, deployment manifest, prompt, sampling randomness, decode policy, and returned-text path. A verifier checks on CPU that the delivered answer matches the committed execution trace, not a post-hoc rewrite.
+          CommitLLM returns a compact receipt binding the checkpoint, deployment manifest, prompt, sampling randomness, decode policy, and the path that produced the delivered answer. A verifier checks on CPU that the delivered answer matches the committed execution trace, not a post-hoc rewrite.
         </p>
         <div class="hero-proofline">
           <span class="proof-chip proof-chip--exact">Checkpoint + config bound</span>
           <span class="proof-chip proof-chip--alg">Prompt + randomness bound</span>
           <span class="proof-chip proof-chip--approx">Decode policy replayed</span>
-          <span class="proof-chip proof-chip--stat">Returned text bound</span>
+          <span class="proof-chip proof-chip--stat">Delivered answer bound</span>
         </div>
         <div class="hero-actions">
-          <a href="#binding" class="btn btn-primary">See what the receipt binds</a>
-          <a href="#benchmarks" class="btn btn-ghost">Benchmarks</a>
+          <a href="#how" class="btn btn-primary">See audit flow</a>
+          <a href="#binding" class="btn btn-ghost">Inspect the receipt</a>
         </div>
       </div>
       <div class="hero-aside">
@@ -138,7 +138,7 @@
             <span class="stat-val">replayed</span>
           </li>
           <li class="stat-row">
-            <span class="stat-key">Returned text path</span>
+            <span class="stat-key">Delivered answer</span>
             <span class="stat-val">bound</span>
           </li>
           <li class="stat-row">
@@ -170,9 +170,9 @@
     <div class="section-split section-split--top">
       <div class="section-main">
         <div class="section-label">Receipt scope</div>
-        <h2 class="section-title">The receipt binds the model, decode path, and returned text</h2>
+        <h2 class="section-title">The receipt binds the model, decode path, and delivered answer</h2>
         <p class="section-sub">
-          CommitLLM does not only attest that some checkpoint ran. It binds the request, deployment choices, sampling policy, and output path that determine the answer you received.
+          CommitLLM does not only attest that some checkpoint ran. It binds the request, deployment choices, sampling policy, and answer path that determine the delivered answer.
         </p>
         <div class="summary-strip">
           <div class="summary-card">
@@ -186,9 +186,9 @@
             <p>Sampler, temperature, penalties, grammar constraints, and stop rules.</p>
           </div>
           <div class="summary-card">
-            <div class="summary-label">Returned text</div>
-            <h3>What text was actually delivered</h3>
-            <p>Detokenization, cleanup, whitespace handling, and output formatting on the committed path.</p>
+            <div class="summary-label">Delivered answer</div>
+            <h3>What answer was actually delivered</h3>
+            <p>Detokenization, cleanup, whitespace handling, and formatting on the committed path.</p>
           </div>
         </div>
         <div class="table-wrap">
@@ -212,17 +212,13 @@
           <ul class="aside-list">
             <li>Serving a different checkpoint or quantization plan than the receipt claims</li>
             <li>Using a different sampler, grammar, or stop rule than the committed decode policy</li>
-            <li>Cleaning up, rewriting, or post-processing the answer off the committed path</li>
+            <li>Cleaning up, rewriting, or post-processing the delivered answer off the committed path</li>
           </ul>
-        </div>
-        <div class="aside-card aside-card--plain">
-          <div class="aside-card-label">Why it matters</div>
-          <p>The receipt is about the delivered answer, not just checkpoint identity. That is the difference between provenance and execution integrity.</p>
         </div>
       </aside>
     </div>
     <div class="section-note">
-      <strong>Consequence:</strong> if the provider rewrites, reformats, or otherwise tampers with the answer outside the committed execution path, verification fails.
+      <strong>Consequence:</strong> if the provider rewrites, reformats, or otherwise tampers with the delivered answer outside the committed execution path, verification fails.
     </div>
   </div>
 </section>
@@ -241,7 +237,7 @@
       <div class="three-col-item">
         <div class="col-label col-label--green">Step 1</div>
         <h3>Serve and commit</h3>
-        <p>The provider stays on the normal GPU path and returns the answer plus a compact receipt binding the model, request, randomness, and output policy.</p>
+        <p>The provider stays on the normal GPU path and returns the delivered answer plus a compact receipt binding the model, request, randomness, and output policy.</p>
       </div>
       <div class="three-col-item three-col-item--highlight">
         <div class="col-label col-label--orange">Step 2</div>
@@ -250,8 +246,8 @@
       </div>
       <div class="three-col-item">
         <div class="col-label col-label--green">Step 3</div>
-        <h3>Verify the delivered text</h3>
-        <p>CPU-side checks tie the delivered text back to model identity, decode policy, and the committed execution trace.</p>
+        <h3>Verify the delivered answer</h3>
+        <p>CPU-side checks tie the delivered answer back to model identity, decode policy, and the committed execution trace.</p>
       </div>
     </div>
   </div>
@@ -360,7 +356,7 @@
         <div class="section-label">Guarantee boundary</div>
         <h2 class="section-title">What is exact, approximate, and statistical</h2>
         <p class="section-sub">
-          Commitment-bound end-to-end, with explicit boundaries for each verification class. Not &ldquo;uniformly exact&rdquo; but precisely delineated.
+          Decode is fail-closed. The remaining boundary lives inside native attention and unopened retained state during routine audit.
         </p>
         <div class="pipeline-wrap">
           <div class="pipeline">
@@ -388,14 +384,10 @@
           <div class="aside-card-label">Reading guide</div>
           <h3>Three guarantee classes</h3>
           <ul class="aside-list">
-            <li><strong>Exact:</strong> input handling, supported canonical replay, INT8 bridges, final tail, and decode checks are deterministic.</li>
-            <li><strong>Approximate:</strong> attention replay is bounded and auditable, but native FP16/BF16 GPU attention is not bit-reproducible.</li>
-            <li><strong>Statistical:</strong> routine audit samples retained prefix and KV state; deep audit opens the full retained window and makes that region exact.</li>
+            <li><strong>Exact:</strong> input handling, canonical replay, INT8 bridges, final tail, and decode checks are deterministic.</li>
+            <li><strong>Approximate:</strong> attention replay is bounded, but native FP16/BF16 GPU attention is not bit-reproducible.</li>
+            <li><strong>Statistical:</strong> routine audit samples retained prefix and KV state; deep audit opens the full retained window.</li>
           </ul>
-        </div>
-        <div class="aside-card aside-card--plain">
-          <div class="aside-card-label">Interpretation</div>
-          <p>The point is explicit boundaries. The receipt tells you which parts are exact, where approximation begins, and what deep audit upgrades.</p>
         </div>
       </aside>
     </div>
@@ -405,7 +397,7 @@
 <hr class="rule">
 
 <!-- ── Audit modes ───────────────────────────────── -->
-<section class="section" id="audit">
+<section class="section section--tint" id="audit">
   <div class="container">
     <div class="section-label">Audit modes</div>
     <h2 class="section-title">Routine audit stays cheap. Deep audit upgrades coverage.</h2>
@@ -455,21 +447,25 @@
     <div class="compat-grid">
       <div class="compat-item">
         <div class="compat-label compat-label--green">Supported now</div>
+        <div class="compat-outcome">Per-request receipts survive batching</div>
         <h3>Continuous batching and paged attention</h3>
         <p>Many user requests can share the same GPU microbatch. CommitLLM still produces per-request receipts and per-request audits.</p>
       </div>
       <div class="compat-item">
         <div class="compat-label compat-label--green">Supported now</div>
+        <div class="compat-outcome">No proof-specific kernel swap</div>
         <h3>Tensor parallelism and fused kernels</h3>
         <p>The tracing layer follows the existing execution path instead of replacing production kernels with proof-friendly substitutes.</p>
       </div>
       <div class="compat-item">
         <div class="compat-label compat-label--green">Supported now</div>
+        <div class="compat-outcome">Measured on production-style W8A8</div>
         <h3>Quantized serving</h3>
         <p>Quantization metadata is receipt-bound, and the kept path is measured on production-style W8A8 checkpoints.</p>
       </div>
       <div class="compat-item compat-item--warn">
         <div class="compat-label compat-label--red">Not the current story</div>
+        <div class="compat-outcome compat-outcome--warn">Unsupported shortcuts should fail closed</div>
         <h3>Cross-request cache reuse and shortcut decoding</h3>
         <p>Cross-request prefix caching, speculative decoding, and other semantics-changing shortcuts need more protocol work. Unsupported paths should fail closed.</p>
       </div>
@@ -482,27 +478,31 @@
 <!-- ── Use cases ─────────────────────────────────── -->
 <section class="section" id="usecases">
   <div class="container">
-    <div class="section-label">Why it matters</div>
+    <div class="section-label">Use cases</div>
     <h2 class="section-title">Execution integrity for every deployment</h2>
     <p class="section-sub">
-      Model identity is only part of the story. CommitLLM matters wherever decode policy and delivered text need to be auditable.
+      Model identity is only part of the story. CommitLLM matters wherever decode policy and the delivered answer need to be auditable.
     </p>
     <div class="cases-grid">
       <div class="case-item">
+        <div class="case-label">Buyer protection</div>
         <h3>Enterprise procurement</h3>
-        <p>Paying for Llama 70B? Get proof the provider served that checkpoint and did not rewrite the answer after decoding.</p>
+        <p>Paying for Llama 70B? Get proof the provider served that checkpoint and did not rewrite the delivered answer after decoding.</p>
       </div>
       <div class="case-item">
+        <div class="case-label">Compliance trail</div>
         <h3>Regulated deployments</h3>
-        <p>Banks, hospitals, and legal teams need an auditable chain from prompt and model version to decode policy and returned text.</p>
+        <p>Banks, hospitals, and legal teams need an auditable chain from prompt and model version to decode policy and the delivered answer.</p>
       </div>
       <div class="case-item">
+        <div class="case-label">Trustless marketplaces</div>
         <h3>Decentralized compute</h3>
         <p>Networks like Gensyn, Ritual, or Bittensor cannot rely on &ldquo;trust the node.&rdquo; CommitLLM provides the missing verification layer.</p>
       </div>
       <div class="case-item">
+        <div class="case-label">Action governance</div>
         <h3>Agent systems</h3>
-        <p>When an agent takes action, model provenance and untampered tool-facing output become governance and liability questions.</p>
+        <p>When an agent takes action, model provenance and the untampered delivered answer become governance and liability questions.</p>
       </div>
     </div>
   </div>
@@ -527,7 +527,7 @@
       <div class="three-col-item three-col-item--highlight">
         <div class="col-label col-label--green">CommitLLM</div>
         <h3>Commit-and-audit</h3>
-        <p>Commitment-bound end-to-end. Large linear layers are checked algebraically, supported nonlinear pieces are replayed canonically, and delivered text is tied to the committed path.</p>
+        <p>Commitment-bound end-to-end. Large linear layers are checked algebraically, supported nonlinear pieces are replayed canonically, and the delivered answer is tied to the committed path.</p>
       </div>
       <div class="three-col-item">
         <div class="col-label col-label--orange">Too expensive</div>
@@ -585,7 +585,7 @@
         </div>
         <div class="aside-card">
           <div class="aside-card-label">Verification stack</div>
-          <p>Freivalds covers the large matrix multiplications, exact replay covers the supported nonlinear pieces, and decode replay binds the returned text.</p>
+          <p>Freivalds covers the large matrix multiplications, exact replay covers the supported nonlinear pieces, and decode replay binds the delivered answer.</p>
         </div>
       </aside>
     </div>

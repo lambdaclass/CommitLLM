@@ -91,6 +91,10 @@ code {
   background: linear-gradient(180deg, rgba($bg-warm, 0.95) 0%, rgba($bg, 0.8) 100%);
 }
 
+.section--tint {
+  background: linear-gradient(180deg, rgba($bg-warm, 0.72) 0%, rgba($bg, 0.96) 100%);
+}
+
 // Practical Typography: headings — bold, minimal size increase,
 // emphasis through space above/below, not through bigness.
 .section-label {
@@ -122,7 +126,7 @@ code {
 
 .section-split {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 280px;
+  grid-template-columns: minmax(0, 1fr) 320px;
   gap: 2rem;
   align-items: start;
   @media (max-width: 900px) { grid-template-columns: 1fr; }
@@ -1025,12 +1029,28 @@ code {
 }
 
 .compat-item {
+  position: relative;
+  overflow: hidden;
   padding: 1.35rem 1.5rem;
   border: 1px solid $border;
   border-radius: 4px;
   background: $bg;
 
-  &--warn { background: mix($bg, #fff2ed, 70%); }
+  &::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: rgba($green, 0.42);
+  }
+
+  &--warn {
+    background: mix($bg, #fff2ed, 70%);
+
+    &::before { background: rgba($red, 0.42); }
+  }
 
   h3 {
     font-size: 1rem;
@@ -1068,6 +1088,16 @@ code {
   &--red { color: $red; }
 }
 
+.compat-outcome {
+  font-family: $mono;
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: $text-bright;
+  margin-bottom: 0.45rem;
+
+  &--warn { color: darken($red, 5%); }
+}
+
 // ── Use cases ───────────────────────────────────────
 .cases-grid {
   display: grid;
@@ -1082,11 +1112,32 @@ code {
 }
 
 .case-item {
+  position: relative;
   background: $bg;
   padding: 1.35rem 1.5rem;
 
+  &::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: rgba($link, 0.38);
+  }
+
   h3 { font-size: 1rem; font-weight: 600; color: $text-bright; margin-bottom: 0.25rem; }
   p { font-size: 0.88rem; color: $text-dim; line-height: 1.5; }
+}
+
+.case-label {
+  font-family: $mono;
+  font-size: 0.64rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: $link;
+  margin-bottom: 0.4rem;
 }
 
 // ── Footer ──────────────────────────────────────────
