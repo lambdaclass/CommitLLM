@@ -1270,6 +1270,36 @@ fn dequant_acc(
     }
 }
 
+/// Dequantize Q/K accumulators through bf16 precision, add bias, apply RoPE → bf16.
+///
+/// Full GPU-matched path:
+/// 1. `bf16(f32_dequant + f32_bias)` — matches CUTLASS `scaled_mm` output
+/// 2. RoPE in f32, then truncate to bf16 — matches KV cache storage
+///
+/// Used for bf16-matched score anchoring on models that run in bfloat16 (e.g. Qwen).
+fn dequant_rope_bf16(
+    key: &VerifierKey,
+    layer_idx: usize,
+    mt: MatrixType,
+    acc: &[i32],
+    scale_x: f32,
+    n_heads: usize,
+    position: usize,
+) -> Vec<f32> {
+    // Get per-channel weight scales.
+    let pc_scales = key
+        .per_channel_scales_for(layer_idx, mt)
+        .expect("bf16 anchoring requires per-channel weight scales");
+    let bias = key.qkv_bias_for(layer_idx, mt);
+
+    // dequant + bias → bf16 truncation (matches CUTLASS bf16_final).
+    let k_f32 =
+        verilm_core::attention::dequant_bias_bf16(acc, pc_scales, scale_x, bias);
+
+    // RoPE in f32, truncate output to bf16 (matches GPU's bf16 KV cache storage).
+    verilm_core::attention::apply_rope_bf16(&k_f32, n_heads, position, &key.config)
+}
+
 /// Per-step tolerance for bridge x_attn check-and-gate.
 ///
 /// Delegates to `VerifierKey::bridge_tolerance()` which reads from the
@@ -1897,13 +1927,152 @@ fn replay_deep_prefix_roped(
 
             st.check();
             let q_roped = dequant_rope_q(ctx.key, layer_idx, q_acc, sl.scale_x_attn, absolute_pos);
-            let expected_a = verilm_core::attention::replay_attention_roped(
-                &q_roped,
-                &kv_k,
-                &kv_v,
-                rs.scale_a as f64,
-                cfg,
-            );
+
+            // Witnessed-score replay: when witnessed scores are available and the
+            // profile has a score anchor threshold, verify the anchor and use
+            // witnessed scores for a tighter softmax·V replay.
+            let expected_a = if let (Some(ws_all), Some(threshold)) = (
+                ctx.r.witnessed_scores.as_ref(),
+                ctx.key.score_anchor_threshold(),
+            ) {
+                if let Some(ws) = ws_all.get(layer_idx) {
+                    // Structural check: shape must match.
+                    if ws.n_q_heads != cfg.n_q_heads || ws.seq_len != kv_v.len() {
+                        st.fail_ctx(
+                            FailureCode::WitnessedScoreStructuralError,
+                            format!(
+                                "layer {}: witnessed scores shape ({} heads, {} seq) \
+                                 doesn't match expected ({} heads, {} seq)",
+                                layer_idx, ws.n_q_heads, ws.seq_len,
+                                cfg.n_q_heads, kv_v.len(),
+                            ),
+                            FailureContext {
+                                layer: Some(layer_idx),
+                                ..Default::default()
+                            },
+                        );
+                        // Fall back to standard replay.
+                        verilm_core::attention::replay_attention_roped(
+                            &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
+                        )
+                    } else {
+                        // Anchor check: compare witnessed scores against canonical Q·K^T/√d.
+                        //
+                        // For models with per-channel scales (W8A8 bf16), use bf16-matched
+                        // reconstruction: dequant → bias → bf16 → f32 → RoPE. This matches
+                        // the GPU's CUTLASS `bf16(f32_dequant + f32_bias)` semantics and
+                        // eliminates the f64-vs-bf16 anchoring gap.
+                        //
+                        // For models without per-channel scales (toy/INT8), fall back to f64.
+                        let has_per_channel =
+                            ctx.key.per_channel_scales_for(layer_idx, MatrixType::Wq).is_some();
+
+                        let anchor = if has_per_channel {
+                            // bf16-matched anchoring: reconstruct Q and all K through bf16 path.
+                            let q_roped_f32 = dequant_rope_bf16(
+                                ctx.key, layer_idx, MatrixType::Wq,
+                                q_acc, sl.scale_x_attn, cfg.n_q_heads, absolute_pos,
+                            );
+
+                            // Build bf16-matched K cache from shell accumulators.
+                            let mut kv_k_f32: Vec<Vec<f32>> = Vec::with_capacity(kv_k.len());
+                            for (j, shell_j) in prefix_shells.iter().enumerate() {
+                                if j >= kv_k.len() {
+                                    break;
+                                }
+                                let prefix_sl = &shell_j.layers[layer_idx];
+                                if let Some(k_acc_j) = &prefix_sl.k {
+                                    // Reconstruct from raw accumulators through bf16.
+                                    let k_roped = dequant_rope_bf16(
+                                        ctx.key, layer_idx, MatrixType::Wk,
+                                        k_acc_j, prefix_sl.scale_x_attn,
+                                        cfg.n_kv_heads, j + 1,
+                                    );
+                                    kv_k_f32.push(k_roped);
+                                } else {
+                                    // No accumulator — narrow committed K through bf16.
+                                    kv_k_f32.push(
+                                        kv_k[j].iter().map(|&x| half::bf16::from_f64(x).to_f32()).collect()
+                                    );
+                                }
+                            }
+                            // Opened token's K.
+                            if kv_k_f32.len() < kv_k.len() {
+                                if let Some(k_acc_open) = &sl.k {
+                                    let k_roped = dequant_rope_bf16(
+                                        ctx.key, layer_idx, MatrixType::Wk,
+                                        k_acc_open, sl.scale_x_attn,
+                                        cfg.n_kv_heads, absolute_pos,
+                                    );
+                                    kv_k_f32.push(k_roped);
+                                } else {
+                                    kv_k_f32.push(
+                                        kv_k.last().unwrap().iter()
+                                            .map(|&x| half::bf16::from_f64(x).to_f32()).collect()
+                                    );
+                                }
+                            }
+
+                            let canonical_f32 =
+                                verilm_core::attention::compute_canonical_scores_gpu_like(
+                                    &q_roped_f32, &kv_k_f32, cfg,
+                                );
+                            let canonical_f64: Vec<f64> =
+                                canonical_f32.iter().map(|&x| x as f64).collect();
+                            verilm_core::attention::anchor_witnessed_scores(
+                                &ws.scores, &canonical_f64,
+                                ws.n_q_heads, ws.seq_len, layer_idx,
+                            )
+                        } else {
+                            // f64 anchoring (toy/INT8 models, or Llama where gap is <0.1).
+                            let canonical_scores =
+                                verilm_core::attention::compute_canonical_scores(
+                                    &q_roped, &kv_k, cfg,
+                                );
+                            verilm_core::attention::anchor_witnessed_scores(
+                                &ws.scores, &canonical_scores,
+                                ws.n_q_heads, ws.seq_len, layer_idx,
+                            )
+                        };
+
+                        if anchor.max_gap > threshold as f64 {
+                            st.fail_ctx(
+                                FailureCode::ScoreAnchorMismatch,
+                                format!(
+                                    "layer {}: witnessed score anchor gap {:.4} exceeds \
+                                     threshold {:.1}",
+                                    layer_idx, anchor.max_gap, threshold,
+                                ),
+                                FailureContext {
+                                    layer: Some(layer_idx),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        // Use witnessed scores for replay (tighter corridor).
+                        let (a_i8, _) =
+                            verilm_core::attention::replay_attention_witnessed_scores(
+                                &ws.scores,
+                                ws.n_q_heads,
+                                ws.seq_len,
+                                &kv_v,
+                                rs.scale_a as f64,
+                                cfg,
+                            );
+                        a_i8
+                    }
+                } else {
+                    // Layer index out of bounds in witnessed_scores — fallback.
+                    verilm_core::attention::replay_attention_roped(
+                        &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
+                    )
+                }
+            } else {
+                // No witnessed scores or no anchor threshold — standard replay.
+                verilm_core::attention::replay_attention_roped(
+                    &q_roped, &kv_k, &kv_v, rs.scale_a as f64, cfg,
+                )
+            };
             check_attention_result_opened(ctx, ctx.key, st, &rs.a, &expected_a, layer_idx);
         }
     }
@@ -2433,6 +2602,7 @@ mod tests {
             prefix_shell_openings: None,
             kv_entries: None,
             kv_proofs: None,
+            witnessed_scores: None,
         }
     }
 

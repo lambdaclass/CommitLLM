@@ -620,6 +620,34 @@ impl MinimalBatchStateHandle {
         self.inner.captured_x_attn = None;
     }
 
+    /// Attach witnessed attention scores (per-layer f32 arrays) to state.
+    /// Each array is flat row-major: scores[qh * seq_len + t] for n_q_heads × seq_len.
+    /// `n_q_heads`: number of query heads (same for all layers).
+    fn set_witnessed_scores(
+        &mut self,
+        scores: &Bound<'_, PyList>,
+        n_q_heads: usize,
+    ) -> PyResult<()> {
+        let mut ws = Vec::with_capacity(scores.len());
+        for i in 0..scores.len() {
+            let arr = extract_f32_vec(&scores.get_item(i)?)?;
+            if arr.len() % n_q_heads != 0 {
+                return Err(PyValueError::new_err(format!(
+                    "layer {} score array length {} not divisible by n_q_heads {}",
+                    i, arr.len(), n_q_heads,
+                )));
+            }
+            let seq_len = arr.len() / n_q_heads;
+            ws.push(verilm_core::types::WitnessedScores {
+                scores: arr,
+                n_q_heads,
+                seq_len,
+            });
+        }
+        self.inner.witnessed_scores = Some(ws);
+        Ok(())
+    }
+
     fn commitment_json(&self) -> PyResult<String> {
         serde_json::to_string(&self.commitment)
             .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
@@ -933,6 +961,32 @@ impl PackedBatchStateHandle {
     #[getter]
     fn get_deep_prefix(&self) -> bool {
         self.deep_prefix
+    }
+
+    /// Attach witnessed attention scores (per-layer f32 arrays) to state.
+    fn set_witnessed_scores(
+        &mut self,
+        scores: &Bound<'_, PyList>,
+        n_q_heads: usize,
+    ) -> PyResult<()> {
+        let mut ws = Vec::with_capacity(scores.len());
+        for i in 0..scores.len() {
+            let arr = extract_f32_vec(&scores.get_item(i)?)?;
+            if arr.len() % n_q_heads != 0 {
+                return Err(PyValueError::new_err(format!(
+                    "layer {} score array length {} not divisible by n_q_heads {}",
+                    i, arr.len(), n_q_heads,
+                )));
+            }
+            let seq_len = arr.len() / n_q_heads;
+            ws.push(verilm_core::types::WitnessedScores {
+                scores: arr,
+                n_q_heads,
+                seq_len,
+            });
+        }
+        self.inner.witnessed_scores = Some(ws);
+        Ok(())
     }
 
     fn commitment_json(&self) -> PyResult<String> {
@@ -1779,6 +1833,191 @@ fn measure_corridor_committed_kv_f32(
     measure_corridor_precision(audit_binary, key_json, "f32", scale_overrides_json)
 }
 
+/// Measure the attention corridor using witnessed pre-softmax scores.
+///
+/// Uses GPU-witnessed scores instead of replaying Q·K^T/√d. This eliminates
+/// the score arithmetic mismatch — the remaining gap comes only from
+/// softmax + V aggregation precision.
+///
+/// Args:
+///     audit_binary: bytes — bincode-serialized V4AuditResponse (must include witnessed_scores + kv_entries).
+///     key_json: str — JSON-serialized VerifierKey.
+///     scale_overrides_json: Optional[str] — JSON-serialized CorridorScaleOverrides.
+///
+/// Returns:
+///     str — JSON-serialized CorridorReport.
+#[pyfunction]
+#[pyo3(signature = (audit_binary, key_json, scale_overrides_json=None))]
+fn measure_corridor_witnessed_scores(
+    audit_binary: &[u8],
+    key_json: &str,
+    scale_overrides_json: Option<&str>,
+) -> PyResult<String> {
+    let key: VerifierKey = serde_json::from_str(key_json)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize key: {}", e)))?;
+    let response = verilm_core::serialize::deserialize_v4_audit(audit_binary)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize audit: {}", e)))?;
+    let overrides = scale_overrides_json
+        .map(|json| {
+            serde_json::from_str::<verilm_verify::corridor::CorridorScaleOverrides>(json).map_err(
+                |e| PyValueError::new_err(format!("failed to deserialize scale overrides: {}", e)),
+            )
+        })
+        .transpose()?;
+    let report = verilm_verify::corridor::measure_corridor_witnessed_scores(
+        &key,
+        &response,
+        overrides.as_ref(),
+    )
+    .map_err(|e| PyValueError::new_err(format!("witnessed corridor measurement failed: {}", e)))?;
+    serde_json::to_string(&report)
+        .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+}
+
+/// Verify that witnessed scores are consistent with shell Q and committed K.
+///
+/// Reconstructs canonical Q·K^T/√d from shell opening + committed KV entries,
+/// then compares against the witnessed scores. Reports per-layer max gap.
+///
+/// This is the security-critical anchoring check. If the max gap exceeds a
+/// threshold, the witnessed scores are likely tampered.
+///
+/// Args:
+///     audit_binary: bytes — bincode-serialized V4AuditResponse.
+///     key_json: str — JSON-serialized VerifierKey.
+///     scale_overrides_json: Optional[str] — JSON-serialized CorridorScaleOverrides.
+///
+/// Returns:
+///     str — JSON-serialized ScoreAnchorReport.
+#[pyfunction]
+#[pyo3(signature = (audit_binary, key_json, scale_overrides_json=None))]
+fn verify_witnessed_score_anchoring(
+    audit_binary: &[u8],
+    key_json: &str,
+    scale_overrides_json: Option<&str>,
+) -> PyResult<String> {
+    let key: VerifierKey = serde_json::from_str(key_json)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize key: {}", e)))?;
+    let response = verilm_core::serialize::deserialize_v4_audit(audit_binary)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize audit: {}", e)))?;
+    let overrides = scale_overrides_json
+        .map(|json| {
+            serde_json::from_str::<verilm_verify::corridor::CorridorScaleOverrides>(json).map_err(
+                |e| PyValueError::new_err(format!("failed to deserialize scale overrides: {}", e)),
+            )
+        })
+        .transpose()?;
+    let report = verilm_verify::corridor::verify_witnessed_score_anchoring(
+        &key,
+        &response,
+        overrides.as_ref(),
+    )
+    .map_err(|e| PyValueError::new_err(format!("score anchoring failed: {}", e)))?;
+    serde_json::to_string(&report)
+        .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+}
+
+/// Verify witnessed scores using GPU-matched precision anchoring.
+///
+/// Reconstructs Q/K from shell i32 accumulators in GPU-like precision
+/// (f32 dequant + fp16 truncation + f32 RoPE) instead of pure f64.
+/// This produces tighter anchoring for models with large bias values (Qwen).
+#[pyfunction]
+#[pyo3(signature = (audit_binary, key_json, scale_overrides_json=None))]
+fn verify_witnessed_score_anchoring_gpu_like(
+    audit_binary: &[u8],
+    key_json: &str,
+    scale_overrides_json: Option<&str>,
+) -> PyResult<String> {
+    let key: VerifierKey = serde_json::from_str(key_json)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize key: {}", e)))?;
+    let response = verilm_core::serialize::deserialize_v4_audit(audit_binary)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize audit: {}", e)))?;
+    let overrides = scale_overrides_json
+        .map(|json| {
+            serde_json::from_str::<verilm_verify::corridor::CorridorScaleOverrides>(json).map_err(
+                |e| PyValueError::new_err(format!("failed to deserialize scale overrides: {}", e)),
+            )
+        })
+        .transpose()?;
+    let report = verilm_verify::corridor::verify_witnessed_score_anchoring_gpu_like(
+        &key,
+        &response,
+        overrides.as_ref(),
+    )
+    .map_err(|e| PyValueError::new_err(format!("GPU-like anchoring failed: {}", e)))?;
+    serde_json::to_string(&report)
+        .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+}
+
+/// Verify witnessed scores using bf16-matched precision anchoring.
+///
+/// Like `verify_witnessed_score_anchoring_gpu_like`, but narrows Q/K through
+/// bf16 instead of fp16. Matches models running in `dtype=torch.bfloat16`.
+#[pyfunction]
+#[pyo3(signature = (audit_binary, key_json, scale_overrides_json=None))]
+fn verify_witnessed_score_anchoring_bf16(
+    audit_binary: &[u8],
+    key_json: &str,
+    scale_overrides_json: Option<&str>,
+) -> PyResult<String> {
+    let key: VerifierKey = serde_json::from_str(key_json)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize key: {}", e)))?;
+    let response = verilm_core::serialize::deserialize_v4_audit(audit_binary)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize audit: {}", e)))?;
+    let overrides = scale_overrides_json
+        .map(|json| {
+            serde_json::from_str::<verilm_verify::corridor::CorridorScaleOverrides>(json).map_err(
+                |e| PyValueError::new_err(format!("failed to deserialize scale overrides: {}", e)),
+            )
+        })
+        .transpose()?;
+    let report = verilm_verify::corridor::verify_witnessed_score_anchoring_bf16(
+        &key,
+        &response,
+        overrides.as_ref(),
+    )
+    .map_err(|e| PyValueError::new_err(format!("bf16 anchoring failed: {}", e)))?;
+    serde_json::to_string(&report)
+        .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+}
+
+/// Diagnose score anchoring mismatch by extracting verifier Q/K intermediates.
+///
+/// Returns JSON with verifier pre-RoPE Q, roped Q, committed K_roped, and
+/// canonical scores for each requested layer. Used to isolate whether
+/// Q or K causes the GPU-vs-verifier score gap.
+#[pyfunction]
+#[pyo3(signature = (audit_binary, key_json, scale_overrides_json=None, layer_indices=None))]
+fn diagnose_score_anchoring(
+    audit_binary: &[u8],
+    key_json: &str,
+    scale_overrides_json: Option<&str>,
+    layer_indices: Option<Vec<usize>>,
+) -> PyResult<String> {
+    let key: VerifierKey = serde_json::from_str(key_json)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize key: {}", e)))?;
+    let response = verilm_core::serialize::deserialize_v4_audit(audit_binary)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize audit: {}", e)))?;
+    let overrides = scale_overrides_json
+        .map(|json| {
+            serde_json::from_str::<verilm_verify::corridor::CorridorScaleOverrides>(json).map_err(
+                |e| PyValueError::new_err(format!("failed to deserialize scale overrides: {}", e)),
+            )
+        })
+        .transpose()?;
+    let layers = layer_indices.unwrap_or_else(|| vec![0]);
+    let diags = verilm_verify::corridor::diagnose_score_anchoring(
+        &key,
+        &response,
+        overrides.as_ref(),
+        &layers,
+    )
+    .map_err(|e| PyValueError::new_err(format!("diagnostic failed: {}", e)))?;
+    serde_json::to_string(&diags)
+        .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+}
+
 /// Simulate per-head vs per-tensor boundary strategies on audit data.
 ///
 /// Replays attention for each layer and compares requantization under:
@@ -1855,6 +2094,83 @@ fn simulate_int16_boundary(
         .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
 }
 
+/// Run dequant+bias cast-order diagnostic on audit data.
+///
+/// Extracts K accumulators from the shell opening and runs all 5 cast-order
+/// strategies, returning the results for comparison against GPU K.
+///
+/// Args:
+///     audit_binary: bytes — bincode-serialized V4AuditResponse.
+///     key_json: str — JSON-serialized VerifierKey.
+///     scale_overrides_json: Optional[str] — JSON CorridorScaleOverrides.
+///     layer_indices: list[int] — which layers to diagnose.
+///
+/// Returns:
+///     str — JSON-serialized Vec<CastOrderDiagnostic>.
+#[pyfunction]
+#[pyo3(signature = (audit_binary, key_json, scale_overrides_json=None, layer_indices=None))]
+fn diagnose_cast_order(
+    audit_binary: &[u8],
+    key_json: &str,
+    scale_overrides_json: Option<&str>,
+    layer_indices: Option<Vec<usize>>,
+) -> PyResult<String> {
+    let key: VerifierKey = serde_json::from_str(key_json)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize key: {}", e)))?;
+    let response = verilm_core::serialize::deserialize_v4_audit(audit_binary)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize audit: {}", e)))?;
+    let overrides = scale_overrides_json
+        .map(|json| {
+            serde_json::from_str::<verilm_verify::corridor::CorridorScaleOverrides>(json).map_err(
+                |e| PyValueError::new_err(format!("failed to deserialize scale overrides: {}", e)),
+            )
+        })
+        .transpose()?;
+    let layers = layer_indices.unwrap_or_else(|| vec![0]);
+    let diags = verilm_verify::corridor::diagnose_cast_order(
+        &key,
+        &response,
+        overrides.as_ref(),
+        &layers,
+    )
+    .map_err(|e| PyValueError::new_err(format!("cast order diagnostic failed: {}", e)))?;
+    serde_json::to_string(&diags)
+        .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+}
+
+/// Try multiple dequant+bias cast orderings and return results for comparison.
+///
+/// This diagnostic helps identify which cast order CUTLASS `scaled_mm` uses
+/// internally, by comparing each variant against the GPU's actual K output.
+///
+/// Args:
+///     k_acc: list[int] — i32 accumulators from shell opening (length kv_dim)
+///     per_channel_scales: list[float] — per-channel weight scales (length kv_dim)
+///     scale_x: float — per-token activation scale
+///     bias: Optional[list[float]] — K projection bias (length kv_dim), or None
+///
+/// Returns:
+///     str — JSON dict mapping strategy_name → list[float] (f32 K values)
+#[pyfunction]
+#[pyo3(signature = (k_acc, per_channel_scales, scale_x, bias=None))]
+fn dequant_bias_cast_variants(
+    k_acc: Vec<i32>,
+    per_channel_scales: Vec<f32>,
+    scale_x: f32,
+    bias: Option<Vec<f32>>,
+) -> PyResult<String> {
+    let variants = verilm_core::attention::dequant_bias_cast_variants(
+        &k_acc,
+        &per_channel_scales,
+        scale_x,
+        bias.as_deref(),
+    );
+    let map: std::collections::HashMap<&str, &Vec<f32>> =
+        variants.iter().map(|(name, data)| (*name, data)).collect();
+    serde_json::to_string(&map)
+        .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+}
+
 #[pymodule]
 fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(commit_minimal_from_captures, m)?)?;
@@ -1873,8 +2189,15 @@ fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(measure_corridor_committed_kv, m)?)?;
     m.add_function(wrap_pyfunction!(measure_corridor_precision, m)?)?;
     m.add_function(wrap_pyfunction!(measure_corridor_committed_kv_f32, m)?)?;
+    m.add_function(wrap_pyfunction!(measure_corridor_witnessed_scores, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_witnessed_score_anchoring, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_witnessed_score_anchoring_gpu_like, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_witnessed_score_anchoring_bf16, m)?)?;
+    m.add_function(wrap_pyfunction!(diagnose_score_anchoring, m)?)?;
     m.add_function(wrap_pyfunction!(simulate_boundary_strategies, m)?)?;
     m.add_function(wrap_pyfunction!(simulate_int16_boundary, m)?)?;
+    m.add_function(wrap_pyfunction!(dequant_bias_cast_variants, m)?)?;
+    m.add_function(wrap_pyfunction!(diagnose_cast_order, m)?)?;
     m.add_class::<CaptureHook>()?;
     m.add_function(wrap_pyfunction!(verify_input_tokenization, m)?)?;
     Ok(())

@@ -74,6 +74,10 @@ pub struct MinimalBatchState {
     /// Per-layer KV entries: `kv_entries[layer][position]`.
     /// Stored for audit-time proof generation. Empty when not committed.
     pub kv_entries: Vec<Vec<KvEntry>>,
+    /// Per-layer witnessed pre-softmax attention scores for the generated token.
+    /// Self-authenticating: verifier checks softmax(scores) @ V ≈ a.
+    /// None when score witnessing is disabled.
+    pub witnessed_scores: Option<Vec<verilm_core::types::WitnessedScores>>,
 }
 
 /// Per-layer bridge replay scales captured during inference.
@@ -473,6 +477,7 @@ pub fn commit_minimal(
         captured_x_attn,
         kv_trees,
         kv_entries: kv_entries_stored,
+        witnessed_scores: None,
     };
 
     if let (Some(t0), Some(t_leaf), Some(t_io_chain), Some(t_trees)) =
@@ -577,6 +582,8 @@ pub struct PackedBatchState {
     pub prompt: Vec<u8>,
     /// Number of prompt tokens (full count including first).
     pub n_prompt_tokens: Option<u32>,
+    /// Per-layer witnessed pre-softmax attention scores for the generated token.
+    pub witnessed_scores: Option<Vec<verilm_core::types::WitnessedScores>>,
 }
 
 impl PackedBatchState {
@@ -782,6 +789,7 @@ pub fn commit_minimal_packed(
         final_res_dim,
         prompt: Vec::new(),
         n_prompt_tokens: None,
+        witnessed_scores: None,
     };
 
     let t0 = if timers {
@@ -889,6 +897,7 @@ pub fn commit_minimal_packed(
         final_res_dim,
         prompt: params.prompt.to_vec(),
         n_prompt_tokens: params.n_prompt_tokens,
+        witnessed_scores: None,
     };
 
     if let (Some(t0), Some(t_leaf), Some(t_io_chain), Some(t_trees)) =
@@ -1078,6 +1087,7 @@ pub fn open_v4_packed(
         prefix_shell_openings: dp_shells,
         kv_entries: None,
         kv_proofs: None,
+        witnessed_scores: state.witnessed_scores.clone(),
     }
 }
 
@@ -1581,6 +1591,7 @@ pub fn open_v4_structural(state: &MinimalBatchState, token_index: u32) -> V4Audi
         prefix_shell_openings: None,
         kv_entries: None,
         kv_proofs: None,
+        witnessed_scores: state.witnessed_scores.clone(),
     }
 }
 

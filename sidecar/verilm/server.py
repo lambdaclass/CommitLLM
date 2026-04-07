@@ -133,6 +133,28 @@ class VerifiedInferenceServer:
         if cap._hidden_size > 0:
             self.buf.init_pinned_slab(cap._hidden_size)
 
+        # Score witness: capture pre-RoPE K on GPU for attention score reconstruction.
+        # Enabled via VERILM_SCORE_WITNESS=1 env var (opt-in).
+        if os.environ.get("VERILM_SCORE_WITNESS", "0") == "1":
+            cfg = getattr(model, "config", None)
+            rope_theta = getattr(cfg, "rope_theta", 10000.0) if cfg else 10000.0
+            rope_scaling = getattr(cfg, "rope_scaling", None) if cfg else None
+            # Convert HF rope_scaling dict to plain dict if needed.
+            rope_scaling_dict = dict(rope_scaling) if rope_scaling else None
+            max_seq = int(os.environ.get(
+                "VERILM_SCORE_WITNESS_MAX_SEQ",
+                str(getattr(cfg, "max_position_embeddings", 4096) if cfg else 4096),
+            ))
+            self.buf.init_score_witness(
+                n_layers=cap._n_layers,
+                max_seq_len=max_seq,
+                n_q_heads=cap._num_heads,
+                n_kv_heads=cap._num_kv_heads,
+                d_head=cap._head_dim,
+                rope_theta=rope_theta,
+                rope_scaling=rope_scaling_dict,
+            )
+
         # Try to activate native C++ capture wrapper.
         # Must be after configure_from_model() + init_pinned_slab().
         import torch
@@ -672,7 +694,7 @@ class VerifiedInferenceServer:
         all_token_ids = prompt_token_ids + gen_token_ids
         expected_traces = len(all_token_ids) - 1
 
-        o_inputs, scales, call_count, x_attn_inputs = self.buf.drain_minimal()
+        o_inputs, scales, call_count, x_attn_inputs, witnessed_scores = self.buf.drain_minimal()
 
         if _chat_timers:
             _ct_buf_drain = time.monotonic()
@@ -822,6 +844,15 @@ class VerifiedInferenceServer:
                 all_token_ids, prompt, seed, manifest, final_residuals_raw,
                 n_prompt_tokens,
                 x_attn_inputs=x_attn_inputs if x_attn_inputs else None,
+            )
+
+        # Attach witnessed scores if score witnessing was active.
+        if witnessed_scores is not None:
+            state.set_witnessed_scores(witnessed_scores, cap._num_heads)
+            logger.info(
+                "verilm: attached witnessed scores — %d layers, %.1f MB",
+                len(witnessed_scores),
+                sum(s.nbytes for s in witnessed_scores) / 1e6,
             )
 
         if _chat_timers:

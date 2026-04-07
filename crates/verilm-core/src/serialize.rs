@@ -210,6 +210,7 @@ mod tests {
             prefix_shell_openings: None,
             kv_entries: None,
             kv_proofs: None,
+            witnessed_scores: None,
         };
 
         let binary = serialize_v4_audit(&resp);

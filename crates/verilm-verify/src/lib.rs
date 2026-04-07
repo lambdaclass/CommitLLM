@@ -166,6 +166,10 @@ pub enum FailureCode {
     BridgeXAttnMismatch,
     BridgeScaleMismatch,
 
+    // -- Score witnessing --
+    ScoreAnchorMismatch,
+    WitnessedScoreStructuralError,
+
     // -- KV transcript --
     KvRootsCountMismatch,
     KvEntriesCountMismatch,
@@ -238,7 +242,9 @@ impl FailureCode {
             | KvRootsCountMismatch
             | KvEntriesCountMismatch
             | KvProofInvalid
-            | KvProofCountMismatch => FailureCategory::CryptographicBinding,
+            | KvProofCountMismatch
+            | ScoreAnchorMismatch
+            | WitnessedScoreStructuralError => FailureCategory::CryptographicBinding,
 
             SpecFieldMismatch => FailureCategory::SpecMismatch,
 

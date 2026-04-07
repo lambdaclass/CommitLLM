@@ -417,6 +417,448 @@ fn replay_attention_narrowed(
     a
 }
 
+/// Replay attention using witnessed pre-softmax scores from the GPU.
+///
+/// Instead of computing Q·K^T/√d, takes the GPU's actual scores as input.
+/// Applies softmax in f64, then aggregates with committed V in f64.
+/// Returns `(a_i8, a_f64)` like [`replay_attention_roped_raw`].
+///
+/// # Arguments
+/// - `witnessed_scores` — flat f32 scores, row-major `[qh * seq_len + t]`
+/// - `n_q_heads` — number of query heads (may differ from `cfg.n_q_heads`
+///   only for partial-head subsets; normally equal)
+/// - `seq_len` — number of KV positions the scores cover
+/// - `kv_cache_v_deq` — dequantized V entries per position, each length kv_dim
+/// - `scale_a` — quantization scale for output requantization
+/// - `cfg` — model config (for `d_head`, `n_kv_heads`, GQA ratio)
+pub fn replay_attention_witnessed_scores(
+    witnessed_scores: &[f32],
+    n_q_heads: usize,
+    seq_len: usize,
+    kv_cache_v_deq: &[Vec<f64>],
+    scale_a: f64,
+    cfg: &ModelConfig,
+) -> (Vec<i8>, Vec<f64>) {
+    let d_head = cfg.d_head;
+    let heads_per_kv = n_q_heads / cfg.n_kv_heads;
+    let inv_scale = if scale_a.abs() > 1e-30 {
+        1.0 / scale_a
+    } else {
+        1.0
+    };
+
+    assert_eq!(
+        witnessed_scores.len(),
+        n_q_heads * seq_len,
+        "witnessed_scores length mismatch: expected {} ({}×{}), got {}",
+        n_q_heads * seq_len,
+        n_q_heads,
+        seq_len,
+        witnessed_scores.len()
+    );
+    assert_eq!(
+        kv_cache_v_deq.len(),
+        seq_len,
+        "kv_cache_v_deq length {} != seq_len {}",
+        kv_cache_v_deq.len(),
+        seq_len
+    );
+
+    let hidden_dim = n_q_heads * d_head;
+    let mut a_i8 = vec![0i8; hidden_dim];
+    let mut a_f64 = vec![0.0f64; hidden_dim];
+
+    for qh in 0..n_q_heads {
+        let kv_head = qh / heads_per_kv;
+
+        // Extract this head's scores and convert to f64.
+        let scores_f64: Vec<f64> = (0..seq_len)
+            .map(|t| witnessed_scores[qh * seq_len + t] as f64)
+            .collect();
+
+        // Softmax in f64 (same stabilized path as replay_attention_roped_raw).
+        let max_score = scores_f64
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
+        let exp_scores: Vec<f64> = scores_f64.iter().map(|&s| (s - max_score).exp()).collect();
+        let sum_exp: f64 = exp_scores.iter().sum();
+        let weights: Vec<f64> = exp_scores.iter().map(|&e| e / sum_exp).collect();
+
+        // Weighted V aggregation in f64.
+        let mut head_out = vec![0.0f64; d_head];
+        for t in 0..seq_len {
+            let v_t = &kv_cache_v_deq[t];
+            for i in 0..d_head {
+                head_out[i] += weights[t] * v_t[kv_head * d_head + i];
+            }
+        }
+
+        // Requantize to i8.
+        for i in 0..d_head {
+            let idx = qh * d_head + i;
+            a_f64[idx] = head_out[i];
+            a_i8[idx] = (head_out[i] * inv_scale).round().clamp(-128.0, 127.0) as i8;
+        }
+    }
+
+    (a_i8, a_f64)
+}
+
+/// Compute canonical Q·K^T/√d scores in f64 from shell Q and committed K.
+///
+/// Returns flat f64 scores in row-major order: `scores[qh * seq_len + t]`.
+/// These are the verifier's independent reconstruction of pre-softmax
+/// attention scores — used to anchor witnessed scores.
+pub fn compute_canonical_scores(
+    q_roped: &[f64],
+    kv_cache_k_roped: &[Vec<f64>],
+    cfg: &ModelConfig,
+) -> Vec<f64> {
+    let d_head = cfg.d_head;
+    let heads_per_kv = cfg.n_q_heads / cfg.n_kv_heads;
+    let inv_sqrt_d = 1.0 / (d_head as f64).sqrt();
+    let seq_len = kv_cache_k_roped.len();
+
+    let mut scores = vec![0.0f64; cfg.n_q_heads * seq_len];
+
+    for qh in 0..cfg.n_q_heads {
+        let kv_head = qh / heads_per_kv;
+        for t in 0..seq_len {
+            let k_t = &kv_cache_k_roped[t];
+            let dot: f64 = (0..d_head)
+                .map(|i| q_roped[qh * d_head + i] * k_t[kv_head * d_head + i])
+                .sum();
+            scores[qh * seq_len + t] = dot * inv_sqrt_d;
+        }
+    }
+
+    scores
+}
+
+/// Compute canonical scores in GPU-like precision (f32 with fp16 truncation).
+///
+/// Mimics the GPU serving path:
+/// 1. Q/K dequantized from i32 accumulators with per-channel scales (f32)
+/// 2. Bias added in f32
+/// 3. Truncated to fp16 (matching cutlass_scaled_mm output precision)
+/// 4. Cast back to f32 for RoPE and dot product
+///
+/// This produces canonical scores that closely match what the GPU computed,
+/// unlike the f64 path which diverges due to precision differences.
+pub fn compute_canonical_scores_gpu_like(
+    q_roped_f32: &[f32],
+    kv_cache_k_roped_f32: &[Vec<f32>],
+    cfg: &ModelConfig,
+) -> Vec<f32> {
+    let d_head = cfg.d_head;
+    let heads_per_kv = cfg.n_q_heads / cfg.n_kv_heads;
+    let inv_sqrt_d = 1.0f32 / (d_head as f32).sqrt();
+    let seq_len = kv_cache_k_roped_f32.len();
+
+    let mut scores = vec![0.0f32; cfg.n_q_heads * seq_len];
+
+    for qh in 0..cfg.n_q_heads {
+        let kv_head = qh / heads_per_kv;
+        for t in 0..seq_len {
+            let k_t = &kv_cache_k_roped_f32[t];
+            let dot: f32 = (0..d_head)
+                .map(|i| q_roped_f32[qh * d_head + i] * k_t[kv_head * d_head + i])
+                .sum();
+            scores[qh * seq_len + t] = dot * inv_sqrt_d;
+        }
+    }
+
+    scores
+}
+
+/// Dequantize i32 accumulator to f32 with per-channel scales, add bias,
+/// then truncate to fp16 precision (mimicking cutlass_scaled_mm output).
+///
+/// Returns f32 values that match the GPU's fp16 output precision.
+pub fn dequant_bias_fp16(
+    acc: &[i32],
+    per_channel_scales: &[f32],
+    scale_x: f32,
+    bias: Option<&[f32]>,
+) -> Vec<f32> {
+    let mut out: Vec<f32> = acc
+        .iter()
+        .zip(per_channel_scales.iter())
+        .map(|(&a, &sw)| (a as f32) * sw * scale_x)
+        .collect();
+
+    if let Some(b) = bias {
+        for (x, &bv) in out.iter_mut().zip(b.iter()) {
+            *x += bv;
+        }
+    }
+
+    // Truncate to fp16 precision: this is the key step that matches
+    // the GPU's cutlass_scaled_mm output, which is fp16.
+    for x in out.iter_mut() {
+        *x = half::f16::from_f32(*x).to_f32();
+    }
+
+    out
+}
+
+/// Dequantize i32 accumulators → f32, add bias, truncate through **bf16**.
+///
+/// Same as `dequant_bias_fp16` but uses bf16 narrowing to match models that
+/// run in bfloat16 (e.g. Qwen on vLLM with `dtype=torch.bfloat16`).
+/// The GPU's cutlass output is bf16, so narrowing through bf16 matches the
+/// actual precision the GPU produces.
+pub fn dequant_bias_bf16(
+    acc: &[i32],
+    per_channel_scales: &[f32],
+    scale_x: f32,
+    bias: Option<&[f32]>,
+) -> Vec<f32> {
+    let mut out: Vec<f32> = acc
+        .iter()
+        .zip(per_channel_scales.iter())
+        .map(|(&a, &sw)| (a as f32) * sw * scale_x)
+        .collect();
+
+    if let Some(b) = bias {
+        for (x, &bv) in out.iter_mut().zip(b.iter()) {
+            *x += bv;
+        }
+    }
+
+    // Truncate to bf16 precision: matches the GPU's bfloat16 output dtype.
+    for x in out.iter_mut() {
+        *x = half::bf16::from_f32(*x).to_f32();
+    }
+
+    out
+}
+
+/// Dequant+bias with multiple bf16 cast-order strategies for diagnostics.
+///
+/// Returns a map of strategy name → f32 output vector. Each strategy represents
+/// a plausible interpretation of what CUTLASS `scaled_mm` does internally:
+///
+/// - `"bf16_final"`: `bf16(f32_dequant + f32_bias)` — single bf16 cast at the end
+/// - `"bf16_before_bias"`: `bf16(f32_dequant) + bf16(bias)` — cast dequant to bf16, add bias in bf16
+/// - `"bf16_dequant_f32_bias"`: `bf16(bf16(f32_dequant) + f32_bias)` — cast dequant to bf16, add bias in f32, recast
+/// - `"f32_all"`: `f32_dequant + f32_bias` — no bf16 narrowing (full precision baseline)
+/// - `"bf16_per_mult"`: `bf16(bf16(a * sw) * sx) + bf16(bias)` — bf16 after each multiply
+pub fn dequant_bias_cast_variants(
+    acc: &[i32],
+    per_channel_scales: &[f32],
+    scale_x: f32,
+    bias: Option<&[f32]>,
+) -> Vec<(&'static str, Vec<f32>)> {
+    let bf16 = |v: f32| -> f32 { half::bf16::from_f32(v).to_f32() };
+
+    // Strategy A: bf16(f32_dequant + f32_bias) — current dequant_bias_bf16
+    let a = {
+        let mut out: Vec<f32> = acc.iter().zip(per_channel_scales.iter())
+            .map(|(&a, &sw)| (a as f32) * sw * scale_x)
+            .collect();
+        if let Some(b) = bias {
+            for (x, &bv) in out.iter_mut().zip(b.iter()) { *x += bv; }
+        }
+        for x in out.iter_mut() { *x = bf16(*x); }
+        out
+    };
+
+    // Strategy B: bf16(f32_dequant) + bf16(bias) — truncate dequant, truncate bias, add in bf16
+    let b = {
+        let mut out: Vec<f32> = acc.iter().zip(per_channel_scales.iter())
+            .map(|(&a, &sw)| bf16((a as f32) * sw * scale_x))
+            .collect();
+        if let Some(bi) = bias {
+            for (x, &bv) in out.iter_mut().zip(bi.iter()) {
+                *x = bf16(*x + bf16(bv));
+            }
+        }
+        out
+    };
+
+    // Strategy C: bf16(bf16(f32_dequant) + f32_bias) — truncate dequant, add bias in f32, truncate again
+    let c = {
+        let mut out: Vec<f32> = acc.iter().zip(per_channel_scales.iter())
+            .map(|(&a, &sw)| bf16((a as f32) * sw * scale_x))
+            .collect();
+        if let Some(bi) = bias {
+            for (x, &bv) in out.iter_mut().zip(bi.iter()) {
+                *x = bf16(*x + bv);
+            }
+        }
+        out
+    };
+
+    // Strategy D: f32 all — no bf16, full precision baseline
+    let d = {
+        let mut out: Vec<f32> = acc.iter().zip(per_channel_scales.iter())
+            .map(|(&a, &sw)| (a as f32) * sw * scale_x)
+            .collect();
+        if let Some(bi) = bias {
+            for (x, &bv) in out.iter_mut().zip(bi.iter()) { *x += bv; }
+        }
+        out
+    };
+
+    // Strategy E: bf16 after each multiply — bf16(bf16(a * sw) * sx) + bf16(bias)
+    let e = {
+        let mut out: Vec<f32> = acc.iter().zip(per_channel_scales.iter())
+            .map(|(&a, &sw)| bf16(bf16((a as f32) * sw) * scale_x))
+            .collect();
+        if let Some(bi) = bias {
+            for (x, &bv) in out.iter_mut().zip(bi.iter()) {
+                *x = bf16(*x + bf16(bv));
+            }
+        }
+        out
+    };
+
+    vec![
+        ("bf16_final", a),
+        ("bf16_before_bias", b),
+        ("bf16_dequant_f32_bias", c),
+        ("f32_all", d),
+        ("bf16_per_mult", e),
+    ]
+}
+
+/// Apply RoPE to a vector in f32 precision (matching GPU score witness path).
+///
+/// `vec_f32` has length `n_heads * d_head`. Returns RoPE'd vector in f32.
+pub fn apply_rope_f32(
+    vec_f32: &[f32],
+    n_heads: usize,
+    position: usize,
+    cfg: &ModelConfig,
+) -> Vec<f32> {
+    let d_head = cfg.d_head;
+    let half = d_head / 2;
+    assert_eq!(vec_f32.len(), n_heads * d_head);
+
+    // Compute inv_freq in f32 (matching GPU capture.py's compute_witnessed_scores).
+    let inv_freq: Vec<f32> = cfg
+        .scaled_inv_freq()
+        .iter()
+        .map(|&f| f as f32)
+        .collect();
+
+    let mut out = vec![0.0f32; vec_f32.len()];
+    for h in 0..n_heads {
+        let head = &vec_f32[h * d_head..(h + 1) * d_head];
+        let base = h * d_head;
+        for i in 0..half {
+            let angle = (position as f32) * inv_freq[i];
+            let cos_f = angle.cos();
+            let sin_f = angle.sin();
+            out[base + i] = head[i] * cos_f - head[i + half] * sin_f;
+            out[base + i + half] = head[i + half] * cos_f + head[i] * sin_f;
+        }
+    }
+
+    out
+}
+
+/// Apply RoPE in f32, then truncate each output element to bf16.
+///
+/// Matches the GPU's KV cache storage: after RoPE, K is stored as bf16 in the
+/// cache. The RoPE arithmetic (multiply/add) happens in f32 (promoted from bf16
+/// inputs), but the result is written back as bf16.
+pub fn apply_rope_bf16(
+    vec_f32: &[f32],
+    n_heads: usize,
+    position: usize,
+    cfg: &ModelConfig,
+) -> Vec<f32> {
+    let d_head = cfg.d_head;
+    let half = d_head / 2;
+    assert_eq!(vec_f32.len(), n_heads * d_head);
+
+    let inv_freq: Vec<f32> = cfg
+        .scaled_inv_freq()
+        .iter()
+        .map(|&f| f as f32)
+        .collect();
+
+    let bf16 = |v: f32| -> f32 { half::bf16::from_f32(v).to_f32() };
+
+    let mut out = vec![0.0f32; vec_f32.len()];
+    for h in 0..n_heads {
+        let head = &vec_f32[h * d_head..(h + 1) * d_head];
+        let base = h * d_head;
+        for i in 0..half {
+            let angle = (position as f32) * inv_freq[i];
+            let cos_f = angle.cos();
+            let sin_f = angle.sin();
+            // RoPE in f32, then truncate to bf16 (matching KV cache storage).
+            out[base + i] = bf16(head[i] * cos_f - head[i + half] * sin_f);
+            out[base + i + half] = bf16(head[i + half] * cos_f + head[i] * sin_f);
+        }
+    }
+
+    out
+}
+
+/// Per-layer score anchoring result.
+///
+/// Compares witnessed pre-softmax scores against canonical verifier-reconstructed
+/// scores (from shell Q and committed K). A max gap exceeding the threshold
+/// indicates the witnessed scores may have been tampered with.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ScoreAnchorStats {
+    pub layer: usize,
+    /// Max |witnessed - canonical| across all (head, position) entries.
+    pub max_gap: f64,
+    /// Mean |witnessed - canonical|.
+    pub mean_gap: f64,
+    /// Number of score elements compared.
+    pub n_elements: usize,
+    /// Per-head max gap.
+    pub per_head_max_gap: Vec<f64>,
+}
+
+/// Compare witnessed scores against canonical scores for one layer.
+///
+/// Returns anchoring statistics. The caller decides the threshold.
+pub fn anchor_witnessed_scores(
+    witnessed: &[f32],
+    canonical: &[f64],
+    n_q_heads: usize,
+    seq_len: usize,
+    layer: usize,
+) -> ScoreAnchorStats {
+    assert_eq!(witnessed.len(), n_q_heads * seq_len);
+    assert_eq!(canonical.len(), n_q_heads * seq_len);
+
+    let mut max_gap = 0.0f64;
+    let mut sum_gap = 0.0f64;
+    let mut per_head_max = vec![0.0f64; n_q_heads];
+
+    for qh in 0..n_q_heads {
+        for t in 0..seq_len {
+            let idx = qh * seq_len + t;
+            let gap = (witnessed[idx] as f64 - canonical[idx]).abs();
+            if gap > max_gap {
+                max_gap = gap;
+            }
+            sum_gap += gap;
+            if gap > per_head_max[qh] {
+                per_head_max[qh] = gap;
+            }
+        }
+    }
+
+    let n = n_q_heads * seq_len;
+    ScoreAnchorStats {
+        layer,
+        max_gap,
+        mean_gap: if n > 0 { sum_gap / n as f64 } else { 0.0 },
+        n_elements: n,
+        per_head_max_gap: per_head_max,
+    }
+}
+
 /// Per-element diff statistics between claimed and replayed attention outputs.
 ///
 /// Used by corridor measurement to characterize the FP16-vs-f64 divergence
@@ -704,5 +1146,266 @@ mod tests {
         let a = vec![1i8, 2, 3];
         let b = vec![1i8, 2];
         assert!(measure_attention_diff(&a, &b, 0, 0).is_err());
+    }
+
+    // ──── Witnessed score replay tests ────
+
+    #[test]
+    fn test_witnessed_single_token_equals_v() {
+        // With one token, softmax([any_score]) = [1.0], so output = V.
+        let cfg = toy_cfg();
+        let seq_len = 1;
+        // Any scores — with one position, softmax is always [1.0].
+        let scores: Vec<f32> = vec![42.0; cfg.n_q_heads * seq_len];
+        // V values: distinct per KV-head dim
+        let v = vec![
+            3.0f64, 7.0, // kv_head 0: d_head=2
+            -2.0, 5.0, // kv_head 1: d_head=2
+        ];
+        let scale_a = 1.0;
+
+        let (a_i8, a_f64) =
+            replay_attention_witnessed_scores(&scores, cfg.n_q_heads, seq_len, &[v.clone()], scale_a, &cfg);
+
+        assert_eq!(a_i8.len(), cfg.hidden_dim);
+        let heads_per_kv = cfg.n_q_heads / cfg.n_kv_heads;
+        for qh in 0..cfg.n_q_heads {
+            let kv_head = qh / heads_per_kv;
+            for i in 0..cfg.d_head {
+                let expected = v[kv_head * cfg.d_head + i];
+                assert!(
+                    (a_f64[qh * cfg.d_head + i] - expected).abs() < 1e-10,
+                    "qh={} i={}: expected {}, got {}",
+                    qh,
+                    i,
+                    expected,
+                    a_f64[qh * cfg.d_head + i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_witnessed_matches_full_replay_exact_scores() {
+        // When witnessed scores are computed from exact f64 Q·K^T/√d,
+        // the witnessed-score replay must produce identical a_i8 as full replay.
+        let cfg = toy_cfg();
+        let d_head = cfg.d_head;
+        let heads_per_kv = cfg.n_q_heads / cfg.n_kv_heads;
+        let inv_sqrt_d = 1.0 / (d_head as f64).sqrt();
+
+        // Build synthetic Q (post-RoPE, f64) and KV cache
+        let q_roped: Vec<f64> = (0..cfg.hidden_dim)
+            .map(|i| (i as f64 * 0.1) - 0.5)
+            .collect();
+        let kv_k: Vec<Vec<f64>> = (0..3)
+            .map(|t| {
+                (0..cfg.kv_dim)
+                    .map(|i| ((t * cfg.kv_dim + i) as f64 * 0.05) - 0.3)
+                    .collect()
+            })
+            .collect();
+        let kv_v: Vec<Vec<f64>> = (0..3)
+            .map(|t| {
+                (0..cfg.kv_dim)
+                    .map(|i| ((t * cfg.kv_dim + i) as f64 * 0.2) - 1.0)
+                    .collect()
+            })
+            .collect();
+        let scale_a = 0.05;
+
+        // Compute exact f64 scores per head
+        let seq_len = kv_k.len();
+        let mut exact_scores = vec![0.0f32; cfg.n_q_heads * seq_len];
+        for qh in 0..cfg.n_q_heads {
+            let kv_head = qh / heads_per_kv;
+            for t in 0..seq_len {
+                let dot: f64 = (0..d_head)
+                    .map(|i| q_roped[qh * d_head + i] * kv_k[t][kv_head * d_head + i])
+                    .sum();
+                exact_scores[qh * seq_len + t] = (dot * inv_sqrt_d) as f32;
+            }
+        }
+
+        // Full replay (reference)
+        let (ref_i8, _) = replay_attention_roped_raw(
+            &q_roped, &kv_k, &kv_v, scale_a, &cfg,
+        );
+
+        // Witnessed replay with exact scores
+        let (wit_i8, _) = replay_attention_witnessed_scores(
+            &exact_scores, cfg.n_q_heads, seq_len, &kv_v, scale_a, &cfg,
+        );
+
+        // They should match exactly when scores are exact f64→f32→f64 roundtrip.
+        // Small diffs from f32 truncation are acceptable (≤1).
+        let max_diff: i16 = ref_i8
+            .iter()
+            .zip(wit_i8.iter())
+            .map(|(&a, &b)| (a as i16 - b as i16).abs())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_diff <= 1,
+            "witnessed vs full replay max diff = {} (expected ≤1 from f32 truncation)",
+            max_diff
+        );
+    }
+
+    #[test]
+    fn test_canonical_scores_matches_replay_scores() {
+        // Verify compute_canonical_scores produces the same scores as
+        // replay_attention_roped_raw's internal Q·K^T/√d computation.
+        let cfg = ModelConfig::toy(); // 8 Q heads, 2 KV heads, d_head=2
+        let q_roped = vec![1.0f64, 0.5, -0.3, 0.7, 0.2, 0.9, -0.1, 0.4,
+                           0.6, -0.2, 0.3, 0.8, -0.5, 0.1, 0.7, -0.3];
+        let kv_k = vec![
+            vec![0.5, 0.3, -0.1, 0.6],  // pos 0, 2 KV heads × d_head=2
+            vec![-0.2, 0.8, 0.4, -0.3],  // pos 1
+        ];
+
+        let canonical = compute_canonical_scores(&q_roped, &kv_k, &cfg);
+        assert_eq!(canonical.len(), cfg.n_q_heads * 2);
+
+        // Check a few values manually.
+        // Head 0 (KV head 0): Q=[1.0, 0.5], K0=[0.5, 0.3], K1=[-0.2, 0.8]
+        let inv_sqrt_d = 1.0 / (2.0f64).sqrt();
+        let expected_h0_t0 = (1.0 * 0.5 + 0.5 * 0.3) * inv_sqrt_d;
+        let expected_h0_t1 = (1.0 * -0.2 + 0.5 * 0.8) * inv_sqrt_d;
+        assert!((canonical[0] - expected_h0_t0).abs() < 1e-12);
+        assert!((canonical[1] - expected_h0_t1).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_anchor_honest_scores_accepted() {
+        // Honest witnessed scores = canonical scores truncated to f32.
+        // The gap should be tiny (f64→f32 rounding only).
+        let cfg = ModelConfig::toy();
+        let q_roped = vec![1.0f64, 0.5, -0.3, 0.7, 0.2, 0.9, -0.1, 0.4,
+                           0.6, -0.2, 0.3, 0.8, -0.5, 0.1, 0.7, -0.3];
+        let kv_k = vec![
+            vec![0.5, 0.3, -0.1, 0.6],
+            vec![-0.2, 0.8, 0.4, -0.3],
+            vec![0.1, -0.5, 0.7, 0.2],
+        ];
+
+        let canonical = compute_canonical_scores(&q_roped, &kv_k, &cfg);
+        // "Honest" witnessed = canonical truncated to f32 (simulates GPU fp16→f32 path)
+        let witnessed: Vec<f32> = canonical.iter().map(|&v| v as f32).collect();
+
+        let stats = anchor_witnessed_scores(&witnessed, &canonical, cfg.n_q_heads, 3, 0);
+        // f64→f32 gap should be negligible (< 1e-6 for small values)
+        assert!(
+            stats.max_gap < 1e-6,
+            "honest scores gap {} too large (expected < 1e-6)",
+            stats.max_gap
+        );
+    }
+
+    #[test]
+    fn test_anchor_tampered_scores_rejected() {
+        // Tampered: add 1.0 to all scores (shifts softmax weights).
+        let cfg = ModelConfig::toy();
+        let q_roped = vec![1.0f64, 0.5, -0.3, 0.7, 0.2, 0.9, -0.1, 0.4,
+                           0.6, -0.2, 0.3, 0.8, -0.5, 0.1, 0.7, -0.3];
+        let kv_k = vec![
+            vec![0.5, 0.3, -0.1, 0.6],
+            vec![-0.2, 0.8, 0.4, -0.3],
+        ];
+
+        let canonical = compute_canonical_scores(&q_roped, &kv_k, &cfg);
+        // Tampered: offset by 1.0
+        let tampered: Vec<f32> = canonical.iter().map(|&v| (v + 1.0) as f32).collect();
+
+        let stats = anchor_witnessed_scores(&tampered, &canonical, cfg.n_q_heads, 2, 0);
+        assert!(
+            stats.max_gap > 0.9,
+            "tampered scores gap {} too small (expected > 0.9)",
+            stats.max_gap
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion `left == right` failed")]
+    fn test_anchor_wrong_length_panics() {
+        let cfg = ModelConfig::toy();
+        let canonical = vec![0.0f64; cfg.n_q_heads * 3]; // 3 positions
+        let wrong_len = vec![0.0f32; cfg.n_q_heads * 2]; // 2 positions — mismatch
+        anchor_witnessed_scores(&wrong_len, &canonical, cfg.n_q_heads, 3, 0);
+    }
+
+    #[test]
+    fn test_dequant_bias_fp16_truncates() {
+        // Verify fp16 truncation actually reduces precision.
+        let acc = vec![12345i32, -67890, 100000];
+        let scales = vec![0.00123f32, 0.00456, 0.00789];
+        let scale_x = 0.5f32;
+        let bias = vec![100.0f32, -200.0, 300.0];
+
+        let result = dequant_bias_fp16(&acc, &scales, scale_x, Some(&bias));
+        assert_eq!(result.len(), 3);
+
+        // Each result should be representable in fp16 (no extra f32 precision bits).
+        for &v in &result {
+            let roundtripped = half::f16::from_f32(v).to_f32();
+            assert_eq!(v, roundtripped, "value {v} should be fp16-exact after truncation");
+        }
+    }
+
+    #[test]
+    fn test_apply_rope_f32_matches_f64_closely() {
+        let cfg = ModelConfig::toy();
+        let d = cfg.d_head;
+        let n_heads = cfg.n_q_heads;
+        let q_f64: Vec<f64> = (0..n_heads * d).map(|i| (i as f64) * 0.01).collect();
+        let q_f32: Vec<f32> = q_f64.iter().map(|&x| x as f32).collect();
+
+        let roped_f64 = crate::rope::apply_rope_q(&q_f64, 42, &cfg);
+        let roped_f32 = apply_rope_f32(&q_f32, n_heads, 42, &cfg);
+
+        assert_eq!(roped_f64.len(), roped_f32.len());
+        let max_diff: f64 = roped_f64
+            .iter()
+            .zip(roped_f32.iter())
+            .map(|(&a, &b)| (a - b as f64).abs())
+            .fold(0.0, f64::max);
+        // f32 RoPE should be very close to f64 RoPE for small values.
+        assert!(
+            max_diff < 0.01,
+            "f32 vs f64 RoPE max diff {max_diff} too large"
+        );
+    }
+
+    #[test]
+    fn test_gpu_like_scores_match_f64_scores_closely() {
+        let cfg = ModelConfig::toy();
+        let d = cfg.d_head;
+        let seq_len = 5;
+
+        // Build Q and K in both precisions.
+        let q_f64: Vec<f64> = (0..cfg.n_q_heads * d).map(|i| (i as f64) * 0.1).collect();
+        let q_f32: Vec<f32> = q_f64.iter().map(|&x| x as f32).collect();
+        let kv_f64: Vec<Vec<f64>> = (0..seq_len)
+            .map(|t| (0..cfg.n_kv_heads * d).map(|i| ((t * 100 + i) as f64) * 0.1).collect())
+            .collect();
+        let kv_f32: Vec<Vec<f32>> = kv_f64
+            .iter()
+            .map(|v| v.iter().map(|&x| x as f32).collect())
+            .collect();
+
+        let scores_f64 = compute_canonical_scores(&q_f64, &kv_f64, &cfg);
+        let scores_f32 = compute_canonical_scores_gpu_like(&q_f32, &kv_f32, &cfg);
+
+        assert_eq!(scores_f64.len(), scores_f32.len());
+        let max_diff: f64 = scores_f64
+            .iter()
+            .zip(scores_f32.iter())
+            .map(|(&a, &b)| (a - b as f64).abs())
+            .fold(0.0, f64::max);
+        // Scores should be close (same data, different precision).
+        assert!(
+            max_diff < 0.1,
+            "f64 vs f32 scores max diff {max_diff} too large"
+        );
     }
 }

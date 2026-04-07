@@ -32,7 +32,7 @@ use crate::merkle::MerkleProof;
 ///
 /// The core protocol, receipt format, and verifier architecture are identical
 /// across profiles — only the numerical parameters differ.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VerificationProfile {
     /// Profile identifier, e.g. "qwen-w8a8", "llama-w8a8".
     pub name: String,
@@ -56,6 +56,14 @@ pub struct VerificationProfile {
     /// Whether this profile requires score anchoring for strong verification
     /// claims at long context (roadmap #8).
     pub requires_score_anchoring: bool,
+
+    /// Maximum allowed score anchor gap (L-inf over all heads and positions)
+    /// for witnessed-score replay. When `Some(t)`, the verifier computes
+    /// canonical Q·K^T/√d from shell Q and committed K, then checks
+    /// `|witnessed - canonical| < t`. If the anchor passes, witnessed scores
+    /// are used for softmax + V aggregation (tighter corridor).
+    /// When `None`, witnessed scores are ignored in verification.
+    pub score_anchor_threshold: Option<f32>,
 }
 
 impl VerificationProfile {
@@ -71,6 +79,7 @@ impl VerificationProfile {
             attention_tolerance: 10,
             max_validated_context: 1164,
             requires_score_anchoring: false,
+            score_anchor_threshold: None, // anchor gap ~14, too loose for strong tier
         }
     }
 
@@ -88,6 +97,7 @@ impl VerificationProfile {
             attention_tolerance: 10,
             max_validated_context: 1165,
             requires_score_anchoring: false,
+            score_anchor_threshold: Some(1.0), // anchor gap ~0.09, well within bound
         }
     }
 
@@ -737,6 +747,15 @@ impl VerifierKey {
         }
         0
     }
+
+    /// Score anchor threshold from the verification profile.
+    /// Returns `None` when no profile is set or the profile has no threshold
+    /// (witnessed scores are not used in verification).
+    pub fn score_anchor_threshold(&self) -> Option<f32> {
+        self.verification_profile
+            .as_ref()
+            .and_then(|p| p.score_anchor_threshold)
+    }
     /// Random vector r for any matrix type (including LmHead).
     pub fn r_for(&self, mt: MatrixType) -> &[Fp] {
         let idx = MatrixType::ALL.iter().position(|&m| m == mt).unwrap();
@@ -952,6 +971,25 @@ pub struct KvEntry {
     pub v_deq: Vec<f64>,
 }
 
+/// Pre-softmax attention scores witnessed from GPU computation.
+///
+/// For one layer at one token position, contains the raw Q·K^T/√d scores
+/// as computed by the GPU in fp16 (stored as f32 after D2H transfer).
+/// Layout: row-major `scores[qh * seq_len + t]` for query head `qh`
+/// attending to KV position `t`.
+///
+/// The verifier uses these instead of replaying Q·K^T, eliminating the
+/// f64-vs-fp16 arithmetic mismatch in the score computation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WitnessedScores {
+    /// Flat f32 scores, row-major: `scores[qh * seq_len + t]`.
+    pub scores: Vec<f32>,
+    /// Number of query heads (for reshaping).
+    pub n_q_heads: usize,
+    /// Sequence length (number of KV positions attended to).
+    pub seq_len: usize,
+}
+
 /// Per-layer shell intermediates opened by the prover at audit time.
 ///
 /// The prover reconstructs these from the committed retained `a` + weights.
@@ -1164,6 +1202,14 @@ pub struct V4AuditResponse {
     /// verifiable against `commitment.kv_roots[layer]`.
     #[serde(default)]
     pub kv_proofs: Option<Vec<Vec<MerkleProof>>>,
+
+    // ──── Score witnessing (generated-token exact scores) ────
+    /// Per-layer witnessed pre-softmax attention scores for the challenged token.
+    /// When present, the verifier uses these for softmax + V aggregation instead
+    /// of replaying Q·K^T/√d, eliminating the score arithmetic mismatch.
+    /// Outer index: layer. Each entry covers all Q-heads × all KV positions.
+    #[serde(default)]
+    pub witnessed_scores: Option<Vec<WitnessedScores>>,
 }
 
 // ===========================================================================

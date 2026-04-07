@@ -880,6 +880,764 @@ pub fn measure_corridor_committed_kv_f32(
     measure_corridor_committed_kv_precision(key, response, scale_overrides, ReplayPrecision::F32)
 }
 
+/// Measure the attention corridor using witnessed pre-softmax scores.
+///
+/// Instead of replaying Q·K^T/√d from committed Q and KV entries, uses the
+/// witnessed scores attached to the audit response. This eliminates the
+/// score arithmetic mismatch (fp16 GPU vs f64 verifier) — the remaining
+/// gap comes only from softmax + V aggregation precision.
+///
+/// Requires both `witnessed_scores` and `kv_entries` (for committed V) in
+/// the audit response.
+pub fn measure_corridor_witnessed_scores(
+    key: &VerifierKey,
+    response: &V4AuditResponse,
+    _scale_overrides: Option<&CorridorScaleOverrides>,
+) -> Result<CorridorReport, String> {
+    let witnessed = response
+        .witnessed_scores
+        .as_ref()
+        .ok_or("no witnessed_scores in audit response")?;
+
+    let kv_entries = response
+        .kv_entries
+        .as_ref()
+        .ok_or("no kv_entries in audit response (need committed V)")?;
+
+    let cfg = &key.config;
+    let n_layers = cfg
+        .n_layers
+        .min(witnessed.len())
+        .min(kv_entries.len())
+        .min(response.retained.layers.len());
+    let token_pos = response.token_index as usize;
+
+    let mut all_stats = Vec::new();
+
+    for layer_idx in 0..n_layers {
+        let ws = &witnessed[layer_idx];
+        let layer_kv = &kv_entries[layer_idx];
+        let rs = &response.retained.layers[layer_idx];
+
+        let n_positions = (token_pos + 1).min(layer_kv.len());
+        let kv_v: Vec<Vec<f64>> = layer_kv[..n_positions]
+            .iter()
+            .map(|e| e.v_deq.clone())
+            .collect();
+
+        if kv_v.is_empty() {
+            continue;
+        }
+
+        // Use witnessed scores for replay (skip Q·K^T).
+        let (replayed, _a_f64) =
+            verilm_core::attention::replay_attention_witnessed_scores(
+                &ws.scores,
+                ws.n_q_heads,
+                ws.seq_len,
+                &kv_v,
+                rs.scale_a as f64,
+                cfg,
+            );
+
+        all_stats.push(measure_attention_diff(
+            &rs.a, &replayed, layer_idx, token_pos,
+        )?);
+    }
+
+    build_report(all_stats, n_layers)
+}
+
+/// Score anchoring report: compares witnessed scores against canonical
+/// Q·K^T/√d reconstructed from shell Q + committed K.
+///
+/// This is the security-critical check: a prover who provides fake scores
+/// to manipulate softmax weights will be caught here, because the forged
+/// scores won't match the verifier's independent reconstruction from
+/// committed Q and K values.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ScoreAnchorReport {
+    /// Per-layer anchoring statistics.
+    pub layers: Vec<verilm_core::attention::ScoreAnchorStats>,
+    /// Global max |witnessed - canonical| across all layers.
+    pub global_max_gap: f64,
+    /// Number of layers checked.
+    pub n_layers: usize,
+}
+
+/// Verify that witnessed scores are consistent with shell-verified Q and
+/// committed K.
+///
+/// Reconstructs canonical Q·K^T/√d from the shell opening's Q accumulator
+/// (dequantized + RoPE'd) and committed KV entries' k_roped, then compares
+/// against the witnessed pre-softmax scores.
+///
+/// The gap is the known fp16-vs-f64 arithmetic mismatch. A large gap means
+/// the prover provided scores inconsistent with the committed QK values —
+/// the verifier should reject.
+pub fn verify_witnessed_score_anchoring(
+    key: &VerifierKey,
+    response: &V4AuditResponse,
+    scale_overrides: Option<&CorridorScaleOverrides>,
+) -> Result<ScoreAnchorReport, String> {
+    let witnessed = response
+        .witnessed_scores
+        .as_ref()
+        .ok_or("no witnessed_scores in audit response")?;
+
+    let kv_entries = response
+        .kv_entries
+        .as_ref()
+        .ok_or("no kv_entries in audit response")?;
+
+    let shell = response
+        .shell_opening
+        .as_ref()
+        .ok_or("no shell_opening in audit response")?;
+
+    let cfg = &key.config;
+    let n_layers = cfg
+        .n_layers
+        .min(witnessed.len())
+        .min(kv_entries.len())
+        .min(shell.layers.len());
+    let token_pos = response.token_index as usize;
+
+    let mut all_stats = Vec::new();
+    let mut global_max_gap = 0.0f64;
+
+    for layer_idx in 0..n_layers {
+        let ws = &witnessed[layer_idx];
+        let layer_kv = &kv_entries[layer_idx];
+        let sl = &shell.layers[layer_idx];
+
+        // Need Q accumulator from shell opening.
+        let q_acc = match &sl.q {
+            Some(q) => q,
+            None => continue,
+        };
+
+        // Build committed K cache (already dequantized + RoPE'd f64).
+        let n_positions = (token_pos + 1).min(layer_kv.len());
+        let kv_k: Vec<Vec<f64>> = layer_kv[..n_positions]
+            .iter()
+            .map(|e| e.k_roped.clone())
+            .collect();
+
+        if kv_k.is_empty() || n_positions != ws.seq_len {
+            continue;
+        }
+
+        // Reconstruct canonical Q (dequant + RoPE) from shell opening.
+        let q_f64 = dequant_one(
+            key,
+            layer_idx,
+            MatrixType::Wq,
+            q_acc,
+            sl.scale_x_attn,
+            scale_overrides.map(|o| o.wq[layer_idx].as_slice()),
+        );
+        let q_f64 = add_qkv_bias(key, layer_idx, MatrixType::Wq, q_f64);
+        let q_roped = verilm_core::rope::apply_rope_q(&q_f64, token_pos, cfg);
+
+        // Compute canonical scores: Q·K^T/√d in f64.
+        let canonical = verilm_core::attention::compute_canonical_scores(
+            &q_roped, &kv_k, cfg,
+        );
+
+        // Compare witnessed vs canonical.
+        let stats = verilm_core::attention::anchor_witnessed_scores(
+            &ws.scores,
+            &canonical,
+            ws.n_q_heads,
+            ws.seq_len,
+            layer_idx,
+        );
+
+        if stats.max_gap > global_max_gap {
+            global_max_gap = stats.max_gap;
+        }
+        all_stats.push(stats);
+    }
+
+    Ok(ScoreAnchorReport {
+        n_layers: all_stats.len(),
+        global_max_gap,
+        layers: all_stats,
+    })
+}
+
+/// Verify witnessed scores using GPU-matched precision anchoring.
+///
+/// Unlike `verify_witnessed_score_anchoring` (which uses f64 throughout),
+/// this reconstructs Q and K from shell i32 accumulators in GPU-like precision:
+///
+/// 1. Per-channel dequant in f32
+/// 2. Bias add in f32
+/// 3. Truncate to fp16 (matching cutlass_scaled_mm output)
+/// 4. RoPE in f32 (matching score witness capture code)
+/// 5. Dot product in f32
+///
+/// For K at the generated token position: uses shell k accumulator (same path).
+/// For K at historical positions: uses committed K_roped cast to f32.
+///
+/// This should produce anchoring gaps close to what Llama achieves (~0.1),
+/// even for models with large bias values (Qwen).
+pub fn verify_witnessed_score_anchoring_gpu_like(
+    key: &VerifierKey,
+    response: &V4AuditResponse,
+    scale_overrides: Option<&CorridorScaleOverrides>,
+) -> Result<ScoreAnchorReport, String> {
+    let witnessed = response
+        .witnessed_scores
+        .as_ref()
+        .ok_or("no witnessed_scores in audit response")?;
+
+    let kv_entries = response
+        .kv_entries
+        .as_ref()
+        .ok_or("no kv_entries in audit response")?;
+
+    let shell = response
+        .shell_opening
+        .as_ref()
+        .ok_or("no shell_opening in audit response")?;
+
+    let cfg = &key.config;
+    let n_layers = cfg
+        .n_layers
+        .min(witnessed.len())
+        .min(kv_entries.len())
+        .min(shell.layers.len());
+    let token_pos = response.token_index as usize;
+
+    let mut all_stats = Vec::new();
+    let mut global_max_gap = 0.0f64;
+
+    for layer_idx in 0..n_layers {
+        let ws = &witnessed[layer_idx];
+        let layer_kv = &kv_entries[layer_idx];
+        let sl = &shell.layers[layer_idx];
+
+        // Need Q accumulator from shell opening.
+        let q_acc = match &sl.q {
+            Some(q) => q,
+            None => continue,
+        };
+
+        let n_positions = (token_pos + 1).min(layer_kv.len());
+        if n_positions == 0 || n_positions != ws.seq_len {
+            continue;
+        }
+
+        // Get per-channel Q scales.
+        let q_scales = if let Some(o) = scale_overrides {
+            &o.wq[layer_idx]
+        } else if let Some(pc) = key.per_channel_scales_for(layer_idx, MatrixType::Wq) {
+            pc
+        } else {
+            // Fall back to per-tensor (less accurate).
+            continue;
+        };
+
+        let q_bias = key.qkv_bias_for(layer_idx, MatrixType::Wq);
+
+        // Reconstruct Q in GPU-like precision: dequant → bias → fp16 → f32 → RoPE.
+        let q_f32 = verilm_core::attention::dequant_bias_fp16(
+            q_acc,
+            q_scales,
+            sl.scale_x_attn,
+            q_bias,
+        );
+        let q_roped_f32 = verilm_core::attention::apply_rope_f32(
+            &q_f32,
+            cfg.n_q_heads,
+            token_pos,
+            cfg,
+        );
+
+        // Build K cache in f32.
+        // For the generated token position: reconstruct from shell k acc if available.
+        // For all other positions: cast committed K_roped to f32.
+        let mut kv_k_f32: Vec<Vec<f32>> = Vec::with_capacity(n_positions);
+
+        for t in 0..n_positions {
+            if t == token_pos {
+                // Reconstruct from shell k accumulator in GPU-like precision.
+                if let Some(k_acc) = &sl.k {
+                    let k_scales = if let Some(o) = scale_overrides {
+                        &o.wk[layer_idx]
+                    } else if let Some(pc) =
+                        key.per_channel_scales_for(layer_idx, MatrixType::Wk)
+                    {
+                        pc
+                    } else {
+                        // Fall back to committed K_roped.
+                        kv_k_f32.push(
+                            layer_kv[t].k_roped.iter().map(|&x| x as f32).collect(),
+                        );
+                        continue;
+                    };
+                    let k_bias = key.qkv_bias_for(layer_idx, MatrixType::Wk);
+                    let k_f32 = verilm_core::attention::dequant_bias_fp16(
+                        k_acc,
+                        k_scales,
+                        sl.scale_x_attn,
+                        k_bias,
+                    );
+                    let k_roped_f32 = verilm_core::attention::apply_rope_f32(
+                        &k_f32,
+                        cfg.n_kv_heads,
+                        token_pos,
+                        cfg,
+                    );
+                    kv_k_f32.push(k_roped_f32);
+                } else {
+                    // No shell k acc, use committed.
+                    kv_k_f32.push(
+                        layer_kv[t].k_roped.iter().map(|&x| x as f32).collect(),
+                    );
+                }
+            } else {
+                // Historical position: cast committed K_roped f64 → f32.
+                kv_k_f32.push(
+                    layer_kv[t].k_roped.iter().map(|&x| x as f32).collect(),
+                );
+            }
+        }
+
+        // Compute canonical scores in f32.
+        let canonical_f32 = verilm_core::attention::compute_canonical_scores_gpu_like(
+            &q_roped_f32,
+            &kv_k_f32,
+            cfg,
+        );
+
+        // Compare witnessed (f32) vs canonical (f32).
+        // Convert canonical to f64 for the anchor_witnessed_scores function.
+        let canonical_f64: Vec<f64> = canonical_f32.iter().map(|&x| x as f64).collect();
+        let stats = verilm_core::attention::anchor_witnessed_scores(
+            &ws.scores,
+            &canonical_f64,
+            ws.n_q_heads,
+            ws.seq_len,
+            layer_idx,
+        );
+
+        if stats.max_gap > global_max_gap {
+            global_max_gap = stats.max_gap;
+        }
+        all_stats.push(stats);
+    }
+
+    Ok(ScoreAnchorReport {
+        n_layers: all_stats.len(),
+        global_max_gap,
+        layers: all_stats,
+    })
+}
+
+/// Verify witnessed scores using bf16-matched precision anchoring.
+///
+/// Same structure as `verify_witnessed_score_anchoring_gpu_like`, but narrows
+/// Q/K through bf16 (bfloat16) instead of fp16. This matches models running
+/// in `dtype=torch.bfloat16` where cutlass outputs bf16, not fp16.
+///
+/// For historical K positions: the committed K_roped (f64) is narrowed through
+/// bf16 to match what the GPU stored in the KV cache.
+pub fn verify_witnessed_score_anchoring_bf16(
+    key: &VerifierKey,
+    response: &V4AuditResponse,
+    scale_overrides: Option<&CorridorScaleOverrides>,
+) -> Result<ScoreAnchorReport, String> {
+    let witnessed = response
+        .witnessed_scores
+        .as_ref()
+        .ok_or("no witnessed_scores in audit response")?;
+
+    let kv_entries = response
+        .kv_entries
+        .as_ref()
+        .ok_or("no kv_entries in audit response")?;
+
+    let shell = response
+        .shell_opening
+        .as_ref()
+        .ok_or("no shell_opening in audit response")?;
+
+    let prefix_shells = response.prefix_shell_openings.as_deref().unwrap_or(&[]);
+
+    let cfg = &key.config;
+    let n_layers = cfg
+        .n_layers
+        .min(witnessed.len())
+        .min(kv_entries.len())
+        .min(shell.layers.len());
+    let token_pos = response.token_index as usize;
+
+    let mut all_stats = Vec::new();
+    let mut global_max_gap = 0.0f64;
+
+    for layer_idx in 0..n_layers {
+        let ws = &witnessed[layer_idx];
+        let layer_kv = &kv_entries[layer_idx];
+        let sl = &shell.layers[layer_idx];
+
+        let q_acc = match &sl.q {
+            Some(q) => q,
+            None => continue,
+        };
+
+        let n_positions = (token_pos + 1).min(layer_kv.len());
+        if n_positions == 0 || n_positions != ws.seq_len {
+            continue;
+        }
+
+        // Q scales.
+        let q_scales = if let Some(o) = scale_overrides {
+            &o.wq[layer_idx]
+        } else if let Some(pc) = key.per_channel_scales_for(layer_idx, MatrixType::Wq) {
+            pc
+        } else {
+            continue;
+        };
+        let q_bias = key.qkv_bias_for(layer_idx, MatrixType::Wq);
+
+        // Reconstruct Q: dequant → bias → bf16 → RoPE in f32 → bf16.
+        let q_f32 = verilm_core::attention::dequant_bias_bf16(
+            q_acc,
+            q_scales,
+            sl.scale_x_attn,
+            q_bias,
+        );
+        let q_roped_f32 = verilm_core::attention::apply_rope_bf16(
+            &q_f32,
+            cfg.n_q_heads,
+            token_pos,
+            cfg,
+        );
+
+        // K scales (shared across positions within a layer).
+        let k_scales: &[f32] = if let Some(o) = scale_overrides {
+            &o.wk[layer_idx]
+        } else if let Some(pc) = key.per_channel_scales_for(layer_idx, MatrixType::Wk) {
+            pc
+        } else {
+            // No per-channel K scales — fall back to narrowing committed K.
+            let kv_k_f32: Vec<Vec<f32>> = layer_kv[..n_positions]
+                .iter()
+                .map(|e| e.k_roped.iter().map(|&x| half::bf16::from_f64(x).to_f32()).collect())
+                .collect();
+            let canonical_f32 = verilm_core::attention::compute_canonical_scores_gpu_like(
+                &q_roped_f32, &kv_k_f32, cfg,
+            );
+            let canonical_f64: Vec<f64> = canonical_f32.iter().map(|&x| x as f64).collect();
+            let stats = verilm_core::attention::anchor_witnessed_scores(
+                &ws.scores, &canonical_f64, ws.n_q_heads, ws.seq_len, layer_idx,
+            );
+            if stats.max_gap > global_max_gap {
+                global_max_gap = stats.max_gap;
+            }
+            all_stats.push(stats);
+            continue;
+        };
+        let k_bias = key.qkv_bias_for(layer_idx, MatrixType::Wk);
+
+        // Build K cache in f32, bf16-matched from shell accumulators.
+        // Full path: dequant → bias → bf16 → RoPE in f32 → bf16 (matching KV cache storage).
+        let mut kv_k_f32: Vec<Vec<f32>> = Vec::with_capacity(n_positions);
+
+        for t in 0..n_positions {
+            // Try to get K accumulators from prefix shells or opened token shell.
+            let k_acc_opt = if t < prefix_shells.len() {
+                let prefix_sl = &prefix_shells[t].layers[layer_idx];
+                prefix_sl.k.as_deref()
+            } else if t == token_pos {
+                sl.k.as_deref()
+            } else {
+                None
+            };
+
+            if let Some(k_acc) = k_acc_opt {
+                // Reconstruct from raw accumulators through bf16 dequant + bf16 RoPE.
+                let scale_x_t = if t < prefix_shells.len() {
+                    prefix_shells[t].layers[layer_idx].scale_x_attn
+                } else {
+                    sl.scale_x_attn
+                };
+                let k_f32 = verilm_core::attention::dequant_bias_bf16(
+                    k_acc, k_scales, scale_x_t, k_bias,
+                );
+                let k_roped_f32 = verilm_core::attention::apply_rope_bf16(
+                    &k_f32, cfg.n_kv_heads, t + 1, cfg,
+                );
+                kv_k_f32.push(k_roped_f32);
+            } else {
+                // No accumulator available — narrow committed K through bf16.
+                kv_k_f32.push(
+                    layer_kv[t].k_roped.iter()
+                        .map(|&x| half::bf16::from_f64(x).to_f32())
+                        .collect(),
+                );
+            }
+        }
+
+        // Canonical scores in f32.
+        let canonical_f32 = verilm_core::attention::compute_canonical_scores_gpu_like(
+            &q_roped_f32,
+            &kv_k_f32,
+            cfg,
+        );
+        let canonical_f64: Vec<f64> = canonical_f32.iter().map(|&x| x as f64).collect();
+
+        let stats = verilm_core::attention::anchor_witnessed_scores(
+            &ws.scores,
+            &canonical_f64,
+            ws.n_q_heads,
+            ws.seq_len,
+            layer_idx,
+        );
+
+        if stats.max_gap > global_max_gap {
+            global_max_gap = stats.max_gap;
+        }
+        all_stats.push(stats);
+    }
+
+    Ok(ScoreAnchorReport {
+        n_layers: all_stats.len(),
+        global_max_gap,
+        layers: all_stats,
+    })
+}
+
+/// Diagnostic report for one layer's score anchoring.
+///
+/// Exposes intermediate Q/K values so the caller can compute cross-scores
+/// (Q_verifier × K_gpu, Q_gpu × K_committed, etc.) to isolate the source
+/// of precision mismatch.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ScoreAnchorDiagnostic {
+    pub layer: usize,
+    /// Verifier-reconstructed Q before RoPE (dequant + bias, f64).
+    /// Length: n_q_heads * d_head.
+    pub q_verifier_pre_rope: Vec<f64>,
+    /// Verifier-reconstructed Q after RoPE (f64).
+    pub q_verifier_roped: Vec<f64>,
+    /// Verifier-reconstructed K before RoPE (dequant + bias, f64).
+    /// Length: n_kv_heads * d_head. Only the current token position.
+    pub k_verifier_pre_rope: Vec<f64>,
+    /// Verifier-reconstructed K after RoPE (f64).
+    pub k_verifier_roped: Vec<f64>,
+    /// Committed K after RoPE, per position (f64).
+    /// k_committed_roped[pos] has length n_kv_heads * d_head.
+    pub k_committed_roped: Vec<Vec<f64>>,
+    /// Canonical scores: Q_verifier_roped · K_committed_roped / √d.
+    pub canonical_scores: Vec<f64>,
+    /// Token position used for RoPE.
+    pub token_pos: usize,
+    /// Number of KV positions.
+    pub seq_len: usize,
+}
+
+/// Extract verifier-side Q/K intermediates for score anchoring diagnostics.
+///
+/// For each requested layer, returns the verifier's reconstructed Q (pre and
+/// post RoPE), committed K (post RoPE), and canonical scores. The caller
+/// can compare these against GPU-captured Q/K to isolate the mismatch source.
+pub fn diagnose_score_anchoring(
+    key: &VerifierKey,
+    response: &V4AuditResponse,
+    scale_overrides: Option<&CorridorScaleOverrides>,
+    layer_indices: &[usize],
+) -> Result<Vec<ScoreAnchorDiagnostic>, String> {
+    let kv_entries = response
+        .kv_entries
+        .as_ref()
+        .ok_or("no kv_entries in audit response")?;
+
+    let shell = response
+        .shell_opening
+        .as_ref()
+        .ok_or("no shell_opening in audit response")?;
+
+    let cfg = &key.config;
+    let token_pos = response.token_index as usize;
+
+    let mut results = Vec::new();
+
+    for &layer_idx in layer_indices {
+        if layer_idx >= cfg.n_layers
+            || layer_idx >= kv_entries.len()
+            || layer_idx >= shell.layers.len()
+        {
+            continue;
+        }
+
+        let layer_kv = &kv_entries[layer_idx];
+        let sl = &shell.layers[layer_idx];
+
+        let q_acc = match &sl.q {
+            Some(q) => q,
+            None => continue,
+        };
+
+        let n_positions = (token_pos + 1).min(layer_kv.len());
+        let kv_k: Vec<Vec<f64>> = layer_kv[..n_positions]
+            .iter()
+            .map(|e| e.k_roped.clone())
+            .collect();
+
+        if kv_k.is_empty() {
+            continue;
+        }
+
+        // Reconstruct verifier Q: dequant + bias (pre-RoPE).
+        let q_pre_rope = dequant_one(
+            key,
+            layer_idx,
+            MatrixType::Wq,
+            q_acc,
+            sl.scale_x_attn,
+            scale_overrides.map(|o| o.wq[layer_idx].as_slice()),
+        );
+        let q_pre_rope = add_qkv_bias(key, layer_idx, MatrixType::Wq, q_pre_rope);
+
+        // Reconstruct verifier K: dequant + bias (pre-RoPE) for current token.
+        let (k_pre_rope, k_roped_ver) = if let Some(k_acc) = &sl.k {
+            let k_pre = dequant_one(
+                key,
+                layer_idx,
+                MatrixType::Wk,
+                k_acc,
+                sl.scale_x_attn,
+                scale_overrides.map(|o| o.wk[layer_idx].as_slice()),
+            );
+            let k_pre = add_qkv_bias(key, layer_idx, MatrixType::Wk, k_pre);
+            let k_roped = verilm_core::rope::apply_rope_k(&k_pre, token_pos, cfg);
+            (k_pre, k_roped)
+        } else {
+            (vec![], vec![])
+        };
+
+        // Apply RoPE to Q.
+        let q_roped = verilm_core::rope::apply_rope_q(&q_pre_rope, token_pos, cfg);
+
+        // Canonical scores.
+        let canonical = verilm_core::attention::compute_canonical_scores(
+            &q_roped, &kv_k, cfg,
+        );
+
+        results.push(ScoreAnchorDiagnostic {
+            layer: layer_idx,
+            q_verifier_pre_rope: q_pre_rope,
+            q_verifier_roped: q_roped,
+            k_verifier_pre_rope: k_pre_rope,
+            k_verifier_roped: k_roped_ver,
+            k_committed_roped: kv_k,
+            canonical_scores: canonical,
+            token_pos,
+            seq_len: n_positions,
+        });
+    }
+
+    Ok(results)
+}
+
+/// Dequant cast-order diagnostic for a single layer.
+///
+/// Returns the K accumulators and all cast-variant outputs so the caller
+/// (Python) can compare each against the GPU's actual pre-RoPE K.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CastOrderDiagnostic {
+    pub layer: usize,
+    /// Raw i32 K accumulators from shell opening.
+    pub k_acc: Vec<i32>,
+    /// Per-channel K weight scales used.
+    pub k_scales: Vec<f32>,
+    /// Per-token activation scale.
+    pub scale_x: f32,
+    /// K bias (if model has it), else empty.
+    pub k_bias: Vec<f32>,
+    /// Each entry: (strategy_name, dequanted K vector as f32).
+    pub variants: Vec<(String, Vec<f32>)>,
+}
+
+/// Run dequant+bias cast-order diagnostic for specified layers.
+///
+/// Extracts K accumulators from the shell opening and runs all 5 cast-order
+/// strategies from [`verilm_core::attention::dequant_bias_cast_variants`].
+pub fn diagnose_cast_order(
+    key: &VerifierKey,
+    response: &V4AuditResponse,
+    scale_overrides: Option<&CorridorScaleOverrides>,
+    layer_indices: &[usize],
+) -> Result<Vec<CastOrderDiagnostic>, String> {
+    let shell = response
+        .shell_opening
+        .as_ref()
+        .ok_or("no shell_opening in audit response")?;
+
+    let cfg = &key.config;
+    let mut results = Vec::new();
+
+    for &layer_idx in layer_indices {
+        if layer_idx >= cfg.n_layers || layer_idx >= shell.layers.len() {
+            continue;
+        }
+
+        let sl = &shell.layers[layer_idx];
+        let k_acc = match &sl.k {
+            Some(k) => k.clone(),
+            None => continue,
+        };
+
+        // Per-channel K scales: prefer overrides, else from key.
+        let k_scales: Vec<f32> = if let Some(ov) = scale_overrides {
+            ov.wk[layer_idx].clone()
+        } else if let Some(pc) = key.per_channel_scales_for(layer_idx, MatrixType::Wk) {
+            pc.to_vec()
+        } else {
+            // Fallback: uniform scale (per-tensor).
+            let sw = key.weight_scale_for(layer_idx, MatrixType::Wk);
+            vec![sw; k_acc.len()]
+        };
+
+        let scale_x = sl.scale_x_attn;
+
+        // K bias from key (if model has it).
+        let k_bias: Vec<f32> = key
+            .qkv_bias_for(layer_idx, MatrixType::Wk)
+            .map(|b| b.to_vec())
+            .unwrap_or_default();
+
+        let bias_opt = if k_bias.is_empty() {
+            None
+        } else {
+            Some(k_bias.as_slice())
+        };
+
+        let raw_variants = verilm_core::attention::dequant_bias_cast_variants(
+            &k_acc, &k_scales, scale_x, bias_opt,
+        );
+        let variants: Vec<(String, Vec<f32>)> = raw_variants
+            .into_iter()
+            .map(|(name, data)| (name.to_string(), data))
+            .collect();
+
+        results.push(CastOrderDiagnostic {
+            layer: layer_idx,
+            k_acc,
+            k_scales,
+            scale_x,
+            k_bias,
+            variants,
+        });
+    }
+
+    Ok(results)
+}
+
 /// Per-head boundary simulation results for a single layer+position.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BoundarySimEntry {

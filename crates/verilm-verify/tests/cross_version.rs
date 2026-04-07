@@ -433,8 +433,8 @@ fn frozen_audit_sha256_pinned() {
     // Pinned on first generation. Update ONLY on intentional format change.
     assert_eq!(
         hash,
-        "bd8fda2f8b653d66cf7babef52db687bce6ea22fc3cb6b1a4633b23e9508e032",
-        "audit fixture checksum drifted — was the fixture silently regenerated? (v4: kv_roots + kv_entries)"
+        "33ce137ef485471b5b087e134a89846c39f2d5d3aa356bbc7fe11551c40ef31c",
+        "audit fixture checksum drifted — was the fixture silently regenerated? (v4: witnessed_scores)"
     );
 }
 

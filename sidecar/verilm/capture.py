@@ -285,6 +285,19 @@ class CaptureBuffer:
         self._pinned_slab_idx: int = 0  # row write cursor
         self._slab_offsets: List[tuple] = []  # (start_row, end_row) per o_proj call
 
+        # Score witness: GPU K buffers for attention score reconstruction.
+        # Enabled via init_score_witness() after model loading.
+        self._sw_enabled = False
+        self._sw_k_buffers: List[torch.Tensor] = []  # per-layer (max_seq, kv_dim) fp16
+        self._sw_k_counts: List[int] = []             # per-layer write cursor
+        self._sw_q_last: List[Optional[torch.Tensor]] = []  # per-layer Q for last decode
+        self._sw_inv_freq: Optional[torch.Tensor] = None    # (d_head/2,) on GPU
+        self._sw_n_q_heads = 0
+        self._sw_n_kv_heads = 0
+        self._sw_d_head = 0
+        self._sw_layer_cursor = 0  # tracks which layer the next qkv_proj belongs to
+        self._sw_diag_snapshot = {}  # CPU snapshot from last drain, for diagnostics
+
         # Sync infrastructure — initialized lazily by set_sync_mode("event").
         self._sync_mode = "global"
         self._copy_stream: Optional[torch.cuda.Stream] = None
@@ -394,10 +407,14 @@ class CaptureBuffer:
         # Clear native capture state (if active).
         if _native_capture is not None:
             _native_capture.drain_discard()
+        # Reset score witness state.
+        self._reset_score_witness()
         return entries
 
     def drain_minimal(self):
-        """Drain minimal-mode buffers. Returns (o_inputs, scales, call_count, x_attn_inputs).
+        """Drain minimal-mode buffers.
+
+        Returns (o_inputs, scales, call_count, x_attn_inputs, witnessed_scores).
 
         o_inputs: list of CPU tensors, one per o_proj call (n_fwd * n_layers).
                   When pinned slab is active, these are views into contiguous
@@ -407,9 +424,17 @@ class CaptureBuffer:
         call_count: total matmul calls captured (= len(scales)).
         x_attn_inputs: list of CPU tensors (one per qkv_proj call) if capture_x_attn
                        is enabled, else empty list.
+        witnessed_scores: list of numpy f32 arrays (one per layer), each flat
+                       row-major (n_q_heads * seq_len), or None if disabled.
         """
         if self._transfers_pending:
             self.wait_for_transfers()
+
+        # ── Compute witnessed scores before resetting GPU state ──
+        witnessed_scores = None
+        if self._sw_enabled and any(c > 0 for c in self._sw_k_counts):
+            witnessed_scores = self.compute_witnessed_scores()
+        self._reset_score_witness()
 
         # ── Rust hook or Python fallback path ──
 
@@ -452,7 +477,7 @@ class CaptureBuffer:
         self._minimal_x_attn_inputs = []
         self._minimal_scales = []
         self._minimal_call_count = 0
-        return o_inputs, scales, count, x_attn_inputs
+        return o_inputs, scales, count, x_attn_inputs, witnessed_scores
 
     def init_pinned_slab(self, hidden_dim: int, capacity_rows: int = 32768):
         """Allocate a pinned CPU slab for o_proj D2H copies.
@@ -472,6 +497,234 @@ class CaptureBuffer:
             capacity_rows * hidden_dim / 1e6,
             os.getpid(),
         )
+
+    def init_score_witness(
+        self, n_layers: int, max_seq_len: int,
+        n_q_heads: int, n_kv_heads: int, d_head: int,
+        rope_theta: float = 10000.0,
+        rope_scaling: Optional[dict] = None,
+    ):
+        """Pre-allocate GPU K buffers for attention score witnessing.
+
+        Call once after model loading when VERILM_SCORE_WITNESS=1.
+        Captures pre-RoPE K (fp16) per token per layer on GPU, then
+        computes Q@K^T/sqrt(d_head) with RoPE after inference.
+
+        Memory: n_layers * max_seq_len * kv_dim * 2 bytes.
+          8B at 4K:  32 * 4096 * 512 * 2 = 128 MB
+          8B at 32K: 32 * 32768 * 512 * 2 = 1 GB
+        """
+        import math
+
+        kv_dim = n_kv_heads * d_head
+        self._sw_k_buffers = [
+            torch.empty(max_seq_len, kv_dim, dtype=torch.float16, device="cuda")
+            for _ in range(n_layers)
+        ]
+        self._sw_k_counts = [0] * n_layers
+        self._sw_q_last = [None] * n_layers
+        self._sw_n_q_heads = n_q_heads
+        self._sw_n_kv_heads = n_kv_heads
+        self._sw_d_head = d_head
+        self._sw_layer_cursor = 0
+
+        # Pre-compute inverse frequencies on GPU.
+        half = d_head // 2
+        inv_freq = 1.0 / (
+            rope_theta ** (
+                torch.arange(0, d_head, 2, dtype=torch.float32, device="cuda")
+                / d_head
+            )
+        )
+
+        # Apply Llama3 scaling if configured.
+        if rope_scaling and rope_scaling.get("rope_type") == "llama3":
+            factor = rope_scaling["factor"]
+            low_freq_factor = rope_scaling.get("low_freq_factor", 1.0)
+            high_freq_factor = rope_scaling.get("high_freq_factor", 4.0)
+            old_context = rope_scaling["original_max_position_embeddings"]
+            low_freq_wavelen = old_context / low_freq_factor
+            high_freq_wavelen = old_context / high_freq_factor
+
+            wavelens = 2 * math.pi / inv_freq
+            scaled = inv_freq / factor
+            smooth = (old_context / wavelens - low_freq_factor) / (
+                high_freq_factor - low_freq_factor
+            )
+            smooth = smooth.clamp(0.0, 1.0)
+            inv_freq = torch.where(
+                wavelens > low_freq_wavelen, scaled,
+                torch.where(wavelens < high_freq_wavelen, inv_freq,
+                            (1.0 - smooth) * scaled + smooth * inv_freq),
+            )
+
+        self._sw_inv_freq = inv_freq
+        self._sw_enabled = True
+
+        mem_mb = n_layers * max_seq_len * kv_dim * 2 / 1e6
+        logger.info(
+            "verilm: score witness initialized — %d layers, max_seq=%d, "
+            "kv_dim=%d, d_head=%d, %.1f MB GPU (pid=%d)",
+            n_layers, max_seq_len, kv_dim, d_head, mem_mb, os.getpid(),
+        )
+
+    def _capture_k_for_scores(self, output: torch.Tensor):
+        """Capture K (and Q for decode) from qkv_proj output. Stays on GPU."""
+        batch_sz = output.shape[0]
+        layer = self._sw_layer_cursor % _n_layers
+        self._sw_layer_cursor += 1
+
+        k_portion = output[:, _q_dim: _q_dim + _kv_dim]
+        buf = self._sw_k_buffers[layer]
+        pos = self._sw_k_counts[layer]
+
+        # Grow if needed (rare).
+        if pos + batch_sz > buf.shape[0]:
+            new_cap = max(buf.shape[0] * 2, pos + batch_sz + 1024)
+            new_buf = torch.empty(
+                new_cap, _kv_dim, dtype=torch.float16, device=buf.device,
+            )
+            new_buf[:pos] = buf[:pos]
+            self._sw_k_buffers[layer] = new_buf
+            buf = new_buf
+            logger.info("verilm: K buffer layer %d grown to %d", layer, new_cap)
+
+        buf[pos: pos + batch_sz] = k_portion
+        self._sw_k_counts[layer] = pos + batch_sz
+
+        # For decode steps (batch=1), store Q (overwrite — want the last one).
+        if batch_sz == 1:
+            self._sw_q_last[layer] = output[:, :_q_dim].clone()
+
+    def compute_witnessed_scores(self):
+        """Compute witnessed attention scores on GPU after inference.
+
+        Per layer: apply RoPE to stored Q (last token) and all K positions,
+        then compute scores = Q_roped @ K_roped^T / sqrt(d_head).
+
+        Returns list of numpy f32 arrays (one per layer), each flat
+        row-major (n_q_heads * seq_len).
+        """
+        import numpy as np
+        import math
+
+        n_q_heads = self._sw_n_q_heads
+        n_kv_heads = self._sw_n_kv_heads
+        d_head = self._sw_d_head
+        half = d_head // 2
+        heads_per_kv = n_q_heads // n_kv_heads
+        inv_freq = self._sw_inv_freq
+        scale = 1.0 / math.sqrt(d_head)
+
+        results = []
+        for layer_idx in range(len(self._sw_k_buffers)):
+            seq_len = self._sw_k_counts[layer_idx]
+            q_raw = self._sw_q_last[layer_idx]  # (1, q_dim) fp16
+            k_raw = self._sw_k_buffers[layer_idx][:seq_len]  # (seq_len, kv_dim) fp16
+
+            if q_raw is None:
+                raise RuntimeError(
+                    f"No Q captured for layer {layer_idx} (no decode step?)"
+                )
+
+            gen_pos = seq_len - 1  # generated token position
+
+            # Reshape to head-major.
+            q = q_raw.float().reshape(n_q_heads, 1, d_head)
+            k = k_raw.float().reshape(seq_len, n_kv_heads, d_head).permute(1, 0, 2)
+
+            # ── RoPE ──
+            # Q: single position (gen_pos).
+            q_angles = gen_pos * inv_freq  # (half,)
+            q_cos = q_angles.cos()
+            q_sin = q_angles.sin()
+            q_roped = torch.cat([
+                q[..., :half] * q_cos - q[..., half:] * q_sin,
+                q[..., half:] * q_cos + q[..., :half] * q_sin,
+            ], dim=-1)
+
+            # K: all positions [0 .. seq_len-1].
+            k_positions = torch.arange(
+                seq_len, dtype=torch.float32, device=k.device,
+            )
+            k_angles = k_positions.unsqueeze(-1) * inv_freq.unsqueeze(0)  # (seq, half)
+            k_cos = k_angles.cos().unsqueeze(0)  # (1, seq, half)
+            k_sin = k_angles.sin().unsqueeze(0)
+            k_roped = torch.cat([
+                k[..., :half] * k_cos - k[..., half:] * k_sin,
+                k[..., half:] * k_cos + k[..., :half] * k_sin,
+            ], dim=-1)
+
+            # Expand K for GQA.
+            if heads_per_kv > 1:
+                k_expanded = k_roped.unsqueeze(1).expand(
+                    -1, heads_per_kv, -1, -1,
+                ).reshape(n_q_heads, seq_len, d_head)
+            else:
+                k_expanded = k_roped
+
+            # scores = Q @ K^T / sqrt(d_head) → (n_q_heads, 1, seq_len)
+            scores = torch.bmm(q_roped, k_expanded.transpose(1, 2)) * scale
+            scores_flat = scores.squeeze(1).contiguous().cpu().numpy().ravel()
+            results.append(scores_flat.astype(np.float32))
+
+        return results
+
+    def get_diagnostic_qk(self, layer_idx):
+        """Return raw pre-RoPE Q and K for diagnostic comparison.
+
+        Returns (q_f32_numpy, k_f32_numpy) where:
+          q: shape (q_dim,) — last decode token's Q projection output
+          k: shape (seq_len, kv_dim) — all K projection outputs
+        Both are fp16→f32 from the cutlass_scaled_mm output (includes bias).
+
+        Works both before and after drain (uses snapshot if live buffers reset).
+        """
+        if not self._sw_enabled:
+            raise RuntimeError("score witness not enabled")
+
+        # Try snapshot first (available after drain_minimal resets live buffers).
+        snapshot = getattr(self, "_sw_diag_snapshot", {})
+        if layer_idx in snapshot:
+            return snapshot[layer_idx]
+
+        # Fall back to live buffers (before drain).
+        if layer_idx >= len(self._sw_k_buffers):
+            raise IndexError(f"layer {layer_idx} out of range")
+
+        import numpy as np
+
+        q_raw = self._sw_q_last[layer_idx]
+        if q_raw is None:
+            raise RuntimeError(f"no Q captured for layer {layer_idx}")
+
+        seq_len = self._sw_k_counts[layer_idx]
+        k_raw = self._sw_k_buffers[layer_idx][:seq_len]
+
+        q_np = q_raw.squeeze(0).float().cpu().numpy().astype(np.float32)
+        k_np = k_raw.float().cpu().numpy().astype(np.float32)
+        return q_np, k_np
+
+    def _reset_score_witness(self):
+        """Reset score witness buffers for next request.
+
+        Saves a CPU snapshot of Q/K before clearing, accessible via
+        get_diagnostic_qk() for post-hoc analysis.
+        """
+        import numpy as np
+
+        self._sw_diag_snapshot = {}
+        for i in range(len(self._sw_k_counts)):
+            seq_len = self._sw_k_counts[i]
+            q = self._sw_q_last[i]
+            if q is not None and seq_len > 0:
+                self._sw_diag_snapshot[i] = (
+                    q.squeeze(0).float().cpu().numpy().astype(np.float32),
+                    self._sw_k_buffers[i][:seq_len].float().cpu().numpy().astype(np.float32),
+                )
+            self._sw_k_counts[i] = 0
+            self._sw_q_last[i] = None
+        self._sw_layer_cursor = 0
 
     def _slab_copy_o_proj(self, a: torch.Tensor):
         """Copy o_proj activation into pinned slab. No tensor allocation."""
@@ -517,6 +770,7 @@ class CaptureBuffer:
         """
         global _call_counter
         _call_counter = 0
+        self._sw_layer_cursor = 0
         if _native_capture is not None:
             _native_capture.reset_counter()
         if _capture_hook is not None:
@@ -640,8 +894,11 @@ def _wrapped_cutlass_scaled_mm(
                 buf._slab_copy_o_proj(a)
             else:
                 buf._minimal_o_inputs.append(buf.copy_to_cpu(a))
-        elif proj_idx == _QKV_PROJ_IDX and buf._capture_x_attn:
-            buf._minimal_x_attn_inputs.append(buf.copy_to_cpu(a))
+        elif proj_idx == _QKV_PROJ_IDX:
+            if buf._capture_x_attn:
+                buf._minimal_x_attn_inputs.append(buf.copy_to_cpu(a))
+            if buf._sw_enabled:
+                buf._capture_k_for_scores(output)
         return output
 
     # ── Python fallback (full mode, or Rust hook unavailable) ──
@@ -669,8 +926,11 @@ def _wrapped_cutlass_scaled_mm(
             buf._slab_copy_o_proj(a)
         else:
             buf._minimal_o_inputs.append(buf.copy_to_cpu(a))
-    elif proj_idx == _QKV_PROJ_IDX and buf._capture_x_attn:
-        buf._minimal_x_attn_inputs.append(buf.copy_to_cpu(a))
+    elif proj_idx == _QKV_PROJ_IDX:
+        if buf._capture_x_attn:
+            buf._minimal_x_attn_inputs.append(buf.copy_to_cpu(a))
+        if buf._sw_enabled:
+            buf._capture_k_for_scores(output)
 
     buf.total_captured += 1
     if buf.total_captured % _log_interval == 0:
