@@ -1060,7 +1060,7 @@ class VerifiedInferenceServer:
         tier: str = "routine",
         binary: bool = True,
         deep_prefix: bool = False,
-        use_captured_x_attn: bool = False,
+        use_captured_x_attn: Optional[bool] = None,
     ):
         """Open an audit proof.
 
@@ -1075,7 +1075,9 @@ class VerifiedInferenceServer:
             binary: if True (default), return bincode+zstd bytes. False for JSON debug.
             deep_prefix: if True, open prefix tokens for deep-prefix replay.
             use_captured_x_attn: if True, shell opening QKV uses GPU-captured
-                x_attn instead of bridge-derived (for corridor measurement).
+                x_attn instead of bridge-derived. Defaults to True for
+                deep/strong audits when captured data is available (the bridge
+                is only an approximation to vLLM's fused norm+quant kernel).
         """
         entry = self._audit_store.get(request_id)
         if entry is None:
@@ -1087,6 +1089,15 @@ class VerifiedInferenceServer:
 
         state = entry["state"]
         state.deep_prefix = deep_prefix
+
+        # Default: use captured x_attn for deep/strong audits when available.
+        # The bridge-derived x_attn is only an approximation to vLLM's fused
+        # norm+quant kernel and produces large errors for some models (Qwen).
+        if use_captured_x_attn is None:
+            use_captured_x_attn = (
+                deep_prefix
+                and state.has_captured_x_attn()
+            )
         state.use_captured_x_attn = use_captured_x_attn
         output_text = entry.get("output_text")
 
