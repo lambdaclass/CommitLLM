@@ -6,28 +6,56 @@ Mark a task done only when it is true in code, tests, docs, and operational beha
 
 The shell/tail/binding protocol is structurally complete. The kept path preserves the full exact 7-matrix Freivalds shell (`Wq/Wk/Wv/Wo/Wg/Wu/Wd`) across all audit tiers; tiers differ in attention evidence and payload cost, not in whether the exact linear shell is checked.
 
+## Linear Execution Order
+
+Use this sequence as the single top-level plan. The tiers below provide detail;
+this list defines the actual order to execute.
+
+1. **Ship the first strong tier** — land the current Llama strong-tier path (`#2`, `#8`, `#15`, `#20`).
+2. **Fix Qwen historical prefix binding** — resolve the `x_attn_i8` / historical-K capture bug for positions `1+` (`#2f`, `#4`).
+3. **Close prefix trust and guarantee language** — KV provenance, audit tiers, guarantee wording, and the formal cheating-game story (`#7`, `#24`, `#25`, `#6`).
+4. **Prove the protocol generalizes across dense families** — add one third dense family before any frontier architecture jump (`#31`).
+5. **Broaden dense coverage** — larger dense model, longer context, and one non-W8A8 dense quant path (`#32`, `#33`, `#34`, `#35`).
+6. **Take the frontier jump** — FP8 first, then FP8 KV, then MoE and architecture variants (`#30`, `#35a`, `#29`, `#35b`, `#35c`, `#35d`, `#35e`).
+7. **Improve serving/runtime compatibility** — native capture, batching, paging, TP, CUDA graphs, payload reduction (`#36` onward).
+8. **Pursue verified-mode research** — deterministic kernels / deterministic runtime only after the current stock-kernel path is shipped and benchmarked (`#67`, `#68`).
+
 ---
 
 ## Tier 0 — Critical path
 
 Highest-priority work. Do in this order.
 
+Strict near-term execution order inside this tier:
+1. `#2` land the Llama strong attention tier
+2. `#2f` fix Qwen historical `x_attn_i8` / K binding
+3. `#4` unify the attention / prefix binding path
+4. `#8` freeze generated-token score witnessing as the strong tier
+5. `#15` freeze the canonical verifier
+6. `#14` keep GPU smoke tests green
+7. `#20` update docs/claims
+8. `#21` cut the release
+
+Items `#1`, `#3`, `#5`, `#6`, `#7`, `#9`, and `#10` remain important, but
+they are supporting work around the main sequence above rather than reasons to
+delay the first strong-tier ship decision indefinitely.
+
 | # | Item | Status |
 |---|------|--------|
 | 1 | **RMSNorm contraction / local operator — MEASURED** — crude contraction ratio `ρ_j = γ·‖W_o‖₂/RMS(x^(j))` and tighter local sensitivity/operator tests have now been run on real checkpoints. **Qwen-7B W8A8**: crude contraction mixed; tighter local operator puts 21/28 layers below 1, but 3 layers (0, 1, 27) can still individually flip the output and many middle layers remain near the margin. **Llama-3.1-8B**: crude contraction fails everywhere and tighter local operator still leaves 0/32 layers below 1; 6 layers can individually flip the output. Conclusion: contraction and local linearization are useful diagnostics, but they do not rescue the corridor by themselves. Next step: refine the local map further with prompt diversity and the full within-layer propagation channel. Subtests: projected norm `‖J_RMSNorm(x_j) W_o^(j)‖`, head-aware/block-aware operators, mixed `∞→∞` and `∞→2` bounds consistent with the protocol corridor, finite-difference local sensitivity on real traces, and inclusion of the MLP propagation channel after the perturbed residual enters the rest of the layer. | **measured** |
-| 2 | **Shrink the honest corridor** — prover-side determinism confirmed (§1h), sidecar-to-verifier gap measured at L∞=8–9 (§1i). Gap is from GPU fp16 vs CPU f64 arithmetic, not backend non-determinism. Backend binding done (`attn_backend`/`attn_dtype` in manifest/key/verifier, SDPA mandated for W8A8, fail closed on eager/unknown). Score witnessing remains load-bearing until τ < adversarial sensitivity threshold (~4–5). See `research/attention-gap.md` §1h–1i. | **partial** |
+| 2 | **Shrink the honest corridor / land strong attention tier** — prover-side determinism confirmed (§1h), sidecar-to-verifier gap measured at L∞=8–9 (§1i). That story is now split by family: **Llama-3.1-8B strong tier is real** with bf16 score anchoring gap ~0.06 and threshold tightened to 0.25; the remaining replay gap is downstream of score anchoring. **Qwen-7B is no longer blocked by generic arithmetic mismatch**: the remaining 6–10 anchor gap localizes to historical `x_attn_i8` / committed-K capture-binding on positions `1+` (position `0` is exact). Backend binding is done (`attn_backend`/`attn_dtype` in manifest/key/verifier, SDPA mandated for W8A8, fail closed on eager/unknown). Current priority is: ship Llama strong tier, then fix Qwen historical K binding. | **partial** |
 | 2a | ~~**Bind attention backend in manifest**~~ — `attn_backend`, `attn_dtype` added to manifest/key/verifier with cross-checks. W8A8 mandates SDPA, fail closed on eager and unknown. Keygen populates from model config. | **done** |
 | 2b | ~~**Measure real protocol gap (sidecar → verifier)**~~ — L∞=8 (Qwen 7B), L∞=9 (Llama 8B, Llama 70B) on A100-80GB with SDPA. ~93–97% exact, >99.9% within ±1. Gap grows weakly with sequence length. See §1i. | **done** |
 | 2c | **Cross-hardware stability** — same backend on A100 vs H100. If hardware changes the gap, τ must accommodate hardware diversity. | open |
-| 2d | **Better `a` quantization** — measurement now rules out per-head `scale_a` as a useful τ-reduction path (one head still dominates; INT8 corridor gets worse). Remaining candidate: INT16/FP16 retained `a` instead of INT8. | **partial** |
-| 2e | **Layer/head-specific tolerances** — calibrate τ per layer per family. Corridor worst layers: Qwen 1/27, Llama-8B 25, Llama-70B 7/13/70. | open |
-| 2f | **fp16 verifier replay** — match GPU arithmetic precision in the verifier to eliminate fp16-to-f64 gap. Largest implementation effort but most direct solution. | open |
+| 2d | ~~**Better `a` quantization**~~ — measured and ruled out as the main τ-reduction path. Per-head `scale_a` does not help (one head still dominates; INT8 corridor gets worse), and INT16 retained `a` does not materially shrink the float-space honest gap. No longer on the critical path. | **done** |
+| 2e | **Layer/head-specific tolerances** — keep only as a routine-tier fallback. Strong-tier direction is family-specific score anchoring, not ever-finer τ tuning. Corridor worst layers remain useful for diagnostics: Qwen 1/27, Llama-8B 25, Llama-70B 7/13/70. | open |
+| 2f | **Fix Qwen historical `x_attn` / K binding** — diagnostic branch point is now clear: `pos=0` is exact, but at `pos=1+` the shell/transcript agree with each other while both diverge from GPU. This is a sidecar capture / binding bug, not a protocol-precision issue. Isolate raw per-position `x_attn_i8` and `scale_x_attn`, recompute `Wk @ x_attn_i8`, and fix the positions `1+` decode/prefix path. | **in progress** |
 | 3 | **Real-model corridor attacks — PARTIALLY MEASURED** — multi-prompt finite-difference sensitivity measured: Qwen 28/28 layers flip on every prompt, Llama 0–6 flips depending on margin. All-layers-simultaneously always flips. Remaining: constrained adversarial optimization (true worst-case under L∞), multi-token accumulation across autoregressive decode. See `research/attention-gap.md` §1e, §3l–3m. | **partial** |
-| 4 | **Unify attention path** — one `x_attn` boundary, one QKV replay story across prover/verifier/corridor. No silent mixing of bridge-derived Q with committed K/V. | open |
+| 4 | **Unify attention path** — one `x_attn` boundary, one QKV replay story across prover/verifier/corridor, and one correct historical-prefix binding story. No silent mixing of bridge-derived Q with committed K/V, and no stale/decode-buffer-dependent `x_attn_i8` capture for prefix positions. | open |
 | 5 | **Adversarial testing** — cheating-provider test suite: receipt forgery, transcript splicing, intermediate tampering, model substitution, selective layer cheating, KV injection, and selective-abort / audit-policy gaming. Every attack must fail verification or be documented as accepted gap. Includes real-model constrained corridor attacks (see #3). | **in progress** |
 | 6 | **Formal security argument** — define the cheating game, state Freivalds soundness bound (1/p), state detection probability as f(sampling rate, cheating fraction), state what commitment binding prevents. Include random audit conditioning analysis: detection probability vs cheating fraction vs audit rate. | open |
-| 7 | **KV provenance** — sampled/batched Freivalds checks verify committed K/V are consistent with committed Wk/Wv weights and bridge inputs. Tightening `a` alone is insufficient if the adversary can manipulate prefix state; KV provenance closes the upstream path. Even perfect current-token attention only proves correctness relative to the committed prefix. | open |
-| 8 | **Score witnessing** — commit pre-softmax scores S=Q·K^T/√d per audited token. Verifier checks S against canonical QK^T from shell-verified Q and committed K, then recomputes softmax(S)·V independently. **Still important**: #2 confirmed prover-side determinism but protocol-level τ=0 requires the verifier to match the same arithmetic path — currently untested (CPU FP64 replay vs GPU fp16). Score witnessing remains the defense if provider-to-verifier mismatch is non-zero. Design: always witness the generated token (exact, not sampled), Fiat-Shamir sample prefix tokens for probabilistic coverage. Test partial variants first: worst-layer only, worst-head only, top-k scores + certified tail bound. Cost: O(seq_len × n_heads) per audited token per layer, deep audit only. | open |
+| 7 | **KV provenance** — sampled/batched Freivalds checks verify committed K/V are consistent with committed Wk/Wv weights and bridge inputs. Tightening current-token attention alone is insufficient if the adversary can manipulate prefix state; KV provenance closes the upstream path. The current Qwen blocker is a concrete example of why historical-K / prefix correctness matters. | open |
+| 8 | **Score witnessing** — generated-token score witnessing is now the live strong-tier path. **Llama:** bf16 score anchoring is validated and should be treated as the first supported strong family. **Qwen:** score witnessing still improves replay materially, but strong-tier support remains blocked on #2f (historical `x_attn_i8` / K binding). After Qwen is fixed, keep the generated token exact by default; sample prefix tokens only as a later probabilistic extension. Compression ideas (top-k + tail bounds) are optimization work after the plain exact tier is benchmarked. | **partial** |
 | 9 | **W_o conditioning** — compute σ_min(W_o), ‖W_o‖₂, and more faithful projected/local operator bounds per layer on real models. **Confirmed critical by #1**: Llama ρ>1 everywhere means the crude spectral bound is loose — need tighter per-layer operator norms to identify which layers genuinely amplify vs where the bound is just conservative. Quantifies adversary freedom when attn_out_i8 is commitment-bound but not independently replayed. Also translate hidden-state drift into per-layer logit-margin bounds using the real LM head, and measure margin-plus-frequency on real prompts to see when dangerous layers actually coincide with small output margins. | open |
 | 10 | **Deep-audit payload sizing** — budget the per-token cost of score witnessing and KV provenance at production context lengths (4K, 32K, 128K). Determine storage, bandwidth, and verification-time scaling. **Must benchmark CPU verification time in the Rust verifier**, not estimate from FLOPs (likely memory-bound). Note: for Fiat-Shamir-sampled decode tokens, average prefix length applies, not max context. Informs audit tier design and whether long-context deployments need different policies. | open |
 | 11 | **Rename to CommitLLM** — all docs, APIs, CLI, scripts, packages use `CommitLLM`. | open |
@@ -68,14 +96,22 @@ critical path before the current attention / score-witness story is solid.
 First make one strong protocol work well for the currently supported dense
 decoder slice; then generalize.
 
+Near-term order within this tier is:
+1. `#31` Third dense family (`Mistral` / `Ministral` / `Nemo` or `Gemma`)
+2. `#30` FP8 support
+3. `#29` MoE support
+
+Reason: prove the protocol is not overfit to Llama/Qwen before taking on the
+frontier FP8+MoE architecture jump.
+
 Without broader model support, CommitLLM remains a Qwen+Llama-focused protocol
 rather than a general verifier for the full frontier serving stack.
 
 | # | Item |
 |---|------|
-| 29 | **MoE support** — verify expert routing decisions and per-expert shell matmuls for Mixtral, DeepSeek-V2/V3, Qwen-MoE. Commit router logits/top-k, Freivalds on selected expert weights, fail-closed on unsupported routing. |
-| 30 | **FP8 quantization** — validated capture/replay/verification for FP8 (E4M3/E5M2) on Hopper/Blackwell. Capture layer needs FP8 `scaled_mm` wrappers; verifier needs FP8 dequant and bridge replay. |
-| 31 | **Third family** — Mistral, Gemma, or strongest alternative measured on the kept path. Proves not overfit to two architectures. |
+| 29 | **MoE support** — verify expert routing decisions and per-expert shell matmuls for Mixtral, DeepSeek-V2/V3, Qwen-MoE. Commit router logits/top-k, Freivalds on selected expert weights, fail-closed on unsupported routing. This is a serious protocol extension and should come after FP8 and a third dense family. |
+| 30 | **FP8 quantization** — split into two explicit tracks: (a) compat mode with bounded replay against vendor FP8 kernels, and (b) verified mode with a canonical exact/fixed-point lowering or custom deterministic kernel. Do not start before the current dense slice and third-family support are stable. |
+| 31 | **Third family** — prioritize `Mistral` / `Ministral` / `Nemo` or `Gemma` before FP8/MoE. Goal: prove the kept path is not overfit to Llama/Qwen while staying in dense-decoder territory. |
 | 32 | **Larger model** — at least one 30B/70B-class datapoint on the corrected path |
 | 33 | **Long-context 128K+** — validate corridor at production context lengths where attention numerics are most stressed |
 | 34 | **GPTQ/AWQ/grouped quant** — at least one non-W8A8 family with a fully validated verifier replay path |
@@ -143,8 +179,8 @@ Important for the long-term story but not blocking anything above.
 
 | # | Item |
 |---|------|
-| 67 | **Deterministic inference mode** — eager attention (`attn_implementation="eager"`), `torch.use_deterministic_algorithms(True)`, fixed CUDA seeds. If the forward pass is bit-exact and the verifier replays with the same arithmetic spec, τ=0 closes the attention gap for opened tokens without score witnessing. Requires a defined arithmetic/kernel spec for cross-hardware determinism — "deterministic on one GPU" is not enough. Note: τ=0 alone does not solve prefix anchoring; replay only proves consistency with committed prefix, not true earlier execution. KV provenance (#5) or deep audit still needed for upstream trust. Measure throughput cost vs FlashAttention. |
-| 68 | **Deterministic attention kernel** — custom Triton/CUDA attention with fixed accumulation order, deterministic reductions. Measure corridor=0. May be slower than FlashAttention. |
+| 67 | **Deterministic inference mode** — eager attention (`attn_implementation="eager"`), `torch.use_deterministic_algorithms(True)`, fixed CUDA seeds. If the forward pass is bit-exact and the verifier replays with the same arithmetic spec, τ=0 closes the attention gap for opened tokens without score witnessing. Requires a defined arithmetic/kernel spec for cross-hardware determinism — "deterministic on one GPU" is not enough. Note: τ=0 alone does not solve prefix anchoring; replay only proves consistency with committed prefix, not true earlier execution. KV provenance (#5) or deep audit still needed for upstream trust. Keep as a research track, not a blocker before shipping the current dense strong tier. |
+| 68 | **Deterministic attention / linear kernels** — custom Triton/CUDA kernels with fixed accumulation order and explicit cast/round semantics. Strong long-term direction for a verified mode, but not the immediate critical path while Llama strong tier and Qwen capture correctness are still being landed on stock kernels. Measure corridor=0 and throughput cost versus FlashAttention / stock CUTLASS. |
 | 69 | **Cheating-incentive analysis** — quantify cost/benefit of model substitution, detection probability vs audit sampling rate, equilibrium conditions |
 | 70 | **Lean formalization** — machine-checked core verification claims |
 | 71 | **Non-Rust verifier** — independent implementation consuming golden vectors |
@@ -191,7 +227,7 @@ All benchmark items in one place for tracking.
 | 96 | Production verification surface is binary-only |
 | 97 | Freeze verifier-facing report contract |
 | 98 | Paper/README/article normative to final protocol |
-| 99 | Update with landed corridor evidence (Qwen L∞=8, Llama L∞=9) |
+| 99 | Update with landed attention evidence: restored single-digit corridor, Llama bf16 strong-tier anchoring (~0.06), and Qwen narrowed to a historical `x_attn_i8` / K capture-binding bug rather than generic arithmetic mismatch |
 | 100 | Full protocol documentation in README |
 | 101 | Full protocol specification in paper |
 | 102 | Explicit input-verification procedure |
