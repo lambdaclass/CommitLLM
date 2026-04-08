@@ -1303,14 +1303,15 @@ pub fn verify_witnessed_score_anchoring_bf16(
         };
         let q_bias = key.qkv_bias_for(layer_idx, MatrixType::Wq);
 
-        // Reconstruct Q: dequant → bias → bf16 → RoPE in f32 → bf16.
-        let q_f32 = verilm_core::attention::dequant_bias_bf16(
+        // Reconstruct Q: CUTLASS epilogue (FMA) → RoPE in f32 (no bf16 truncation).
+        // Matches witness capture.py: promote to f32, apply RoPE, compute scores.
+        let q_f32 = verilm_core::attention::cutlass_epilogue_bf16(
             q_acc,
             q_scales,
             sl.scale_x_attn,
             q_bias,
         );
-        let q_roped_f32 = verilm_core::attention::apply_rope_bf16(
+        let q_roped_f32 = verilm_core::attention::apply_rope_f32(
             &q_f32,
             cfg.n_q_heads,
             token_pos,
@@ -1343,8 +1344,9 @@ pub fn verify_witnessed_score_anchoring_bf16(
         };
         let k_bias = key.qkv_bias_for(layer_idx, MatrixType::Wk);
 
-        // Build K cache in f32, bf16-matched from shell accumulators.
-        // Full path: dequant → bias → bf16 → RoPE in f32 → bf16 (matching KV cache storage).
+        // Build K cache in f32 from shell accumulators.
+        // Path: cutlass_epilogue_bf16 → RoPE in f32 (no bf16 truncation).
+        // Position `t` maps to RoPE position `t` (matching witness arange(seq_len)).
         let mut kv_k_f32: Vec<Vec<f32>> = Vec::with_capacity(n_positions);
 
         for t in 0..n_positions {
@@ -1359,24 +1361,23 @@ pub fn verify_witnessed_score_anchoring_bf16(
             };
 
             if let Some(k_acc) = k_acc_opt {
-                // Reconstruct from raw accumulators through bf16 dequant + bf16 RoPE.
                 let scale_x_t = if t < prefix_shells.len() {
                     prefix_shells[t].layers[layer_idx].scale_x_attn
                 } else {
                     sl.scale_x_attn
                 };
-                let k_f32 = verilm_core::attention::dequant_bias_bf16(
+                let k_f32 = verilm_core::attention::cutlass_epilogue_bf16(
                     k_acc, k_scales, scale_x_t, k_bias,
                 );
-                let k_roped_f32 = verilm_core::attention::apply_rope_bf16(
-                    &k_f32, cfg.n_kv_heads, t + 1, cfg,
+                let k_roped_f32 = verilm_core::attention::apply_rope_f32(
+                    &k_f32, cfg.n_kv_heads, t, cfg,
                 );
                 kv_k_f32.push(k_roped_f32);
             } else {
-                // No accumulator available — narrow committed K through bf16.
+                // No accumulator — use committed K_roped cast to f32.
                 kv_k_f32.push(
                     layer_kv[t].k_roped.iter()
-                        .map(|&x| half::bf16::from_f64(x).to_f32())
+                        .map(|&x| x as f32)
                         .collect(),
                 );
             }

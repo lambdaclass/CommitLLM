@@ -1270,14 +1270,14 @@ fn dequant_acc(
     }
 }
 
-/// Dequantize Q/K accumulators through bf16 precision, add bias, apply RoPE → bf16.
+/// Dequantize Q/K accumulators and apply RoPE in f32.
 ///
-/// Full GPU-matched path:
-/// 1. `bf16(f32_dequant + f32_bias)` — matches CUTLASS `scaled_mm` output
-/// 2. RoPE in f32, then truncate to bf16 — matches KV cache storage
+/// Full path matching witness capture.py:
+/// 1. `cutlass_epilogue_bf16()` — exact CUTLASS epilogue with FMA for bias path
+/// 2. RoPE in f32 (no bf16 truncation — matches witness score computation)
 ///
-/// Used for bf16-matched score anchoring on models that run in bfloat16 (e.g. Qwen).
-fn dequant_rope_bf16(
+/// Used for score anchoring on models that run in bfloat16 (e.g. Qwen, Llama).
+fn dequant_rope_f32(
     key: &VerifierKey,
     layer_idx: usize,
     mt: MatrixType,
@@ -1292,12 +1292,13 @@ fn dequant_rope_bf16(
         .expect("bf16 anchoring requires per-channel weight scales");
     let bias = key.qkv_bias_for(layer_idx, mt);
 
-    // dequant + bias → bf16 truncation (matches CUTLASS bf16_final).
+    // Deterministic epilogue matching CUTLASS exactly (FMA for bias path).
     let k_f32 =
-        verilm_core::attention::dequant_bias_bf16(acc, pc_scales, scale_x, bias);
+        verilm_core::attention::cutlass_epilogue_bf16(acc, pc_scales, scale_x, bias);
 
-    // RoPE in f32, truncate output to bf16 (matches GPU's bf16 KV cache storage).
-    verilm_core::attention::apply_rope_bf16(&k_f32, n_heads, position, &key.config)
+    // RoPE in f32 — no bf16 truncation. Matches witness capture.py which promotes
+    // to f32, applies RoPE, and computes scores all in f32.
+    verilm_core::attention::apply_rope_f32(&k_f32, n_heads, position, &key.config)
 }
 
 /// Per-step tolerance for bridge x_attn check-and-gate.
@@ -1958,23 +1959,25 @@ fn replay_deep_prefix_roped(
                     } else {
                         // Anchor check: compare witnessed scores against canonical Q·K^T/√d.
                         //
-                        // For models with per-channel scales (W8A8 bf16), use bf16-matched
-                        // reconstruction: dequant → bias → bf16 → f32 → RoPE. This matches
-                        // the GPU's CUTLASS `bf16(f32_dequant + f32_bias)` semantics and
-                        // eliminates the f64-vs-bf16 anchoring gap.
+                        // For models with per-channel scales (W8A8 bf16), use exact CUTLASS
+                        // epilogue + f32 RoPE (no bf16 truncation). Matches witness capture.py
+                        // which promotes to f32, applies RoPE, and computes Q·K^T all in f32.
                         //
                         // For models without per-channel scales (toy/INT8), fall back to f64.
                         let has_per_channel =
                             ctx.key.per_channel_scales_for(layer_idx, MatrixType::Wq).is_some();
 
                         let anchor = if has_per_channel {
-                            // bf16-matched anchoring: reconstruct Q and all K through bf16 path.
-                            let q_roped_f32 = dequant_rope_bf16(
+                            // Reconstruct Q: epilogue → RoPE in f32 (no bf16 truncation).
+                            // Position = pos (= token_index), matching witness gen_pos = seq_len-1.
+                            // NOT absolute_pos (pos+1) — that's an off-by-one vs witness.
+                            let q_roped_f32 = dequant_rope_f32(
                                 ctx.key, layer_idx, MatrixType::Wq,
-                                q_acc, sl.scale_x_attn, cfg.n_q_heads, absolute_pos,
+                                q_acc, sl.scale_x_attn, cfg.n_q_heads, pos,
                             );
 
-                            // Build bf16-matched K cache from shell accumulators.
+                            // Build K cache from shell accumulators.
+                            // Position `j` maps to RoPE position `j` (matching witness arange).
                             let mut kv_k_f32: Vec<Vec<f32>> = Vec::with_capacity(kv_k.len());
                             for (j, shell_j) in prefix_shells.iter().enumerate() {
                                 if j >= kv_k.len() {
@@ -1982,33 +1985,32 @@ fn replay_deep_prefix_roped(
                                 }
                                 let prefix_sl = &shell_j.layers[layer_idx];
                                 if let Some(k_acc_j) = &prefix_sl.k {
-                                    // Reconstruct from raw accumulators through bf16.
-                                    let k_roped = dequant_rope_bf16(
+                                    let k_roped = dequant_rope_f32(
                                         ctx.key, layer_idx, MatrixType::Wk,
                                         k_acc_j, prefix_sl.scale_x_attn,
-                                        cfg.n_kv_heads, j + 1,
+                                        cfg.n_kv_heads, j,
                                     );
                                     kv_k_f32.push(k_roped);
                                 } else {
-                                    // No accumulator — narrow committed K through bf16.
+                                    // No accumulator — use committed K_roped cast to f32.
                                     kv_k_f32.push(
-                                        kv_k[j].iter().map(|&x| half::bf16::from_f64(x).to_f32()).collect()
+                                        kv_k[j].iter().map(|&x| x as f32).collect()
                                     );
                                 }
                             }
-                            // Opened token's K.
+                            // Opened token's K — position = pos (matching witness).
                             if kv_k_f32.len() < kv_k.len() {
                                 if let Some(k_acc_open) = &sl.k {
-                                    let k_roped = dequant_rope_bf16(
+                                    let k_roped = dequant_rope_f32(
                                         ctx.key, layer_idx, MatrixType::Wk,
                                         k_acc_open, sl.scale_x_attn,
-                                        cfg.n_kv_heads, absolute_pos,
+                                        cfg.n_kv_heads, pos,
                                     );
                                     kv_k_f32.push(k_roped);
                                 } else {
                                     kv_k_f32.push(
                                         kv_k.last().unwrap().iter()
-                                            .map(|&x| half::bf16::from_f64(x).to_f32()).collect()
+                                            .map(|&x| x as f32).collect()
                                     );
                                 }
                             }

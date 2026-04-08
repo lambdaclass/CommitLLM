@@ -83,12 +83,14 @@ impl VerificationProfile {
         }
     }
 
-    /// Llama W8A8 profile, validated on Llama-3.1-8B-W8A8 (A100-80GB).
+    /// Llama W8A8 profile, validated on Llama-3.1-8B-W8A8 (H100).
     ///
     /// Corridor: max L-inf=9, frac≤1 > 99.9%, measured after rope_scaling fix.
     /// Slight growth with context (3 at short, 9 at 1165 tokens). Layer 25
     /// is consistently worst.
     /// Bridge: 1 bucket tolerance (BF16-vs-f64).
+    /// Score anchoring: bf16 path gives ~0.06 gap (short/medium/long),
+    /// validated with cutlass_epilogue_bf16 + f32 RoPE on H100.
     pub fn llama_w8a8() -> Self {
         VerificationProfile {
             name: "llama-w8a8".into(),
@@ -96,8 +98,8 @@ impl VerificationProfile {
             bridge_tolerance: 1,
             attention_tolerance: 10,
             max_validated_context: 1165,
-            requires_score_anchoring: false,
-            score_anchor_threshold: Some(1.0), // anchor gap ~0.09, well within bound
+            requires_score_anchoring: true,
+            score_anchor_threshold: Some(0.25), // bf16 anchor gap ~0.06, 4x headroom
         }
     }
 

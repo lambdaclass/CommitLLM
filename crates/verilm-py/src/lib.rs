@@ -2171,6 +2171,36 @@ fn dequant_bias_cast_variants(
         .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
 }
 
+/// Apply the deterministic CUTLASS epilogue to INT32 accumulators.
+///
+/// Exactly mirrors vLLM's CUTLASS `_scaled_mm` epilogue:
+///   No bias:   bf16_rne(scale_a * (f32(acc) * scale_b))
+///   With bias: bf16_rne(fma(scale_a, f32(acc) * scale_b, f32(bias)))
+///
+/// Args:
+///     acc: list[int] — i32 accumulators (length N, one row)
+///     per_channel_scales: list[float] — per-channel weight scales (length N)
+///     scale_a: float — per-token activation scale (scalar)
+///     bias: Optional[list[float]] — projection bias (length N), or None
+///
+/// Returns:
+///     list[float] — bf16-precision f32 values (length N)
+#[pyfunction]
+#[pyo3(signature = (acc, per_channel_scales, scale_a, bias=None))]
+fn cutlass_epilogue_bf16(
+    acc: Vec<i32>,
+    per_channel_scales: Vec<f32>,
+    scale_a: f32,
+    bias: Option<Vec<f32>>,
+) -> PyResult<Vec<f32>> {
+    Ok(verilm_core::attention::cutlass_epilogue_bf16(
+        &acc,
+        &per_channel_scales,
+        scale_a,
+        bias.as_deref(),
+    ))
+}
+
 #[pymodule]
 fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(commit_minimal_from_captures, m)?)?;
@@ -2197,6 +2227,7 @@ fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(simulate_boundary_strategies, m)?)?;
     m.add_function(wrap_pyfunction!(simulate_int16_boundary, m)?)?;
     m.add_function(wrap_pyfunction!(dequant_bias_cast_variants, m)?)?;
+    m.add_function(wrap_pyfunction!(cutlass_epilogue_bf16, m)?)?;
     m.add_function(wrap_pyfunction!(diagnose_cast_order, m)?)?;
     m.add_class::<CaptureHook>()?;
     m.add_function(wrap_pyfunction!(verify_input_tokenization, m)?)?;
