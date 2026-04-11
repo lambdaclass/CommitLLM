@@ -23,7 +23,10 @@ Usage:
 
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
-from _pins import VLLM_SPEC, TORCH_SPEC, TRANSFORMERS_SPEC, NUMPY_SPEC, SAFETENSORS_SPEC
+try:
+    from _pins import VLLM_SPEC, TORCH_SPEC, TRANSFORMERS_SPEC, NUMPY_SPEC, SAFETENSORS_SPEC
+except ImportError:
+    VLLM_SPEC = TORCH_SPEC = TRANSFORMERS_SPEC = NUMPY_SPEC = SAFETENSORS_SPEC = ""
 
 import modal
 

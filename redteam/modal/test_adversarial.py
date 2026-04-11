@@ -56,7 +56,10 @@ Usage:
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../scripts/modal"))
-from _pins import VERIFICATION
+try:
+    from _pins import VERIFICATION
+except ImportError:
+    VERIFICATION = []
 
 import modal
 

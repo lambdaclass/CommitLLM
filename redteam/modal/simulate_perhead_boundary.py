@@ -19,7 +19,11 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../scripts/modal"))
-from _pins import VERIFICATION, VLLM_SPEC, TORCH_SPEC, TRANSFORMERS_SPEC, COMPRESSED_TENSORS_SPEC
+try:
+    from _pins import VERIFICATION, VLLM_SPEC, TORCH_SPEC, TRANSFORMERS_SPEC, COMPRESSED_TENSORS_SPEC
+except ImportError:
+    VERIFICATION = []
+    VLLM_SPEC = TORCH_SPEC = TRANSFORMERS_SPEC = COMPRESSED_TENSORS_SPEC = ""
 
 import modal
 

@@ -15,7 +15,10 @@ Usage:
 
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
-from _pins import KEYGEN
+try:
+    from _pins import KEYGEN
+except ImportError:
+    KEYGEN = []
 
 import modal
 
