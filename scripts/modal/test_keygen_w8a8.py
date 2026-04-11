@@ -13,6 +13,10 @@ Usage:
     modal run --detach scripts/modal/test_keygen_w8a8.py
 """
 
+import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
+from _pins import KEYGEN
+
 import modal
 
 app = modal.App("verilm-test-keygen-w8a8")
@@ -28,7 +32,7 @@ image = (
     .env({
         "PATH": "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     })
-    .pip_install("torch", "numpy", "huggingface_hub", "safetensors", "maturin")
+    .pip_install(*KEYGEN)
     .add_local_dir(".", remote_path="/build", copy=True, ignore=[
         ".git", "target", "scripts/__pycache__", "*.pdf",
     ])

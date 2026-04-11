@@ -1,6 +1,6 @@
 # Roadmap
 
-All remaining work for CommitLLM, organized by priority. Items numbered sequentially within each tier.
+All remaining work for CommitLLM, organized by priority. Items are numbered globally, with suffix letters for follow-on work inside an existing track.
 
 Mark a task done only when it is true in code, tests, docs, and operational behavior. Completed milestones live in [CHANGELOG.md](./CHANGELOG.md).
 
@@ -12,13 +12,32 @@ Use this sequence as the single top-level plan. The tiers below provide detail;
 this list defines the actual order to execute.
 
 1. **Ship the first strong tier** — land the current Llama strong-tier path (`#2`, `#8`, `#15`, `#20`).
-2. **Land Qwen strong tier via captured x_attn** — bridge x_attn diverges under fused norm+quant; captured x_attn gives exact shell K. Default strong/deep audits to captured x_attn (`#2f`, `#4`).
-3. **Close prefix trust and guarantee language** — KV provenance, audit tiers, guarantee wording, and the formal cheating-game story (`#7`, `#24`, `#25`, `#6`).
-4. **Prove the protocol generalizes across dense families** — add one third dense family before any frontier architecture jump (`#31`).
-5. **Broaden dense coverage** — larger dense model, longer context, and one non-W8A8 dense quant path (`#32`, `#33`, `#34`, `#35`).
-6. **Take the frontier jump** — FP8 first, then FP8 KV, then MoE and architecture variants (`#30`, `#35a`, `#29`, `#35b`, `#35c`, `#35d`, `#35e`).
-7. **Improve serving/runtime compatibility** — native capture, batching, paging, TP, CUDA graphs, payload reduction (`#36` onward).
-8. **Pursue verified-mode research** — deterministic kernels / deterministic runtime only after the current stock-kernel path is shipped and benchmarked (`#67`, `#68`).
+2. **Land Qwen strong tier via captured x_attn** — bridge x_attn diverges under fused norm+quant; captured x_attn gives exact shell K. Next proof point is an end-to-end Qwen strong-tier benchmark with captured x_attn: anchor gap, witnessed-replay L∞, payload, and verifier time (`#2f`, `#4`, `#8`).
+3. **Prototype local captured-boundary verification** — replace long-chain bridge replay with per-layer local checks using captured boundaries. Measure exactness, payload growth, and verifier time. Define boundary policy per family (`#2g`, `#2h`, `#2i`).
+4. **Close prefix trust and guarantee language** — KV provenance, audit tiers, guarantee wording, and the formal cheating-game story (`#7`, `#24`, `#25`, `#6`). Include security comparison of bridge vs local-boundary verification (`#25a`).
+5. **Prove the protocol generalizes across dense families** — add one third dense family using the local-boundary path before any frontier architecture jump (`#31`, `#31a`).
+6. **Broaden dense coverage** — larger dense model, longer context, and one non-W8A8 dense quant path (`#32`, `#33`, `#34`, `#35`).
+7. **Take the frontier jump** — FP8 boundary policy first (`#30a`), then FP8 KV, then MoE and architecture variants (`#30`, `#35a`, `#29`, `#35b`, `#35c`, `#35d`, `#35e`).
+8. **Improve serving/runtime compatibility** — native capture (including native captured-boundary backend `#36a`), batching, paging, TP, CUDA graphs, payload reduction (`#36` onward).
+9. **Pursue verified-mode research** — deterministic kernels / deterministic runtime only after the current stock-kernel path is shipped and benchmarked (`#67`, `#68`).
+
+### Architecture fork
+
+Two verification paths, ordered by time-to-value:
+
+1. **Stock-kernel path with captured local boundaries** (near-term) — keep vLLM's existing kernels and move strong-tier verification toward captured local boundaries instead of long-chain bridge replay. Start with the already-proven `x_attn` boundary; extend to `x_ffn`, `h`, or residual capture only after `#2g/#2h/#2i` show that the local checks are accurate and the capture cost is acceptable. This is the intended dense-model path if the prototype succeeds.
+2. **Verified-mode deterministic kernels** (research / backstop) — custom CUDA kernels with exact arithmetic. Eliminates the boundary-approximation class entirely but requires kernel engineering per op and a deeper runtime fork. Keep this as the long-term clean path and as the fallback if the stock-kernel path stalls on unsupported kernels, FP8 semantics, or frontier architectures.
+
+The long-chain bridge is downgraded from the main verification path to a routine-tier fallback / diagnostic tool. It remains useful where captured boundaries are unavailable, but it should no longer define strong-tier semantics for dense models once a measured local-boundary policy exists.
+
+### Near-term decision gates
+
+Use these as explicit promotion criteria between phases, not just as vague "next work":
+
+1. **Llama strong tier ships first** — keep the current Llama path as the reference strong dense family only if GPU smoke tests, canonical verifier behavior, score witnessing, and docs/claims all stay aligned.
+2. **Qwen only graduates after the captured-`x_attn` benchmark** — promote Qwen to a supported strong family only if the end-to-end benchmark with captured `x_attn` shows an acceptably tight anchor gap / witnessed-replay gap at reasonable payload and verifier cost. If not, keep Qwen routine-tier only rather than silently widening semantics.
+3. **Local-boundary path starts with `x_attn` only** — do not pre-commit to `x_ffn`, `h`, or residual capture until the `x_attn`-only prototype and cost benchmark are measured. The first question is whether local RMSNorm/quant checks are accurate enough and materially simpler than the long-chain bridge.
+4. **Native captured-boundary backend is conditional, not automatic** — only invest in the native path after the protocol explicitly chooses local captured boundaries as the kept dense-model direction and after the boundary cost benchmark shows Python copy/materialization is the limiting factor.
 
 ---
 
@@ -28,13 +47,16 @@ Highest-priority work. Do in this order.
 
 Strict near-term execution order inside this tier:
 1. `#2` land the Llama strong attention tier
-2. `#2f` fix Qwen historical `x_attn_i8` / K binding
-3. `#4` unify the attention / prefix binding path
-4. `#8` freeze generated-token score witnessing as the strong tier
-5. `#15` freeze the canonical verifier
-6. `#14` keep GPU smoke tests green
-7. `#20` update docs/claims
-8. `#21` cut the release
+2. `#2f` run Qwen captured-`x_attn` strong-tier benchmark
+3. `#4` default captured `x_attn` for strong/full/score-witness audit opens, not only for `deep_prefix`
+4. `#2g` prototype local captured-boundary verification for `x_attn` only (per-layer local checks vs long-chain bridge)
+5. `#2i` benchmark boundary capture cost and separate prover-internal capture volume from client-visible audit payload
+6. `#2h` define strong-tier boundary policy per family from measured results, not assumptions
+7. `#8` freeze generated-token score witnessing as the strong tier
+8. `#15` freeze the canonical verifier
+9. `#14` keep GPU smoke tests green
+10. `#20` update docs/claims
+11. `#21` cut the release
 
 Items `#1`, `#3`, `#5`, `#6`, `#7`, `#9`, and `#10` remain important, but
 they are supporting work around the main sequence above rather than reasons to
@@ -43,15 +65,18 @@ delay the first strong-tier ship decision indefinitely.
 | # | Item | Status |
 |---|------|--------|
 | 1 | **RMSNorm contraction / local operator — MEASURED** — crude contraction ratio `ρ_j = γ·‖W_o‖₂/RMS(x^(j))` and tighter local sensitivity/operator tests have now been run on real checkpoints. **Qwen-7B W8A8**: crude contraction mixed; tighter local operator puts 21/28 layers below 1, but 3 layers (0, 1, 27) can still individually flip the output and many middle layers remain near the margin. **Llama-3.1-8B**: crude contraction fails everywhere and tighter local operator still leaves 0/32 layers below 1; 6 layers can individually flip the output. Conclusion: contraction and local linearization are useful diagnostics, but they do not rescue the corridor by themselves. Next step: refine the local map further with prompt diversity and the full within-layer propagation channel. Subtests: projected norm `‖J_RMSNorm(x_j) W_o^(j)‖`, head-aware/block-aware operators, mixed `∞→∞` and `∞→2` bounds consistent with the protocol corridor, finite-difference local sensitivity on real traces, and inclusion of the MLP propagation channel after the perturbed residual enters the rest of the layer. | **measured** |
-| 2 | **Shrink the honest corridor / land strong attention tier** — prover-side determinism confirmed (§1h), sidecar-to-verifier gap measured at L∞=8–9 (§1i). That story is now split by family: **Llama-3.1-8B strong tier is real** with bf16 score anchoring gap ~0.06 and threshold tightened to 0.25; the remaining replay gap is downstream of score anchoring. **Qwen-7B strong tier is now unblocked**: the L∞ 6–10 anchor gap was caused by bridge-derived `x_attn` diverging from vLLM's fused `norm_quant` kernel — NOT a capture-binding bug. With GPU-captured `x_attn` as the QKV boundary, shell K matches the GPU QKV output with L-inf=0 for all positions (confirmed by 10-run Modal diagnostic). Strong/deep audits now default to captured `x_attn` when available. Backend binding is done (`attn_backend`/`attn_dtype` in manifest/key/verifier, SDPA mandated for W8A8, fail closed on eager/unknown). | **partial** |
+| 2 | **Shrink the honest corridor / land strong attention tier** — prover-side determinism confirmed (§1h), sidecar-to-verifier gap measured at L∞=8–9 (§1i). That story is now split by family: **Llama-3.1-8B strong tier is real** with bf16 score anchoring gap ~0.06 and threshold tightened to 0.25; the remaining replay gap is downstream of score anchoring. **Qwen-7B strong tier is now unblocked but not yet end-to-end benchmarked**: the L∞ 6–10 anchor gap was caused by bridge-derived `x_attn` diverging from vLLM's fused `norm_quant` kernel — NOT a capture-binding bug. With GPU-captured `x_attn` as the QKV boundary, shell K matches the GPU QKV output with L-inf=0 for all positions (confirmed by 10-run Modal diagnostic). Next required measurement: Qwen captured-`x_attn` strong-tier end-to-end benchmark: anchor gap, witnessed replay L∞, payload MB, verifier ms. Backend binding is done (`attn_backend`/`attn_dtype` in manifest/key/verifier, SDPA mandated for W8A8, fail closed on eager/unknown). | **partial** |
 | 2a | ~~**Bind attention backend in manifest**~~ — `attn_backend`, `attn_dtype` added to manifest/key/verifier with cross-checks. W8A8 mandates SDPA, fail closed on eager and unknown. Keygen populates from model config. | **done** |
 | 2b | ~~**Measure real protocol gap (sidecar → verifier)**~~ — L∞=8 (Qwen 7B), L∞=9 (Llama 8B, Llama 70B) on A100-80GB with SDPA. ~93–97% exact, >99.9% within ±1. Gap grows weakly with sequence length. See §1i. | **done** |
 | 2c | **Cross-hardware stability** — same backend on A100 vs H100. If hardware changes the gap, τ must accommodate hardware diversity. | open |
 | 2d | ~~**Better `a` quantization**~~ — measured and ruled out as the main τ-reduction path. Per-head `scale_a` does not help (one head still dominates; INT8 corridor gets worse), and INT16 retained `a` does not materially shrink the float-space honest gap. No longer on the critical path. | **done** |
 | 2e | **Layer/head-specific tolerances** — keep only as a routine-tier fallback. Strong-tier direction is family-specific score anchoring, not ever-finer τ tuning. Corridor worst layers remain useful for diagnostics: Qwen 1/27, Llama-8B 25, Llama-70B 7/13/70. | open |
-| 2f | **Qwen `x_attn` boundary: captured path exact, bridge approximate** — 10-run Modal diagnostic (2026-04-08) proved: (1) shell K from captured `x_attn` + bf16 CUTLASS epilogue matches GPU QKV output K-slice with L-inf=0 for ALL prefix positions; (2) bridge-derived `x_attn` (f64 RMSNorm + quantize) diverges from vLLM's fused `norm_quant` kernel output for all positions; (3) the apparent pos 1+ divergence in earlier diagnostics was a measurement bug (RoPE applied in-place, hook captured post-RoPE K). **Fix landed**: `server.audit()` defaults to captured `x_attn` for deep/strong audits. Regression test: `test_qwen_shell_exact.py`. Long-term: canonical deterministic norm+quant kernel eliminates the bridge approximation class entirely. | **fixed** |
+| 2f | **Qwen `x_attn` boundary: captured path exact, bridge approximate** — 10-run Modal diagnostic (2026-04-08) proved: (1) shell K from captured `x_attn` + bf16 CUTLASS epilogue matches GPU QKV output K-slice with L-inf=0 for ALL prefix positions; (2) bridge-derived `x_attn` (f64 RMSNorm + quantize) diverges from vLLM's fused `norm_quant` kernel output for all positions; (3) the apparent pos 1+ divergence in earlier diagnostics was a measurement bug (RoPE applied in-place, hook captured post-RoPE K). **Next**: run Qwen score-witness strong-tier benchmark with captured `x_attn`, then enable the Qwen strong profile only if the score anchor gap is tight. Regression test: `test_qwen_shell_exact.py`. Long-term: canonical deterministic norm+quant kernel eliminates the bridge approximation class entirely. | **in progress** |
+| 2g | **Local boundary prototype** — prototype local captured-boundary verification on one family (Qwen or Llama). Replace long-chain bridge replay with per-layer local checks using captured boundaries where available. Start with `x_attn` only for Qwen/Llama strong tier and measure exactness, payload, and verifier time. Only if the single-op RMSNorm/quant gap is tight enough should the protocol extend to `x_ffn` and `h`. | open |
+| 2h | **Strong-tier boundary policy** — for each supported family, specify which boundaries are: (a) captured exactly, (b) locally checked, (c) replayed approximately, (d) unsupported. This prevents the protocol from silently mixing bridge-derived and captured semantics across audit tiers. | open |
+| 2i | **Boundary cost benchmark** — quantify retained-state growth and online overhead for: (a) captured `x_attn` only (current), (b) captured `x_attn` + `x_ffn` + `h`, (c) optional residual capture. Report per-token/per-layer bytes, total prefill volume at 4K/32K, end-to-end latency impact, and keep prover-internal capture/hash volume separate from client-visible audit payload. | open |
 | 3 | **Real-model corridor attacks — PARTIALLY MEASURED** — multi-prompt finite-difference sensitivity measured: Qwen 28/28 layers flip on every prompt, Llama 0–6 flips depending on margin. All-layers-simultaneously always flips. Remaining: constrained adversarial optimization (true worst-case under L∞), multi-token accumulation across autoregressive decode. See `research/attention-gap.md` §1e, §3l–3m. | **partial** |
-| 4 | **Unify attention path** — one `x_attn` boundary, one QKV replay story across prover/verifier/corridor, and one correct historical-prefix binding story. No silent mixing of bridge-derived Q with committed K/V. With #2f resolved, the captured `x_attn` is the canonical QKV boundary for strong-tier verification. Remaining: ensure the verifier uses captured `x_attn` consistently (not just for `deep_prefix`), and that the bridge path is explicitly documented as a routine-tier approximation. | open |
+| 4 | **Unify attention path** — one `x_attn` boundary, one QKV replay story across prover/verifier/corridor, and one correct historical-prefix binding story. No silent mixing of bridge-derived Q with committed K/V. The captured `x_attn` is the canonical QKV boundary for strong-tier verification. Remaining: make `server.audit()` default to captured `x_attn` for strong/full/score-witness audit opens whenever captured data is available (currently defaulted for `deep_prefix`), and document the bridge path explicitly as a routine-tier approximation. | open |
 | 5 | **Adversarial testing** — cheating-provider test suite: receipt forgery, transcript splicing, intermediate tampering, model substitution, selective layer cheating, KV injection, and selective-abort / audit-policy gaming. Every attack must fail verification or be documented as accepted gap. Includes real-model constrained corridor attacks (see #3). | **in progress** |
 | 6 | **Formal security argument** — define the cheating game, state Freivalds soundness bound (1/p), state detection probability as f(sampling rate, cheating fraction), state what commitment binding prevents. Include random audit conditioning analysis: detection probability vs cheating fraction vs audit rate. | open |
 | 7 | **KV provenance** — sampled/batched Freivalds checks verify committed K/V are consistent with committed Wk/Wv weights and the bound `x_attn` inputs. Tightening current-token attention alone is insufficient if the adversary can manipulate prefix state; KV provenance closes the upstream path. With #2f resolved (captured `x_attn` gives exact K), the provenance check can now use exact equality for models where captured `x_attn` is available, falling back to corridor bounds only for the bridge path. | open |
@@ -78,11 +103,13 @@ Blocks credibility with serious reviewers.
 
 | # | Item |
 |---|------|
-| 21 | **Trust assumptions review** — enumerate exact, approximate, statistical, fail-closed, and out-of-scope assumptions; check against code and claims |
+| 21a | **Trust assumptions review** — enumerate exact, approximate, statistical, fail-closed, and out-of-scope assumptions; check against code and claims |
 | 22 | **Freshness / temporal binding** — verifier-issued nonce or timestamp in receipts; prevent replay of cached honest responses. Also define selective-abort / denial-of-audit policy: response deadlines, retention horizon, and what evidence is required when a provider refuses or misses an audit. |
 | 23 | **Tolerance bounds** — analytical attention-gap story for the kept path. Empirical data exists (Qwen L∞=8, Llama L∞=9); a full composed theorem does not. Do not assume plain per-layer `L∞` alone gives a strong semantic guarantee. Use norm-consistent bounds: if the corridor is stated in `L∞`, the downstream analysis must use compatible induced norms or explicitly justify the `L2`/spectral relaxation. Combine per-step corridor bounds with the local operator measurements from #1, real-model attack evidence from #2, `W_o` conditioning (#8), and score witnessing (#7) where needed. Add margin-based safety as an operational corollary where full worst-case theorems are too loose. RMSNorm contraction is supporting evidence, not the primary fix. |
 | 24 | **Audit tiers** — formalize receipt-only / routine / deep / full with explicit coverage and cost per tier |
 | 25 | **Guarantee language** — docs clearly separate exact (Freivalds/INT8), bounded approximate (attention), statistical (sampled provenance), and fail-closed |
+| 25a | **Bridge vs local-boundary security comparison** — explicitly compare: (a) long-chain bridge replay, (b) local captured-boundary checks, (c) what each proves and does not prove about nonlinear transitions. The guarantee language changes: local-boundary checks verify each nonlinear op independently (no accumulated drift) but still require per-op tolerance or exactness claims. Document which nonlinear ops (RMSNorm, SiLU, quantization, residual add) are exact vs approximate under each verification mode, and state clearly that the bridge remains a routine-tier fallback once local boundaries are adopted for strong-tier dense models. |
+| 25b | **Local nonlinear transition checks** — formalize RMSNorm, quantization, SiLU/gating, and residual update checks as local constraints with exact vs approximate status clearly stated per op. Quantization should be exact; RMSNorm and SiLU may have small fused-kernel gaps that need measurement. |
 | 26 | **Verifier-key distribution** — canonical procedure for trusted key provenance, hash pinning, historical lookup, fail-closed on unknown keys |
 | 27 | **Key rotation** — key versions tracked; old receipts remain auditable with historical key |
 | 28 | **Verifier-secret randomness** — one canonical verifier-secret randomness story. Make explicit which claims rely only on secrecy (single Freivalds check soundness `≈ 1/p`) and which rely on independence (cross-layer amplification, if claimed). If the protocol keeps shared `r_j` per matrix family, document that this is sufficient for base per-check soundness but does not provide multiplicative amplification across layers. If stronger composed claims are desired, derive per-layer Freivalds randomness from a verifier-secret seed. Deep-audit batching randomness and challenge selection must remain unpredictable until after commitment. |
@@ -111,7 +138,9 @@ rather than a general verifier for the full frontier serving stack.
 |---|------|
 | 29 | **MoE support** — verify expert routing decisions and per-expert shell matmuls for Mixtral, DeepSeek-V2/V3, Qwen-MoE. Commit router logits/top-k, Freivalds on selected expert weights, fail-closed on unsupported routing. This is a serious protocol extension and should come after FP8 and a third dense family. |
 | 30 | **FP8 quantization** — split into two explicit tracks: (a) compat mode with bounded replay against vendor FP8 kernels, and (b) verified mode with a canonical exact/fixed-point lowering or custom deterministic kernel. Do not start before the current dense slice and third-family support are stable. |
+| 30a | **FP8 boundary policy** — decide whether FP8 uses captured boundaries, compat replay, or verified-mode kernels. This should be explicit before FP8 implementation starts, not implied from the W8A8 path. FP8 decode semantics differ from INT8 and may require different boundary capture or tolerance strategies. |
 | 31 | **Third family** — prioritize `Mistral` / `Ministral` / `Nemo` or `Gemma` before FP8/MoE. Goal: prove the kept path is not overfit to Llama/Qwen while staying in dense-decoder territory. |
+| 31a | **Third-family local-boundary validation** — validate the local captured-boundary path on the third dense family (Mistral or Gemma) with the same architecture, before FP8/MoE. Confirms the local-boundary design generalizes beyond Llama/Qwen. |
 | 32 | **Larger model** — at least one 30B/70B-class datapoint on the corrected path |
 | 33 | **Long-context 128K+** — validate corridor at production context lengths where attention numerics are most stressed |
 | 34 | **GPTQ/AWQ/grouped quant** — at least one non-W8A8 family with a fully validated verifier replay path |
@@ -131,6 +160,7 @@ Determines whether CommitLLM is deployable at production throughput.
 | # | Item |
 |---|------|
 | 36 | **Native capture backend** — C++/CUDA/Triton hot path replacing Python interception. Milestones: (a) profile dominant cost, (b) prototype native `cutlass_scaled_mm` hook with ring buffer, (c) benchmark vs Python path, (d) integrate. Also enables CUDA graph compat (#44). |
+| 36a | **Native captured-boundary backend** — if local-boundary verification becomes the main dense-model path, the capture path needs a native implementation sooner because bandwidth/copy becomes the dominant bottleneck. The additional `x_ffn` + `h` captures (3-4× current volume) through Python→Rust is the likely scaling wall. Do not start this before the `x_attn`-only prototype and cost benchmark establish that local boundaries are the kept path. |
 | 37 | **Cross-request prefix caching** — committed prefix receipt referenced by subsequent requests. Highest-impact unsupported optimization (~2-5x TTFT). Prefix cache becomes first-class committed object. |
 | 38 | **Test continuous batching** — tracer splits batched prefill into per-token traces; commit+audit+verify on real GPU with concurrent requests |
 | 39 | **Test paged attention** — paged KV doesn't interfere with committed KV transcript integrity |

@@ -968,9 +968,75 @@ pub struct RetainedTokenState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KvEntry {
     /// Post-RoPE K vector, length kv_dim. f64 for deterministic hashing.
+    #[serde(with = "f64_hex_vec")]
     pub k_roped: Vec<f64>,
     /// Dequantized V vector (no RoPE), length kv_dim.
+    #[serde(with = "f64_hex_vec")]
     pub v_deq: Vec<f64>,
+}
+
+/// Serde module that serializes `Vec<f64>` as hex-encoded IEEE 754 LE bytes.
+///
+/// serde_json's default f64 round-trip (Ryū → decimal → parse) introduces
+/// ±1 ULP errors for some values (e.g. products of sin/cos from RoPE).
+/// Hex encoding preserves bit-exact f64 values across JSON serialization.
+///
+/// JSON format: array of hex strings, e.g. `["3ff0000000000000", ...]`.
+/// Bincode: transparent (delegates to default Vec<f64> encoding).
+mod f64_hex_vec {
+    use serde::{self, Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(data: &[f64], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            // JSON: encode each f64 as a hex string of its LE bytes
+            let hex_strs: Vec<String> = data
+                .iter()
+                .map(|v| {
+                    let bytes = v.to_le_bytes();
+                    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+                })
+                .collect();
+            hex_strs.serialize(serializer)
+        } else {
+            // Bincode: use default Vec<f64> encoding (raw bytes, bit-exact)
+            data.serialize(serializer)
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<f64>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            // JSON: decode hex strings back to f64
+            let hex_strs: Vec<String> = Vec::deserialize(deserializer)?;
+            hex_strs
+                .iter()
+                .map(|s| {
+                    if s.len() != 16 {
+                        return Err(serde::de::Error::custom(format!(
+                            "expected 16 hex chars for f64, got {}",
+                            s.len()
+                        )));
+                    }
+                    let mut bytes = [0u8; 8];
+                    for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+                        let hex_str = std::str::from_utf8(chunk)
+                            .map_err(serde::de::Error::custom)?;
+                        bytes[i] = u8::from_str_radix(hex_str, 16)
+                            .map_err(serde::de::Error::custom)?;
+                    }
+                    Ok(f64::from_le_bytes(bytes))
+                })
+                .collect()
+        } else {
+            // Bincode: default Vec<f64> decoding
+            Vec::deserialize(deserializer)
+        }
+    }
 }
 
 /// Pre-softmax attention scores witnessed from GPU computation.

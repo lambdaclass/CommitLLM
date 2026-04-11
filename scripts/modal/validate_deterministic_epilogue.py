@@ -17,18 +17,13 @@ Usage:
     modal run --detach scripts/modal/validate_deterministic_epilogue.py
 """
 
-import os
+import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
+from _pins import VERIFICATION
 
 import modal
 
 app = modal.App("verilm-validate-epilogue")
-
-VLLM_SPEC = os.environ.get("VERILM_VLLM_SPEC", "vllm==0.18.0")
-TORCH_SPEC = os.environ.get("VERILM_TORCH_SPEC", "torch")
-TRANSFORMERS_SPEC = os.environ.get("VERILM_TRANSFORMERS_SPEC", "transformers<5")
-COMPRESSED_TENSORS_SPEC = os.environ.get(
-    "VERILM_COMPRESSED_TENSORS_SPEC", "compressed-tensors==0.13.0"
-)
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -40,14 +35,7 @@ image = (
         "PATH": "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
     })
-    .pip_install(
-        VLLM_SPEC,
-        TORCH_SPEC,
-        TRANSFORMERS_SPEC,
-        COMPRESSED_TENSORS_SPEC,
-        "numpy",
-        "maturin",
-    )
+    .pip_install(*VERIFICATION)
     .add_local_dir(".", remote_path="/build", copy=True, ignore=[
         ".git", "target", "scripts", "*.pdf", "site", ".cache",
     ])

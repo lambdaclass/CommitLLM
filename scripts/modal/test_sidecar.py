@@ -21,13 +21,17 @@ Usage:
     modal run scripts/modal_test_sidecar.py
 """
 
+import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
+from _pins import VLLM_SPEC, TORCH_SPEC, TRANSFORMERS_SPEC, NUMPY_SPEC, SAFETENSORS_SPEC
+
 import modal
 
 app = modal.App("verilm-sidecar-test")
 
 vllm_image = (
     modal.Image.debian_slim(python_version="3.11")
-    .pip_install("vllm>=0.8", "torch", "numpy", "safetensors")
+    .pip_install(VLLM_SPEC, TORCH_SPEC, TRANSFORMERS_SPEC, NUMPY_SPEC, SAFETENSORS_SPEC)
     .add_local_dir("sidecar", remote_path="/opt/verilm", copy=True)
     .run_commands(
         "pip install -e /opt/verilm",

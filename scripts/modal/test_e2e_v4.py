@@ -13,6 +13,10 @@ Usage:
     modal run --detach scripts/modal_test_e2e_v4.py
 """
 
+import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
+from _pins import VERIFICATION
+
 import modal
 
 app = modal.App("verilm-test-e2e-v4")
@@ -30,7 +34,7 @@ image = (
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
         "VERILM_CAPTURE": "1",
     })
-    .pip_install("vllm>=0.8", "torch", "numpy", "fastapi", "maturin")
+    .pip_install(*VERIFICATION)
     .add_local_dir("sidecar", remote_path="/opt/verilm", copy=True)
     .run_commands(
         "pip install -e /opt/verilm",
@@ -57,6 +61,7 @@ def _run_e2e():
     import os
 
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    os.environ["VERILM_DEBUG_KV"] = "1"
 
     import verilm_rs
     from vllm import LLM, SamplingParams
@@ -132,8 +137,56 @@ def _run_e2e():
     payload_full_bytes = len(audit_full_json.encode("utf-8")) if isinstance(audit_full_json, str) else len(audit_full_json)
     print(f"  payload: {payload_full_bytes} bytes")
 
+    # ── Step 3a.1: JSON round-trip diagnostic ──
+    print("\n3a.1. KV JSON round-trip diagnostic...")
+    if isinstance(audit_full_json, str):
+        import struct
+        parsed = json.loads(audit_full_json)
+        kv_e = parsed.get("kv_entries")
+        if kv_e and len(kv_e) > 0 and len(kv_e[0]) > 0:
+            # Re-serialize parsed response to JSON and compare with original
+            re_json = json.dumps(parsed)
+            re_parsed = json.loads(re_json)
+            orig_k0 = kv_e[0][0]["k_roped"][:4]
+            re_k0 = re_parsed["kv_entries"][0][0]["k_roped"][:4]
+            print(f"  orig k_roped[:4]: {orig_k0}")
+            print(f"  re-parsed k_roped[:4]: {re_k0}")
+            # Check bit-exact equality via struct pack
+            for i, (a, b) in enumerate(zip(orig_k0, re_k0)):
+                a_bits = struct.pack('<d', a).hex()
+                b_bits = struct.pack('<d', b).hex()
+                match = "OK" if a_bits == b_bits else "MISMATCH"
+                if match == "MISMATCH" or i == 0:
+                    print(f"  k[{i}]: {a} ({a_bits}) -> {b} ({b_bits}) [{match}]")
+            # Also check: does Python json.loads parse the Rust JSON values the same?
+            # This checks if Python's float parser and Rust's float parser agree
+            print(f"  Python json.loads round-trip of audit_full_json: checking first 4 k_roped values")
+        else:
+            print("  no kv_entries in parsed audit")
+
+    # ── Step 3a.2: Same commit, binary audit for comparison ──
+    print("\n3a.2. Binary audit from same commit (KV comparison)...")
+    audit_same_binary = server.audit(
+        request_id=request_id,
+        token_index=0,
+        layer_indices=full_layers,
+        tier="full",
+        binary=True,
+    )
+    report_same_binary = verilm_rs.verify_v4_binary(bytes(audit_same_binary), key_json)
+    print(f"  binary same-commit: {report_same_binary['checks_passed']}/{report_same_binary['checks_run']} checks")
+    if not report_same_binary["passed"]:
+        # Filter to just KV failures
+        kv_fails = [f for f in report_same_binary["failures"] if "KV" in f]
+        non_kv_fails = [f for f in report_same_binary["failures"] if "KV" not in f]
+        print(f"  KV failures: {len(kv_fails)}, non-KV failures: {len(non_kv_fails)}")
+        if non_kv_fails:
+            print(f"  non-KV: {non_kv_fails}")
+    else:
+        print("  binary path: ALL PASSED (including KV)")
+
     # ── Step 3b: Verify full audit ──
-    print("\n3b. Verify (full tier)...")
+    print("\n3b. Verify (full tier, JSON)...")
     report_full = verilm_rs.verify_v4(audit_full_json, key_json)
     assert_true(report_full["passed"], f"full verify passed ({report_full['checks_passed']}/{report_full['checks_run']} checks)")
     if not report_full["passed"]:

@@ -11,18 +11,13 @@ Usage:
     modal run --detach scripts/modal/diag_bias_check.py
 """
 
-import os
+import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
+from _pins import VERIFICATION, VLLM_SPEC, TORCH_SPEC, TRANSFORMERS_SPEC, COMPRESSED_TENSORS_SPEC
 
 import modal
 
 app = modal.App("verilm-bias-check")
-
-VLLM_SPEC = os.environ.get("VERILM_VLLM_SPEC", "vllm==0.18.0")
-TORCH_SPEC = os.environ.get("VERILM_TORCH_SPEC", "torch")
-TRANSFORMERS_SPEC = os.environ.get("VERILM_TRANSFORMERS_SPEC", "transformers<5")
-COMPRESSED_TENSORS_SPEC = os.environ.get(
-    "VERILM_COMPRESSED_TENSORS_SPEC", "compressed-tensors==0.9.3"
-)
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -35,15 +30,7 @@ image = (
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
         "VERILM_CAPTURE": "1",
     })
-    .pip_install(
-        VLLM_SPEC,
-        TORCH_SPEC,
-        TRANSFORMERS_SPEC,
-        COMPRESSED_TENSORS_SPEC,
-        "numpy",
-        "fastapi",
-        "maturin",
-    )
+    .pip_install(*VERIFICATION)
     .add_local_dir("sidecar", remote_path="/opt/verilm", copy=True)
     .run_commands(
         "pip install -e /opt/verilm",

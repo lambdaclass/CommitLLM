@@ -8,3 +8,4 @@ verilm-core = { path = "../verilm-core" }
 bincode = "1"
 rayon = "1.11.0"
 sha2 = "0.10"
+hex = "0.4"

@@ -17,6 +17,10 @@ Usage:
     modal volume get verilm-diag-output diag_qwen_k_triple.log /tmp/diag_qwen_k_triple.log
 """
 
+import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
+from _pins import VERIFICATION
+
 import modal
 
 app = modal.App("verilm-qwen-k-triple")
@@ -33,7 +37,7 @@ image = (
         "VERILM_CAPTURE": "1",
         "VERILM_CAPTURE_X_ATTN": "1",
     })
-    .pip_install("vllm>=0.8", "torch", "numpy", "fastapi", "maturin", "safetensors")
+    .pip_install(*VERIFICATION)
     .add_local_dir("sidecar", remote_path="/opt/verilm", copy=True)
     .run_commands(
         "pip install -e /opt/verilm",

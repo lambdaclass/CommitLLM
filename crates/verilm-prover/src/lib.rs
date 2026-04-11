@@ -421,12 +421,26 @@ pub fn commit_minimal(
         Some(transcripts) => {
             let mut roots = Vec::with_capacity(transcripts.len());
             let mut trees = Vec::with_capacity(transcripts.len());
+            let debug_kv = std::env::var("VERILM_DEBUG_KV").map_or(false, |v| v == "1");
             for (layer_idx, layer_entries) in transcripts.iter().enumerate() {
                 let leaves: Vec<[u8; 32]> = layer_entries
                     .iter()
                     .enumerate()
                     .map(|(pos, entry)| {
-                        merkle::hash_kv_entry(layer_idx, pos, &entry.k_roped, &entry.v_deq)
+                        let h = merkle::hash_kv_entry(layer_idx, pos, &entry.k_roped, &entry.v_deq);
+                        if debug_kv && layer_idx == 0 && pos == 0 {
+                            let k_preview: Vec<String> = entry.k_roped.iter().take(4)
+                                .map(|v| format!("{:.17e} ({:016x})", v, v.to_bits())).collect();
+                            let v_preview: Vec<String> = entry.v_deq.iter().take(4)
+                                .map(|v| format!("{:.17e} ({:016x})", v, v.to_bits())).collect();
+                            eprintln!(
+                                "[KV COMMIT] layer=0 pos=0 k_len={} v_len={} leaf={}",
+                                entry.k_roped.len(), entry.v_deq.len(), hex::encode(h)
+                            );
+                            eprintln!("[KV COMMIT]   k_roped[:4] = {:?}", k_preview);
+                            eprintln!("[KV COMMIT]   v_deq[:4]   = {:?}", v_preview);
+                        }
+                        h
                     })
                     .collect();
                 let tree = merkle::build_tree(&leaves);

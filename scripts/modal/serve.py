@@ -16,6 +16,10 @@ Usage:
       -d '{"prompt": "What is 2+2?", "n_tokens": 4}'
 """
 
+import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
+from _pins import VERIFICATION
+
 import modal
 
 app = modal.App("vi-verified-inference")
@@ -34,7 +38,7 @@ image = (
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
         "VERILM_CAPTURE": "1",
     })
-    .pip_install("vllm>=0.8", "torch", "numpy", "fastapi", "maturin")
+    .pip_install(*VERIFICATION)
     # Install verilm Python package (capture plugin).
     .add_local_dir("sidecar", remote_path="/opt/verilm", copy=True)
     .run_commands(

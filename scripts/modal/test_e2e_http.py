@@ -14,6 +14,10 @@ Usage:
     modal run --detach scripts/modal/test_e2e_http.py
 """
 
+import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
+from _pins import VERIFICATION
+
 import modal
 
 app = modal.App("verilm-test-e2e-http")
@@ -31,7 +35,7 @@ image = (
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
         "VERILM_CAPTURE": "1",
     })
-    .pip_install("vllm>=0.8", "torch", "numpy", "fastapi", "httpx", "maturin")
+    .pip_install(*VERIFICATION, "httpx")
     .add_local_dir("sidecar", remote_path="/opt/verilm", copy=True)
     .run_commands(
         "pip install -e /opt/verilm",

@@ -2287,6 +2287,23 @@ fn phase_kv_transcript(ctx: &Ctx, st: &mut St) -> bool {
             st.check();
             let leaf_hash = merkle::hash_kv_entry(layer_idx, pos, &entry.k_roped, &entry.v_deq);
             if !merkle::verify(&kv_roots[layer_idx], &leaf_hash, proof) {
+                // Debug: print first few k/v values and hash details
+                if std::env::var("VERILM_DEBUG_KV").map_or(false, |v| v == "1") {
+                    let k_preview: Vec<String> = entry.k_roped.iter().take(4)
+                        .map(|v| format!("{:.17e} ({:016x})", v, v.to_bits())).collect();
+                    let v_preview: Vec<String> = entry.v_deq.iter().take(4)
+                        .map(|v| format!("{:.17e} ({:016x})", v, v.to_bits())).collect();
+                    let leaf_hex: String = leaf_hash.iter().map(|b| format!("{:02x}", b)).collect();
+                    let root_hex: String = kv_roots[layer_idx].iter().map(|b| format!("{:02x}", b)).collect();
+                    eprintln!(
+                        "[KV DEBUG] layer={} pos={} k_len={} v_len={} leaf={} root={} proof_idx={} siblings={}",
+                        layer_idx, pos, entry.k_roped.len(), entry.v_deq.len(),
+                        leaf_hex, root_hex,
+                        proof.leaf_index, proof.siblings.len()
+                    );
+                    eprintln!("[KV DEBUG]   k_roped[:4] = {:?}", k_preview);
+                    eprintln!("[KV DEBUG]   v_deq[:4]   = {:?}", v_preview);
+                }
                 st.fail_ctx(
                     FailureCode::KvProofInvalid,
                     format!(

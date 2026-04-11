@@ -3915,6 +3915,53 @@ fn kv_entry_json_round_trip_hash_stability() {
 }
 
 #[test]
+fn kv_entry_json_round_trip_rope_values() {
+    // Test with values that come from RoPE (sin/cos) — more realistic than simple integer products.
+    use verilm_core::merkle;
+    use verilm_core::types::KvEntry;
+
+    // Simulate RoPE-derived K values: int_accum * scale * cos(theta) + rotated * scale * sin(theta)
+    let k: Vec<f64> = (0..512)
+        .map(|i| {
+            let theta = (i as f64) * 0.001 / (10000.0_f64).powf((2.0 * (i % 64) as f64) / 128.0);
+            let accum = (i as i32 * 37 - 9000) as f64;
+            let scale = 0.00390625_f64; // typical w8a8 scale
+            accum * scale * theta.cos() + (accum * 0.5) * scale * theta.sin()
+        })
+        .collect();
+    let v: Vec<f64> = (0..512)
+        .map(|i| ((i as i32 * 23 + 100) as f64) * 0.0078125_f64)
+        .collect();
+
+    let entry = KvEntry {
+        k_roped: k,
+        v_deq: v,
+    };
+
+    let hash_before = merkle::hash_kv_entry(0, 0, &entry.k_roped, &entry.v_deq);
+
+    let json = serde_json::to_string(&entry).unwrap();
+    let restored: KvEntry = serde_json::from_str(&json).unwrap();
+
+    let mut mismatches = 0;
+    for (i, (orig, rt)) in entry.k_roped.iter().zip(restored.k_roped.iter()).enumerate() {
+        if orig.to_bits() != rt.to_bits() {
+            if mismatches < 5 {
+                eprintln!(
+                    "k_roped[{}]: orig={:.17e} ({:016x}) rt={:.17e} ({:016x})",
+                    i, orig, orig.to_bits(), rt, rt.to_bits()
+                );
+            }
+            mismatches += 1;
+        }
+    }
+    assert_eq!(mismatches, 0, "{} k_roped values changed after JSON round-trip", mismatches);
+
+    let hash_after = merkle::hash_kv_entry(0, 0, &restored.k_roped, &restored.v_deq);
+    assert_eq!(hash_before, hash_after, "KV hash must survive JSON round-trip");
+}
+
+#[test]
 fn kv_derived_transcript_full_response_json_round_trip_passes() {
     let cfg = ModelConfig::toy();
     let model = generate_model(&cfg, 42);

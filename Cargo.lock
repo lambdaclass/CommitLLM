@@ -898,6 +898,7 @@ name = "verilm-prover"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "hex",
  "rayon",
  "sha2",
  "verilm-core",

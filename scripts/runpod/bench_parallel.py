@@ -35,7 +35,7 @@ SETUP_COMMANDS = [
     "apt-get update -qq && apt-get install -y -qq rsync > /dev/null",
     "command -v cargo || (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y)",
     'export PATH="$HOME/.cargo/bin:$PATH"',
-    "pip install -q 'vllm>=0.8' torch numpy fastapi maturin modal",
+    "pip install -q 'vllm==0.8.3' 'torch==2.6.0' 'transformers==4.57.6' 'compressed-tensors==0.9.2' 'numpy==2.1.3' 'safetensors==0.7.0' fastapi maturin modal",
 ]
 
 BUILD_COMMANDS = [

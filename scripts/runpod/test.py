@@ -45,7 +45,7 @@ SETUP_COMMANDS = [
     # Clean corrupt package metadata that crashes pip's resolver.
     "rm -rf /usr/local/lib/python3.11/dist-packages/~*",
     # Python deps.
-    "pip install -q 'vllm>=0.8' torch numpy fastapi maturin modal ninja",
+    "pip install -q 'vllm==0.8.3' 'torch==2.6.0' 'transformers==4.57.6' 'compressed-tensors==0.9.2' 'numpy==2.1.3' 'safetensors==0.7.0' fastapi maturin modal ninja",
 ]
 
 # Per-run commands: rebuild Rust bindings + install sidecar.

@@ -13,18 +13,14 @@ Usage:
     modal run scripts/modal/test_decode_corridor_regression.py
 """
 
-import os
+import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
+from _pins import VERIFICATION, VLLM_SPEC, TORCH_SPEC, TRANSFORMERS_SPEC, COMPRESSED_TENSORS_SPEC
 
 import modal
 
 app = modal.App("verilm-decode-corridor-regression")
 
-VLLM_SPEC = os.environ.get("VERILM_VLLM_SPEC", "vllm==0.18.0")
-TORCH_SPEC = os.environ.get("VERILM_TORCH_SPEC", "torch")
-TRANSFORMERS_SPEC = os.environ.get("VERILM_TRANSFORMERS_SPEC", "transformers<5")
-COMPRESSED_TENSORS_SPEC = os.environ.get(
-    "VERILM_COMPRESSED_TENSORS_SPEC", "compressed-tensors==0.13.0"
-)
 PREFILL_MAX_LINF = int(os.environ.get("VERILM_PREFILL_MAX_LINF", "2"))
 DECODE_MAX_LINF = int(os.environ.get("VERILM_DECODE_MAX_LINF", "12"))
 
@@ -40,15 +36,7 @@ image = (
         "VLLM_USE_V1": os.environ.get("VLLM_USE_V1", "1"),
         "VERILM_CAPTURE": "1",
     })
-    .pip_install(
-        VLLM_SPEC,
-        TORCH_SPEC,
-        TRANSFORMERS_SPEC,
-        COMPRESSED_TENSORS_SPEC,
-        "numpy",
-        "fastapi",
-        "maturin",
-    )
+    .pip_install(*VERIFICATION)
     .add_local_dir("sidecar", remote_path="/opt/verilm", copy=True)
     .run_commands(
         "pip install -e /opt/verilm",
