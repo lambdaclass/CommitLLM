@@ -8,6 +8,10 @@ Expected result: rejection. A provider should not be able to serve Qwen while
 claiming Llama, or vice versa, and still pass verification.
 """
 
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../scripts/modal"))
+from _pins import VERIFICATION
+
 import modal
 
 app = modal.App("verilm-redteam-model-substitution")
@@ -41,7 +45,7 @@ image = (
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
         "VERILM_CAPTURE": "1",
     })
-    .pip_install("vllm>=0.8", "torch", "numpy", "fastapi", "httpx", "maturin")
+    .pip_install(*VERIFICATION, "httpx")
     .add_local_dir("sidecar", remote_path="/opt/verilm", copy=True)
     .run_commands(
         "pip install -e /opt/verilm",

@@ -10,6 +10,10 @@ Expected result today: the replayed audit still verifies, and the script
 reports that as an observed limitation rather than a verifier bug.
 """
 
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../scripts/modal"))
+from _pins import VERIFICATION
+
 import modal
 
 app = modal.App("verilm-redteam-freshness-gap")
@@ -42,7 +46,7 @@ image = (
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
         "VERILM_CAPTURE": "1",
     })
-    .pip_install("vllm>=0.8", "torch", "numpy", "fastapi", "httpx", "maturin")
+    .pip_install(*VERIFICATION, "httpx")
     .add_local_dir("sidecar", remote_path="/opt/verilm", copy=True)
     .run_commands(
         "pip install -e /opt/verilm",
