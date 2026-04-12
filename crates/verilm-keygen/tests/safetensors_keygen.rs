@@ -636,7 +636,8 @@ fn test_w8a8_llama_profile_detected() {
     assert_eq!(profile.bridge_tolerance, 1);
     assert_eq!(profile.attention_tolerance, 10);
     assert_eq!(profile.max_validated_context, 1165);
-    assert!(!profile.requires_score_anchoring);
+    assert!(profile.requires_score_anchoring);
+    assert_eq!(profile.score_anchor_threshold, Some(0.25));
 }
 
 #[test]

@@ -36,6 +36,7 @@ image = (
         "PATH": "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
         "VERILM_CAPTURE": "1",
+        "VERILM_CAPTURE_X_ATTN": "1",
     })
     .pip_install(*VERIFICATION)
     .add_local_dir("sidecar", remote_path="/opt/verilm", copy=True)
@@ -44,7 +45,7 @@ image = (
         "python3 -c 'import site, os; open(os.path.join(site.getsitepackages()[0], \"verilm_capture.pth\"), \"w\").write(\"import verilm._startup\\n\")'",
     )
     .add_local_dir(".", remote_path="/build", copy=True, ignore=[
-        ".git", "target", "scripts/__pycache__", "*.pdf",
+        ".git", "target", "scripts/__pycache__", "*.pdf", "site",
     ])
     .run_commands(
         "cd /build/crates/verilm-py && maturin build --release",

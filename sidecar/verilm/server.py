@@ -1125,14 +1125,11 @@ class VerifiedInferenceServer:
         state = entry["state"]
         state.deep_prefix = deep_prefix
 
-        # Default: use captured x_attn for deep/strong audits when available.
+        # Default: use captured x_attn for all audits when available.
         # The bridge-derived x_attn is only an approximation to vLLM's fused
         # norm+quant kernel and produces large errors for some models (Qwen).
         if use_captured_x_attn is None:
-            use_captured_x_attn = (
-                deep_prefix
-                and state.has_captured_x_attn()
-            )
+            use_captured_x_attn = state.has_captured_x_attn()
         state.use_captured_x_attn = use_captured_x_attn
         output_text = entry.get("output_text")
 

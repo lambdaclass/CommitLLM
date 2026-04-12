@@ -1168,13 +1168,21 @@ fn bridge_layers(
         shell.layers[0].scale_x_attn,
     );
 
+    let qkv_freivalds = key
+        .verification_profile
+        .as_ref()
+        .map_or(true, |p| p.supports_qkv_freivalds);
+
     let n_layers = shell.layers.len().min(retained.layers.len());
     for layer_idx in 0..n_layers {
         let rs = &retained.layers[layer_idx];
         let sl = &shell.layers[layer_idx];
 
         // QKV Freivalds uses the gated x_attn (committed when available).
-        check_qkv(key, st, layer_idx, sl, &x_attn);
+        // Skip when the profile says bridge replay can't match GPU GEMM.
+        if qkv_freivalds {
+            check_qkv(key, st, layer_idx, sl, &x_attn);
+        }
         // Downstream exact checks continue from committed `rs.a`.
         check_wo(key, st, layer_idx, &rs.a, &sl.attn_out);
         let x_ffn = bridge_attn_to_ffn(key, layer_idx, rs, sl, &sl.attn_out, &mut residual);

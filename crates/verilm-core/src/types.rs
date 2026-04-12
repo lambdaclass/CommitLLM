@@ -64,6 +64,17 @@ pub struct VerificationProfile {
     /// are used for softmax + V aggregation (tighter corridor).
     /// When `None`, witnessed scores are ignored in verification.
     pub score_anchor_threshold: Option<f32>,
+
+    /// Whether this profile supports exact QKV Freivalds checks.
+    /// When false, the verifier skips Wq/Wk/Wv Freivalds (bridge replay
+    /// cannot reproduce the GPU's quantized GEMM for this model family).
+    /// Default: true (backward compatible — existing keys get Freivalds).
+    #[serde(default = "default_true")]
+    pub supports_qkv_freivalds: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl VerificationProfile {
@@ -80,6 +91,7 @@ impl VerificationProfile {
             max_validated_context: 1164,
             requires_score_anchoring: false,
             score_anchor_threshold: None, // anchor gap ~14, too loose for strong tier
+            supports_qkv_freivalds: false, // bridge replay can't match GPU INT8 GEMM for Qwen
         }
     }
 
@@ -100,6 +112,7 @@ impl VerificationProfile {
             max_validated_context: 1165,
             requires_score_anchoring: true,
             score_anchor_threshold: Some(0.25), // bf16 anchor gap ~0.06, 4x headroom
+            supports_qkv_freivalds: true,
         }
     }
 
