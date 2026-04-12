@@ -143,7 +143,6 @@ def _run_e2e():
     # ── Step 3a.1: JSON round-trip diagnostic ──
     print("\n3a.1. KV JSON round-trip diagnostic...")
     if isinstance(audit_full_json, str):
-        import struct
         parsed = json.loads(audit_full_json)
         kv_e = parsed.get("kv_entries")
         if kv_e and len(kv_e) > 0 and len(kv_e[0]) > 0:
@@ -154,16 +153,11 @@ def _run_e2e():
             re_k0 = re_parsed["kv_entries"][0][0]["k_roped"][:4]
             print(f"  orig k_roped[:4]: {orig_k0}")
             print(f"  re-parsed k_roped[:4]: {re_k0}")
-            # Check bit-exact equality via struct pack
+            # Values are hex-encoded IEEE 754 bytes — compare strings directly
             for i, (a, b) in enumerate(zip(orig_k0, re_k0)):
-                a_bits = struct.pack('<d', a).hex()
-                b_bits = struct.pack('<d', b).hex()
-                match = "OK" if a_bits == b_bits else "MISMATCH"
+                match = "OK" if a == b else "MISMATCH"
                 if match == "MISMATCH" or i == 0:
-                    print(f"  k[{i}]: {a} ({a_bits}) -> {b} ({b_bits}) [{match}]")
-            # Also check: does Python json.loads parse the Rust JSON values the same?
-            # This checks if Python's float parser and Rust's float parser agree
-            print(f"  Python json.loads round-trip of audit_full_json: checking first 4 k_roped values")
+                    print(f"  k[{i}]: {a} -> {b} [{match}]")
         else:
             print("  no kv_entries in parsed audit")
 

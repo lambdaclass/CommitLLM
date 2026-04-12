@@ -481,24 +481,27 @@ class VerifiedInferenceServer:
         except Exception:
             pass
 
-        # vLLM 0.8+ may not set HF-style attn_implementation on the config.
-        # Probe vLLM's own attention backend selection.
+        # vLLM 0.8+: walk model layers to find the attention impl class name.
         try:
-            from vllm.attention.selector import get_attn_backend
-            backend_cls = get_attn_backend()
-            if backend_cls is not None:
-                name = backend_cls.__name__.lower()
-                if "flash" in name:
-                    return "flash_attention_2"
-                if "sdpa" in name or "torch" in name:
-                    return "sdpa"
-                if "eager" in name:
-                    return "eager"
-                return name
-        except (ImportError, Exception):
+            for module in model.modules():
+                cls_name = type(module).__name__
+                if "Attention" not in cls_name:
+                    continue
+                # vLLM Attention layers have .impl with the backend instance
+                impl = getattr(module, "impl", None)
+                if impl is not None:
+                    name = type(impl).__name__.lower()
+                    if "flash" in name:
+                        return "flash_attention_2"
+                    if "sdpa" in name or "torch" in name:
+                        return "sdpa"
+                    if "eager" in name:
+                        return "eager"
+                    return name
+        except Exception:
             pass
 
-        # vLLM may expose the backend via the global attention selector.
+        # Fallback: vLLM global attention backend selector.
         try:
             from vllm.attention.selector import _Backend, get_global_forced_attn_backend
             forced = get_global_forced_attn_backend()

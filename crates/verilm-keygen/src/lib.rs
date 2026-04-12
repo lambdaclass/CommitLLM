@@ -710,12 +710,7 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         embedding_merkle_root,
         final_norm_weights,
         quant_block_size: None,
-        attn_backend: if quant_family.as_deref() == Some("W8A8") {
-            // W8A8 (compressed_tensors) requires SDPA — eager produces incorrect outputs.
-            Some("sdpa".to_string())
-        } else {
-            None
-        },
+        attn_backend: None, // W8A8 backend validation is in the verifier (sdpa + flash_attention_2 accepted)
         attn_dtype: json_cfg.torch_dtype.clone(),
         quant_family,
         scale_derivation,

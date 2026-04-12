@@ -859,6 +859,23 @@ fn canonical_w8a8_sdpa_accepted() {
 }
 
 #[test]
+fn canonical_w8a8_flash_attention_accepted() {
+    let mut manifest = make_manifest(0.0, 0, 1.0);
+    manifest.quant_family = Some("W8A8".into());
+    manifest.attn_backend = Some("flash_attention_2".into());
+    let (mut key, binary) = build_canonical_audit(Some(&manifest));
+    key.quant_family = Some("W8A8".into());
+    key.attn_backend = None; // key doesn't pin backend; verifier validates the allow-list
+    let report = verify_binary(&key, &binary, None, None).unwrap();
+    assert_eq!(
+        report.verdict,
+        Verdict::Pass,
+        "W8A8+flash_attention_2 should be accepted, failures: {:?}",
+        report.failures
+    );
+}
+
+#[test]
 fn canonical_attn_backend_match_accepted() {
     let mut manifest = make_manifest(0.0, 0, 1.0);
     manifest.attn_backend = Some("sdpa".into());
