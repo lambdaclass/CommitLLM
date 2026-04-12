@@ -1332,6 +1332,10 @@ fn verify_v4<'py>(
     )?;
     result.set_item("coverage", coverage_to_py(py, &report.coverage))?;
     result.set_item("duration_us", report.duration.as_micros() as u64)?;
+    if !report.skipped.is_empty() {
+        let skipped: Vec<&str> = report.skipped.iter().map(|s| s.as_str()).collect();
+        result.set_item("skipped", &skipped)?;
+    }
     Ok(result)
 }
 
@@ -1382,6 +1386,10 @@ fn verify_v4_binary<'py>(
     )?;
     result.set_item("coverage", coverage_to_py(py, &report.coverage))?;
     result.set_item("duration_us", report.duration.as_micros() as u64)?;
+    if !report.skipped.is_empty() {
+        let skipped: Vec<&str> = report.skipped.iter().map(|s| s.as_str()).collect();
+        result.set_item("skipped", &skipped)?;
+    }
     Ok(result)
 }
 

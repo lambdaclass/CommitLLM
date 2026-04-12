@@ -115,6 +115,7 @@ impl<'a> Ctx<'a> {
 struct St {
     checks: usize,
     failures: Vec<VerificationFailure>,
+    skipped: Vec<String>,
 }
 
 impl St {
@@ -122,6 +123,7 @@ impl St {
         Self {
             checks: 0,
             failures: Vec::new(),
+            skipped: Vec::new(),
         }
     }
     fn check(&mut self) {
@@ -1172,6 +1174,17 @@ fn bridge_layers(
         .verification_profile
         .as_ref()
         .map_or(true, |p| p.supports_qkv_freivalds);
+    if !qkv_freivalds {
+        let profile_name = key
+            .verification_profile
+            .as_ref()
+            .map_or("unknown", |p| &p.name);
+        st.skipped.push(format!(
+            "Wq/Wk/Wv Freivalds: unsupported for profile '{}' \
+             (bridge replay cannot match GPU quantized GEMM)",
+            profile_name
+        ));
+    }
 
     let n_layers = shell.layers.len().min(retained.layers.len());
     for layer_idx in 0..n_layers {
@@ -2435,6 +2448,7 @@ fn finish(ctx: &Ctx, st: St, coverage: AuditCoverage) -> V4VerifyReport {
         failures: st.failures,
         coverage,
         duration: ctx.start.elapsed(),
+        skipped: st.skipped,
     }
 }
 

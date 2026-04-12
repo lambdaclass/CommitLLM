@@ -604,6 +604,9 @@ pub struct V4VerifyReport {
     /// Consumers MUST distinguish routine-audit passes from full-audit passes.
     pub coverage: AuditCoverage,
     pub duration: Duration,
+    /// Checks that were skipped because the profile does not support them.
+    /// Each entry describes what was skipped and why.
+    pub skipped: Vec<String>,
 }
 
 impl V4VerifyReport {
@@ -616,15 +619,21 @@ impl V4VerifyReport {
 impl std::fmt::Display for V4VerifyReport {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self.verdict {
-            Verdict::Pass => write!(
-                f,
-                "V4 PASS: token {} — {}/{} checks, coverage: {} ({:.1}ms)",
-                self.token_index,
-                self.checks_passed,
-                self.checks_run,
-                self.coverage,
-                self.duration.as_secs_f64() * 1000.0
-            ),
+            Verdict::Pass => {
+                write!(
+                    f,
+                    "V4 PASS: token {} — {}/{} checks, coverage: {} ({:.1}ms)",
+                    self.token_index,
+                    self.checks_passed,
+                    self.checks_run,
+                    self.coverage,
+                    self.duration.as_secs_f64() * 1000.0
+                )?;
+                for s in &self.skipped {
+                    write!(f, "\n  [skipped] {}", s)?;
+                }
+                Ok(())
+            }
             Verdict::Fail => {
                 writeln!(
                     f,
@@ -635,6 +644,9 @@ impl std::fmt::Display for V4VerifyReport {
                 )?;
                 for fail in &self.failures {
                     writeln!(f, "  {}", fail)?;
+                }
+                for s in &self.skipped {
+                    writeln!(f, "  [skipped] {}", s)?;
                 }
                 Ok(())
             }
@@ -1807,6 +1819,7 @@ pub fn verify_v4_legacy(
         failures,
         coverage,
         duration,
+        skipped: Vec::new(), // legacy path does not support tier-aware skipping
     }
 }
 
@@ -2181,6 +2194,7 @@ pub fn verify_v4_with_weights(
         failures,
         coverage,
         duration,
+        skipped: Vec::new(), // legacy path does not support tier-aware skipping
     }
 }
 

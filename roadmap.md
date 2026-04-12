@@ -4,7 +4,7 @@ All remaining work for CommitLLM, organized by priority. Items are numbered glob
 
 Mark a task done only when it is true in code, tests, docs, and operational behavior. Completed milestones live in [CHANGELOG.md](./CHANGELOG.md).
 
-The shell/tail/binding protocol is structurally complete. The kept path preserves the full exact 7-matrix Freivalds shell (`Wq/Wk/Wv/Wo/Wg/Wu/Wd`) across all audit tiers; tiers differ in attention evidence and payload cost, not in whether the exact linear shell is checked.
+The shell/tail/binding protocol is structurally complete. The Freivalds shell checks are gated by verification profile: Llama checks all 7 matrices (`Wq/Wk/Wv/Wo/Wg/Wu/Wd`); Qwen skips `Wq/Wk/Wv` because the bridge replay cannot match the GPU's quantized QKV GEMM (exact QKV Freivalds remains Llama-only until captured-boundary local verification or deterministic kernels close the gap). Tiers differ in attention evidence and payload cost.
 
 ## Linear Execution Order
 
