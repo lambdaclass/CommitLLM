@@ -148,20 +148,16 @@ pub fn build_retained_from_captures(
                 let a_dim = entry.a_i8.len() / batch_size;
                 let a = entry.a_i8[b * a_dim..(b + 1) * a_dim].to_vec();
 
-                let (retained_xa, retained_scale_xa) = if let Some(ref xa) = entry.x_attn_i8 {
+                if let Some(ref xa) = entry.x_attn_i8 {
                     let x_dim = xa.len() / batch_size;
-                    let slice = xa[b * x_dim..(b + 1) * x_dim].to_vec();
-                    token_x_attn.push(slice.clone());
-                    (Some(slice), Some(entry.scale_x_attn[b]))
-                } else {
-                    (None, None)
-                };
+                    token_x_attn.push(xa[b * x_dim..(b + 1) * x_dim].to_vec());
+                }
 
                 layers.push(RetainedLayerState {
                     a,
                     scale_a: entry.scale_a[b],
-                    x_attn_i8: retained_xa,
-                    scale_x_attn: retained_scale_xa,
+                    x_attn_i8: None,
+                    scale_x_attn: None,
                 });
                 token_scales.push(CapturedLayerScales {
                     scale_x_attn: entry.scale_x_attn[b],
