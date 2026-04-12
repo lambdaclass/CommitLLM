@@ -92,6 +92,7 @@
       <li><a href="#guarantees">Guarantees</a></li>
       <li><a href="#deployment">Deployment</a></li>
       <li><a href="#usecases">Use cases</a></li>
+      <li><a href="#faq">FAQ</a></li>
       <li><a href="#protocol">Protocol</a></li>
       <li><a href="#resources">Resources</a></li>
     </ul>
@@ -533,6 +534,129 @@
         <div class="col-label col-label--orange">Too expensive</div>
         <h3>Full proofs</h3>
         <p>Strong proof objects are attractive, but prover costs remain too high for production LLM serving at realistic scale today.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="rule">
+
+<!-- ── FAQ ───────────────────────────────────────── -->
+<section class="section section--tint" id="faq">
+  <div class="container">
+    <div class="section-label">FAQ</div>
+    <h2 class="section-title">The questions serious readers ask first</h2>
+    <p class="section-sub">
+      The important distinctions are threat model, cost model, and what is exact versus approximate. This protocol is not a SNARK, not a TEE, and not naive spot checking. It is a commit-and-audit system for remote inference.
+    </p>
+    <div class="section-note">
+      <strong>The key distinction:</strong> the provider commits before they know whether any part of the response will be audited.
+    </div>
+    <div class="faq-grid">
+      <div class="faq-item">
+        <div class="faq-label">Problem</div>
+        <h3>What problem does CommitLLM solve?</h3>
+        <p>It gives a remote caller evidence that the provider actually served the claimed model and did not rewrite the delivered answer after decoding. The receipt binds model identity, deployment choices, decode policy, randomness, and the answer path into one auditable object.</p>
+      </div>
+      <div class="faq-item">
+        <div class="faq-label">Baseline</div>
+        <h3>Why not just rerun the model?</h3>
+        <p>Because that assumes the caller can afford to run the same checkpoint, quantization, and serving stack themselves. Often they cannot. CommitLLM is built for the more common server-vs-client setting where the model is remote and the caller needs something stronger than trust without reproducing the full computation locally.</p>
+      </div>
+      <div class="faq-item">
+        <div class="faq-label">Security model</div>
+        <h3>Is this just spot checking?</h3>
+        <p>No. Ordinary spot checking is weak because the provider can behave honestly when watched and cheat when unwatched. Here the provider commits first. The challenge happens after commitment, so a forged answer cannot be swapped out once the provider learns that an audit is coming.</p>
+      </div>
+      <div class="faq-item">
+        <div class="faq-label">Commitment</div>
+        <h3>What does precommitment actually buy?</h3>
+        <p>It forces the provider to bind themselves to one concrete execution trace before they know which tokens or layers will be challenged. If they serve a forged answer and that request is challenged later, they must open the same forgery they already committed to or fail verification.</p>
+      </div>
+      <div class="faq-item">
+        <div class="faq-label">Scope</div>
+        <h3>What exactly is bound in the receipt?</h3>
+        <p>The checkpoint, quantization, runtime manifest, prompt handling, sampling randomness, decode policy, token count, and output path. The question is not just “did some model produce something plausible,” but “did the claimed deployment produce this answer under the claimed policy.”</p>
+      </div>
+      <div class="faq-item">
+        <div class="faq-label">Coverage</div>
+        <h3>What is exact, what is approximate, and what is statistical?</h3>
+        <p>Large INT8 matrix multiplications are checked by exact algebraic fingerprints. Supported nonlinear boundaries are replayed canonically. Native FP16/BF16 attention is bounded approximate replay on the current path. Routine audit gives statistical coverage on unopened retained state; deep audit opens more of that state and upgrades coverage.</p>
+      </div>
+      <div class="faq-item">
+        <div class="faq-label">Boundary</div>
+        <h3>Does this verify the whole model exactly?</h3>
+        <p>No. The protocol is honest about its guarantee boundary. Some parts are exact, some are bounded approximate on the current path, and some are statistical unless deep audit is used. The point is not to pretend everything is exact, but to make the exact, approximate, and fail-closed parts explicit and auditable.</p>
+      </div>
+      <div class="faq-item">
+        <div class="faq-label">Attacker model</div>
+        <h3>Can a provider still target one user or one prompt?</h3>
+        <p>Yes, but then the guarantee is probabilistic unless the audit rate is 100%. Roughly, catch probability is audit rate times challenge coverage times verifier soundness. If the stakes are higher, the verifier can escalate from routine audit to deep audit on that specific response instead of paying full cost on every request.</p>
+      </div>
+      <div class="faq-item">
+        <div class="faq-label">Availability</div>
+        <h3>What if the provider refuses or misses an audit?</h3>
+        <p>Then that is evidence too. CommitLLM is an interactive protocol: inability or refusal to open a committed region on time is not neutral behavior. In a real deployment, missed audits, selective aborts, and retention-window failures should be policy violations, not silently ignored edge cases.</p>
+      </div>
+      <div class="faq-item">
+        <div class="faq-label">Comparison</div>
+        <h3>Is this stronger or weaker than redundant execution?</h3>
+        <p>If you can afford full redundant execution of the exact claimed stack, that gives stronger assurance on one request. CommitLLM solves a different problem: making remote inference verification deployable when full reruns are too expensive, unavailable, or only practical occasionally.</p>
+      </div>
+      <div class="faq-item">
+        <div class="faq-label">Anti-substitution</div>
+        <h3>Does this catch model switching and hidden downgrades?</h3>
+        <p>That is one of the main reasons the protocol exists. A remote provider’s cheapest attack is often not random corruption but serving a smaller checkpoint, using a more aggressive quantization plan, skipping work, or changing decode behavior. The receipt is designed to make those changes auditable.</p>
+      </div>
+      <div class="faq-item">
+        <div class="faq-label">Auditors</div>
+        <h3>Can someone other than the original user verify later?</h3>
+        <p>Yes. The client can verify, hand the receipt to an auditor, or ask a third party with the verifier material to re-check it later. CommitLLM is not only about server-vs-server replication; it is mainly about crossing the server-vs-client trust boundary.</p>
+      </div>
+      <div class="faq-item">
+        <div class="faq-label">Verifier cost</div>
+        <h3>Does the verifier need a GPU?</h3>
+        <p>No. The kept path is CPU-only on the verifier side. In the current prototype, Llama 70B routine audit is about 1.3 ms per challenged token and a 1-token full audit is about 10 ms on CPU.</p>
+      </div>
+      <div class="faq-item">
+        <div class="faq-label">Provider cost</div>
+        <h3>What does this cost the provider?</h3>
+        <p>The provider keeps the normal GPU serving path and pays for tracing, retained state, and occasional audit openings. On the current prototype, online tracing overhead is roughly 12-14%. The big costs are retained-state memory and audit bandwidth, not per-response proof generation.</p>
+      </div>
+      <div class="faq-item">
+        <div class="faq-label">Wire cost</div>
+        <h3>Does the client receive huge payloads on every request?</h3>
+        <p>No. The normal path returns a compact receipt. Large payloads appear only when an audit opening is requested. That is a core design choice: cheap steady-state serving, heavier bandwidth only on challenged responses.</p>
+      </div>
+      <div class="faq-item">
+        <div class="faq-label">Tuning</div>
+        <h3>Do all requests get the same verification?</h3>
+        <p>No. That is one of the practical advantages. Low-stakes traffic can use cheap routine verification. High-stakes responses can be escalated to deep audit on demand. The assurance/cost tradeoff is programmable instead of all-or-nothing.</p>
+      </div>
+      <div class="faq-item">
+        <div class="faq-label">Privacy</div>
+        <h3>Does auditing reveal anything sensitive?</h3>
+        <p>The compact receipt is small, but deep audit openings can reveal retained trace data and intermediate activations. In practice, that means deep audits are best done by the client or a trusted auditor rather than published as a universally reusable proof object.</p>
+      </div>
+      <div class="faq-item">
+        <div class="faq-label">Protocol shape</div>
+        <h3>Is this a zk proof or a TEE?</h3>
+        <p>No. It is a sidecar commit-and-audit protocol. The provider stays on the normal serving path, there is no expensive proof generation for every response, and there is no hardware-attestation trust assumption. The tradeoff is that verification is interactive and audit openings can be bulky.</p>
+      </div>
+      <div class="faq-item">
+        <div class="faq-label">Deployment</div>
+        <h3>Does this only make sense in server-vs-client settings?</h3>
+        <p>No. It also helps in server-vs-server settings when constant full redundancy is too expensive. A second server can act as verifier or auditor, and the operator can replace “rerun every request” with “precommit everything, audit selectively, and escalate when needed.” In practice, occasional re-execution plus CommitLLM is a strong combination.</p>
+      </div>
+      <div class="faq-item">
+        <div class="faq-label">Compatibility</div>
+        <h3>What models and deployments does this support today?</h3>
+        <p>The current measured path is focused on open-weight dense decoder models on quantized serving stacks, with explicit fail-closed behavior for unsupported semantics. The protocol is meant to broaden over time, but it is better to be explicit about what is supported today than to claim universal coverage prematurely.</p>
+      </div>
+      <div class="faq-item">
+        <div class="faq-label">Serving path</div>
+        <h3>Does the provider need to replace production kernels?</h3>
+        <p>Not on the kept path. CommitLLM is designed to sit beside normal serving rather than force a proof-specific inference engine. The provider stays on the ordinary GPU path and produces evidence alongside it. Heavier kernel changes belong to later research paths, not the basic deployment story.</p>
       </div>
     </div>
   </div>

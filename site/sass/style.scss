@@ -1140,6 +1140,58 @@ code {
   margin-bottom: 0.4rem;
 }
 
+// ── FAQ ─────────────────────────────────────────────
+.faq-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-top: 2rem;
+  @media (max-width: 760px) { grid-template-columns: 1fr; }
+}
+
+.faq-item {
+  position: relative;
+  padding: 1.35rem 1.5rem;
+  border: 1px solid $border;
+  border-radius: 4px;
+  background: $bg;
+
+  &::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: rgba($blue, 0.38);
+  }
+
+  h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: $text-bright;
+    margin-bottom: 0.35rem;
+    max-width: 30rem;
+  }
+
+  p {
+    font-size: 0.9rem;
+    color: $text-dim;
+    line-height: 1.55;
+    max-width: 34em;
+  }
+}
+
+.faq-label {
+  font-family: $mono;
+  font-size: 0.64rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: $blue;
+  margin-bottom: 0.4rem;
+}
+
 // ── Footer ──────────────────────────────────────────
 .footer {
   padding: 1.5rem 0;
