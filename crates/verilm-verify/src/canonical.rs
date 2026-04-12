@@ -1604,32 +1604,66 @@ fn phase_lm_head(
                 );
             }
 
-            // Token replay (generated tokens only)
+            // Token-identity check (generated tokens only).
+            //
+            // Gated by DecodeAcceptanceMode on the verification profile:
+            //
+            // **ExactTokenIdentity**: the committed token must be argmax (greedy)
+            // or the exact sampling output of the quantized logits.
+            //
+            // **Unsupported**: the quantized replay path diverges too far from
+            // the GPU's bf16 logits for reliable token identity. Skip the check
+            // and report it explicitly. The lm_head Freivalds matmul check
+            // above still runs exactly.
             if ctx.key.config.vocab_size > 0 && ctx.r.token_index >= ctx.gen_start {
-                st.check();
-                let logits_f32: Vec<f32> = logits.iter().map(|&v| v as f32).collect();
-                let expected = if let Some(ref dp) = specs.decode_params {
-                    let seed = verilm_core::sampling::derive_token_seed(
-                        &ctx.r.revealed_seed,
-                        ctx.r.token_index,
-                    );
-                    verilm_core::sampling::sample(&logits_f32, dp, &seed)
-                } else {
-                    logits_f32
-                        .iter()
-                        .enumerate()
-                        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-                        .map(|(i, _)| i as u32)
-                        .unwrap_or(0)
-                };
-                if expected != ctx.r.token_id {
-                    st.fail(
-                        FailureCode::TokenSelectionMismatch,
-                        format!(
-                            "lm_head: expected token {} but got {}",
-                            expected, ctx.r.token_id
-                        ),
-                    );
+                use verilm_core::types::DecodeAcceptanceMode;
+                let mode = ctx
+                    .key
+                    .verification_profile
+                    .as_ref()
+                    .map(|p| &p.decode_acceptance)
+                    .unwrap_or(&DecodeAcceptanceMode::ExactTokenIdentity);
+
+                match mode {
+                    DecodeAcceptanceMode::Unsupported => {
+                        let profile_name = ctx
+                            .key
+                            .verification_profile
+                            .as_ref()
+                            .map_or("unknown", |p| &p.name);
+                        st.skipped.push(format!(
+                            "lm_head token identity: unsupported for profile '{}' \
+                             (quantized logits diverge from GPU bf16 path)",
+                            profile_name
+                        ));
+                    }
+                    DecodeAcceptanceMode::ExactTokenIdentity => {
+                        st.check();
+                        let logits_f32: Vec<f32> = logits.iter().map(|&v| v as f32).collect();
+                        let expected = if let Some(ref dp) = specs.decode_params {
+                            let seed = verilm_core::sampling::derive_token_seed(
+                                &ctx.r.revealed_seed,
+                                ctx.r.token_index,
+                            );
+                            verilm_core::sampling::sample(&logits_f32, dp, &seed)
+                        } else {
+                            logits_f32
+                                .iter()
+                                .enumerate()
+                                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                                .map(|(i, _)| i as u32)
+                                .unwrap_or(0)
+                        };
+                        if expected != ctx.r.token_id {
+                            st.fail(
+                                FailureCode::TokenSelectionMismatch,
+                                format!(
+                                    "lm_head: expected token {} but got {}",
+                                    expected, ctx.r.token_id
+                                ),
+                            );
+                        }
+                    }
                 }
             }
         }

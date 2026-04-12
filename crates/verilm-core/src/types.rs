@@ -22,6 +22,39 @@ use crate::constants::{MatrixType, ModelConfig};
 use crate::field::Fp;
 use crate::merkle::MerkleProof;
 
+/// Token-identity acceptance mode for the lm_head decode check.
+///
+/// The lm_head Freivalds algebraic check (`final_hidden × lm_head == logits`)
+/// is always exact. This enum controls only the final step: does the verifier
+/// check that the committed token matches `argmax/sample(quantized_logits)`?
+///
+/// Empirical measurement on Qwen W8A8 showed that the i8→i32 quantized logit
+/// path can diverge from the GPU's bf16 logit path by up to ~6500 i32 units
+/// (on a ~7000 range), making any tolerance-based acceptance meaningless.
+/// Bounded acceptance was tested and rejected — the gap tail is too heavy.
+///
+/// Future paths to exact token acceptance for currently-unsupported profiles:
+/// captured float logit commitment, or deterministic lm_head kernels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum DecodeAcceptanceMode {
+    /// Exact: `argmax(quantized_logits) == token_id` (greedy) or
+    /// `sample(quantized_logits, seed) == token_id` (sampled).
+    /// The quantized replay path matches the GPU closely enough for
+    /// the top token to be preserved.
+    ExactTokenIdentity,
+
+    /// The quantized replay path diverges too far from the GPU's logits
+    /// to verify token identity. The lm_head Freivalds matmul check still
+    /// runs exactly — only the token-identity step is skipped.
+    Unsupported,
+}
+
+impl Default for DecodeAcceptanceMode {
+    fn default() -> Self {
+        DecodeAcceptanceMode::ExactTokenIdentity
+    }
+}
+
 /// Verification profile: family-specific validated parameters.
 ///
 /// Each supported model family gets a profile carrying empirically validated
@@ -71,6 +104,17 @@ pub struct VerificationProfile {
     /// Default: true (backward compatible — existing keys get Freivalds).
     #[serde(default = "default_true")]
     pub supports_qkv_freivalds: bool,
+
+    /// Token-identity acceptance mode for the lm_head decode check.
+    ///
+    /// Controls whether the verifier checks that `argmax(quantized_logits)`
+    /// or `sample(quantized_logits, seed)` matches the committed token.
+    /// The lm_head Freivalds matmul check is always exact regardless of
+    /// this setting — only the final token-identity step is affected.
+    ///
+    /// Default: `ExactTokenIdentity` (backward compatible).
+    #[serde(default)]
+    pub decode_acceptance: DecodeAcceptanceMode,
 }
 
 fn default_true() -> bool {
@@ -91,7 +135,8 @@ impl VerificationProfile {
             max_validated_context: 1164,
             requires_score_anchoring: false,
             score_anchor_threshold: None, // anchor gap ~14, too loose for strong tier
-            supports_qkv_freivalds: false, // pending: prover now populates x_attn_i8 in retained state, needs GPU validation
+            supports_qkv_freivalds: false,
+            decode_acceptance: DecodeAcceptanceMode::Unsupported, // i8→i32 logits diverge from GPU bf16 by up to 6556; no viable threshold
         }
     }
 
@@ -113,6 +158,7 @@ impl VerificationProfile {
             requires_score_anchoring: true,
             score_anchor_threshold: Some(0.25), // bf16 anchor gap ~0.06, 4x headroom
             supports_qkv_freivalds: true,
+            decode_acceptance: DecodeAcceptanceMode::ExactTokenIdentity,
         }
     }
 
