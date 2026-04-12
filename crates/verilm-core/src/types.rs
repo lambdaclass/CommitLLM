@@ -91,7 +91,7 @@ impl VerificationProfile {
             max_validated_context: 1164,
             requires_score_anchoring: false,
             score_anchor_threshold: None, // anchor gap ~14, too loose for strong tier
-            supports_qkv_freivalds: false, // bridge replay can't match GPU INT8 GEMM for Qwen
+            supports_qkv_freivalds: false, // pending: prover now populates x_attn_i8 in retained state, needs GPU validation
         }
     }
 
