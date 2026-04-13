@@ -320,7 +320,12 @@ fn check_merkle_proofs(ctx: &Ctx, st: &mut St) {
         .shell_opening
         .as_ref()
         .and_then(|s| s.final_residual.as_deref());
-    let leaf = merkle::hash_retained_with_residual(&ctx.r.retained, fr_ref);
+    let lp_ref = ctx
+        .r
+        .shell_opening
+        .as_ref()
+        .and_then(|s| s.lp_hidden_bf16.as_deref());
+    let leaf = merkle::hash_retained_with_lp_hidden(&ctx.r.retained, fr_ref, lp_ref);
     if !merkle::verify(&ctx.r.commitment.merkle_root, &leaf, &ctx.r.merkle_proof) {
         st.fail_ctx(
             FailureCode::MerkleProofFailed,
@@ -386,7 +391,11 @@ fn check_io_chain(ctx: &Ctx, st: &mut St) {
         .shell_opening
         .as_ref()
         .and_then(|s| s.final_residual.as_deref());
-    let leaf = merkle::hash_retained_with_residual(&r.retained, fr_ref);
+    let lp_ref = r
+        .shell_opening
+        .as_ref()
+        .and_then(|s| s.lp_hidden_bf16.as_deref());
+    let leaf = merkle::hash_retained_with_lp_hidden(&r.retained, fr_ref, lp_ref);
     let challenged_io = merkle::io_hash_v4(leaf, r.token_id, prev_io);
     if !merkle::verify(&r.commitment.io_root, &challenged_io, &r.io_proof) {
         st.fail_ctx(
@@ -1589,7 +1598,23 @@ fn phase_lm_head(
     specs: &SpecState,
     st: &mut St,
 ) {
-    // LM-head Freivalds
+    use verilm_core::types::DecodeAcceptanceMode;
+
+    let mode = ctx
+        .key
+        .verification_profile
+        .as_ref()
+        .map(|p| &p.decode_acceptance)
+        .unwrap_or(&DecodeAcceptanceMode::ExactTokenIdentity);
+
+    // LP hidden bf16 path: verify token identity via bf16 lm_head matmul
+    // from the captured decode boundary. No Freivalds — direct matmul.
+    if matches!(mode, DecodeAcceptanceMode::LpHiddenBf16) {
+        phase_lm_head_lp_hidden(ctx, shell, specs, st);
+        return;
+    }
+
+    // Legacy i8→i32 path: Freivalds + optional token identity.
     let r_lm = ctx.key.r_for(MatrixType::LmHead);
     if r_lm.is_empty() || ctx.key.v_lm_head.is_none() {
         return;
@@ -1605,25 +1630,7 @@ fn phase_lm_head(
             }
 
             // Token-identity check (generated tokens only).
-            //
-            // Gated by DecodeAcceptanceMode on the verification profile:
-            //
-            // **ExactTokenIdentity**: the committed token must be argmax (greedy)
-            // or the exact sampling output of the quantized logits.
-            //
-            // **Unsupported**: the quantized replay path diverges too far from
-            // the GPU's bf16 logits for reliable token identity. Skip the check
-            // and report it explicitly. The lm_head Freivalds matmul check
-            // above still runs exactly.
             if ctx.key.config.vocab_size > 0 && ctx.r.token_index >= ctx.gen_start {
-                use verilm_core::types::DecodeAcceptanceMode;
-                let mode = ctx
-                    .key
-                    .verification_profile
-                    .as_ref()
-                    .map(|p| &p.decode_acceptance)
-                    .unwrap_or(&DecodeAcceptanceMode::ExactTokenIdentity);
-
                 match mode {
                     DecodeAcceptanceMode::Unsupported => {
                         let profile_name = ctx
@@ -1664,6 +1671,7 @@ fn phase_lm_head(
                             );
                         }
                     }
+                    DecodeAcceptanceMode::LpHiddenBf16 => unreachable!(),
                 }
             }
         }
@@ -1675,6 +1683,117 @@ fn phase_lm_head(
             FailureCode::MissingFinalHidden,
             "lm_head: logits_i32 present but no final_hidden to verify against",
         ),
+    }
+}
+
+/// LP hidden bf16 decode verification.
+///
+/// Reconstructs logits from the captured LP hidden state via bf16 lm_head matmul,
+/// then verifies token identity (argmax for greedy, canonical sample for sampled).
+///
+/// The LP hidden is the exact tensor that LogitsProcessor received on the GPU.
+/// The bf16 matmul on CPU reproduces GPU logits exactly (validated 192/192 greedy,
+/// 32/32 sampled on Qwen W8A8).
+fn phase_lm_head_lp_hidden(
+    ctx: &Ctx,
+    shell: &ShellTokenOpening,
+    specs: &SpecState,
+    st: &mut St,
+) {
+    let lp_hidden = match &shell.lp_hidden_bf16 {
+        Some(lp) => lp,
+        None => {
+            st.fail(
+                FailureCode::MissingFinalHidden,
+                "lm_head (LP hidden): profile requires lp_hidden_bf16 but shell missing it",
+            );
+            return;
+        }
+    };
+
+    let lm_head_bf16 = match &ctx.key.lm_head_bf16 {
+        Some(w) => w,
+        None => {
+            st.fail(
+                FailureCode::MissingLogits,
+                "lm_head (LP hidden): key missing lm_head_bf16 for decode verification",
+            );
+            return;
+        }
+    };
+
+    let vocab_size = ctx.key.config.vocab_size;
+    let hidden_dim = ctx.key.config.hidden_dim;
+
+    if lp_hidden.len() != hidden_dim {
+        st.fail(
+            FailureCode::MissingFinalHidden,
+            format!(
+                "lm_head (LP hidden): expected hidden_dim={}, got {}",
+                hidden_dim,
+                lp_hidden.len()
+            ),
+        );
+        return;
+    }
+
+    if lm_head_bf16.len() != vocab_size * hidden_dim {
+        st.fail(
+            FailureCode::MissingLogits,
+            format!(
+                "lm_head (LP hidden): lm_head_bf16 size mismatch: expected {}, got {}",
+                vocab_size * hidden_dim,
+                lm_head_bf16.len()
+            ),
+        );
+        return;
+    }
+
+    // Compute logits via bf16 matmul: lm_head_bf16 @ lp_hidden_bf16.
+    // Each row of lm_head is one vocabulary entry.
+    // Accumulate in bf16 to match GPU execution (bf16 tensor cores).
+    st.check();
+    let logits_f32: Vec<f32> = (0..vocab_size)
+        .map(|v| {
+            let row_start = v * hidden_dim;
+            let mut acc = half::bf16::ZERO;
+            for j in 0..hidden_dim {
+                let w = half::bf16::from_bits(lm_head_bf16[row_start + j]);
+                let h = half::bf16::from_bits(lp_hidden[j]);
+                // bf16 multiply-add: matches GPU bf16 tensor core accumulation.
+                acc = half::bf16::from_f32(acc.to_f32() + w.to_f32() * h.to_f32());
+            }
+            acc.to_f32()
+        })
+        .collect();
+
+    // Token identity check (generated tokens only).
+    if ctx.key.config.vocab_size > 0 && ctx.r.token_index >= ctx.gen_start {
+        st.check();
+        let expected = if let Some(ref dp) = specs.decode_params {
+            let seed = verilm_core::sampling::derive_token_seed(
+                &ctx.r.revealed_seed,
+                ctx.r.token_index,
+            );
+            verilm_core::sampling::sample(&logits_f32, dp, &seed)
+        } else {
+            // Greedy: argmax.
+            logits_f32
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                .map(|(i, _)| i as u32)
+                .unwrap_or(0)
+        };
+        if expected != ctx.r.token_id {
+            st.fail(
+                FailureCode::TokenSelectionMismatch,
+                format!(
+                    "lm_head (LP hidden bf16): expected token {} but got {}",
+                    expected, ctx.r.token_id
+                ),
+            );
+        }
     }
 }
 
@@ -1711,7 +1830,8 @@ fn phase_deep_prefix(ctx: &Ctx, kv_transcript_ok: bool, st: &mut St) {
         // Hash consistency
         st.check();
         let fr_ref = shell_j.final_residual.as_deref();
-        let hash_j = merkle::hash_retained_with_residual(ret_j, fr_ref);
+        let lp_ref = shell_j.lp_hidden_bf16.as_deref();
+        let hash_j = merkle::hash_retained_with_lp_hidden(ret_j, fr_ref, lp_ref);
         if hash_j != expected_hash {
             st.fail_ctx(
                 FailureCode::RetainedHashMismatch,
@@ -2608,6 +2728,7 @@ mod tests {
             max_v_norm: 0.0,
             lm_head: None,
             v_lm_head: None,
+            lm_head_bf16: None,
             weight_hash: None,
             rmsnorm_attn_weights: vec![],
             rmsnorm_ffn_weights: vec![],

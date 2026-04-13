@@ -881,8 +881,9 @@ pub fn verify_v4_legacy(
                         // 1. Hash consistency: retained state must match committed leaf.
                         checks_run += 1;
                         let fr_ref = shell_j.final_residual.as_deref();
+                        let lp_ref = shell_j.lp_hidden_bf16.as_deref();
                         let hash_j =
-                            verilm_core::merkle::hash_retained_with_residual(ret_j, fr_ref);
+                            verilm_core::merkle::hash_retained_with_lp_hidden(ret_j, fr_ref, lp_ref);
                         if hash_j != expected_hash {
                             failures.push(vfail_ctx(
                                 FailureCode::RetainedHashMismatch,
@@ -2317,7 +2318,11 @@ fn verify_v4_structural(response: &V4AuditResponse) -> (usize, Vec<VerificationF
         .shell_opening
         .as_ref()
         .and_then(|s| s.final_residual.as_deref());
-    let leaf_hash = merkle::hash_retained_with_residual(&response.retained, final_residual_ref);
+    let lp_hidden_ref = response
+        .shell_opening
+        .as_ref()
+        .and_then(|s| s.lp_hidden_bf16.as_deref());
+    let leaf_hash = merkle::hash_retained_with_lp_hidden(&response.retained, final_residual_ref, lp_hidden_ref);
     if !merkle::verify(
         &response.commitment.merkle_root,
         &leaf_hash,

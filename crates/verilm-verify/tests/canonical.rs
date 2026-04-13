@@ -314,6 +314,7 @@ fn build_canonical_audit(
         vec![captured_scales],
         None,
         None,
+        None,
     );
     let response = open_v4(
         &state,
@@ -383,6 +384,7 @@ fn build_canonical_audit_with_response(
         vec![captured_scales],
         None,
         None,
+        None,
     );
     let response = open_v4(
         &state,
@@ -449,6 +451,7 @@ fn build_canonical_audit_with_response_n_prompt(
         &params,
         None,
         vec![captured_scales],
+        None,
         None,
         None,
     );
@@ -1613,6 +1616,7 @@ fn phase7_deep_prefix_count_mismatch() {
         embedding_proof: None,
         final_residual: None,
         logits_i32: None,
+        lp_hidden_bf16: None,
     }]);
     // prefix_leaf_hashes still has 0 entries → count mismatch
     let report = verify_response(&key, &response, None, None);
@@ -2095,7 +2099,7 @@ fn build_deep_prefix_audit() -> (
         manifest: Some(&manifest),
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None, None);
 
     // Open token 2 with deep_prefix=true
     let proof = verilm_core::merkle::prove(&tree, 30);
@@ -2259,7 +2263,7 @@ fn build_routine_audit_with_fake_a() -> (
         manifest: Some(&manifest),
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None, None);
 
     // Open token 1 as routine audit (NOT deep prefix)
     let proof = verilm_core::merkle::prove(&tree, 43);
@@ -2455,7 +2459,7 @@ fn build_deep_prefix_audit_fake_opened_a() -> (
         manifest: Some(&manifest),
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None, None);
 
     // Open token 2 with deep_prefix=true
     let proof = verilm_core::merkle::prove(&tree, 30);
@@ -2581,7 +2585,7 @@ fn build_deep_prefix_audit_roped() -> (
         manifest: Some(&manifest),
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None, None);
 
     let proof = verilm_core::merkle::prove(&tree, 30);
     let bridge = BridgeParams {
@@ -2722,7 +2726,7 @@ fn build_deep_prefix_audit_roped_fake_a() -> (
         manifest: Some(&manifest),
         n_prompt_tokens: Some(1),
     };
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None, None);
 
     let proof = verilm_core::merkle::prove(&tree, 30);
     let bridge = BridgeParams {
@@ -3230,6 +3234,7 @@ fn kv_commit_e2e_toy_autoregressive() {
         scales,
         None,
         Some(kv_entries.clone()),
+        None,
     );
 
     // kv_roots must have one root per layer.
@@ -3320,7 +3325,7 @@ fn kv_open_produces_valid_merkle_proofs() {
     ];
 
     let (_commitment, state) =
-        commit_minimal(all_retained, &params, None, scales, None, Some(kv_entries));
+        commit_minimal(all_retained, &params, None, scales, None, Some(kv_entries), None);
 
     // Open audit for token 2 (last token) — should include KV for positions 0..=2.
     let response = verilm_prover::open_v4(
@@ -3429,7 +3434,7 @@ fn kv_tampered_entry_fails_proof() {
     ];
 
     let (_commitment, state) =
-        commit_minimal(all_retained, &params, None, scales, None, Some(kv_entries));
+        commit_minimal(all_retained, &params, None, scales, None, Some(kv_entries), None);
 
     let mut response = verilm_prover::open_v4(
         &state,
@@ -3515,7 +3520,7 @@ fn kv_toy_response(
     ];
 
     let (_commitment, state) =
-        commit_minimal(all_retained, &params, None, scales, None, Some(kv_entries));
+        commit_minimal(all_retained, &params, None, scales, None, Some(kv_entries), None);
 
     let last_token = n_tokens - 1;
     let response = open_v4(
@@ -3826,6 +3831,7 @@ fn kv_derived_transcript_passes_canonical_verification() {
         scales_for_commit,
         Some(captured_x_attn),
         Some(kv_transcripts),
+        None,
     );
 
     // Open audit for last token.
@@ -4045,6 +4051,7 @@ fn kv_derived_transcript_full_response_json_round_trip_passes() {
         captured_scales,
         Some(captured_x_attn),
         Some(kv_transcripts),
+        None,
     );
 
     let response = open_v4(
@@ -4152,6 +4159,7 @@ fn kv_derived_transcript_binary_round_trip_passes() {
         captured_scales,
         Some(captured_x_attn),
         Some(kv_transcripts),
+        None,
     );
 
     let response = open_v4(

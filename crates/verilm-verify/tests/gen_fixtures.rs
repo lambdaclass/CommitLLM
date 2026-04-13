@@ -322,6 +322,7 @@ fn generate_frozen_fixtures() {
         vec![unit_scales(cfg.n_layers)],
         None,
         None,
+        None,
     );
     let response = open_v4(
         &state,
@@ -394,6 +395,7 @@ fn generate_frozen_fixtures() {
         &params_fb,
         None,
         vec![captured_scales_fb],
+        None,
         None,
         None,
     );

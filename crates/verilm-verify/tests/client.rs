@@ -317,6 +317,7 @@ fn build_audit() -> (
         vec![captured_scales],
         None,
         None,
+        None,
     );
     let response = open_v4(
         &state,

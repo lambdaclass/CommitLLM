@@ -688,6 +688,44 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         quant_family.as_deref(),
     );
 
+    // Load raw bf16 lm_head when verification profile uses LpHiddenBf16 mode.
+    // The verifier replays the bf16 matmul to recover logits, so it needs the
+    // exact bf16 bit patterns — not a quantized or converted copy.
+    let lm_head_bf16 = if verification_profile
+        .as_ref()
+        .is_some_and(|p| p.decode_acceptance == verilm_core::types::DecodeAcceptanceMode::LpHiddenBf16)
+    {
+        match find_tensor_raw(&parsed, "lm_head.weight") {
+            Ok((data, shape, dtype)) => {
+                let expected_len = shape.iter().product::<usize>();
+                match dtype {
+                    Dtype::BF16 => {
+                        let u16s: Vec<u16> = data
+                            .chunks_exact(2)
+                            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                            .collect();
+                        assert_eq!(u16s.len(), expected_len, "lm_head bf16 element count mismatch");
+                        eprintln!("  lm_head_bf16: {} elements (raw bf16 bit patterns)", u16s.len());
+                        Some(u16s)
+                    }
+                    other => {
+                        eprintln!(
+                            "  warning: lm_head_bf16 requested but source dtype is {:?}, skipping",
+                            other
+                        );
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("  warning: could not load lm_head.weight for bf16: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     Ok(VerifierKey {
         version: 1,
         config,
@@ -702,6 +740,7 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         max_v_norm: 0.0,
         lm_head,
         v_lm_head,
+        lm_head_bf16,
         weight_hash: Some(weight_hash),
         rmsnorm_attn_weights,
         rmsnorm_ffn_weights,

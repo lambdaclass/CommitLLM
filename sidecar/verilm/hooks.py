@@ -4,6 +4,7 @@ PyTorch hooks for capturing data outside the cutlass_scaled_mm path.
 Captures:
   - Input embeddings (token embedding lookup output)
   - Logits (LogitsProcessor output)
+  - LP hidden (LogitsProcessor input hidden state — decode boundary)
 
 These are needed for R_T but aren't INT8 matmuls, so they don't go
 through the cutlass_scaled_mm wrapper in capture.py.
@@ -104,6 +105,66 @@ class EmbeddingLogitCapture:
         for h in self._handles:
             h.remove()
         self._handles.clear()
+
+
+class LPHiddenCapture:
+    """Captures the hidden state at LogitsProcessor input per forward pass.
+
+    This is the actual decode boundary: the pruned hidden state that
+    LogitsProcessor receives as args[1], shape (batch, hidden_dim), bf16.
+
+    The verifier uses this for exact token-identity verification via
+    bf16 lm_head matmul instead of the i8→i32 quantized path.
+
+    Empirical result: 192/192 exact on greedy decode (Qwen W8A8).
+    See docs/design/decode-boundary-spike.md.
+
+    Synchronous D2H: 7 KB/token is too small for async to matter, and
+    async D2H risks the caching allocator recycling the GPU snapshot
+    before the copy stream finishes reading (observed as exactly 2
+    zeroed bf16 elements per affected capture).
+    """
+
+    def __init__(self):
+        self.hiddens: List[torch.Tensor] = []
+        self._handle = None
+        self.enabled = True
+
+    def install(self, model) -> bool:
+        """Install forward hook on LogitsProcessor.
+
+        Returns True if the hook was installed.
+        """
+        for name, mod in model.named_modules():
+            if name == "logits_processor" or type(mod).__name__ == "LogitsProcessor":
+                self._handle = mod.register_forward_hook(self._hook)
+                logger.info("verilm: installed LP hidden hook on %s (%s)", name, type(mod).__name__)
+                return True
+        logger.warning("verilm: could not find LogitsProcessor for LP hidden capture")
+        return False
+
+    def _hook(self, module, args, output):
+        if self.enabled and len(args) >= 2 and isinstance(args[1], torch.Tensor):
+            # args[1] is hidden_states, shape (batch, hidden_dim), dtype bf16.
+            # Clone on GPU then synchronous D2H. Preserves native dtype.
+            cpu_t = args[1].detach().contiguous().clone().cpu()
+            self.hiddens.append(cpu_t)
+
+    def wait_for_transfers(self):
+        """No-op — D2H is synchronous. Kept for API compat with server.py."""
+        pass
+
+    def drain(self) -> List[torch.Tensor]:
+        """Return and clear all captured LP hidden states."""
+        result = self.hiddens
+        self.hiddens = []
+        return result
+
+    def remove(self):
+        """Remove the installed hook."""
+        if self._handle is not None:
+            self._handle.remove()
+            self._handle = None
 
 
 class FinalResidualCapture:

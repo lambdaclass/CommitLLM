@@ -47,6 +47,17 @@ pub enum DecodeAcceptanceMode {
     /// to verify token identity. The lm_head Freivalds matmul check still
     /// runs exactly — only the token-identity step is skipped.
     Unsupported,
+
+    /// Verify token identity via captured LP hidden state (bf16 matmul).
+    ///
+    /// The prover captures `LogitsProcessor args[1]` (the pruned hidden
+    /// state at the decode boundary, shape `(1, hidden_dim)`, dtype bf16)
+    /// and commits it in the Merkle leaf. The verifier reconstructs logits
+    /// via `lp_hidden_bf16 @ lm_head_bf16.T` and checks argmax/sample.
+    ///
+    /// Validated: 192/192 exact greedy, 32/32 exact sampled on Qwen W8A8.
+    /// See docs/design/decode-boundary-spike.md.
+    LpHiddenBf16,
 }
 
 impl Default for DecodeAcceptanceMode {
@@ -136,7 +147,7 @@ impl VerificationProfile {
             requires_score_anchoring: false,
             score_anchor_threshold: None, // anchor gap ~14, too loose for strong tier
             supports_qkv_freivalds: false,
-            decode_acceptance: DecodeAcceptanceMode::Unsupported, // i8→i32 logits diverge from GPU bf16 by up to 6556; no viable threshold
+            decode_acceptance: DecodeAcceptanceMode::LpHiddenBf16, // i8→i32 logits diverge (6556 gap), but LP hidden bf16 matmul is 192/192 exact
         }
     }
 
@@ -693,6 +704,12 @@ pub struct VerifierKey {
     /// Global (not per-layer). Use `r_for(MatrixType::LmHead)` for the r vector.
     pub v_lm_head: Option<Vec<Fp>>,
 
+    /// Unembedding matrix in bf16 for LP hidden decode verification.
+    /// Shape: (vocab_size, hidden_dim), row-major, stored as u16 bf16 bit patterns.
+    /// Used when `DecodeAcceptanceMode::LpHiddenBf16` is active.
+    #[serde(default)]
+    pub lm_head_bf16: Option<Vec<u16>>,
+
     /// SHA-256 hash of all INT8 weights in canonical order (weight chain).
     /// Binds the verifier key to a specific quantized checkpoint, ensuring
     /// the Freivalds precomputation corresponds to the published model.
@@ -1187,6 +1204,12 @@ pub struct ShellTokenOpening {
     /// instead of recomputing the full matmul. Length = vocab_size.
     #[serde(default)]
     pub logits_i32: Option<Vec<i32>>,
+    /// Captured LP hidden state at LogitsProcessor input (decode boundary).
+    /// Each u16 is a bf16 bit pattern. Length = hidden_dim.
+    /// The verifier reconstructs logits via `lp_hidden_bf16 @ lm_head_bf16.T`
+    /// and checks argmax/sample for token identity.
+    #[serde(default)]
+    pub lp_hidden_bf16: Option<Vec<u16>>,
 }
 
 /// Parameters for the full bridge computation (dequant → residual → RMSNorm → quantize).

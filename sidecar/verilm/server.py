@@ -75,6 +75,18 @@ class VerifiedInferenceServer:
             )
             self.final_res_capture = None
 
+        # Install LP hidden capture (decode boundary).
+        # Captures LogitsProcessor input hidden state (bf16) for exact
+        # token-identity verification via bf16 lm_head matmul.
+        from .hooks import LPHiddenCapture
+        self.lp_hidden_capture = LPHiddenCapture()
+        if not self.lp_hidden_capture.install(model):
+            logger.warning(
+                "Could not install LP hidden capture — "
+                "bf16 decode-boundary verification unavailable"
+            )
+            self.lp_hidden_capture = None
+
         # Install canonical sampler hook on LogitsProcessor module.
         # Must be AFTER capture hooks so capture sees original (unmasked) logits.
         from .sampler import CanonicalSamplerHook
@@ -675,11 +687,14 @@ class VerifiedInferenceServer:
             self.el_capture.drain()
         if self.final_res_capture is not None:
             self.final_res_capture.drain()
+        if self.lp_hidden_capture is not None:
+            self.lp_hidden_capture.drain()
 
         # Fresh random batch seed per request. The commitment includes
         # seed_commitment = SHA256(batch_seed); the batch_seed itself is
         # revealed only at audit time, preventing pre-computation attacks.
         seed = secrets.token_bytes(32)
+        self._last_seed = seed  # Expose for diagnostics.
 
         _chat_timers = self._chat_timers
         if _chat_timers:
@@ -709,6 +724,8 @@ class VerifiedInferenceServer:
         self.buf.wait_for_transfers()
         if self.final_res_capture is not None:
             self.final_res_capture.wait_for_transfers()
+        if self.lp_hidden_capture is not None:
+            self.lp_hidden_capture.wait_for_transfers()
 
         if _chat_timers:
             _ct_sync = time.monotonic()
@@ -720,6 +737,7 @@ class VerifiedInferenceServer:
             _ct_el_drain = time.monotonic()
 
         final_residuals_raw = self.final_res_capture.drain() if self.final_res_capture is not None else []
+        lp_hidden_raw = self.lp_hidden_capture.drain() if self.lp_hidden_capture is not None else []
 
         if _chat_timers:
             _ct_fr_drain = time.monotonic()
@@ -793,6 +811,8 @@ class VerifiedInferenceServer:
             fwd_batch_sizes = fwd_batch_sizes[:-1]
             if len(final_residuals_raw) == n_fwd + 1:
                 final_residuals_raw = final_residuals_raw[:-1]
+            if len(lp_hidden_raw) == n_fwd + 1:
+                lp_hidden_raw = lp_hidden_raw[:-1]
             n_tokens = sum(fwd_batch_sizes)
 
         if _chat_timers:
@@ -863,11 +883,12 @@ class VerifiedInferenceServer:
 
         n_prompt_tokens = len(prompt_token_ids)
 
-        # Packed commit is faster but does not support x_attn (KV transcript).
-        # Fall back to non-packed when x_attn is captured.
+        # Packed commit is faster but does not support x_attn (KV transcript)
+        # or LP hidden (decode boundary). Fall back to non-packed when either is present.
         use_packed = os.environ.get("VERILM_PACKED_COMMIT", "1") == "1"
         has_x_attn = bool(x_attn_inputs)
-        if use_packed and not has_x_attn:
+        has_lp_hidden = bool(lp_hidden_raw)
+        if use_packed and not has_x_attn and not has_lp_hidden:
             state = self._commit_minimal_packed(
                 o_inputs, scales, n_fwd, n_layers, fwd_batch_sizes,
                 all_token_ids, prompt, seed, manifest, final_residuals_raw,
@@ -879,6 +900,17 @@ class VerifiedInferenceServer:
                 all_token_ids, prompt, seed, manifest, final_residuals_raw,
                 n_prompt_tokens,
                 x_attn_inputs=x_attn_inputs if x_attn_inputs else None,
+                lp_hidden_raw=lp_hidden_raw,
+            )
+
+        # Log LP hidden captures (decode boundary).
+        # Store on self so callers (e.g. diagnostics) can access after chat().
+        self._last_lp_hidden = lp_hidden_raw
+        if lp_hidden_raw:
+            lp_total_bytes = sum(t.nelement() * t.element_size() for t in lp_hidden_raw)
+            logger.info(
+                "verilm: LP hidden captured — %d forward passes, %.1f KB total (bf16)",
+                len(lp_hidden_raw), lp_total_bytes / 1024,
             )
 
         # Attach witnessed scores if score witnessing was active.
@@ -944,7 +976,7 @@ class VerifiedInferenceServer:
     def _commit_minimal(self, o_inputs, scales, n_fwd, n_layers,
                          fwd_batch_sizes, all_token_ids, prompt, seed, manifest,
                          final_residuals_raw=None, n_prompt_tokens=None,
-                         x_attn_inputs=None):
+                         x_attn_inputs=None, lp_hidden_raw=None):
         """V4 retained-state commitment path (no _int_mm, no full traces).
 
         Args:
@@ -954,8 +986,12 @@ class VerifiedInferenceServer:
                     Already bulk-transferred from GPU at drain time.
             x_attn_inputs: optional list of CPU tensors (one per qkv_proj call,
                     n_fwd * n_layers). Used for precision corridor measurement.
+            lp_hidden_raw: optional list of CPU tensors (one per decode step).
+                    LP hidden at LogitsProcessor input, bf16, shape (1, hidden_dim).
         """
+        import torch
         import verilm_rs
+        import numpy as np
 
         o_proj_inputs = [inp.numpy() for inp in o_inputs]
         x_attn_np = [inp.numpy() for inp in x_attn_inputs] if x_attn_inputs else None
@@ -979,6 +1015,17 @@ class VerifiedInferenceServer:
                     else:
                         final_residuals.append(fwd_tensor.numpy())
 
+        # Organize LP hidden: each capture is (1, hidden_dim) bf16.
+        # Convert to numpy u16 (bf16 bit patterns) for Rust.
+        lp_hidden_list = None
+        if lp_hidden_raw:
+            lp_hidden_list = []
+            for t in lp_hidden_raw:
+                # t is bf16 CPU tensor, shape (1, hidden_dim).
+                # View as u16 via numpy to preserve exact bf16 bits.
+                arr = t.view(torch.int16).numpy().view(np.uint16).ravel()
+                lp_hidden_list.append(arr)
+
         return verilm_rs.commit_minimal_from_captures(
             o_proj_inputs=o_proj_inputs,
             scales=scales,
@@ -992,6 +1039,7 @@ class VerifiedInferenceServer:
             final_residuals=final_residuals,
             n_prompt_tokens=n_prompt_tokens,
             x_attn_inputs=x_attn_np,
+            lp_hidden_bf16=lp_hidden_list,
         )
 
     def _commit_minimal_packed(self, o_inputs, scales, n_fwd, n_layers,

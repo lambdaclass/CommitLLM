@@ -158,6 +158,7 @@ fn frozen_v4_audit_byte_stable() {
         vec![unit_scales(cfg.n_layers)],
         None,
         None,
+        None,
     );
     let response = open_v4(
         &state,
@@ -431,10 +432,11 @@ fn frozen_audit_sha256_pinned() {
     let data = fixture("v4_audit_canonical.bin");
     let hash = hex::encode(Sha256::digest(&data));
     // Pinned on first generation. Update ONLY on intentional format change.
+    // Updated: added lp_hidden_bf16 to ShellTokenOpening + lm_head_bf16 to VerifierKey.
     assert_eq!(
         hash,
-        "33ce137ef485471b5b087e134a89846c39f2d5d3aa356bbc7fe11551c40ef31c",
-        "audit fixture checksum drifted — was the fixture silently regenerated? (v4: witnessed_scores)"
+        "02182c3d6ca9f58127c85d01d5b10b0fc2d4186591e0ff07b25bb4066b1f5618",
+        "audit fixture checksum drifted — was the fixture silently regenerated? (v4: lp_hidden_bf16)"
     );
 }
 
@@ -444,9 +446,9 @@ fn frozen_key_sha256_pinned() {
     let data = fixture("v4_key_canonical.bin");
     let hash = hex::encode(Sha256::digest(&data));
     // Pinned on first generation. Update ONLY on intentional format change.
-    // Updated: added attn_backend + attn_dtype fields to VerifierKey.
+    // Updated: added lm_head_bf16 to VerifierKey.
     assert_eq!(
-        hash, "124fdc05788f5f22e329ca3de289d90cef8c9e4be10d781b7d360798a8b8649f",
+        hash, "4b56335851fde8fae165760ae2c138ab8f15464759164318274c2c1e622ad886",
         "key fixture checksum drifted — was the fixture silently regenerated?"
     );
 }

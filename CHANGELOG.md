@@ -4,6 +4,35 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 
 Historical references below to “roadmap #N” refer to the pre-2026-03-30 roadmap numbering. On 2026-03-30 the roadmap was renumbered into a single linear open-items-only sequence.
 
+## 2026-04-13
+
+### Measured
+
+- **LP-hidden decode capture is now exact on the real sampler boundary**: the `LogitsProcessor` capture hook passes `23/23` validation checks on Qwen W8A8. Count alignment is exact on both greedy and sampled runs, dtype is preserved as `bf16`, reference-hook match is exact (`max_diff = 0.0`), greedy token replay is `192/192`, sampled replay is `32/32` exact under the canonical sampler with the committed seed, and no prefill rows leak into the decode trace. Root cause of the earlier mismatch was CUDA allocator reuse before an async D2H copy completed; the kept path now snapshots on the producer stream before copying.
+
+### Added
+
+- **Committed LP-hidden decode path in the protocol surface**: `ShellTokenOpening` now carries `lp_hidden_bf16`, the prover commit/open path stores per-token LP hidden, and the retained-state hash binds LP hidden with a dedicated domain separator. The canonical verifier gained `DecodeAcceptanceMode::LpHiddenBf16`, a `bf16` `lm_head` replay path for greedy and sampled decode, and `VerifierKey.lm_head_bf16` so token identity can be checked from the committed runtime boundary instead of the broken `i8→i32` surrogate.
+- **Keygen support for decode-boundary replay**: key generation now loads raw `bf16` bit patterns from `lm_head.weight` and stores them in the verifier key when the selected verification profile requires `LpHiddenBf16`. The verifier therefore replays the exact `bf16` `lm_head` surface the decode path expects, rather than silently re-deriving a different dtype path.
+
+### Changed
+
+- **Qwen decode semantics moved from “unsupported” to “captured LP-hidden path in code”**: the protocol no longer treats Qwen token identity as permanently unsupported. The kept decode path is now `LogitsProcessor` input hidden → verifier-side `bf16 lm_head` replay → canonical sampler. This is the right architectural answer to the failed tolerance experiment: keep `lm_head` Freivalds exact for the linear check, but stop pretending the quantized replay logits are the correct object for token identity. The remaining promotion gate before calling this fully shipped behavior is a real-weight GPU E2E run using keygen-populated `lm_head_bf16`.
+
+## 2026-04-12
+
+### Measured
+
+- **Qwen W8A8 tier-aware benchmark passes cleanly on the honest supported profile**: Modal A100 benchmark `scripts/modal/bench_e2e_v4.py` passes **20/20** across both audit tiers. **Full tier**: 10/10 pass, 261/261 checks, mean verify time ~16.6 ms, mean binary payload ~4.1 MB. **Routine tier**: 10/10 pass, 397/397 checks, mean verify time ~14.7 ms, mean binary payload ~5.4 MB. Skipped checks are explicit rather than silent: Qwen skips `Wq/Wk/Wv` Freivalds and `lm_head` token identity; all supported checks pass.
+
+- **Bounded `lm_head` token acceptance was tested and rejected on Qwen W8A8**: honest-gap measurement on the quantized replay path showed a heavy tail from `0` to `6556` i32 units on a ~7000 range, making any threshold meaningless. Result: Qwen uses `DecodeAcceptanceMode::Unsupported`; Llama keeps exact token identity. The `lm_head` Freivalds matmul check remains exact for all profiles.
+
+- **The decode boundary is `LogitsProcessor` input, not `model.norm` output**: diagnostic runs on Qwen W8A8 showed that `model.norm` does not feed the sampler boundary directly. `model.norm output[1]` differs from `LogitsProcessor args[1]` by 38–318 and gives only 1/192 exact token matches. In contrast, the pruned hidden at `LogitsProcessor args[1]` is the real decode boundary: `bf16 lm_head` replay from that captured hidden reproduced token identity **192/192** on greedy decode, while `fp32` replay gave 189/192 and the `i8→i32` path stayed dead. This makes captured LP-input hidden the leading decode-boundary candidate.
+
+### Added
+
+- **Profile-gated decode acceptance in the canonical verifier**: `VerificationProfile.decode_acceptance` / `DecodeAcceptanceMode` now control whether final-token identity is checked exactly or reported as unsupported. Qwen is explicitly unsupported for token identity on the stock quantized replay path; Llama remains exact. The verifier still runs exact `lm_head` Freivalds regardless of profile.
+
 ## 2026-04-04
 
 ### Measured

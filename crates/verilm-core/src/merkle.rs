@@ -184,6 +184,36 @@ pub fn hash_retained_with_residual(
     }
 }
 
+/// Compute the committed leaf hash for a token with LP hidden binding.
+///
+/// Binds the captured LP hidden state (bf16, at LogitsProcessor input) into
+/// the Merkle leaf. This is the decode boundary: the verifier uses it for
+/// exact token-identity verification via bf16 lm_head matmul.
+///
+/// Uses a distinct domain separator ("vi-retained-lp-v1") from final_residual
+/// binding to prevent cross-path collisions.
+pub fn hash_retained_with_lp_hidden(
+    state: &crate::types::RetainedTokenState,
+    final_residual: Option<&[f32]>,
+    lp_hidden_bf16: Option<&[u16]>,
+) -> [u8; 32] {
+    // Start with base + final_residual binding (backward compatible layer).
+    let base = hash_retained_with_residual(state, final_residual);
+    match lp_hidden_bf16 {
+        Some(lp) => {
+            let mut hasher = Sha256::new();
+            hasher.update(b"vi-retained-lp-v1");
+            hasher.update(base);
+            // Hash raw bf16 bits as little-endian u16 bytes.
+            for &bits in lp {
+                hasher.update(bits.to_le_bytes());
+            }
+            hasher.finalize().into()
+        }
+        None => base,
+    }
+}
+
 /// Compute the V4 IO chain hash for a token.
 ///
 /// `io_t = H("vi-io-v4" || leaf_hash_t || token_id_t || prev_io_hash)`

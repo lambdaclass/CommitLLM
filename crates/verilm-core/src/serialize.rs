@@ -95,6 +95,7 @@ mod tests {
             max_v_norm: 0.0,
             lm_head: None,
             v_lm_head: None,
+            lm_head_bf16: None,
             weight_hash: None,
             rmsnorm_attn_weights: Vec::new(),
             rmsnorm_ffn_weights: Vec::new(),
@@ -166,6 +167,7 @@ mod tests {
             embedding_proof: None,
             final_residual: None,
             logits_i32: None,
+            lp_hidden_bf16: None,
         };
         let resp = V4AuditResponse {
             token_index: 7,

@@ -800,6 +800,7 @@ impl MinimalBatchStateHandle {
     final_residuals = None,
     n_prompt_tokens = None,
     x_attn_inputs = None,
+    lp_hidden_bf16 = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn commit_minimal_from_captures(
@@ -815,6 +816,7 @@ fn commit_minimal_from_captures(
     final_residuals: Option<&Bound<'_, PyList>>,
     n_prompt_tokens: Option<u32>,
     x_attn_inputs: Option<&Bound<'_, PyList>>,
+    lp_hidden_bf16: Option<&Bound<'_, PyList>>,
 ) -> PyResult<MinimalBatchStateHandle> {
     let scales = extract_f32_vec(scales)?;
     let n_entries = o_proj_inputs.len();
@@ -892,6 +894,26 @@ fn commit_minimal_from_captures(
         None
     };
 
+    // Extract per-token LP hidden state (bf16 bit patterns) if provided.
+    let lp_hidden = if let Some(lp_list) = lp_hidden_bf16 {
+        let mut vecs = Vec::with_capacity(lp_list.len());
+        for i in 0..lp_list.len() {
+            let item = lp_list.get_item(i)?;
+            // Each item is a numpy array of u16 (bf16 bit patterns).
+            let bytes = try_buffer_as_bytes(&item).ok_or_else(|| {
+                PyValueError::new_err("lp_hidden_bf16 items must support buffer protocol")
+            })?;
+            // Reinterpret bytes as u16 (native endian).
+            let u16_slice: &[u16] = unsafe {
+                std::slice::from_raw_parts(bytes.as_ptr() as *const u16, bytes.len() / 2)
+            };
+            vecs.push(u16_slice.to_vec());
+        }
+        Some(vecs)
+    } else {
+        None
+    };
+
     // Compute KV transcript from captured x_attn + weights when both are available.
     // This produces the committed KV entries that the verifier will replay against.
     let kv_transcripts = if captured_x_attn.is_some() && weight_provider.is_some() {
@@ -924,6 +946,7 @@ fn commit_minimal_from_captures(
         captured_scales,
         captured_x_attn,
         kv_transcripts,
+        lp_hidden,
     );
 
     Ok(MinimalBatchStateHandle {
@@ -1271,6 +1294,72 @@ fn generate_key(model_dir: String, seed: Vec<u8>) -> PyResult<String> {
 
     serde_json::to_string(&key)
         .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+}
+
+/// Generate a verifier key in binary format (magic + bincode).
+///
+/// Returns raw bytes suitable for `verify_v4_full_binary`. Much more compact
+/// than the JSON path when the key contains large fields like `lm_head_bf16`.
+#[pyfunction]
+fn generate_key_binary<'py>(py: Python<'py>, model_dir: String, seed: Vec<u8>) -> PyResult<Bound<'py, PyBytes>> {
+    if seed.len() != 32 {
+        return Err(PyValueError::new_err("seed must be exactly 32 bytes"));
+    }
+    let mut seed_arr = [0u8; 32];
+    seed_arr.copy_from_slice(&seed);
+
+    let key = verilm_keygen::generate_key(std::path::Path::new(&model_dir), seed_arr)
+        .map_err(|e| PyValueError::new_err(format!("keygen failed: {}", e)))?;
+
+    let binary = verilm_core::serialize::serialize_key(&key);
+    Ok(PyBytes::new(py, &binary))
+}
+
+/// Verify a V4 audit response with both audit and key in binary format.
+///
+/// This is the most efficient verification path: binary audit (bincode+zstd)
+/// and binary key (magic+bincode). Avoids JSON serialization overhead for
+/// large keys (e.g., with lm_head_bf16).
+#[pyfunction]
+#[pyo3(signature = (audit_binary, key_binary, expected_prompt_token_ids=None, tokenizer_fn=None, detokenizer_fn=None))]
+fn verify_v4_full_binary<'py>(
+    py: Python<'py>,
+    audit_binary: &[u8],
+    key_binary: &[u8],
+    expected_prompt_token_ids: Option<Vec<u32>>,
+    tokenizer_fn: Option<Bound<'py, PyAny>>,
+    detokenizer_fn: Option<Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let response = verilm_core::serialize::deserialize_v4_audit(audit_binary)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize V4 binary: {}", e)))?;
+    let key = verilm_core::serialize::deserialize_key(key_binary)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize binary key: {}", e)))?;
+
+    let report = run_verify(
+        &key,
+        &response,
+        expected_prompt_token_ids.as_deref(),
+        tokenizer_fn,
+        detokenizer_fn,
+    );
+
+    let result = PyDict::new(py);
+    result.set_item("passed", report.verdict == verilm_verify::Verdict::Pass)?;
+    result.set_item("checks_run", report.checks_run)?;
+    result.set_item("checks_passed", report.checks_passed)?;
+    let failure_msgs: Vec<&str> = report.failures.iter().map(|f| f.message.as_str()).collect();
+    result.set_item("failures", &failure_msgs)?;
+    result.set_item(
+        "classified_failures",
+        classified_failures_to_py(py, &report.failures)?,
+    )?;
+    result.set_item("coverage", coverage_to_py(py, &report.coverage))?;
+    result.set_item("duration_us", report.duration.as_micros() as u64)?;
+    if !report.skipped.is_empty() {
+        let skipped: Vec<&str> = report.skipped.iter().map(|s| s.as_str()).collect();
+        result.set_item("skipped", &skipped)?;
+    }
+    Ok(result)
 }
 
 /// Verify a V4 audit response from JSON (debug/convenience path).
@@ -2215,8 +2304,10 @@ fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_audit_challenge, m)?)?;
     m.add_function(wrap_pyfunction!(compute_weight_hash, m)?)?;
     m.add_function(wrap_pyfunction!(generate_key, m)?)?;
+    m.add_function(wrap_pyfunction!(generate_key_binary, m)?)?;
     m.add_function(wrap_pyfunction!(verify_v4, m)?)?;
     m.add_function(wrap_pyfunction!(verify_v4_binary, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_v4_full_binary, m)?)?;
     m.add_function(wrap_pyfunction!(derive_token_seed, m)?)?;
     m.add_function(wrap_pyfunction!(canonical_sample, m)?)?;
     m.add_class::<WeightProvider>()?;
