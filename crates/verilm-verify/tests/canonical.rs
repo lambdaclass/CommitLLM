@@ -3684,6 +3684,225 @@ fn kv_canonical_legacy_no_kv_roots_skipped() {
     );
 }
 
+// ===========================================================================
+// Phase 7a: Exact attention verification
+// ===========================================================================
+
+/// Helper: produce a toy audit response with KV entries AND Q accumulators
+/// in the shell opening (captured x_attn provided so QKV projections are computed).
+fn kv_toy_response_with_q(
+    n_tokens: usize,
+) -> (
+    verilm_core::types::VerifierKey,
+    verilm_core::types::V4AuditResponse,
+) {
+    let cfg = ModelConfig::toy();
+    let model = generate_model(&cfg, 42);
+    let key = generate_key(&cfg, &model, [1u8; 32]);
+    let initial: Vec<i8> = (0..cfg.hidden_dim as i8).collect();
+
+    let traces = verilm_test_vectors::forward_pass_autoregressive(&cfg, &model, &initial, n_tokens);
+    let kv_entries = verilm_test_vectors::kv_entries_from_traces(&cfg, &traces);
+
+    // Extract captured x_attn from traces (simulates GPU capture).
+    let captured_x_attn: Vec<Vec<Vec<i8>>> = traces
+        .iter()
+        .map(|token_traces| token_traces.iter().map(|lt| lt.x_attn.clone()).collect())
+        .collect();
+
+    let all_retained: Vec<_> = traces
+        .iter()
+        .map(|token_traces| RetainedTokenState {
+            layers: token_traces
+                .iter()
+                .map(|lt| RetainedLayerState {
+                    a: lt.a.clone(),
+                    scale_a: lt.scale_a.unwrap_or(1.0),
+                    x_attn_i8: None,
+                    scale_x_attn: None,
+                })
+                .collect(),
+        })
+        .collect();
+
+    let token_ids: Vec<u32> = (0..n_tokens as u32).map(|i| i + 10).collect();
+    let params = FullBindingParams {
+        token_ids: &token_ids,
+        prompt: b"exact attn test",
+        sampling_seed: [9u8; 32],
+        manifest: None,
+        n_prompt_tokens: Some(1),
+    };
+    let scales = vec![
+        vec![
+            CapturedLayerScales {
+                scale_x_attn: 1.0,
+                scale_x_ffn: 1.0,
+                scale_h: 1.0,
+            };
+            cfg.n_layers
+        ];
+        n_tokens
+    ];
+
+    let (_commitment, mut state) =
+        commit_minimal(all_retained, &params, None, scales, None, Some(kv_entries), None);
+
+    // Store captured x_attn so open_v4 can use it for QKV shell accumulators.
+    state.captured_x_attn = Some(captured_x_attn);
+
+    let last_token = n_tokens - 1;
+    let response = open_v4(
+        &state,
+        last_token as u32,
+        &ToyWeights(&model),
+        &cfg,
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        false,
+        true, // use_captured_x_attn = true
+    );
+
+    (key, response)
+}
+
+/// Exact attention replay on a toy model with committed KV passes with no failures.
+#[test]
+fn exact_attention_toy_pass() {
+    let (key, response) = kv_toy_response_with_q(4);
+    assert!(response.kv_entries.is_some());
+    // Verify Q is present in the shell opening.
+    let shell = response.shell_opening.as_ref().unwrap();
+    assert!(
+        shell.layers[0].q.is_some(),
+        "shell Q must be present when captured x_attn is provided"
+    );
+
+    let report = verify_response(&key, &response, None, None, None);
+    let attn_failures: Vec<_> = report
+        .failures
+        .iter()
+        .filter(|f| {
+            matches!(
+                f.code,
+                FailureCode::AttentionExactMismatch | FailureCode::AttentionKvCoverageIncomplete
+            )
+        })
+        .collect();
+    assert!(
+        attn_failures.is_empty(),
+        "exact attention should pass on honest toy model, got: {:?}",
+        attn_failures
+    );
+}
+
+/// Tampered `a` vector (retained state) detected by exact attention replay.
+#[test]
+fn exact_attention_tampered_a_detected() {
+    let (key, mut response) = kv_toy_response_with_q(3);
+
+    // Tamper with the committed `a` for the challenged token at layer 0.
+    response.retained.layers[0].a[0] = response.retained.layers[0].a[0].wrapping_add(1);
+
+    let report = verify_response(&key, &response, None, None, None);
+    let exact_failures: Vec<_> = report
+        .failures
+        .iter()
+        .filter(|f| f.code == FailureCode::AttentionExactMismatch)
+        .collect();
+    assert!(
+        !exact_failures.is_empty(),
+        "tampered `a` should trigger AttentionExactMismatch"
+    );
+    // Verify the failure points to the right layer.
+    assert_eq!(exact_failures[0].context.layer, Some(0));
+}
+
+/// Tampered KV entry is caught by Merkle proof (before exact attention runs).
+#[test]
+fn exact_attention_tampered_kv_caught_by_merkle() {
+    let (key, mut response) = kv_toy_response_with_q(3);
+
+    // Tamper with a KV entry — Merkle proof fails, exact attention skipped.
+    response.kv_entries.as_mut().unwrap()[0][0].k_roped[0] += 999.0;
+
+    let report = verify_response(&key, &response, None, None, None);
+    // Merkle failure should be present.
+    let merkle_failures: Vec<_> = report
+        .failures
+        .iter()
+        .filter(|f| f.code == FailureCode::KvProofInvalid)
+        .collect();
+    assert!(!merkle_failures.is_empty());
+
+    // Exact attention should NOT run (kv_transcript_ok = false).
+    let exact_failures: Vec<_> = report
+        .failures
+        .iter()
+        .filter(|f| f.code == FailureCode::AttentionExactMismatch)
+        .collect();
+    assert!(
+        exact_failures.is_empty(),
+        "exact attention should not run when KV Merkle proofs fail"
+    );
+}
+
+/// Without KV entries, exact attention phase is silently skipped.
+#[test]
+fn exact_attention_skipped_without_kv() {
+    let (key, mut response) = kv_toy_response_with_q(3);
+
+    // Remove KV data.
+    response.commitment.kv_roots.clear();
+    response.kv_entries = None;
+    response.kv_proofs = None;
+
+    let report = verify_response(&key, &response, None, None, None);
+    let attn_failures: Vec<_> = report
+        .failures
+        .iter()
+        .filter(|f| {
+            matches!(
+                f.code,
+                FailureCode::AttentionExactMismatch | FailureCode::AttentionKvCoverageIncomplete
+            )
+        })
+        .collect();
+    assert!(
+        attn_failures.is_empty(),
+        "exact attention should be skipped without KV entries"
+    );
+}
+
+/// Without Q in shell (no captured x_attn), exact attention is silently skipped.
+#[test]
+fn exact_attention_skipped_without_q() {
+    let (key, response) = kv_toy_response(3);
+    // kv_toy_response doesn't provide captured x_attn, so Q is None.
+    let shell = response.shell_opening.as_ref().unwrap();
+    assert!(shell.layers[0].q.is_none(), "precondition: Q should be absent");
+
+    let report = verify_response(&key, &response, None, None, None);
+    let attn_failures: Vec<_> = report
+        .failures
+        .iter()
+        .filter(|f| {
+            matches!(
+                f.code,
+                FailureCode::AttentionExactMismatch | FailureCode::AttentionKvCoverageIncomplete
+            )
+        })
+        .collect();
+    assert!(
+        attn_failures.is_empty(),
+        "exact attention should be skipped when Q is not in shell"
+    );
+}
+
 /// compute_kv_transcript produces the same KV entries as kv_entries_from_traces
 /// for the toy model (validates that commit-time derivation from x_attn + weights
 /// matches the reference path).

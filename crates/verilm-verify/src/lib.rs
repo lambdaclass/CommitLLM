@@ -148,6 +148,8 @@ pub enum FailureCode {
     EmbeddingProofFailed,
     EmbeddingLeafMismatch,
     AttentionReplayMismatch,
+    AttentionExactMismatch,
+    AttentionKvCoverageIncomplete,
     DecodeArtifactHashMismatch,
 
     // -- Spec mismatch --
@@ -246,7 +248,9 @@ impl FailureCode {
             | KvProofCountMismatch
             | ScoreAnchorMismatch
             | WitnessedScoreStructuralError
-            | DecodeArtifactHashMismatch => FailureCategory::CryptographicBinding,
+            | DecodeArtifactHashMismatch
+            | AttentionExactMismatch
+            | AttentionKvCoverageIncomplete => FailureCategory::CryptographicBinding,
 
             SpecFieldMismatch => FailureCategory::SpecMismatch,
 

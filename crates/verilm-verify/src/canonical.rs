@@ -182,6 +182,7 @@ fn run(ctx: &Ctx) -> V4VerifyReport {
     }
 
     let kv_transcript_ok = phase_kv_transcript(ctx, &mut st);
+    phase_exact_attention(ctx, kv_transcript_ok, &mut st);
     phase_deep_prefix(ctx, kv_transcript_ok, &mut st);
     phase_tokenization(ctx, &specs, &mut st);
     phase_detokenization(ctx, &specs, &mut st);
@@ -1816,7 +1817,223 @@ fn phase_lm_head_lp_hidden(
     }
 }
 
-// --- Phase 7: Deep prefix
+// --- Phase 7a: Exact attention verification
+//
+// Verifies the committed `a` vector for the challenged token by replaying
+// canonical f64 attention: Q·K^T/√d → softmax → weights·V → requantize.
+//
+// Requires committed KV transcript (Merkle-verified by phase_kv_transcript)
+// and shell Q accumulators. This is the high-assurance attention tier:
+// exact match, no tolerance.
+
+fn phase_exact_attention(ctx: &Ctx, kv_transcript_ok: bool, st: &mut St) {
+    // Guard: only runs when KV transcript is committed and verified.
+    if !kv_transcript_ok {
+        return;
+    }
+    let kv_entries = match &ctx.r.kv_entries {
+        Some(e) => e,
+        None => return,
+    };
+    let shell = match &ctx.r.shell_opening {
+        Some(s) => s,
+        None => return,
+    };
+
+    let cfg = &ctx.key.config;
+    let token_index = ctx.r.token_index as usize;
+    let n_layers = cfg
+        .n_layers
+        .min(shell.layers.len())
+        .min(ctx.r.retained.layers.len())
+        .min(kv_entries.len());
+
+    if ctx.key.rope_aware_replay {
+        exact_attention_roped(ctx, kv_entries, shell, n_layers, token_index, st);
+    } else {
+        exact_attention_toy(ctx, kv_entries, shell, n_layers, token_index, st);
+    }
+}
+
+/// Exact attention replay for production models (dequant → RoPE → f64 replay).
+fn exact_attention_roped(
+    ctx: &Ctx,
+    kv_entries: &[Vec<KvEntry>],
+    shell: &ShellTokenOpening,
+    n_layers: usize,
+    token_index: usize,
+    st: &mut St,
+) {
+    let cfg = &ctx.key.config;
+    // Position convention: opened token at `token_index + 1` matches prover's
+    // `compute_kv_transcript` which uses 0-indexed positions for prefix and
+    // the deep-prefix replay which uses `pos + 1` for the opened token.
+    let absolute_pos = token_index + 1;
+
+    for layer_idx in 0..n_layers {
+        let sl = &shell.layers[layer_idx];
+        let rs = &ctx.r.retained.layers[layer_idx];
+
+        // Need Q accumulators for the challenged token.
+        let q_acc = match &sl.q {
+            Some(q) => q,
+            None => continue, // Q not available (layer 0 without bridge, or missing data)
+        };
+
+        // Check KV coverage: need entries for positions 0..=token_index.
+        let layer_kv = &kv_entries[layer_idx];
+        if layer_kv.len() < token_index + 1 {
+            st.check();
+            st.fail_ctx(
+                FailureCode::AttentionKvCoverageIncomplete,
+                format!(
+                    "layer {}: KV entries cover {} positions, need {}",
+                    layer_idx,
+                    layer_kv.len(),
+                    token_index + 1,
+                ),
+                FailureContext {
+                    layer: Some(layer_idx),
+                    token_index: Some(ctx.r.token_index),
+                    ..Default::default()
+                },
+            );
+            continue;
+        }
+
+        // Build K/V cache from committed KV entries (already f64, RoPE applied to K).
+        let kv_k: Vec<Vec<f64>> = layer_kv[..=token_index]
+            .iter()
+            .map(|e| e.k_roped.clone())
+            .collect();
+        let kv_v: Vec<Vec<f64>> = layer_kv[..=token_index]
+            .iter()
+            .map(|e| e.v_deq.clone())
+            .collect();
+
+        // Reconstruct Q: dequantize i32 accumulators → add bias → apply RoPE.
+        let q_roped = dequant_rope_q(ctx.key, layer_idx, q_acc, sl.scale_x_attn, absolute_pos);
+
+        // Replay canonical attention: Q·K^T/√d → softmax → weights·V → requantize.
+        let expected_a = verilm_core::attention::replay_attention_roped(
+            &q_roped,
+            &kv_k,
+            &kv_v,
+            rs.scale_a as f64,
+            cfg,
+        );
+
+        // Exact comparison — tolerance = 0.
+        st.check();
+        if expected_a != rs.a {
+            let max_diff = expected_a
+                .iter()
+                .zip(rs.a.iter())
+                .map(|(&e, &c)| (e as i16 - c as i16).unsigned_abs())
+                .max()
+                .unwrap_or(0);
+            st.fail_ctx(
+                FailureCode::AttentionExactMismatch,
+                format!(
+                    "layer {}: exact attention mismatch (max_diff={})",
+                    layer_idx, max_diff
+                ),
+                FailureContext {
+                    layer: Some(layer_idx),
+                    token_index: Some(ctx.r.token_index),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+}
+
+/// Exact attention replay for toy models (raw i32→i8, no RoPE).
+fn exact_attention_toy(
+    ctx: &Ctx,
+    kv_entries: &[Vec<KvEntry>],
+    shell: &ShellTokenOpening,
+    n_layers: usize,
+    token_index: usize,
+    st: &mut St,
+) {
+    let cfg = &ctx.key.config;
+
+    for layer_idx in 0..n_layers {
+        let sl = &shell.layers[layer_idx];
+        let rs = &ctx.r.retained.layers[layer_idx];
+
+        let q_acc = match &sl.q {
+            Some(q) => q,
+            None => continue,
+        };
+
+        let layer_kv = &kv_entries[layer_idx];
+        if layer_kv.len() < token_index + 1 {
+            st.check();
+            st.fail_ctx(
+                FailureCode::AttentionKvCoverageIncomplete,
+                format!(
+                    "layer {}: KV entries cover {} positions, need {}",
+                    layer_idx,
+                    layer_kv.len(),
+                    token_index + 1,
+                ),
+                FailureContext {
+                    layer: Some(layer_idx),
+                    token_index: Some(ctx.r.token_index),
+                    ..Default::default()
+                },
+            );
+            continue;
+        }
+
+        // Toy path: KV entries store f64-cast i8 values. Q is requantized directly.
+        let kv_k: Vec<Vec<f64>> = layer_kv[..=token_index]
+            .iter()
+            .map(|e| e.k_roped.clone())
+            .collect();
+        let kv_v: Vec<Vec<f64>> = layer_kv[..=token_index]
+            .iter()
+            .map(|e| e.v_deq.clone())
+            .collect();
+
+        let q_i8 = verilm_core::requantize(q_acc);
+        let q_f64: Vec<f64> = q_i8.iter().map(|&x| x as f64).collect();
+
+        let expected_a = verilm_core::attention::replay_attention_roped(
+            &q_f64,
+            &kv_k,
+            &kv_v,
+            rs.scale_a as f64,
+            cfg,
+        );
+
+        st.check();
+        if expected_a != rs.a {
+            let max_diff = expected_a
+                .iter()
+                .zip(rs.a.iter())
+                .map(|(&e, &c)| (e as i16 - c as i16).unsigned_abs())
+                .max()
+                .unwrap_or(0);
+            st.fail_ctx(
+                FailureCode::AttentionExactMismatch,
+                format!(
+                    "layer {}: exact attention mismatch (max_diff={})",
+                    layer_idx, max_diff
+                ),
+                FailureContext {
+                    layer: Some(layer_idx),
+                    token_index: Some(ctx.r.token_index),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+}
+
+// --- Phase 7b: Deep prefix
 
 fn phase_deep_prefix(ctx: &Ctx, kv_transcript_ok: bool, st: &mut St) {
     let (prefix_ret, prefix_shells) = match (&ctx.r.prefix_retained, &ctx.r.prefix_shell_openings) {
