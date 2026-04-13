@@ -359,7 +359,7 @@ fn client_challenge_match_pass() {
         report.failures
     );
     // Should have 2 extra checks (token_index + layer_indices) beyond canonical baseline.
-    let baseline = verify_binary(&key, &binary, None, None).unwrap();
+    let baseline = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(report.checks_run, baseline.checks_run + 2);
 }
 
@@ -455,7 +455,7 @@ fn client_both_canonical_and_challenge_failures() {
 fn client_without_wrapper_has_no_challenge_checks() {
     // Calling canonical::verify_binary directly doesn't do challenge checks.
     let (key, binary, _) = build_audit();
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Pass);
     assert!(!report
         .failures

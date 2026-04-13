@@ -341,7 +341,7 @@ fn frozen_fullbridge_audit_passes_canonical_verification() {
     let key = serialize::deserialize_key(&key_data).unwrap();
     let response = serialize::deserialize_v4_audit(&audit_data).unwrap();
 
-    let report = verilm_verify::canonical::verify_response(&key, &response, None, None);
+    let report = verilm_verify::canonical::verify_response(&key, &response, None, None, None);
     assert_eq!(
         report.verdict,
         Verdict::Pass,

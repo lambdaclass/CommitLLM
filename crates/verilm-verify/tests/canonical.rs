@@ -485,7 +485,7 @@ fn to_binary(r: &verilm_core::types::V4AuditResponse) -> Vec<u8> {
 fn canonical_full_bridge_pass() {
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, binary) = build_canonical_audit(Some(&manifest));
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(
         report.verdict,
         Verdict::Pass,
@@ -503,7 +503,7 @@ fn canonical_full_bridge_pass() {
 #[test]
 fn canonical_missing_manifest_rejected() {
     let (key, binary) = build_canonical_audit(None);
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report
         .failures
@@ -515,7 +515,7 @@ fn canonical_missing_manifest_rejected() {
 fn canonical_full_bridge_with_manifest_pass() {
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, binary) = build_canonical_audit(Some(&manifest));
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(
         report.verdict,
         Verdict::Pass,
@@ -534,7 +534,7 @@ fn canonical_full_bridge_with_manifest_pass() {
 fn canonical_binary_magic_validated() {
     let (key, _) = build_canonical_audit(None);
     // Bad magic
-    let err = verify_binary(&key, b"XXXX1234567890", None, None);
+    let err = verify_binary(&key, b"XXXX1234567890", None, None, None);
     assert!(err.is_err(), "should reject bad magic");
     assert!(
         err.unwrap_err().contains("magic"),
@@ -545,7 +545,7 @@ fn canonical_binary_magic_validated() {
 #[test]
 fn canonical_empty_input_rejected() {
     let (key, _) = build_canonical_audit(None);
-    let err = verify_binary(&key, &[], None, None);
+    let err = verify_binary(&key, &[], None, None, None);
     assert!(err.is_err());
 }
 
@@ -553,7 +553,7 @@ fn canonical_empty_input_rejected() {
 fn canonical_truncated_payload_rejected() {
     let (key, binary) = build_canonical_audit(None);
     // Just the magic
-    let err = verify_binary(&key, &binary[..4], None, None);
+    let err = verify_binary(&key, &binary[..4], None, None, None);
     assert!(err.is_err());
 }
 
@@ -566,7 +566,7 @@ fn canonical_missing_shell_opening_rejected() {
     let (key, mut response) = build_canonical_audit_with_response(None);
     response.shell_opening = None;
     let binary = to_binary(&response);
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report
         .failures
@@ -580,7 +580,7 @@ fn canonical_missing_initial_residual_rejected() {
     response.shell_opening.as_mut().unwrap().initial_residual = None;
     // Must recompute leaf hash since it includes final_residual but not initial_residual
     let binary = to_binary(&response);
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report
         .failures
@@ -593,7 +593,7 @@ fn canonical_missing_embedding_proof_rejected() {
     let (key, mut response) = build_canonical_audit_with_response(None);
     response.shell_opening.as_mut().unwrap().embedding_proof = None;
     let binary = to_binary(&response);
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report
         .failures
@@ -611,7 +611,7 @@ fn canonical_tampered_attn_out_detected() {
     let shell = response.shell_opening.as_mut().unwrap();
     shell.layers[0].attn_out[0] ^= 0x7FFF_FFFF;
     let binary = to_binary(&response);
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report
         .failures
@@ -625,7 +625,7 @@ fn canonical_tampered_ffn_out_detected() {
     let shell = response.shell_opening.as_mut().unwrap();
     shell.layers[0].ffn_out[0] ^= 0x7FFF_FFFF;
     let binary = to_binary(&response);
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report
         .failures
@@ -638,7 +638,7 @@ fn canonical_tampered_seed_detected() {
     let (key, mut response) = build_canonical_audit_with_response(None);
     response.revealed_seed[0] ^= 0xFF;
     let binary = to_binary(&response);
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report
         .failures
@@ -652,7 +652,7 @@ fn canonical_tampered_embedding_detected() {
     let shell = response.shell_opening.as_mut().unwrap();
     shell.initial_residual.as_mut().unwrap()[0] += 1.0;
     let binary = to_binary(&response);
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report
         .failures
@@ -671,7 +671,7 @@ fn canonical_tampered_revealed_scale_x_attn_rejected() {
     let shell = response.shell_opening.as_mut().unwrap();
     shell.layers[0].scale_x_attn *= 2.0; // wrong QKV input quantization
     let binary = to_binary(&response);
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(
         report.verdict,
         Verdict::Fail,
@@ -699,7 +699,7 @@ fn canonical_tampered_revealed_scale_x_ffn_rejected() {
     let shell = response.shell_opening.as_mut().unwrap();
     shell.layers[0].scale_x_ffn *= 2.0; // wrong gate_up input quantization
     let binary = to_binary(&response);
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(
         report.verdict,
         Verdict::Fail,
@@ -721,7 +721,7 @@ fn canonical_tampered_revealed_scale_h_rejected() {
     let shell = response.shell_opening.as_mut().unwrap();
     shell.layers[0].scale_h *= 2.0; // wrong down projection input quantization
     let binary = to_binary(&response);
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(
         report.verdict,
         Verdict::Fail,
@@ -742,7 +742,7 @@ fn canonical_correct_revealed_scales_pass() {
     // Confirm the clean path passes with scales in the shell opening.
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, binary) = build_canonical_audit(Some(&manifest));
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(
         report.verdict,
         Verdict::Pass,
@@ -759,7 +759,7 @@ fn canonical_correct_revealed_scales_pass() {
 fn canonical_manifest_spec_hash_verified() {
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, binary) = build_canonical_audit(Some(&manifest));
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(
         report.verdict,
         Verdict::Pass,
@@ -773,7 +773,7 @@ fn canonical_unsupported_sampler_rejected() {
     let mut manifest = make_manifest(0.0, 0, 1.0);
     manifest.sampler_version = Some("custom-sampler-v99".into());
     let (key, binary) = build_canonical_audit(Some(&manifest));
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report
         .failures
@@ -786,7 +786,7 @@ fn canonical_unsupported_repetition_penalty_rejected() {
     let mut manifest = make_manifest(0.0, 0, 1.0);
     manifest.repetition_penalty = 1.5;
     let (key, binary) = build_canonical_audit(Some(&manifest));
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report
         .failures
@@ -799,7 +799,7 @@ fn canonical_decode_mode_inconsistency_rejected() {
     let mut manifest = make_manifest(0.0, 0, 1.0);
     manifest.decode_mode = Some("sampled".into()); // temp=0 but mode=sampled
     let (key, binary) = build_canonical_audit(Some(&manifest));
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report
         .failures
@@ -817,7 +817,7 @@ fn canonical_attn_backend_mismatch_rejected() {
     manifest.attn_backend = Some("eager".into());
     let (mut key, binary) = build_canonical_audit(Some(&manifest));
     key.attn_backend = Some("sdpa".into());
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report
         .failures
@@ -835,7 +835,7 @@ fn canonical_w8a8_eager_rejected() {
     // Key also says W8A8 + eager — the fail-closed policy should reject regardless
     key.quant_family = Some("W8A8".into());
     key.attn_backend = Some("eager".into());
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report
         .failures
@@ -852,7 +852,7 @@ fn canonical_w8a8_sdpa_accepted() {
     let (mut key, binary) = build_canonical_audit(Some(&manifest));
     key.quant_family = Some("W8A8".into());
     key.attn_backend = Some("sdpa".into());
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(
         report.verdict,
         Verdict::Pass,
@@ -869,7 +869,7 @@ fn canonical_w8a8_flash_attention_accepted() {
     let (mut key, binary) = build_canonical_audit(Some(&manifest));
     key.quant_family = Some("W8A8".into());
     key.attn_backend = None; // key doesn't pin backend; verifier validates the allow-list
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(
         report.verdict,
         Verdict::Pass,
@@ -884,7 +884,7 @@ fn canonical_attn_backend_match_accepted() {
     manifest.attn_backend = Some("sdpa".into());
     let (mut key, binary) = build_canonical_audit(Some(&manifest));
     key.attn_backend = Some("sdpa".into());
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(
         report.verdict,
         Verdict::Pass,
@@ -901,7 +901,7 @@ fn canonical_w8a8_missing_backend_rejected() {
     let (mut key, binary) = build_canonical_audit(Some(&manifest));
     key.quant_family = Some("W8A8".into());
     key.attn_backend = None;
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report
         .failures
@@ -918,7 +918,7 @@ fn canonical_w8a8_unknown_backend_rejected() {
     let (mut key, binary) = build_canonical_audit(Some(&manifest));
     key.quant_family = Some("W8A8".into());
     key.attn_backend = Some("custom_kernel".into());
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(report
         .failures
@@ -934,7 +934,7 @@ fn canonical_w8a8_unknown_backend_rejected() {
 #[test]
 fn canonical_reports_full_coverage() {
     let (key, binary) = build_canonical_audit(None);
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     match &report.coverage {
         verilm_verify::AuditCoverage::Full { layers_checked } => {
             assert!(*layers_checked > 0);
@@ -961,7 +961,7 @@ fn canonical_frozen_audit_deserializes() {
     let key_data = std::fs::read(key_path).unwrap();
     let key = verilm_core::serialize::deserialize_key(&key_data).unwrap();
 
-    let report = verify_binary(&key, &audit_data, None, None).unwrap();
+    let report = verify_binary(&key, &audit_data, None, None, None).unwrap();
     // Must not panic; verdict is either Pass or Fail.
     assert!(report.verdict == Verdict::Pass || report.verdict == Verdict::Fail);
 }
@@ -977,7 +977,7 @@ fn canonical_frozen_fullbridge_passes() {
         .unwrap_or_else(|e| panic!("fixture not found: {} — run gen_fixtures first", e));
     let key = verilm_core::serialize::deserialize_key(&key_data).unwrap();
 
-    let report = verify_binary(&key, &audit_data, None, None).unwrap();
+    let report = verify_binary(&key, &audit_data, None, None, None).unwrap();
     assert_eq!(
         report.verdict,
         Verdict::Pass,
@@ -1027,7 +1027,7 @@ fn assert_parity(
 ) {
     let legacy = verify_v4_legacy(key, response, None, None, None);
     let binary = to_binary(response);
-    let canonical = verify_binary(key, &binary, None, None).unwrap();
+    let canonical = verify_binary(key, &binary, None, None, None).unwrap();
 
     assert_eq!(
         legacy.verdict, canonical.verdict,
@@ -1163,7 +1163,7 @@ fn phase1_io_chain_tampered_rejected() {
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
     response.prev_io_hash[0] ^= 0xFF;
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1183,7 +1183,7 @@ fn phase1_n_prompt_tokens_mismatch_rejected() {
     let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
     // Set response n_prompt_tokens to differ from commitment
     response.n_prompt_tokens = Some(response.commitment.n_prompt_tokens.unwrap_or(1) + 99);
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1202,7 +1202,7 @@ fn phase1_missing_seed_commitment_rejected() {
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
     response.commitment.seed_commitment = None;
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1221,7 +1221,7 @@ fn phase1_prompt_hash_mismatch_rejected() {
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
     response.prompt = Some(b"tampered".to_vec());
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1249,7 +1249,7 @@ fn phase1_prefix_count_mismatch_rejected() {
             leaf_index: 0,
             siblings: vec![],
         });
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1268,7 +1268,7 @@ fn phase1_merkle_proof_tampered_rejected() {
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
     response.commitment.merkle_root[0] ^= 0xFF;
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1291,7 +1291,7 @@ fn phase2_embedding_leaf_mismatch_rejected() {
             ir[0] += 999.0; // corrupt embedding
         }
     }
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1311,7 +1311,7 @@ fn phase3_manifest_hash_mismatch_rejected() {
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
     response.commitment.manifest_hash = Some([0xFFu8; 32]);
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1330,7 +1330,7 @@ fn phase3_missing_spec_hash_rejected() {
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
     response.commitment.input_spec_hash = None;
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1353,7 +1353,7 @@ fn phase5_freivalds_wq_tampered_rejected() {
             q[0] = q[0].wrapping_add(9999);
         }
     }
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1375,7 +1375,7 @@ fn phase5_bridge_residual_chain_broken() {
     if let Some(ref mut shell) = response.shell_opening {
         shell.layers[0].attn_out[0] = shell.layers[0].attn_out[0].wrapping_add(9999);
     }
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     // Tampered attn_out breaks the residual chain, causing downstream Freivalds failures
     assert!(
@@ -1396,7 +1396,7 @@ fn phase5_bridge_residual_chain_broken() {
 fn phase5_first_traced_prompt_token_passes_without_attention_failure() {
     let manifest = make_manifest(0.0, 0, 1.0);
     let (key, response) = build_canonical_audit_with_response_n_prompt(Some(&manifest), 2);
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(
         report.verdict,
         Verdict::Pass,
@@ -1419,7 +1419,7 @@ fn phase5_tampered_a_is_caught_by_exact_shell_checks() {
     let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
     // Flip a byte in layer 0's attention output.
     response.retained.layers[0].a[0] ^= 0x7F;
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1442,7 +1442,7 @@ fn phase4_ignore_eos_violated() {
     manifest.ignore_eos = true;
     manifest.eos_token_id = Some(42); // matches the test token_id
     let (key, response) = build_canonical_audit_with_response(Some(&manifest));
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1460,7 +1460,7 @@ fn phase4_unknown_eos_policy() {
     manifest.eos_policy = "badpolicy".into();
     manifest.eos_token_id = Some(42);
     let (key, response) = build_canonical_audit_with_response(Some(&manifest));
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1479,7 +1479,7 @@ fn phase4_missing_eos_token_id() {
     manifest.min_tokens = 5;
     // eos_token_id stays None
     let (key, response) = build_canonical_audit_with_response(Some(&manifest));
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1498,7 +1498,7 @@ fn phase4_min_tokens_violated() {
     manifest.min_tokens = 100;
     manifest.eos_token_id = Some(42);
     let (key, response) = build_canonical_audit_with_response(Some(&manifest));
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1525,7 +1525,7 @@ fn phase6_missing_logits_rejected() {
     let vocab_size = key.config.vocab_size;
     key.r_vectors[7] = vec![verilm_core::field::Fp(1); vocab_size];
     key.v_lm_head = Some(vec![verilm_core::field::Fp(1); hidden_dim]);
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1554,7 +1554,7 @@ fn phase6_missing_final_hidden_rejected() {
         // Add fake logits so shell has logits_i32.
         shell.logits_i32 = Some(vec![0i32; vocab_size]);
     }
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1576,7 +1576,7 @@ fn phase6_incompatible_key_dimensions_fail_closed_without_panic() {
     key.rmsnorm_ffn_weights = vec![vec![1.0; key.config.hidden_dim]; key.config.n_layers];
     key.final_norm_weights = Some(vec![1.0; key.config.hidden_dim]);
 
-    let result = std::panic::catch_unwind(|| verify_response(&key, &response, None, None));
+    let result = std::panic::catch_unwind(|| verify_response(&key, &response, None, None, None));
     assert!(result.is_ok(), "dimension-mismatched key must not panic");
 
     let report = result.unwrap();
@@ -1619,7 +1619,7 @@ fn phase7_deep_prefix_count_mismatch() {
         lp_hidden_bf16: None,
     }]);
     // prefix_leaf_hashes still has 0 entries → count mismatch
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1657,7 +1657,7 @@ fn phase8_tokenizer_count_mismatch() {
     let tokenizer = MockTokenizer {
         result: Ok(vec![10, 20, 30]),
     };
-    let report = verify_response(&key, &response, Some(&tokenizer), None);
+    let report = verify_response(&key, &response, None, Some(&tokenizer), None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1676,7 +1676,7 @@ fn phase8_tokenizer_error() {
     let tokenizer = MockTokenizer {
         result: Err("mock tokenizer failure".into()),
     };
-    let report = verify_response(&key, &response, Some(&tokenizer), None);
+    let report = verify_response(&key, &response, None, Some(&tokenizer), None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1711,7 +1711,7 @@ fn phase9_missing_output_text() {
     let detokenizer = MockDetokenizer {
         result: Ok("decoded".into()),
     };
-    let report = verify_response(&key, &response, None, Some(&detokenizer));
+    let report = verify_response(&key, &response, None, None, Some(&detokenizer));
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1732,7 +1732,7 @@ fn phase9_detokenization_mismatch() {
     let detokenizer = MockDetokenizer {
         result: Ok("decoded".into()),
     };
-    let report = verify_response(&key, &response, None, Some(&detokenizer));
+    let report = verify_response(&key, &response, None, None, Some(&detokenizer));
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -1752,7 +1752,7 @@ fn phase9_detokenizer_error() {
     let detokenizer = MockDetokenizer {
         result: Err("mock detokenizer failure".into()),
     };
-    let report = verify_response(&key, &response, None, Some(&detokenizer));
+    let report = verify_response(&key, &response, None, None, Some(&detokenizer));
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -2143,7 +2143,7 @@ fn phase7b_deep_prefix_attention_replay_pass() {
     let prefix_len = response.prefix_retained.as_ref().unwrap().len();
     assert_eq!(prefix_len, 2, "token 2 should have 2 prefix tokens");
 
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(
         report.verdict,
         Verdict::Pass,
@@ -2160,7 +2160,7 @@ fn phase7b_deep_prefix_tampered_attention_rejected() {
     if let Some(ref mut prefix_ret) = response.prefix_retained {
         prefix_ret[1].layers[0].a[0] ^= 0x7F;
     }
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -2320,7 +2320,7 @@ fn routine_audit_self_consistent_fake_a_passes() {
     );
 
     // The routine audit passes despite the wrong attention computation.
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(
         report.verdict,
         Verdict::Pass,
@@ -2348,7 +2348,7 @@ fn routine_audit_self_consistent_fake_a_passes() {
 #[test]
 fn deep_prefix_opened_token_replay_pass() {
     let (key, response) = build_deep_prefix_audit();
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(
         report.verdict,
         Verdict::Pass,
@@ -2618,7 +2618,7 @@ fn rope_deep_prefix_attention_replay_pass() {
     let (key, response) = build_deep_prefix_audit_roped();
     assert!(key.rope_aware_replay);
 
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(
         report.verdict,
         Verdict::Pass,
@@ -2763,7 +2763,7 @@ fn rope_deep_prefix_fake_a_caught() {
         "fake a must differ from honest a to prove the detection is real"
     );
 
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(
         report.verdict,
         Verdict::Fail,
@@ -2793,7 +2793,7 @@ fn deep_prefix_opened_token_fake_a_caught() {
         "fake a must differ from honest a to prove the detection is real"
     );
 
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     assert_eq!(
         report.verdict,
         Verdict::Fail,
@@ -2969,7 +2969,7 @@ fn bridge_check_and_gate_exact_match_passes() {
     let (key, response) = build_canonical_audit_with_response(Some(&manifest));
     // full_bridge_forward now populates x_attn_i8 + scale_x_attn — should pass.
     let binary = to_binary(&response);
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(
         report.verdict,
         Verdict::Pass,
@@ -2998,7 +2998,7 @@ fn bridge_check_and_gate_tampered_x_attn_rejected() {
         }
     }
     let binary = to_binary(&response);
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -3017,7 +3017,7 @@ fn bridge_check_and_gate_tampered_scale_rejected() {
     let (key, mut response) = build_canonical_audit_with_response(Some(&manifest));
     response.retained.layers[0].scale_x_attn = Some(999.0); // wrong scale
     let binary = to_binary(&response);
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     assert_eq!(report.verdict, Verdict::Fail);
     assert!(
         report
@@ -3548,7 +3548,7 @@ fn kv_canonical_valid_proofs_pass() {
     assert!(response.kv_entries.is_some());
     assert!(response.kv_proofs.is_some());
 
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     // No KV-related failures.
     let kv_failures: Vec<_> = report
         .failures
@@ -3577,7 +3577,7 @@ fn kv_canonical_tampered_entry_fails() {
     // Tamper with a KV entry — the Merkle proof should fail.
     response.kv_entries.as_mut().unwrap()[0][0].k_roped[0] += 999.0;
 
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     let kv_proof_failures: Vec<_> = report
         .failures
         .iter()
@@ -3596,7 +3596,7 @@ fn kv_canonical_roots_count_mismatch() {
     // Remove one kv_root to trigger count mismatch.
     response.commitment.kv_roots.pop();
 
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     let mismatch: Vec<_> = report
         .failures
         .iter()
@@ -3615,7 +3615,7 @@ fn kv_canonical_entries_without_proofs_rejected() {
     // Remove proofs but keep entries — structural error.
     response.kv_proofs = None;
 
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     let mismatch: Vec<_> = report
         .failures
         .iter()
@@ -3634,7 +3634,7 @@ fn kv_roots_without_opened_entries_are_allowed() {
     response.kv_entries = None;
     response.kv_proofs = None;
 
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     let kv_failures: Vec<_> = report
         .failures
         .iter()
@@ -3663,7 +3663,7 @@ fn kv_canonical_legacy_no_kv_roots_skipped() {
     response.kv_entries = None;
     response.kv_proofs = None;
 
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     // No KV-related failures — phase is silently skipped.
     let kv_failures: Vec<_> = report
         .failures
@@ -3856,7 +3856,7 @@ fn kv_derived_transcript_passes_canonical_verification() {
     assert!(response.kv_proofs.is_some());
 
     // Canonical verifier should accept.
-    let report = verify_response(&key, &response, None, None);
+    let report = verify_response(&key, &response, None, None, None);
     let kv_failures: Vec<_> = report
         .failures
         .iter()
@@ -4071,7 +4071,7 @@ fn kv_derived_transcript_full_response_json_round_trip_passes() {
 
     let json = serde_json::to_string(&response).unwrap();
     let restored: verilm_core::types::V4AuditResponse = serde_json::from_str(&json).unwrap();
-    let report = verify_response(&key, &restored, None, None);
+    let report = verify_response(&key, &restored, None, None, None);
     let kv_failures: Vec<_> = report
         .failures
         .iter()
@@ -4178,7 +4178,7 @@ fn kv_derived_transcript_binary_round_trip_passes() {
     );
 
     let binary = verilm_core::serialize::serialize_v4_audit(&response);
-    let report = verify_binary(&key, &binary, None, None).unwrap();
+    let report = verify_binary(&key, &binary, None, None, None).unwrap();
     let kv_failures: Vec<_> = report
         .failures
         .iter()

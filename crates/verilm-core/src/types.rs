@@ -704,11 +704,12 @@ pub struct VerifierKey {
     /// Global (not per-layer). Use `r_for(MatrixType::LmHead)` for the r vector.
     pub v_lm_head: Option<Vec<Fp>>,
 
-    /// Unembedding matrix in bf16 for LP hidden decode verification.
-    /// Shape: (vocab_size, hidden_dim), row-major, stored as u16 bf16 bit patterns.
-    /// Used when `DecodeAcceptanceMode::LpHiddenBf16` is active.
+    /// SHA-256 hash of the decode artifact containing lm_head bf16 weights.
+    /// The decode artifact is a separate binary object (VDEC magic + bincode)
+    /// that carries the full unembedding matrix for LP hidden verification.
+    /// Keeping it out of the verifier key avoids a 1+ GB key for large models.
     #[serde(default)]
-    pub lm_head_bf16: Option<Vec<u16>>,
+    pub lm_head_bf16_hash: Option<[u8; 32]>,
 
     /// SHA-256 hash of all INT8 weights in canonical order (weight chain).
     /// Binds the verifier key to a specific quantized checkpoint, ensuring
@@ -801,6 +802,39 @@ pub struct VerifierKey {
     /// When `None`, the verifier falls back to hardcoded defaults.
     #[serde(default)]
     pub verification_profile: Option<VerificationProfile>,
+}
+
+/// Separate artifact containing the bf16 unembedding matrix for LP hidden
+/// decode verification. Kept out of `VerifierKey` because it can be 1+ GB
+/// for large vocabularies. Content-addressed by SHA-256 hash stored in
+/// `VerifierKey.lm_head_bf16_hash`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecodeArtifact {
+    /// bf16 bit patterns of the lm_head weight matrix, row-major.
+    /// Shape: (vocab_size, hidden_dim). Length = vocab_size * hidden_dim.
+    pub lm_head_bf16: Vec<u16>,
+    pub vocab_size: usize,
+    pub hidden_dim: usize,
+}
+
+impl DecodeArtifact {
+    /// SHA-256 content hash for binding to the verifier key.
+    pub fn content_hash(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"vi-decode-artifact-v1");
+        hasher.update(self.vocab_size.to_le_bytes());
+        hasher.update(self.hidden_dim.to_le_bytes());
+        // Hash raw bytes of the u16 array for efficiency.
+        let byte_slice = unsafe {
+            std::slice::from_raw_parts(
+                self.lm_head_bf16.as_ptr() as *const u8,
+                self.lm_head_bf16.len() * 2,
+            )
+        };
+        hasher.update(byte_slice);
+        hasher.finalize().into()
+    }
 }
 
 impl VerifierKey {

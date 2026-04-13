@@ -67,7 +67,7 @@ fn test_detect_config() {
 fn test_generate_key_dimensions() {
     let (dir, cfg, _) = make_toy_safetensors();
     let seed = [42u8; 32];
-    let key = verilm_keygen::generate_key(dir.path(), seed).unwrap();
+    let key = verilm_keygen::generate_key(dir.path(), seed).unwrap().key;
 
     assert_eq!(key.version, 1);
     assert_eq!(key.r_vectors.len(), 8);
@@ -91,7 +91,7 @@ fn test_generate_key_dimensions() {
 fn test_precomputed_v_matches_manual() {
     let (dir, cfg, all_weights) = make_toy_safetensors();
     let seed = [42u8; 32];
-    let key = verilm_keygen::generate_key(dir.path(), seed).unwrap();
+    let key = verilm_keygen::generate_key(dir.path(), seed).unwrap().key;
 
     // For each layer and matrix type, verify v_j = r_j^T W_j
     for (layer_idx, layer_weights) in all_weights.iter().enumerate() {
@@ -117,7 +117,7 @@ fn test_precomputed_v_matches_manual() {
 fn test_freivalds_check_with_safetensors_key() {
     let (dir, cfg, all_weights) = make_toy_safetensors();
     let seed = [42u8; 32];
-    let key = verilm_keygen::generate_key(dir.path(), seed).unwrap();
+    let key = verilm_keygen::generate_key(dir.path(), seed).unwrap().key;
 
     // Pick a random input and verify the full Freivalds check works
     use rand::Rng;
@@ -158,7 +158,7 @@ fn test_freivalds_check_with_safetensors_key() {
 fn test_corrupted_weight_fails_freivalds() {
     let (dir, cfg, all_weights) = make_toy_safetensors();
     let seed = [42u8; 32];
-    let key = verilm_keygen::generate_key(dir.path(), seed).unwrap();
+    let key = verilm_keygen::generate_key(dir.path(), seed).unwrap().key;
 
     use rand::Rng;
     use rand::SeedableRng;
@@ -204,7 +204,7 @@ fn test_corrupted_weight_fails_freivalds() {
 fn test_key_serialization_roundtrip() {
     let (dir, _, _) = make_toy_safetensors();
     let seed = [42u8; 32];
-    let key = verilm_keygen::generate_key(dir.path(), seed).unwrap();
+    let key = verilm_keygen::generate_key(dir.path(), seed).unwrap().key;
 
     let data = serialize::serialize_key(&key);
     let key2 = serialize::deserialize_key(&data).unwrap();
@@ -222,8 +222,8 @@ fn test_deterministic_seed() {
     let (dir, _, _) = make_toy_safetensors();
     let seed = [42u8; 32];
 
-    let key1 = verilm_keygen::generate_key(dir.path(), seed).unwrap();
-    let key2 = verilm_keygen::generate_key(dir.path(), seed).unwrap();
+    let key1 = verilm_keygen::generate_key(dir.path(), seed).unwrap().key;
+    let key2 = verilm_keygen::generate_key(dir.path(), seed).unwrap().key;
 
     assert_eq!(key1.r_vectors, key2.r_vectors);
     assert_eq!(key1.v_vectors, key2.v_vectors);
@@ -233,8 +233,8 @@ fn test_deterministic_seed() {
 fn test_different_seed_different_key() {
     let (dir, _, _) = make_toy_safetensors();
 
-    let key1 = verilm_keygen::generate_key(dir.path(), [1u8; 32]).unwrap();
-    let key2 = verilm_keygen::generate_key(dir.path(), [2u8; 32]).unwrap();
+    let key1 = verilm_keygen::generate_key(dir.path(), [1u8; 32]).unwrap().key;
+    let key2 = verilm_keygen::generate_key(dir.path(), [2u8; 32]).unwrap().key;
 
     assert_ne!(key1.r_vectors, key2.r_vectors);
 }
@@ -309,7 +309,7 @@ fn make_bf16_safetensors() -> (tempfile::TempDir, ModelConfig) {
 fn test_bf16_keygen_produces_valid_key() {
     let (dir, cfg) = make_bf16_safetensors();
     let seed = [42u8; 32];
-    let key = verilm_keygen::generate_key(dir.path(), seed).unwrap();
+    let key = verilm_keygen::generate_key(dir.path(), seed).unwrap().key;
 
     assert_eq!(key.source_dtype, "BF16");
     assert_eq!(key.quantization_scales.len(), cfg.n_layers);
@@ -331,8 +331,8 @@ fn test_bf16_keygen_produces_valid_key() {
 fn test_bf16_keygen_deterministic() {
     let (dir, _) = make_bf16_safetensors();
 
-    let key1 = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
-    let key2 = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+    let key1 = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap().key;
+    let key2 = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap().key;
 
     assert_eq!(key1.r_vectors, key2.r_vectors);
     assert_eq!(key1.v_vectors, key2.v_vectors);
@@ -342,7 +342,7 @@ fn test_bf16_keygen_deterministic() {
 #[test]
 fn test_bf16_key_stores_quantization_metadata() {
     let (dir, _) = make_bf16_safetensors();
-    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap().key;
 
     // Serialize and deserialize — metadata should survive
     let data = serialize::serialize_key(&key);
@@ -355,7 +355,7 @@ fn test_bf16_key_stores_quantization_metadata() {
 #[test]
 fn test_int8_key_has_zero_quantization_scales() {
     let (dir, _cfg, _) = make_toy_safetensors();
-    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap().key;
 
     assert_eq!(key.source_dtype, "I8");
     // INT8 weights have scale=0.0 (no quantization applied)
@@ -400,7 +400,7 @@ fn test_weight_provider_freivalds_compatible() {
     use verilm_core::types::ShellWeights;
 
     let (dir, cfg, _) = make_toy_safetensors();
-    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap().key;
     let provider = verilm_keygen::SafetensorsWeightProvider::load(dir.path()).unwrap();
 
     // Shell opening from the provider must pass Freivalds with the keygen key
@@ -533,7 +533,7 @@ fn write_llama3_config_json(dir: &TempDir) {
 #[test]
 fn test_w8a8_keygen_detects_per_channel_scales() {
     let (dir, cfg) = make_w8a8_safetensors();
-    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap().key;
 
     assert_eq!(key.source_dtype, "I8");
     assert_eq!(key.quant_family.as_deref(), Some("W8A8"));
@@ -573,7 +573,7 @@ fn test_w8a8_keygen_detects_per_channel_scales() {
 #[test]
 fn test_w8a8_keygen_legacy_scales_zero() {
     let (dir, _cfg) = make_w8a8_safetensors();
-    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap().key;
 
     for layer_scales in &key.quantization_scales {
         for &scale in layer_scales {
@@ -585,7 +585,7 @@ fn test_w8a8_keygen_legacy_scales_zero() {
 #[test]
 fn test_w8a8_key_roundtrip() {
     let (dir, _cfg) = make_w8a8_safetensors();
-    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap().key;
 
     let data = serialize::serialize_key(&key);
     let key2 = serialize::deserialize_key(&data).unwrap();
@@ -604,7 +604,7 @@ fn test_w8a8_qwen_profile_detected_and_roundtrips() {
     let (dir, _cfg) = make_w8a8_safetensors();
     write_model_config_json(&dir, "qwen2", 1_000_000.0);
 
-    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap().key;
     let profile = key
         .verification_profile
         .as_ref()
@@ -626,7 +626,7 @@ fn test_w8a8_llama_profile_detected() {
     let (dir, _cfg) = make_w8a8_safetensors();
     write_model_config_json(&dir, "llama", 500_000.0);
 
-    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap().key;
     let profile = key
         .verification_profile
         .as_ref()
@@ -643,7 +643,7 @@ fn test_w8a8_llama_profile_detected() {
 #[test]
 fn test_w8a8_freivalds_still_works() {
     let (dir, cfg) = make_w8a8_safetensors();
-    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap().key;
 
     use rand::Rng;
     use rand::SeedableRng;
@@ -683,7 +683,7 @@ fn test_llama3_rope_scaling_stored_in_key() {
     let (dir, _cfg) = make_w8a8_safetensors();
     write_llama3_config_json(&dir);
 
-    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap().key;
     let scaling = key
         .config
         .rope_scaling
@@ -706,14 +706,14 @@ fn test_llama3_rope_scaling_stored_in_key() {
 fn test_no_rope_scaling_when_absent() {
     let (dir, _cfg, _) = make_toy_safetensors();
     // No config.json → no rope_scaling
-    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap().key;
     assert!(key.config.rope_scaling.is_none());
 }
 
 #[test]
 fn test_plain_int8_has_no_per_channel_scales() {
     let (dir, _cfg, _) = make_toy_safetensors();
-    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap();
+    let key = verilm_keygen::generate_key(dir.path(), [42u8; 32]).unwrap().key;
 
     assert!(!key.has_per_channel_scales());
     assert_eq!(key.quant_family.as_deref(), Some("INT8"));

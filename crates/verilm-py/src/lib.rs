@@ -1289,30 +1289,36 @@ fn generate_key(model_dir: String, seed: Vec<u8>) -> PyResult<String> {
     let mut seed_arr = [0u8; 32];
     seed_arr.copy_from_slice(&seed);
 
-    let key = verilm_keygen::generate_key(std::path::Path::new(&model_dir), seed_arr)
+    let output = verilm_keygen::generate_key(std::path::Path::new(&model_dir), seed_arr)
         .map_err(|e| PyValueError::new_err(format!("keygen failed: {}", e)))?;
 
-    serde_json::to_string(&key)
+    serde_json::to_string(&output.key)
         .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
 }
 
 /// Generate a verifier key in binary format (magic + bincode).
 ///
-/// Returns raw bytes suitable for `verify_v4_full_binary`. Much more compact
-/// than the JSON path when the key contains large fields like `lm_head_bf16`.
+/// Returns a tuple `(key_bytes, decode_artifact_bytes_or_none)`.
+/// `key_bytes` is the serialized VerifierKey (VKEY magic + bincode).
+/// `decode_artifact_bytes` is the serialized DecodeArtifact (VDEC magic + bincode),
+/// or None if the model doesn't require a decode artifact.
 #[pyfunction]
-fn generate_key_binary<'py>(py: Python<'py>, model_dir: String, seed: Vec<u8>) -> PyResult<Bound<'py, PyBytes>> {
+fn generate_key_binary<'py>(py: Python<'py>, model_dir: String, seed: Vec<u8>) -> PyResult<(Bound<'py, PyBytes>, Option<Bound<'py, PyBytes>>)> {
     if seed.len() != 32 {
         return Err(PyValueError::new_err("seed must be exactly 32 bytes"));
     }
     let mut seed_arr = [0u8; 32];
     seed_arr.copy_from_slice(&seed);
 
-    let key = verilm_keygen::generate_key(std::path::Path::new(&model_dir), seed_arr)
+    let output = verilm_keygen::generate_key(std::path::Path::new(&model_dir), seed_arr)
         .map_err(|e| PyValueError::new_err(format!("keygen failed: {}", e)))?;
 
-    let binary = verilm_core::serialize::serialize_key(&key);
-    Ok(PyBytes::new(py, &binary))
+    let key_binary = verilm_core::serialize::serialize_key(&output.key);
+    let artifact_binary = output.decode_artifact.as_ref().map(|a| {
+        let data = verilm_core::serialize::serialize_decode_artifact(a);
+        PyBytes::new(py, &data)
+    });
+    Ok((PyBytes::new(py, &key_binary), artifact_binary))
 }
 
 /// Verify a V4 audit response with both audit and key in binary format.
@@ -1321,11 +1327,12 @@ fn generate_key_binary<'py>(py: Python<'py>, model_dir: String, seed: Vec<u8>) -
 /// and binary key (magic+bincode). Avoids JSON serialization overhead for
 /// large keys (e.g., with lm_head_bf16).
 #[pyfunction]
-#[pyo3(signature = (audit_binary, key_binary, expected_prompt_token_ids=None, tokenizer_fn=None, detokenizer_fn=None))]
+#[pyo3(signature = (audit_binary, key_binary, decode_artifact_binary=None, expected_prompt_token_ids=None, tokenizer_fn=None, detokenizer_fn=None))]
 fn verify_v4_full_binary<'py>(
     py: Python<'py>,
     audit_binary: &[u8],
     key_binary: &[u8],
+    decode_artifact_binary: Option<&[u8]>,
     expected_prompt_token_ids: Option<Vec<u32>>,
     tokenizer_fn: Option<Bound<'py, PyAny>>,
     detokenizer_fn: Option<Bound<'py, PyAny>>,
@@ -1334,10 +1341,15 @@ fn verify_v4_full_binary<'py>(
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize V4 binary: {}", e)))?;
     let key = verilm_core::serialize::deserialize_key(key_binary)
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize binary key: {}", e)))?;
+    let artifact = decode_artifact_binary
+        .map(|data| verilm_core::serialize::deserialize_decode_artifact(data))
+        .transpose()
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize decode artifact: {}", e)))?;
 
-    let report = run_verify(
+    let report = run_verify_with_artifact(
         &key,
         &response,
+        artifact.as_ref(),
         expected_prompt_token_ids.as_deref(),
         tokenizer_fn,
         detokenizer_fn,
@@ -1570,6 +1582,25 @@ fn run_verify(
         .as_ref()
         .map(|d| d as &dyn verilm_verify::Detokenizer);
     verilm_verify::verify_v4_full(key, response, expected_prompt_token_ids, tok_ref, detok_ref)
+}
+
+fn run_verify_with_artifact(
+    key: &VerifierKey,
+    response: &V4AuditResponse,
+    decode_artifact: Option<&verilm_core::types::DecodeArtifact>,
+    _expected_prompt_token_ids: Option<&[u32]>,
+    tokenizer_fn: Option<Bound<'_, PyAny>>,
+    detokenizer_fn: Option<Bound<'_, PyAny>>,
+) -> verilm_verify::V4VerifyReport {
+    let tok_wrapper = tokenizer_fn.map(|cb| PyCallableTokenizer { callback: cb });
+    let detok_wrapper = detokenizer_fn.map(|cb| PyCallableDetokenizer { callback: cb });
+    let tok_ref: Option<&dyn verilm_verify::PromptTokenizer> = tok_wrapper
+        .as_ref()
+        .map(|t| t as &dyn verilm_verify::PromptTokenizer);
+    let detok_ref: Option<&dyn verilm_verify::Detokenizer> = detok_wrapper
+        .as_ref()
+        .map(|d| d as &dyn verilm_verify::Detokenizer);
+    verilm_verify::verify_v4_full_with_artifact(key, response, decode_artifact, tok_ref, detok_ref)
 }
 
 /// Verify that externally-computed prompt token IDs match the committed token chain.

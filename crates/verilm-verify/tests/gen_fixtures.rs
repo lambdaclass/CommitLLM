@@ -429,7 +429,7 @@ fn generate_frozen_fixtures() {
     );
 
     // Verify the canonical fixture passes canonical verification before freezing
-    let report = verilm_verify::canonical::verify_response(&key_fb, &response_fb, None, None);
+    let report = verilm_verify::canonical::verify_response(&key_fb, &response_fb, None, None, None);
     assert_eq!(
         report.verdict,
         verilm_verify::Verdict::Pass,

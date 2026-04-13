@@ -446,7 +446,16 @@ fn gcd(a: usize, b: usize) -> usize {
 ///
 /// Streams one layer at a time. BF16/FP16 weights are quantized to INT8
 /// using absmax per-tensor quantization.
-pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
+/// Output of `generate_key`: a small verifier key plus an optional decode
+/// artifact for models that require LP hidden bf16 verification.
+pub struct KeygenOutput {
+    pub key: VerifierKey,
+    /// Separate artifact containing lm_head bf16 weights (can be 1+ GB).
+    /// Content-addressed by `key.lm_head_bf16_hash`.
+    pub decode_artifact: Option<verilm_core::types::DecodeArtifact>,
+}
+
+pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<KeygenOutput> {
     let cfg = detect_config(dir)?;
     let json_cfg = read_model_config_json(dir);
     let rmsnorm_eps = json_cfg.rmsnorm_eps;
@@ -688,10 +697,10 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         quant_family.as_deref(),
     );
 
-    // Load raw bf16 lm_head when verification profile uses LpHiddenBf16 mode.
-    // The verifier replays the bf16 matmul to recover logits, so it needs the
-    // exact bf16 bit patterns — not a quantized or converted copy.
-    let lm_head_bf16 = if verification_profile
+    // Build decode artifact when verification profile uses LpHiddenBf16 mode.
+    // The artifact contains the full bf16 lm_head matrix; the verifier key
+    // stores only its content hash (keeping the key small).
+    let (decode_artifact, lm_head_bf16_hash) = if verification_profile
         .as_ref()
         .is_some_and(|p| p.decode_acceptance == verilm_core::types::DecodeAcceptanceMode::LpHiddenBf16)
     {
@@ -705,28 +714,38 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
                             .map(|c| u16::from_le_bytes([c[0], c[1]]))
                             .collect();
                         assert_eq!(u16s.len(), expected_len, "lm_head bf16 element count mismatch");
-                        eprintln!("  lm_head_bf16: {} elements (raw bf16 bit patterns)", u16s.len());
-                        Some(u16s)
+                        let artifact = verilm_core::types::DecodeArtifact {
+                            vocab_size: shape[0],
+                            hidden_dim: shape[1],
+                            lm_head_bf16: u16s,
+                        };
+                        let hash = artifact.content_hash();
+                        eprintln!(
+                            "  decode artifact: {} elements, hash {}",
+                            artifact.lm_head_bf16.len(),
+                            hex::encode(hash),
+                        );
+                        (Some(artifact), Some(hash))
                     }
                     other => {
                         eprintln!(
                             "  warning: lm_head_bf16 requested but source dtype is {:?}, skipping",
                             other
                         );
-                        None
+                        (None, None)
                     }
                 }
             }
             Err(e) => {
                 eprintln!("  warning: could not load lm_head.weight for bf16: {}", e);
-                None
+                (None, None)
             }
         }
     } else {
-        None
+        (None, None)
     };
 
-    Ok(VerifierKey {
+    let key = VerifierKey {
         version: 1,
         config,
         seed,
@@ -740,7 +759,7 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         max_v_norm: 0.0,
         lm_head,
         v_lm_head,
-        lm_head_bf16,
+        lm_head_bf16_hash,
         weight_hash: Some(weight_hash),
         rmsnorm_attn_weights,
         rmsnorm_ffn_weights,
@@ -756,7 +775,9 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<VerifierKey> {
         rope_aware_replay,
         qkv_biases,
         verification_profile,
-    })
+    };
+
+    Ok(KeygenOutput { key, decode_artifact })
 }
 
 /// Compute the paper's R_W (weight-chain hash) without full keygen.

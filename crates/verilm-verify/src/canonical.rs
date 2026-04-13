@@ -35,8 +35,8 @@ use std::time::Instant;
 
 use verilm_core::constants::MatrixType;
 use verilm_core::types::{
-    CommitmentVersion, InputSpec, KvEntry, OutputSpec, RetainedLayerState, RetainedTokenState,
-    ShellTokenOpening, V4AuditResponse, VerifierKey,
+    CommitmentVersion, DecodeArtifact, InputSpec, KvEntry, OutputSpec, RetainedLayerState,
+    RetainedTokenState, ShellTokenOpening, V4AuditResponse, VerifierKey,
 };
 use verilm_core::{freivalds, merkle, serialize};
 
@@ -54,11 +54,12 @@ use crate::{
 pub fn verify_binary(
     key: &VerifierKey,
     audit_bytes: &[u8],
+    decode_artifact: Option<&DecodeArtifact>,
     tokenizer: Option<&dyn PromptTokenizer>,
     detokenizer: Option<&dyn Detokenizer>,
 ) -> Result<V4VerifyReport, String> {
     let response = serialize::deserialize_v4_audit(audit_bytes)?;
-    Ok(verify_response(key, &response, tokenizer, detokenizer))
+    Ok(verify_response(key, &response, decode_artifact, tokenizer, detokenizer))
 }
 
 /// Verify a deserialized V4 audit response.
@@ -67,10 +68,11 @@ pub fn verify_binary(
 pub fn verify_response(
     key: &VerifierKey,
     r: &V4AuditResponse,
+    decode_artifact: Option<&DecodeArtifact>,
     tokenizer: Option<&dyn PromptTokenizer>,
     detokenizer: Option<&dyn Detokenizer>,
 ) -> V4VerifyReport {
-    run(&Ctx::new(key, r, tokenizer, detokenizer))
+    run(&Ctx::new(key, r, decode_artifact, tokenizer, detokenizer))
 }
 
 // --- Orchestrator state
@@ -78,6 +80,7 @@ pub fn verify_response(
 struct Ctx<'a> {
     key: &'a VerifierKey,
     r: &'a V4AuditResponse,
+    decode_artifact: Option<&'a DecodeArtifact>,
     tokenizer: Option<&'a dyn PromptTokenizer>,
     detokenizer: Option<&'a dyn Detokenizer>,
     start: Instant,
@@ -91,6 +94,7 @@ impl<'a> Ctx<'a> {
     fn new(
         key: &'a VerifierKey,
         r: &'a V4AuditResponse,
+        decode_artifact: Option<&'a DecodeArtifact>,
         tokenizer: Option<&'a dyn PromptTokenizer>,
         detokenizer: Option<&'a dyn Detokenizer>,
     ) -> Self {
@@ -102,6 +106,7 @@ impl<'a> Ctx<'a> {
         Self {
             key,
             r,
+            decode_artifact,
             tokenizer,
             detokenizer,
             start: Instant::now(),
@@ -1711,19 +1716,33 @@ fn phase_lm_head_lp_hidden(
         }
     };
 
-    let lm_head_bf16 = match &ctx.key.lm_head_bf16 {
-        Some(w) => w,
+    let artifact = match ctx.decode_artifact {
+        Some(a) => a,
         None => {
             st.fail(
                 FailureCode::MissingLogits,
-                "lm_head (LP hidden): key missing lm_head_bf16 for decode verification",
+                "lm_head (LP hidden): decode artifact not provided for LpHiddenBf16 mode",
             );
             return;
         }
     };
 
-    let vocab_size = ctx.key.config.vocab_size;
-    let hidden_dim = ctx.key.config.hidden_dim;
+    // Validate artifact hash matches key commitment.
+    st.check();
+    if let Some(expected_hash) = ctx.key.lm_head_bf16_hash {
+        let actual_hash = artifact.content_hash();
+        if actual_hash != expected_hash {
+            st.fail(
+                FailureCode::DecodeArtifactHashMismatch,
+                "lm_head (LP hidden): decode artifact hash does not match key's lm_head_bf16_hash",
+            );
+            return;
+        }
+    }
+
+    let lm_head_bf16 = &artifact.lm_head_bf16;
+    let vocab_size = artifact.vocab_size;
+    let hidden_dim = artifact.hidden_dim;
 
     if lp_hidden.len() != hidden_dim {
         st.fail(
@@ -2728,7 +2747,7 @@ mod tests {
             max_v_norm: 0.0,
             lm_head: None,
             v_lm_head: None,
-            lm_head_bf16: None,
+            lm_head_bf16_hash: None,
             weight_hash: None,
             rmsnorm_attn_weights: vec![],
             rmsnorm_ffn_weights: vec![],
@@ -2806,7 +2825,7 @@ mod tests {
     fn ctx_n_prompt_prefers_commitment() {
         let key = dummy_key();
         let r = dummy_response(0, 10, Some(5), Some(3));
-        let ctx = Ctx::new(&key, &r, None, None);
+        let ctx = Ctx::new(&key, &r, None, None, None);
         assert_eq!(ctx.n_prompt, 5);
     }
 
@@ -2814,7 +2833,7 @@ mod tests {
     fn ctx_n_prompt_falls_back_to_response() {
         let key = dummy_key();
         let r = dummy_response(0, 10, None, Some(3));
-        let ctx = Ctx::new(&key, &r, None, None);
+        let ctx = Ctx::new(&key, &r, None, None, None);
         assert_eq!(ctx.n_prompt, 3);
     }
 
@@ -2822,7 +2841,7 @@ mod tests {
     fn ctx_n_prompt_defaults_to_zero() {
         let key = dummy_key();
         let r = dummy_response(0, 10, None, None);
-        let ctx = Ctx::new(&key, &r, None, None);
+        let ctx = Ctx::new(&key, &r, None, None, None);
         assert_eq!(ctx.n_prompt, 0);
     }
 
@@ -2830,7 +2849,7 @@ mod tests {
     fn ctx_gen_start_from_n_prompt() {
         let key = dummy_key();
         let r = dummy_response(0, 10, Some(5), Some(5));
-        let ctx = Ctx::new(&key, &r, None, None);
+        let ctx = Ctx::new(&key, &r, None, None, None);
         assert_eq!(ctx.gen_start, 4); // 5 - 1
     }
 
@@ -2838,7 +2857,7 @@ mod tests {
     fn ctx_gen_start_saturates_at_zero() {
         let key = dummy_key();
         let r = dummy_response(0, 10, Some(0), Some(0));
-        let ctx = Ctx::new(&key, &r, None, None);
+        let ctx = Ctx::new(&key, &r, None, None, None);
         assert_eq!(ctx.gen_start, 0);
     }
 
@@ -2846,7 +2865,7 @@ mod tests {
     fn ctx_is_last_final_token() {
         let key = dummy_key();
         let r = dummy_response(9, 10, Some(1), Some(1));
-        let ctx = Ctx::new(&key, &r, None, None);
+        let ctx = Ctx::new(&key, &r, None, None, None);
         assert!(ctx.is_last);
     }
 
@@ -2854,7 +2873,7 @@ mod tests {
     fn ctx_is_last_not_final() {
         let key = dummy_key();
         let r = dummy_response(5, 10, Some(1), Some(1));
-        let ctx = Ctx::new(&key, &r, None, None);
+        let ctx = Ctx::new(&key, &r, None, None, None);
         assert!(!ctx.is_last);
     }
 
@@ -2862,7 +2881,7 @@ mod tests {
     fn ctx_is_last_single_token() {
         let key = dummy_key();
         let r = dummy_response(0, 1, Some(1), Some(1));
-        let ctx = Ctx::new(&key, &r, None, None);
+        let ctx = Ctx::new(&key, &r, None, None, None);
         assert!(ctx.is_last);
     }
 }

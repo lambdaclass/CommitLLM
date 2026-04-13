@@ -148,6 +148,7 @@ pub enum FailureCode {
     EmbeddingProofFailed,
     EmbeddingLeafMismatch,
     AttentionReplayMismatch,
+    DecodeArtifactHashMismatch,
 
     // -- Spec mismatch --
     SpecFieldMismatch,
@@ -244,7 +245,8 @@ impl FailureCode {
             | KvProofInvalid
             | KvProofCountMismatch
             | ScoreAnchorMismatch
-            | WitnessedScoreStructuralError => FailureCategory::CryptographicBinding,
+            | WitnessedScoreStructuralError
+            | DecodeArtifactHashMismatch => FailureCategory::CryptographicBinding,
 
             SpecFieldMismatch => FailureCategory::SpecMismatch,
 
@@ -666,7 +668,7 @@ pub fn verify_v4(
     response: &V4AuditResponse,
     _expected_prompt_token_ids: Option<&[u32]>,
 ) -> V4VerifyReport {
-    canonical::verify_response(key, response, None, None)
+    canonical::verify_response(key, response, None, None, None)
 }
 
 /// Full verification with optional canonical tokenizer and detokenizer.
@@ -682,7 +684,18 @@ pub fn verify_v4_full(
     tokenizer: Option<&dyn PromptTokenizer>,
     detokenizer: Option<&dyn Detokenizer>,
 ) -> V4VerifyReport {
-    canonical::verify_response(key, response, tokenizer, detokenizer)
+    canonical::verify_response(key, response, None, tokenizer, detokenizer)
+}
+
+/// Full verification with decode artifact for LP hidden decode path.
+pub fn verify_v4_full_with_artifact(
+    key: &VerifierKey,
+    response: &V4AuditResponse,
+    decode_artifact: Option<&verilm_core::types::DecodeArtifact>,
+    tokenizer: Option<&dyn PromptTokenizer>,
+    detokenizer: Option<&dyn Detokenizer>,
+) -> V4VerifyReport {
+    canonical::verify_response(key, response, decode_artifact, tokenizer, detokenizer)
 }
 
 /// Legacy verification path — kept for differential testing and rollback.

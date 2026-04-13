@@ -47,7 +47,7 @@ pub fn verify_challenged_response(
     tokenizer: Option<&dyn PromptTokenizer>,
     detokenizer: Option<&dyn Detokenizer>,
 ) -> V4VerifyReport {
-    let mut report = canonical::verify_response(key, response, tokenizer, detokenizer);
+    let mut report = canonical::verify_response(key, response, None, tokenizer, detokenizer);
 
     // External check: response.token_index matches the challenged token.
     report.checks_run += 1;

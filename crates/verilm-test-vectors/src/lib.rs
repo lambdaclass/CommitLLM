@@ -398,7 +398,7 @@ pub fn generate_key(cfg: &ModelConfig, model: &[LayerWeights], seed: [u8; 32]) -
         max_v_norm: 0.0,
         lm_head: None,
         v_lm_head: None,
-        lm_head_bf16: None,
+        lm_head_bf16_hash: None,
         weight_hash: Some(weight_hash),
         rmsnorm_attn_weights: Vec::new(),
         rmsnorm_ffn_weights: Vec::new(),

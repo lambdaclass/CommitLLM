@@ -12,10 +12,11 @@
 //! Compression is a separate layer applied on top of any serialized
 //! payload. It is not part of the canonical format.
 
-use crate::types::{V4AuditResponse, VerifierKey};
+use crate::types::{DecodeArtifact, V4AuditResponse, VerifierKey};
 
 const KEY_MAGIC: &[u8; 4] = b"VKEY";
 const V4_AUDIT_MAGIC: &[u8; 4] = b"VV4A";
+const DECODE_ARTIFACT_MAGIC: &[u8; 4] = b"VDEC";
 
 // ── Verifier key ────────────────────────────────────────────
 
@@ -57,6 +58,24 @@ pub fn deserialize_v4_audit(data: &[u8]) -> Result<V4AuditResponse, String> {
     bincode::deserialize(&decompressed).map_err(|e| format!("V4 audit deserialization failed: {e}"))
 }
 
+// ── Decode artifact ──────────────────────────────────────────
+
+pub fn serialize_decode_artifact(artifact: &DecodeArtifact) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(DECODE_ARTIFACT_MAGIC);
+    let encoded = bincode::serialize(artifact).expect("decode artifact serialization failed");
+    buf.extend_from_slice(&encoded);
+    buf
+}
+
+pub fn deserialize_decode_artifact(data: &[u8]) -> Result<DecodeArtifact, String> {
+    if data.len() < 4 || &data[..4] != DECODE_ARTIFACT_MAGIC {
+        return Err("invalid decode artifact magic".into());
+    }
+    bincode::deserialize(&data[4..])
+        .map_err(|e| format!("decode artifact deserialization failed: {e}"))
+}
+
 // ── Transport compression (independent of schema) ───────────
 //
 // These work on arbitrary byte slices. Apply on top of any
@@ -95,7 +114,7 @@ mod tests {
             max_v_norm: 0.0,
             lm_head: None,
             v_lm_head: None,
-            lm_head_bf16: None,
+            lm_head_bf16_hash: None,
             weight_hash: None,
             rmsnorm_attn_weights: Vec::new(),
             rmsnorm_ffn_weights: Vec::new(),

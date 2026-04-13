@@ -52,15 +52,26 @@ fn main() -> Result<()> {
         "verilm-keygen: generating verifier-secret key from {}",
         args.model_dir
     );
-    let key = verilm_keygen::generate_key(std::path::Path::new(&args.model_dir), seed)?;
+    let output = verilm_keygen::generate_key(std::path::Path::new(&args.model_dir), seed)?;
 
-    let data = serialize::serialize_key(&key);
+    let data = serialize::serialize_key(&output.key);
     std::fs::write(&args.output, &data)?;
     eprintln!(
         "wrote {} ({:.1} MB) — VERIFIER-SECRET, do not share with prover",
         args.output,
         data.len() as f64 / 1_048_576.0
     );
+
+    if let Some(artifact) = &output.decode_artifact {
+        let artifact_path = format!("{}.decode", args.output);
+        let artifact_data = serialize::serialize_decode_artifact(artifact);
+        std::fs::write(&artifact_path, &artifact_data)?;
+        eprintln!(
+            "wrote {} ({:.1} MB) — decode artifact (content-addressed)",
+            artifact_path,
+            artifact_data.len() as f64 / 1_048_576.0
+        );
+    }
 
     Ok(())
 }
