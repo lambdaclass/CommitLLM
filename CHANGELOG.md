@@ -6,18 +6,23 @@ Historical references below to “roadmap #N” refer to the pre-2026-03-30 road
 
 ## 2026-04-13
 
+### Shipped
+
+- **Qwen W8A8 decode verification is now fully shipped on the binary-key path.** The complete LP hidden → bf16 lm_head matmul → canonical sampler path passes real-weight E2E on Modal A100-80GB: **261/261 verifier checks on every run**, across 3 greedy prompts, 2 sampled prompts (temp=0.8, top_k=50, top_p=0.9), and an EOS-trim regression test. Tamper detection confirmed. This closes the decode-side promotion gate — Qwen token identity is no longer “unsupported in principle.”
+
 ### Measured
 
-- **LP-hidden decode capture is now exact on the real sampler boundary**: the `LogitsProcessor` capture hook passes `23/23` validation checks on Qwen W8A8. Count alignment is exact on both greedy and sampled runs, dtype is preserved as `bf16`, reference-hook match is exact (`max_diff = 0.0`), greedy token replay is `192/192`, sampled replay is `32/32` exact under the canonical sampler with the committed seed, and no prefill rows leak into the decode trace. Root cause of the earlier mismatch was CUDA allocator reuse before an async D2H copy completed; the kept path now snapshots on the producer stream before copying.
+- **LP-hidden decode capture is exact on the real sampler boundary**: the `LogitsProcessor` capture hook passes `23/23` validation checks on Qwen W8A8. Count alignment is exact on both greedy and sampled runs, dtype is preserved as `bf16`, reference-hook match is exact (`max_diff = 0.0`), greedy token replay is `192/192`, sampled replay is `32/32` exact under the canonical sampler with the committed seed, and no prefill rows leak into the decode trace. Root cause of the earlier mismatch was CUDA allocator reuse before an async D2H copy completed; the kept path now snapshots on the producer stream before copying.
 
 ### Added
 
+- **Binary verifier-key API**: `generate_key_binary()` and `verify_v4_full_binary()` added to the Python API. The JSON key path is impractical for models with `lm_head_bf16` (Qwen 7B key is 1.57 GB binary / ~2 GB JSON). The binary path (VKEY magic + bincode) is now mandatory for `LpHiddenBf16` profiles.
 - **Committed LP-hidden decode path in the protocol surface**: `ShellTokenOpening` now carries `lp_hidden_bf16`, the prover commit/open path stores per-token LP hidden, and the retained-state hash binds LP hidden with a dedicated domain separator. The canonical verifier gained `DecodeAcceptanceMode::LpHiddenBf16`, a `bf16` `lm_head` replay path for greedy and sampled decode, and `VerifierKey.lm_head_bf16` so token identity can be checked from the committed runtime boundary instead of the broken `i8→i32` surrogate.
 - **Keygen support for decode-boundary replay**: key generation now loads raw `bf16` bit patterns from `lm_head.weight` and stores them in the verifier key when the selected verification profile requires `LpHiddenBf16`. The verifier therefore replays the exact `bf16` `lm_head` surface the decode path expects, rather than silently re-deriving a different dtype path.
 
-### Changed
+### Known issues
 
-- **Qwen decode semantics moved from “unsupported” to “captured LP-hidden path in code”**: the protocol no longer treats Qwen token identity as permanently unsupported. The kept decode path is now `LogitsProcessor` input hidden → verifier-side `bf16 lm_head` replay → canonical sampler. This is the right architectural answer to the failed tolerance experiment: keep `lm_head` Freivalds exact for the linear check, but stop pretending the quantized replay logits are the correct object for token identity. The remaining promotion gate before calling this fully shipped behavior is a real-weight GPU E2E run using keygen-populated `lm_head_bf16`.
+- **Verifier key size**: `lm_head_bf16` for Qwen 7B is 544M u16 elements (152064 × 3584) = 1.57 GB binary. This makes verifier-key distribution a first-class product concern. Options: keep in key, split to separate artifact, or derive differently. JSON key path is dead for these models.
 
 ## 2026-04-12
 
