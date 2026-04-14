@@ -4,6 +4,24 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 
 Historical references below to “roadmap #N” refer to the pre-2026-03-30 roadmap numbering. On 2026-03-30 the roadmap was renumbered into a single linear open-items-only sequence.
 
+## 2026-04-14
+
+### Added
+
+- **Explicit attention-verification routing in the canonical verifier**: `VerificationProfile` now carries `AttentionVerificationMode` with `ExactReplay` and `WitnessedScores`. The verifier routes attention checking through an explicit mode instead of overloading `score_anchor_threshold` as an implicit selector. Current intended split: **Llama stays on exact attention replay**; **Qwen uses witnessed-score attention**.
+- **Standalone witnessed-score attention phase**: `phase_witnessed_score_attention` is now a first-class verifier phase. It performs (1) witnessed-score structural checks, (2) score anchoring against canonical `QK^T / sqrt(d)`, (3) softmax replay from the witnessed score rows, and (4) comparison against committed `a` with the local requantization tolerance. This separates the “witnessed score” claim cleanly from raw `Q/K/V` replay.
+- **Exact attention reference phase**: `phase_exact_attention` is now kept as a pure reference-tier phase that replays canonical attention directly from reconstructed `Q` plus committed `K/V`. It no longer doubles as the stock-kernel Qwen strong-tier path.
+
+### Measured
+
+- **Qwen brute-force exact attention replay is a reference tier, not the kept path**: with committed KV transcript and canonical f64 replay, token 0 passes under a `±1` LSB tolerance at the final `a` requantization boundary, but later tokens still diverge heavily (`max_diff` on the order of `100–170` in i8 space). This is not a small rounding issue; it is the stock-kernel attention arithmetic gap showing up across longer prefixes. Conclusion: brute-force exact replay remains useful as an upper-bound payload/CPU benchmark and diagnostic tier, but it is not the honest Qwen production attention path.
+- **Witnessed-score and exact replay are now treated as different claims, not two checks on the same claim**: the earlier benchmark confusion came from routing witnessed-score logic through a separate corridor/anchoring path while `phase_exact_attention` still enforced raw f64 replay first. The verifier now has an explicit phase split so Qwen is no longer blocked by the wrong attention claim.
+- **Qwen witnessed-score attention nearly passes on real late-token audits, but the bound is not frozen yet**: reruns on short / medium / long prompts with the **last generated token** show deterministic, small residual failures on only a few layers per prompt. The witnessed-score path reduces the last-token `a` replay gap from the old `100–170` scale down to `max_diff = 2–3`, with `2–5 / 28` failing layers depending on prompt and a stable bad-layer set (notably layer 11 across all three prompts). Measured payloads scale roughly linearly with context (`~13 MB` at ~43 tokens, `~33 MB` at ~136 tokens, `~117 MB` at ~532 tokens), and verifier runtime stays around `~4.0–4.4 s`, with the attention phase itself still cheap compared to the rest of verification. This is strong evidence that the kept stock-kernel path is close, but **`±3` is not yet a frozen protocol bound**: it still needs a broader randomized / longer-context sweep before docs can treat it as final.
+
+### Known issues
+
+- **Last-token LP-hidden opening bug remains separate from the attention result**: in the same benchmark runs, the final generated token can still miss `lp_hidden_bf16` in the shell opening even when the attention path is otherwise behaving as expected. This is an independent commit/open bug and should not be conflated with the witnessed-score attention tail.
+
 ## 2026-04-13
 
 ### Shipped
