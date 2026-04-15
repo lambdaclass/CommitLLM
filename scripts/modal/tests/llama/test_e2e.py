@@ -113,10 +113,13 @@ def _run():
     check(decode_mode == "ExactTokenIdentity", f"decode acceptance is ExactTokenIdentity (got {decode_mode})")
     print()
 
-    # ── Helper: derive challenge seed from commitment (like a real verifier) ──
-    def derive_challenge_seed(commitment, verifier_secret):
-        """In production, the verifier derives the challenge from the commitment
-        so the prover cannot predict it before committing."""
+    # ── Helper: derive challenge seed from commitment ──
+    # TODO: production version should hash a canonical commitment digest
+    # (e.g. the full serialized receipt bytes), not hand-concatenated fields.
+    # This is sufficient for testing but two commitments with missing/renamed
+    # fields could accidentally derive the same challenge input.
+    def derive_test_challenge_seed(commitment, verifier_secret):
+        """Test helper — derives a challenge seed from commitment fields."""
         merkle_root = commitment.get("merkle_root", "")
         io_root = commitment.get("io_root", "")
         return hashlib.sha256(
@@ -148,7 +151,7 @@ def _run():
         check(commitment.get("version") == "V4", f"req {i}: commitment is V4")
 
         # Step 2: Verifier derives challenge seed from the commitment
-        challenge_seed = derive_challenge_seed(commitment, verifier_secret)
+        challenge_seed = derive_test_challenge_seed(commitment, verifier_secret)
 
         # Step 3: Pick audit tier — full every 3rd request, routine otherwise
         is_full = (i % 3 == 0)
@@ -198,7 +201,7 @@ def _run():
     # Derive 3 different challenges by varying a counter in the seed
     for j in range(3):
         seed_j = hashlib.sha256(
-            derive_challenge_seed(commitment_multi, verifier_secret) + j.to_bytes(4, "little")
+            derive_test_challenge_seed(commitment_multi, verifier_secret) + j.to_bytes(4, "little")
         ).digest()
         challenge = verilm_rs.build_audit_challenge(
             list(seed_j), result_multi["n_tokens"], n_layers, "full"
@@ -224,7 +227,7 @@ def _run():
     # ── Test 3: Tamper detection ──
     print("Test 3: Tamper detection (bit-flip → verifier rejects)")
     result_tamper = server.chat(prompt="What is gravity?", max_tokens=32, temperature=0.0)
-    challenge_seed = derive_challenge_seed(result_tamper["commitment"], verifier_secret)
+    challenge_seed = derive_test_challenge_seed(result_tamper["commitment"], verifier_secret)
     challenge = verilm_rs.build_audit_challenge(
         list(challenge_seed), result_tamper["n_tokens"], n_layers, "full"
     )
@@ -253,7 +256,7 @@ def _run():
     eos_n = eos["n_tokens"]
     print(f"  {eos_n} tokens (EOS {'early' if eos_n < 256 else 'at limit'})")
 
-    challenge_seed = derive_challenge_seed(eos["commitment"], verifier_secret)
+    challenge_seed = derive_test_challenge_seed(eos["commitment"], verifier_secret)
     challenge = verilm_rs.build_audit_challenge(
         list(challenge_seed), eos_n, n_layers, "full"
     )
