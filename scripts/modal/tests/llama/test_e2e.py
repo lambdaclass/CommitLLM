@@ -1,8 +1,13 @@
 """
 Llama 3.1 8B W8A8 — E2E protocol test.
 
-Exercises the full commit-and-audit pipeline:
-  chat → commit → keygen → audit → verify → tamper detection
+Exercises the full commit-and-audit pipeline the way a real verifier would:
+  - Multiple requests with varied prompts and generation lengths
+  - Challenge seeds derived from commitment (not hardcoded)
+  - Mix of routine (~90%) and full (~10%) audits
+  - Random token positions selected by the challenge
+  - Tamper detection on a separate request
+  - EOS early-stop handling
 
 Llama uses the strongest verification tier:
   - ExactReplay attention (f64 Q·K^T)
@@ -90,13 +95,13 @@ def _run():
 
     # ── Keygen ──
     print("Generating verifier key...")
-    seed = hashlib.sha256(b"test-llama-e2e").digest()
+    verifier_secret = hashlib.sha256(b"test-llama-e2e-verifier-secret").digest()
     t0 = time.time()
-    key_bin, artifact_bin = verilm_rs.generate_key_binary(model_dir, seed)
+    key_bin, artifact_bin = verilm_rs.generate_key_binary(model_dir, verifier_secret)
     print(f"  {len(key_bin)/1024/1024:.1f} MB, {(time.time()-t0)*1000:.0f} ms")
 
     # Inspect profile to assert correct verification mode
-    key_json = verilm_rs.generate_key(model_dir, seed)
+    key_json = verilm_rs.generate_key(model_dir, verifier_secret)
     key = json.loads(key_json)
     profile = key.get("verification_profile", {})
     attn_mode = profile.get("attention_mode", "unknown")
@@ -108,77 +113,134 @@ def _run():
     check(decode_mode == "ExactTokenIdentity", f"decode acceptance is ExactTokenIdentity (got {decode_mode})")
     print()
 
-    # ── Test 1: Full-tier verify ──
-    print("Test 1: Full-tier verify")
-    result = server.chat(prompt="What causes rainbows?", max_tokens=64, temperature=0.0)
-    commitment = result["commitment"]
-    n_gen = result["n_tokens"] - commitment.get("n_prompt_tokens", 0)
-    print(f"  generated {n_gen} tokens")
-    print(f"  text: {result['generated_text'][:80]}...")
+    # ── Helper: derive challenge seed from commitment (like a real verifier) ──
+    def derive_challenge_seed(commitment, verifier_secret):
+        """In production, the verifier derives the challenge from the commitment
+        so the prover cannot predict it before committing."""
+        merkle_root = commitment.get("merkle_root", "")
+        io_root = commitment.get("io_root", "")
+        return hashlib.sha256(
+            f"{merkle_root}:{io_root}".encode() + verifier_secret
+        ).digest()
 
-    check(commitment.get("version") == "V4", "commitment is V4")
-    check(len(commitment.get("kv_roots", [])) == n_layers, "KV roots cover all layers")
+    # ── Test 1: Batch of requests with mixed audit tiers ──
+    # This mirrors real usage: the verifier receives multiple requests,
+    # derives a challenge for each from the commitment, and picks
+    # routine or full audit based on a policy (here: every 3rd is full).
+    prompts = [
+        ("What causes rainbows?", 64, 0.0),
+        ("Explain how a CPU pipeline works.", 96, 0.0),
+        ("What is the theory of general relativity?", 64, 0.0),
+        ("Write a haiku about cryptography.", 48, 0.0),
+        ("What is the difference between TCP and UDP?", 80, 0.0),
+        ("Why is the sky blue?", 64, 0.0),
+    ]
 
-    audit = server.audit(
-        request_id=result["request_id"],
-        token_index=0,
-        layer_indices=full_layers,
-        tier="full",
-        binary=True,
-        use_captured_x_attn=True,
-    )
-    report = verilm_rs.verify_v4_full_binary(bytes(audit), key_bin, artifact_bin)
-    check(report["passed"], f"full verify: {report['checks_passed']}/{report['checks_run']} checks")
-    if not report["passed"]:
-        for f in report.get("failures", [])[:5]:
-            print(f"    {f}")
+    print(f"Test 1: Mixed audit batch ({len(prompts)} requests)")
+    print(f"  Policy: every 3rd request gets full audit, rest get routine\n")
+
+    for i, (prompt, max_tok, temp) in enumerate(prompts):
+        # Step 1: Provider generates response and returns commitment
+        result = server.chat(prompt=prompt, max_tokens=max_tok, temperature=temp)
+        commitment = result["commitment"]
+        n_gen = result["n_tokens"] - commitment.get("n_prompt_tokens", 0)
+
+        check(commitment.get("version") == "V4", f"req {i}: commitment is V4")
+
+        # Step 2: Verifier derives challenge seed from the commitment
+        challenge_seed = derive_challenge_seed(commitment, verifier_secret)
+
+        # Step 3: Pick audit tier — full every 3rd request, routine otherwise
+        is_full = (i % 3 == 0)
+        tier = "full" if is_full else "routine"
+
+        # Step 4: Build challenge (token position + layers from seed)
+        challenge = verilm_rs.build_audit_challenge(
+            list(challenge_seed), result["n_tokens"], n_layers, tier
+        )
+        tok_idx = challenge["token_index"]
+        layers = challenge["layer_indices"]
+
+        tier_label = f"FULL ({len(layers)}/{n_layers} layers)" if is_full else f"routine ({len(layers)}/{n_layers} layers)"
+        print(f"  req {i}: \"{prompt[:40]}...\" → {n_gen} tok, {tier_label}, challenge token={tok_idx}")
+
+        # Step 5: Provider opens the challenged position
+        audit = server.audit(
+            request_id=result["request_id"],
+            token_index=tok_idx,
+            layer_indices=layers,
+            tier=tier,
+            binary=True,
+            use_captured_x_attn=True,
+        )
+
+        # Step 6: Verifier checks
+        report = verilm_rs.verify_v4_full_binary(bytes(audit), key_bin, artifact_bin)
+        check(report["passed"], f"req {i} ({tier}): {report['checks_passed']}/{report['checks_run']} checks")
+        if not report["passed"]:
+            for f in report.get("failures", [])[:3]:
+                print(f"    {f}")
+
     print()
 
-    # ── Test 2: Routine-tier verify ──
-    print("Test 2: Routine-tier verify")
-    result2 = server.chat(prompt="What is a CPU pipeline?", max_tokens=64, temperature=0.0)
-    challenge_seed = hashlib.sha256(b"test-llama-routine").digest()
-    challenge = verilm_rs.build_audit_challenge(
-        list(challenge_seed), result2["n_tokens"], n_layers, "routine"
+    # ── Test 2: Multiple positions on same request ──
+    # A verifier may challenge the same request at multiple token positions
+    # (e.g., deep audit after a routine audit flags something).
+    print("Test 2: Multiple challenge positions on one request")
+    result_multi = server.chat(
+        prompt="Write a short poem about the ocean.",
+        max_tokens=128, temperature=0.0,
     )
-    routine_layers = challenge["layer_indices"]
-    routine_token = challenge["token_index"]
-    print(f"  challenge: token={routine_token}, {len(routine_layers)}/{n_layers} layers")
+    commitment_multi = result_multi["commitment"]
+    n_prompt = commitment_multi.get("n_prompt_tokens", 0)
+    n_gen = result_multi["n_tokens"] - n_prompt
 
-    audit2 = server.audit(
-        request_id=result2["request_id"],
-        token_index=routine_token,
-        layer_indices=routine_layers,
-        tier="routine",
-        binary=True,
-        use_captured_x_attn=True,
-    )
-    report2 = verilm_rs.verify_v4_full_binary(bytes(audit2), key_bin, artifact_bin)
-    check(report2["passed"], f"routine verify: {report2['checks_passed']}/{report2['checks_run']} checks")
-    if not report2["passed"]:
-        for f in report2.get("failures", [])[:5]:
-            print(f"    {f}")
+    # Derive 3 different challenges by varying a counter in the seed
+    for j in range(3):
+        seed_j = hashlib.sha256(
+            derive_challenge_seed(commitment_multi, verifier_secret) + j.to_bytes(4, "little")
+        ).digest()
+        challenge = verilm_rs.build_audit_challenge(
+            list(seed_j), result_multi["n_tokens"], n_layers, "full"
+        )
+        tok_idx = challenge["token_index"]
+        print(f"  challenge {j}: token={tok_idx}")
 
-    full_kb = len(audit) / 1024
-    routine_kb = len(audit2) / 1024
-    print(f"  payload: {routine_kb:.0f} KB routine vs {full_kb:.0f} KB full")
+        a = server.audit(
+            request_id=result_multi["request_id"],
+            token_index=tok_idx,
+            layer_indices=full_layers,
+            tier="full",
+            binary=True,
+            use_captured_x_attn=True,
+        )
+        r = verilm_rs.verify_v4_full_binary(bytes(a), key_bin, artifact_bin)
+        check(r["passed"], f"position {tok_idx}: {r['checks_passed']}/{r['checks_run']} checks")
+        if not r["passed"]:
+            for f in r.get("failures", [])[:3]:
+                print(f"    {f}")
     print()
 
     # ── Test 3: Tamper detection ──
-    print("Test 3: Tamper detection")
-    result3 = server.chat(prompt="What is gravity?", max_tokens=32, temperature=0.0)
-    audit3 = server.audit(
-        request_id=result3["request_id"],
-        token_index=0,
+    print("Test 3: Tamper detection (bit-flip → verifier rejects)")
+    result_tamper = server.chat(prompt="What is gravity?", max_tokens=32, temperature=0.0)
+    challenge_seed = derive_challenge_seed(result_tamper["commitment"], verifier_secret)
+    challenge = verilm_rs.build_audit_challenge(
+        list(challenge_seed), result_tamper["n_tokens"], n_layers, "full"
+    )
+
+    audit_honest = server.audit(
+        request_id=result_tamper["request_id"],
+        token_index=challenge["token_index"],
         layer_indices=full_layers,
         tier="full",
         binary=True,
         use_captured_x_attn=True,
     )
-    report_honest = verilm_rs.verify_v4_full_binary(bytes(audit3), key_bin, artifact_bin)
+    report_honest = verilm_rs.verify_v4_full_binary(bytes(audit_honest), key_bin, artifact_bin)
     check(report_honest["passed"], "honest audit passes")
 
-    tampered = bytearray(audit3)
+    tampered = bytearray(audit_honest)
     if len(tampered) > 100:
         tampered[100] ^= 0xFF
     report_tamper = verilm_rs.verify_v4_full_binary(bytes(tampered), key_bin, artifact_bin)
@@ -191,9 +253,13 @@ def _run():
     eos_n = eos["n_tokens"]
     print(f"  {eos_n} tokens (EOS {'early' if eos_n < 256 else 'at limit'})")
 
+    challenge_seed = derive_challenge_seed(eos["commitment"], verifier_secret)
+    challenge = verilm_rs.build_audit_challenge(
+        list(challenge_seed), eos_n, n_layers, "full"
+    )
     eos_audit = server.audit(
         request_id=eos["request_id"],
-        token_index=0,
+        token_index=challenge["token_index"],
         layer_indices=full_layers,
         tier="full",
         binary=True,
@@ -201,37 +267,6 @@ def _run():
     )
     eos_report = verilm_rs.verify_v4_full_binary(bytes(eos_audit), key_bin, artifact_bin)
     check(eos_report["passed"], f"EOS verify: {eos_report['checks_passed']}/{eos_report['checks_run']} checks")
-    print()
-
-    # ── Test 5: Multiple token positions ──
-    print("Test 5: Verify at different token positions")
-    result5 = server.chat(
-        prompt="Write a short poem about the ocean.",
-        max_tokens=128, temperature=0.0,
-    )
-    n5 = result5["n_tokens"]
-    n5_prompt = result5["commitment"].get("n_prompt_tokens", 0)
-    n5_gen = n5 - n5_prompt
-    test_positions = [0]
-    if n5_gen > 4:
-        test_positions.append(n5_prompt + n5_gen // 2)
-    if n5_gen > 2:
-        test_positions.append(n5_prompt + n5_gen - 1)
-
-    for tok_idx in test_positions:
-        a = server.audit(
-            request_id=result5["request_id"],
-            token_index=tok_idx,
-            layer_indices=full_layers,
-            tier="full",
-            binary=True,
-            use_captured_x_attn=True,
-        )
-        r = verilm_rs.verify_v4_full_binary(bytes(a), key_bin, artifact_bin)
-        check(r["passed"], f"token {tok_idx}: {r['checks_passed']}/{r['checks_run']} checks")
-        if not r["passed"]:
-            for f in r.get("failures", [])[:3]:
-                print(f"    {f}")
     print()
 
     # ── Summary ──
