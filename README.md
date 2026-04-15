@@ -42,25 +42,27 @@ When you call an LLM provider, you have no proof they ran the model they claim, 
 
 The protocol is commitment-bound end-to-end. Within that binding, large linear components are verified by verifier-secret, information-theoretically sound algebraic checks, exact bridge tensors and supported nonlinear subcomputations are checked by canonical re-execution, attention is checked by bounded approximate replay, and routine KV provenance is statistical unless deep audit is used. Unsupported semantics fail closed.
 
-## Running the Tests
+## Try It
 
-Per-model E2E tests verify the full pipeline on Modal (requires a GPU):
+You need a [Modal](https://modal.com) account (runs on an A100 GPU). Each script runs the full protocol end-to-end: load model → generate text with capture → commit → generate verifier key → audit → verify → tamper detection.
+
+**Run the E2E test for a model:**
 
 ```bash
-# Llama 3.1 8B W8A8 — ExactReplay attention, ExactTokenIdentity decode
+# Llama 3.1 8B (strongest tier: exact attention replay, exact token identity)
 modal run --detach scripts/modal/tests/llama/test_e2e.py
 
-# Qwen 2.5 7B W8A8 — WitnessedScores attention, LpHiddenBf16 decode
+# Qwen 2.5 7B (witnessed-score attention, bf16 decode acceptance)
 modal run --detach scripts/modal/tests/qwen/test_e2e.py
 ```
 
-Each test exercises: chat → commit → keygen → full-tier audit+verify → routine-tier audit+verify → tamper detection → EOS handling → multi-position verification.
-
-There is also a demo script with detailed output suitable for walkthroughs:
+**Run the full demo with detailed output** (timings, payload sizes, per-prompt breakdown):
 
 ```bash
 modal run --detach scripts/modal/demo_llama_e2e.py
 ```
+
+`--detach` runs the job server-side so you can close your terminal. Check logs at `modal.com/apps`.
 
 ## Repository Layout
 

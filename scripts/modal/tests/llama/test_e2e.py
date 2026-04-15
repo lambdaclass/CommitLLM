@@ -60,6 +60,7 @@ image = (
 
 def _run():
     import hashlib
+    import json
     import time
 
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -92,7 +93,20 @@ def _run():
     seed = hashlib.sha256(b"test-llama-e2e").digest()
     t0 = time.time()
     key_bin, artifact_bin = verilm_rs.generate_key_binary(model_dir, seed)
-    print(f"  {len(key_bin)/1024/1024:.1f} MB, {(time.time()-t0)*1000:.0f} ms\n")
+    print(f"  {len(key_bin)/1024/1024:.1f} MB, {(time.time()-t0)*1000:.0f} ms")
+
+    # Inspect profile to assert correct verification mode
+    key_json = verilm_rs.generate_key(model_dir, seed)
+    key = json.loads(key_json)
+    profile = key.get("verification_profile", {})
+    attn_mode = profile.get("attention_mode", "unknown")
+    decode_mode = profile.get("decode_acceptance", "unknown")
+    print(f"  profile: {profile.get('name', 'unknown')}")
+    print(f"  attention_mode: {attn_mode}")
+    print(f"  decode_acceptance: {decode_mode}")
+    check(attn_mode == "ExactReplay", f"attention mode is ExactReplay (got {attn_mode})")
+    check(decode_mode == "ExactTokenIdentity", f"decode acceptance is ExactTokenIdentity (got {decode_mode})")
+    print()
 
     # ── Test 1: Full-tier verify ──
     print("Test 1: Full-tier verify")

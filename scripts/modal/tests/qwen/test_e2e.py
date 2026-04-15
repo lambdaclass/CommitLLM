@@ -1,13 +1,19 @@
 """
-Qwen 2.5 7B W8A8 — E2E protocol test.
+Qwen 2.5 7B W8A8 — E2E protocol regression test.
 
-Exercises the full commit-and-audit pipeline:
-  chat → commit → keygen → audit → verify → tamper detection
+Verifies the Qwen-specific wiring works end-to-end:
+  - Decode path: LpHiddenBf16 acceptance (bf16 lm_head matmul)
+  - Score-witness capture plumbing
+  - Captured x_attn as QKV boundary input
+  - Supported checks pass, unsupported checks skip correctly
 
-Qwen uses:
-  - WitnessedScores attention (GPU-captured pre-softmax scores)
-  - LpHiddenBf16 decode acceptance
-  - Score witness + anchoring
+This is a regression test for Qwen protocol wiring, NOT a claim that
+strong-tier attention is solved. The witnessed-score f64 softmax·V
+replay has known precision gaps (max_diff=9 in sweep). The test verifies
+the machinery works, not that attention tolerances are final.
+
+Score witness currently captures Q only for the last decode step.
+First/mid token attention verification is intentionally skipped.
 
 Usage:
     modal run --detach scripts/modal/tests/qwen/test_e2e.py
@@ -61,6 +67,7 @@ image = (
 
 def _run():
     import hashlib
+    import json
     import time
 
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -98,10 +105,23 @@ def _run():
     seed = hashlib.sha256(b"test-qwen-e2e").digest()
     t0 = time.time()
     key_bin, artifact_bin = verilm_rs.generate_key_binary(model_dir, seed)
-    print(f"  {len(key_bin)/1024/1024:.1f} MB, {(time.time()-t0)*1000:.0f} ms\n")
+    print(f"  {len(key_bin)/1024/1024:.1f} MB, {(time.time()-t0)*1000:.0f} ms")
 
-    # ── Test 1: Full-tier verify ──
-    print("Test 1: Full-tier verify")
+    # Also generate JSON key to inspect the profile
+    key_json = verilm_rs.generate_key(model_dir, seed)
+    key = json.loads(key_json)
+    profile = key.get("verification_profile", {})
+    attn_mode = profile.get("attention_mode", "unknown")
+    decode_mode = profile.get("decode_acceptance", "unknown")
+    print(f"  profile: {profile.get('name', 'unknown')}")
+    print(f"  attention_mode: {attn_mode}")
+    print(f"  decode_acceptance: {decode_mode}")
+    check(attn_mode == "WitnessedScores", f"attention mode is WitnessedScores (got {attn_mode})")
+    check(decode_mode == "LpHiddenBf16", f"decode acceptance is LpHiddenBf16 (got {decode_mode})")
+    print()
+
+    # ── Test 1: Full-tier verify (token 0 — decode + bridge checks) ──
+    print("Test 1: Full-tier verify (token 0)")
     result = server.chat(prompt="What causes rainbows?", max_tokens=64, temperature=0.0)
     commitment = result["commitment"]
     n_gen = result["n_tokens"] - commitment.get("n_prompt_tokens", 0)
@@ -124,6 +144,14 @@ def _run():
     if not report["passed"]:
         for f in report.get("failures", [])[:5]:
             print(f"    {f}")
+
+    # Assert LP-hidden decode check actually ran (not skipped)
+    cf = report.get("classified_failures", [])
+    skipped = report.get("skipped", [])
+    lp_skipped = [s for s in skipped if "lp_hidden" in s.lower() or "lm_head" in s.lower()]
+    check(len(lp_skipped) == 0, f"LP-hidden decode check ran (not skipped)")
+    if lp_skipped:
+        print(f"    skipped: {lp_skipped}")
     print()
 
     # ── Test 2: Routine-tier verify ──
@@ -195,16 +223,16 @@ def _run():
     check(eos_report["passed"], f"EOS verify: {eos_report['checks_passed']}/{eos_report['checks_run']} checks")
     print()
 
-    # ── Test 5: Multiple token positions (last gen token only for score witness) ──
-    print("Test 5: Verify at last generated token")
+    # ── Test 5: Last-gen-token score witness verify ──
+    print("Test 5: Score witness at last generated token")
+    print("  NOTE: score witness captures Q for last decode step only")
+    print("  NOTE: first/mid token attention verification intentionally skipped")
     result5 = server.chat(
         prompt="Explain what a hash function does.",
         max_tokens=64, temperature=0.0,
     )
     n5_prompt = result5["commitment"].get("n_prompt_tokens", 0)
     n5_gen = result5["n_tokens"] - n5_prompt
-    # Score witness captures Q only for the last decode step,
-    # so only the last gen token has matching witnessed scores.
     last_tok = n5_prompt + n5_gen - 1
     print(f"  last gen token: {last_tok} (prompt={n5_prompt}, gen={n5_gen})")
 
@@ -243,7 +271,7 @@ def run():
 
 @app.local_entrypoint()
 def main():
-    print("CommitLLM E2E — Qwen 2.5 7B W8A8")
+    print("CommitLLM E2E — Qwen 2.5 7B W8A8 (regression test)")
     print("=" * 50)
     result = run.remote()
     if not result["passed"]:
