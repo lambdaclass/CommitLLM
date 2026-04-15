@@ -117,6 +117,7 @@ def _run_test():
             "tier": "full",
             "binary": binary,
             "deep_prefix": deep_prefix,
+            "use_captured_x_attn": True,
         })
         assert resp.status_code == 200, f"audit failed: {resp.status_code}"
         return resp

@@ -1015,16 +1015,26 @@ class VerifiedInferenceServer:
                     else:
                         final_residuals.append(fwd_tensor.numpy())
 
-        # Organize LP hidden: each capture is (1, hidden_dim) bf16.
-        # Convert to numpy u16 (bf16 bit patterns) for Rust.
+        # Organize LP hidden: LogitsProcessor hook captures (batch, hidden_dim) bf16
+        # per forward pass. Expand by fwd_batch_sizes to get one entry per token,
+        # matching the per-token indexing in open_v4.
         lp_hidden_list = None
         if lp_hidden_raw:
-            lp_hidden_list = []
-            for t in lp_hidden_raw:
-                # t is bf16 CPU tensor, shape (1, hidden_dim).
-                # View as u16 via numpy to preserve exact bf16 bits.
-                arr = t.view(torch.int16).numpy().view(np.uint16).ravel()
-                lp_hidden_list.append(arr)
+            if len(lp_hidden_raw) != len(fwd_batch_sizes):
+                logger.warning(
+                    "verilm: lp_hidden count (%d) != fwd count (%d), skipping",
+                    len(lp_hidden_raw), len(fwd_batch_sizes),
+                )
+            else:
+                lp_hidden_list = []
+                for fwd_tensor, batch_sz in zip(lp_hidden_raw, fwd_batch_sizes):
+                    for pos in range(batch_sz):
+                        if fwd_tensor.dim() >= 2 and fwd_tensor.shape[0] >= batch_sz:
+                            row = fwd_tensor[pos:pos+1].contiguous()
+                        else:
+                            row = fwd_tensor
+                        arr = row.view(torch.int16).numpy().view(np.uint16).ravel()
+                        lp_hidden_list.append(arr)
 
         return verilm_rs.commit_minimal_from_captures(
             o_proj_inputs=o_proj_inputs,
@@ -1250,6 +1260,7 @@ def create_app(llm, **kwargs):
                 tier=request.get("tier", "routine"),
                 binary=use_binary,
                 deep_prefix=request.get("deep_prefix", False),
+                use_captured_x_attn=request.get("use_captured_x_attn"),
             )
             # Binary response returns bytes.
             if isinstance(result, (bytes, memoryview)):
