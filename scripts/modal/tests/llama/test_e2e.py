@@ -125,6 +125,7 @@ def _run():
         layer_indices=full_layers,
         tier="full",
         binary=True,
+        use_captured_x_attn=True,
     )
     report = verilm_rs.verify_v4_full_binary(bytes(audit), key_bin, artifact_bin)
     check(report["passed"], f"full verify: {report['checks_passed']}/{report['checks_run']} checks")
@@ -150,6 +151,7 @@ def _run():
         layer_indices=routine_layers,
         tier="routine",
         binary=True,
+        use_captured_x_attn=True,
     )
     report2 = verilm_rs.verify_v4_full_binary(bytes(audit2), key_bin, artifact_bin)
     check(report2["passed"], f"routine verify: {report2['checks_passed']}/{report2['checks_run']} checks")
@@ -171,6 +173,7 @@ def _run():
         layer_indices=full_layers,
         tier="full",
         binary=True,
+        use_captured_x_attn=True,
     )
     report_honest = verilm_rs.verify_v4_full_binary(bytes(audit3), key_bin, artifact_bin)
     check(report_honest["passed"], "honest audit passes")
@@ -194,6 +197,7 @@ def _run():
         layer_indices=full_layers,
         tier="full",
         binary=True,
+        use_captured_x_attn=True,
     )
     eos_report = verilm_rs.verify_v4_full_binary(bytes(eos_audit), key_bin, artifact_bin)
     check(eos_report["passed"], f"EOS verify: {eos_report['checks_passed']}/{eos_report['checks_run']} checks")
@@ -221,6 +225,7 @@ def _run():
             layer_indices=full_layers,
             tier="full",
             binary=True,
+            use_captured_x_attn=True,
         )
         r = verilm_rs.verify_v4_full_binary(bytes(a), key_bin, artifact_bin)
         check(r["passed"], f"token {tok_idx}: {r['checks_passed']}/{r['checks_run']} checks")
