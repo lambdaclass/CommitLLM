@@ -42,6 +42,26 @@ When you call an LLM provider, you have no proof they ran the model they claim, 
 
 The protocol is commitment-bound end-to-end. Within that binding, large linear components are verified by verifier-secret, information-theoretically sound algebraic checks, exact bridge tensors and supported nonlinear subcomputations are checked by canonical re-execution, attention is checked by bounded approximate replay, and routine KV provenance is statistical unless deep audit is used. Unsupported semantics fail closed.
 
+## Running the Tests
+
+Per-model E2E tests verify the full pipeline on Modal (requires a GPU):
+
+```bash
+# Llama 3.1 8B W8A8 — ExactReplay attention, ExactTokenIdentity decode
+modal run --detach scripts/modal/tests/llama/test_e2e.py
+
+# Qwen 2.5 7B W8A8 — WitnessedScores attention, LpHiddenBf16 decode
+modal run --detach scripts/modal/tests/qwen/test_e2e.py
+```
+
+Each test exercises: chat → commit → keygen → full-tier audit+verify → routine-tier audit+verify → tamper detection → EOS handling → multi-position verification.
+
+There is also a demo script with detailed output suitable for walkthroughs:
+
+```bash
+modal run --detach scripts/modal/demo_llama_e2e.py
+```
+
 ## Repository Layout
 
 | Component | Path |
@@ -53,7 +73,9 @@ The protocol is commitment-bound end-to-end. Within that binding, large linear c
 | Prover (Python sidecar) | [`sidecar/`](sidecar/) |
 | Python bindings | [`crates/verilm-py/`](crates/verilm-py/) |
 | Test vectors | [`crates/verilm-test-vectors/`](crates/verilm-test-vectors/) |
-| Benchmark and repro scripts | [`scripts/modal/`](scripts/modal/) |
+| Per-model E2E tests | [`scripts/modal/tests/`](scripts/modal/tests/) |
+| Demo script | [`scripts/modal/demo_llama_e2e.py`](scripts/modal/demo_llama_e2e.py) |
+| Benchmarks and diagnostics | [`scripts/modal/`](scripts/modal/) |
 | Lean formalization | [`lean/`](lean/) |
 | Paper | [`paper/`](paper/) |
 
