@@ -2,12 +2,15 @@
 Llama 3.1 8B W8A8 — E2E protocol test.
 
 Exercises the full commit-and-audit pipeline the way a real verifier would:
-  - Multiple requests with varied prompts and generation lengths
+  - Greedy and sampled decoding (different decode paths + seed commitment)
+  - Short and long prompts with varied generation lengths
   - Challenge seeds derived from commitment (not hardcoded)
-  - Mix of routine (~90%) and full (~10%) audits
+  - Mix of routine and full audits
   - Random token positions selected by the challenge
-  - Tamper detection on a separate request
+  - Multi-position escalation on a single request
+  - Tamper detection (bit-flip → verifier rejects)
   - EOS early-stop handling
+  - Payload size and verification timing
 
 Llama uses the strongest verification tier:
   - ExactReplay attention (f64 Q·K^T)
@@ -98,7 +101,8 @@ def _run():
     verifier_secret = hashlib.sha256(b"test-llama-e2e-verifier-secret").digest()
     t0 = time.time()
     key_bin, artifact_bin = verilm_rs.generate_key_binary(model_dir, verifier_secret)
-    print(f"  {len(key_bin)/1024/1024:.1f} MB, {(time.time()-t0)*1000:.0f} ms")
+    keygen_ms = (time.time() - t0) * 1000
+    print(f"  {len(key_bin)/1024/1024:.1f} MB, {keygen_ms:.0f} ms")
 
     # Inspect profile to assert correct verification mode
     key_json = verilm_rs.generate_key(model_dir, verifier_secret)
@@ -116,8 +120,6 @@ def _run():
     # ── Helper: derive challenge seed from commitment ──
     # TODO: production version should hash a canonical commitment digest
     # (e.g. the full serialized receipt bytes), not hand-concatenated fields.
-    # This is sufficient for testing but two commitments with missing/renamed
-    # fields could accidentally derive the same challenge input.
     def derive_test_challenge_seed(commitment, verifier_secret):
         """Test helper — derives a challenge seed from commitment fields."""
         merkle_root = commitment.get("merkle_root", "")
@@ -126,48 +128,25 @@ def _run():
             f"{merkle_root}:{io_root}".encode() + verifier_secret
         ).digest()
 
-    # ── Test 1: Batch of requests with mixed audit tiers ──
-    # This mirrors real usage: the verifier receives multiple requests,
-    # derives a challenge for each from the commitment, and picks
-    # routine or full audit based on a policy (here: every 3rd is full).
-    prompts = [
-        ("What causes rainbows?", 64, 0.0),
-        ("Explain how a CPU pipeline works.", 96, 0.0),
-        ("What is the theory of general relativity?", 64, 0.0),
-        ("Write a haiku about cryptography.", 48, 0.0),
-        ("What is the difference between TCP and UDP?", 80, 0.0),
-        ("Why is the sky blue?", 64, 0.0),
-    ]
-
-    print(f"Test 1: Mixed audit batch ({len(prompts)} requests)")
-    print(f"  Policy: every 3rd request gets full audit, rest get routine\n")
-
-    for i, (prompt, max_tok, temp) in enumerate(prompts):
-        # Step 1: Provider generates response and returns commitment
-        result = server.chat(prompt=prompt, max_tokens=max_tok, temperature=temp)
+    # ── Helper: run one audit cycle (chat → commit → challenge → audit → verify) ──
+    def audit_and_verify(prompt, max_tokens, temperature, tier, label):
+        """Full cycle: generate → derive challenge → audit → verify. Returns report."""
+        t_chat = time.time()
+        result = server.chat(prompt=prompt, max_tokens=max_tokens, temperature=temperature)
+        chat_ms = (time.time() - t_chat) * 1000
         commitment = result["commitment"]
         n_gen = result["n_tokens"] - commitment.get("n_prompt_tokens", 0)
 
-        check(commitment.get("version") == "V4", f"req {i}: commitment is V4")
+        check(commitment.get("version") == "V4", f"{label}: commitment is V4")
 
-        # Step 2: Verifier derives challenge seed from the commitment
         challenge_seed = derive_test_challenge_seed(commitment, verifier_secret)
-
-        # Step 3: Pick audit tier — full every 3rd request, routine otherwise
-        is_full = (i % 3 == 0)
-        tier = "full" if is_full else "routine"
-
-        # Step 4: Build challenge (token position + layers from seed)
         challenge = verilm_rs.build_audit_challenge(
             list(challenge_seed), result["n_tokens"], n_layers, tier
         )
         tok_idx = challenge["token_index"]
         layers = challenge["layer_indices"]
 
-        tier_label = f"FULL ({len(layers)}/{n_layers} layers)" if is_full else f"routine ({len(layers)}/{n_layers} layers)"
-        print(f"  req {i}: \"{prompt[:40]}...\" → {n_gen} tok, {tier_label}, challenge token={tok_idx}")
-
-        # Step 5: Provider opens the challenged position
+        t_audit = time.time()
         audit = server.audit(
             request_id=result["request_id"],
             token_index=tok_idx,
@@ -175,38 +154,113 @@ def _run():
             tier=tier,
             binary=True,
         )
+        audit_ms = (time.time() - t_audit) * 1000
+        audit_kb = len(audit) / 1024
 
-        # Step 6: Verifier checks
+        t_verify = time.time()
         report = verilm_rs.verify_v4_full_binary(bytes(audit), key_bin, artifact_bin)
-        check(report["passed"], f"req {i} ({tier}): {report['checks_passed']}/{report['checks_run']} checks")
+        verify_ms = (time.time() - t_verify) * 1000
+
+        temp_str = f"T={temperature}" if temperature > 0 else "greedy"
+        tier_str = f"{tier} ({len(layers)}/{n_layers} layers)"
+        print(f"  {label}: {n_gen} tok, {temp_str}, {tier_str}, "
+              f"token={tok_idx}, {audit_kb:.0f} KB, "
+              f"chat={chat_ms:.0f}ms audit={audit_ms:.0f}ms verify={verify_ms:.0f}ms")
+
+        check(report["passed"],
+              f"{label}: {report['checks_passed']}/{report['checks_run']} checks")
         if not report["passed"]:
             for f in report.get("failures", [])[:3]:
                 print(f"    {f}")
 
+        return result, report, audit
+
+    # ── Test 1: Mixed batch — greedy decoding, varied lengths ──
+    # Mirrors real usage: verifier receives requests, derives challenges,
+    # mixes routine and full audits.
+    greedy_prompts = [
+        ("What causes rainbows?", 64),
+        ("Explain how a CPU pipeline works.", 96),
+        ("What is the theory of general relativity?", 64),
+        ("Write a haiku about cryptography.", 48),
+        ("What is the difference between TCP and UDP?", 80),
+        ("Why is the sky blue?", 64),
+    ]
+
+    print(f"Test 1: Greedy batch ({len(greedy_prompts)} requests, mixed tiers)")
+    for i, (prompt, max_tok) in enumerate(greedy_prompts):
+        tier = "full" if (i % 3 == 0) else "routine"
+        audit_and_verify(prompt, max_tok, 0.0, tier, f"req {i}")
     print()
 
-    # ── Test 2: Multiple positions on same request ──
+    # ── Test 2: Sampled decoding ──
+    # Exercises the sampled decode path: seed commitment, probability checks,
+    # top_k/top_p filtering. This is a completely different verification path
+    # from greedy (ExactTokenIdentity → seed + probability replay).
+    sampled_prompts = [
+        ("Write a creative story about a robot learning to paint.", 128, 0.8),
+        ("Invent a new recipe using only five ingredients.", 96, 0.7),
+        ("Describe an alien civilization in three sentences.", 64, 0.9),
+    ]
+
+    print(f"Test 2: Sampled decoding ({len(sampled_prompts)} requests)")
+    for i, (prompt, max_tok, temp) in enumerate(sampled_prompts):
+        tier = "full" if (i == 0) else "routine"
+        audit_and_verify(prompt, max_tok, temp, tier, f"sampled {i}")
+    print()
+
+    # ── Test 3: Long generation ──
+    # Real requests often generate 200-500+ tokens. Longer sequences stress
+    # KV transcript, prefix state, and the attention replay window.
+    print("Test 3: Long generation")
+    audit_and_verify(
+        "Write a detailed explanation of how public-key cryptography works, "
+        "including RSA key generation, encryption, decryption, and why it is "
+        "secure. Include mathematical intuition.",
+        512, 0.0, "full", "long-gen",
+    )
+    print()
+
+    # ── Test 4: Long prompt (system prompt + context) ──
+    # Real deployments have system prompts + user context that can be 500+ tokens.
+    long_prompt = (
+        "You are an expert systems architect. You have deep knowledge of "
+        "distributed systems, cryptographic protocols, consensus mechanisms, "
+        "and formal verification. The user is building a cryptographic "
+        "commit-and-audit protocol for LLM inference verification. The protocol "
+        "uses Merkle commitments over retained state, Freivalds checks for "
+        "matrix multiplications, and bounded approximate replay for attention. "
+        "The provider runs inference normally on GPU and returns a compact "
+        "receipt. When challenged, the provider opens specific token positions "
+        "and layer ranges. The verifier checks shell matmuls via Freivalds, "
+        "exact bridge tensors by canonical recomputation, and attention by "
+        "bounded replay against committed post-attention output. "
+        "Given this context, what are the three biggest attack vectors "
+        "a dishonest provider could exploit?"
+    )
+    print("Test 4: Long prompt (~150 tokens input)")
+    audit_and_verify(long_prompt, 128, 0.0, "full", "long-prompt")
+    print()
+
+    # ── Test 5: Multiple positions on same request ──
     # A verifier may challenge the same request at multiple token positions
     # (e.g., deep audit after a routine audit flags something).
-    print("Test 2: Multiple challenge positions on one request")
+    print("Test 5: Multi-position escalation on one request")
     result_multi = server.chat(
         prompt="Write a short poem about the ocean.",
         max_tokens=128, temperature=0.0,
     )
     commitment_multi = result_multi["commitment"]
-    n_prompt = commitment_multi.get("n_prompt_tokens", 0)
-    n_gen = result_multi["n_tokens"] - n_prompt
 
-    # Derive 3 different challenges by varying a counter in the seed
     for j in range(3):
         seed_j = hashlib.sha256(
-            derive_test_challenge_seed(commitment_multi, verifier_secret) + j.to_bytes(4, "little")
+            derive_test_challenge_seed(commitment_multi, verifier_secret)
+            + j.to_bytes(4, "little")
         ).digest()
         challenge = verilm_rs.build_audit_challenge(
             list(seed_j), result_multi["n_tokens"], n_layers, "full"
         )
         tok_idx = challenge["token_index"]
-        print(f"  challenge {j}: token={tok_idx}")
 
         a = server.audit(
             request_id=result_multi["request_id"],
@@ -222,8 +276,8 @@ def _run():
                 print(f"    {f}")
     print()
 
-    # ── Test 3: Tamper detection ──
-    print("Test 3: Tamper detection (bit-flip → verifier rejects)")
+    # ── Test 6: Tamper detection ──
+    print("Test 6: Tamper detection (bit-flip → verifier rejects)")
     result_tamper = server.chat(prompt="What is gravity?", max_tokens=32, temperature=0.0)
     challenge_seed = derive_test_challenge_seed(result_tamper["commitment"], verifier_secret)
     challenge = verilm_rs.build_audit_challenge(
@@ -236,7 +290,6 @@ def _run():
         layer_indices=full_layers,
         tier="full",
         binary=True,
-        use_captured_x_attn=True,
     )
     report_honest = verilm_rs.verify_v4_full_binary(bytes(audit_honest), key_bin, artifact_bin)
     check(report_honest["passed"], "honest audit passes")
@@ -248,8 +301,8 @@ def _run():
     check(not report_tamper["passed"], "tampered audit rejected")
     print()
 
-    # ── Test 4: EOS early stop ──
-    print("Test 4: EOS early stop")
+    # ── Test 7: EOS early stop ──
+    print("Test 7: EOS early stop")
     eos = server.chat(prompt="What is 2+2? Just the number.", max_tokens=256, temperature=0.0)
     eos_n = eos["n_tokens"]
     print(f"  {eos_n} tokens (EOS {'early' if eos_n < 256 else 'at limit'})")
@@ -264,7 +317,6 @@ def _run():
         layer_indices=full_layers,
         tier="full",
         binary=True,
-        use_captured_x_attn=True,
     )
     eos_report = verilm_rs.verify_v4_full_binary(bytes(eos_audit), key_bin, artifact_bin)
     check(eos_report["passed"], f"EOS verify: {eos_report['checks_passed']}/{eos_report['checks_run']} checks")
