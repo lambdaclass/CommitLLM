@@ -44,25 +44,66 @@ The protocol is commitment-bound end-to-end. Within that binding, large linear c
 
 ## Try It
 
-You need a [Modal](https://modal.com) account (runs on an A100 GPU). Each script runs the full protocol end-to-end: load model → generate text with capture → commit → generate verifier key → audit → verify → tamper detection.
+You need a [Modal](https://modal.com) account. All tests run on an A100 GPU.
 
-**Run the E2E test for a model:**
+### Prerequisites
 
 ```bash
-# Llama 3.1 8B (strongest tier: exact attention replay, exact token identity)
+pip install modal
+modal setup   # one-time auth
+```
+
+### Per-Model E2E Tests
+
+Each test loads a real model, generates text with cryptographic capture, commits, generates a verifier key, audits at multiple tiers, and verifies. Takes ~5-10 minutes per model (most of that is image build on first run).
+
+```bash
+# Llama 3.1 8B W8A8 — strongest tier: exact attention replay, exact token identity
 modal run --detach scripts/modal/tests/llama/test_e2e.py
 
-# Qwen 2.5 7B (witnessed-score attention, bf16 decode acceptance)
+# Qwen 2.5 7B W8A8 — decode path regression test (attention verification disabled, known open problem)
 modal run --detach scripts/modal/tests/qwen/test_e2e.py
 ```
 
-**Run the full demo with detailed output** (timings, payload sizes, per-prompt breakdown):
+What `test_e2e.py` checks:
+- Full-tier verify (all layers, binary key path)
+- Routine-tier verify (subset of layers via random challenge)
+- Tamper detection (bit-flip → verifier rejects)
+- EOS early-stop handling
+- Multi-position verification (Llama) / last-token verification (Qwen)
+- Profile assertion (ExactReplay vs WitnessedScores, ExactTokenIdentity vs LpHiddenBf16)
+
+### Adversarial Tamper Tests
+
+36 scenarios that systematically tamper with individual fields in an honest audit and assert the verifier rejects each one **for the right reason**. This is not "does an honest prover pass?" — this is "can a dishonest prover cheat?"
+
+```bash
+modal run --detach scripts/modal/tests/llama/test_adversarial.py
+```
+
+Boundaries tested: Freivalds (all 7 matmul families), Merkle binding (retained state, final residual), IO chain, embedding proof, LM-head logits, decode replay (greedy + sampled), manifest/prompt binding, cross-request splice, layer swap, prefix tampering, token index shift, seed commitment.
+
+### Demo Script
+
+Polished output with timings, payload sizes, and per-prompt breakdown. Suitable for walkthroughs.
 
 ```bash
 modal run --detach scripts/modal/demo_llama_e2e.py
 ```
 
-`--detach` runs the job server-side so you can close your terminal. Check logs at `modal.com/apps`.
+### Checking Results
+
+`--detach` runs the job server-side so you can close your terminal. To check results:
+
+```bash
+# List recent runs
+modal app list
+
+# Stream logs from a running/completed app
+modal app logs <app-id>
+```
+
+Or check the Modal dashboard at `modal.com/apps`.
 
 ## Repository Layout
 
@@ -76,6 +117,7 @@ modal run --detach scripts/modal/demo_llama_e2e.py
 | Python bindings | [`crates/verilm-py/`](crates/verilm-py/) |
 | Test vectors | [`crates/verilm-test-vectors/`](crates/verilm-test-vectors/) |
 | Per-model E2E tests | [`scripts/modal/tests/`](scripts/modal/tests/) |
+| Adversarial tamper tests | [`scripts/modal/tests/llama/test_adversarial.py`](scripts/modal/tests/llama/test_adversarial.py) |
 | Demo script | [`scripts/modal/demo_llama_e2e.py`](scripts/modal/demo_llama_e2e.py) |
 | Benchmarks and diagnostics | [`scripts/modal/`](scripts/modal/) |
 | Lean formalization | [`lean/`](lean/) |
