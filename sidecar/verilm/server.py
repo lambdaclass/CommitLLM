@@ -208,6 +208,38 @@ class VerifiedInferenceServer:
             self._quant_family = self._extract_quant_family(model)
             self._scale_derivation = self._extract_scale_derivation(model)
 
+        # Detect verification profile to determine x_attn source policy.
+        # When QKV Freivalds is enabled (Llama): prover MUST use bridge-derived
+        # x_attn so QKV accumulators match the verifier's own derivation.
+        # When QKV Freivalds is disabled (Qwen): captured x_attn is used for
+        # score/corridor paths where bridge diverges from GPU fused norm_quant.
+        self._model_type = getattr(getattr(model, "config", None), "model_type", None)
+        self._supports_qkv_freivalds = self._detect_qkv_freivalds_support()
+        x_attn_source = "bridge" if self._supports_qkv_freivalds else "captured"
+        logger.info(
+            "x_attn_source=%s (model_type=%s, quant=%s, qkv_freivalds=%s)",
+            x_attn_source, self._model_type, self._quant_family,
+            self._supports_qkv_freivalds,
+        )
+
+    def _detect_qkv_freivalds_support(self) -> bool:
+        """Detect whether this model supports QKV Freivalds checks.
+
+        Mirrors VerificationProfile::detect() in verilm-core/types.rs.
+        When True, bridge-derived x_attn MUST be used for shell QKV so
+        prover and verifier agree. When False, captured x_attn may be
+        used (e.g. Qwen where bridge diverges from GPU).
+        """
+        mt = (self._model_type or "").lower()
+        qf = (self._quant_family or "").upper()
+        is_w8a8 = qf == "W8A8"
+        if "qwen" in mt and is_w8a8:
+            return False  # Qwen W8A8: bridge != GPU fused norm_quant
+        if "llama" in mt and is_w8a8:
+            return True   # Llama W8A8: bridge is accurate
+        # Unknown model: default to True (safe — uses bridge, Freivalds works)
+        return True
+
     def _compute_tokenizer_hash(self, llm) -> str:
         """SHA-256 of full tokenizer identity (vocab + normalizer + pre-tokenizer + added tokens).
 
@@ -1167,10 +1199,10 @@ class VerifiedInferenceServer:
             tier: "routine" (shell checks) or "full" (shell + attention replay).
             binary: if True (default), return bincode+zstd bytes. False for JSON debug.
             deep_prefix: if True, open prefix tokens for deep-prefix replay.
-            use_captured_x_attn: if True, shell opening QKV uses GPU-captured
-                x_attn instead of bridge-derived. Defaults to True for
-                deep/strong audits when captured data is available (the bridge
-                is only an approximation to vLLM's fused norm+quant kernel).
+            use_captured_x_attn: DIAGNOSTIC ONLY. Overrides the automatic
+                x_attn source selection. Do not set in production — the server
+                chooses the correct source based on the verification profile.
+                Ignored when QKV Freivalds is enabled (would cause mismatch).
         """
         entry = self._audit_store.get(request_id)
         if entry is None:
@@ -1183,12 +1215,31 @@ class VerifiedInferenceServer:
         state = entry["state"]
         state.deep_prefix = deep_prefix
 
-        # Default: use captured x_attn for all audits when available.
-        # The bridge-derived x_attn is only an approximation to vLLM's fused
-        # norm+quant kernel and produces large errors for some models (Qwen).
-        if use_captured_x_attn is None:
-            use_captured_x_attn = state.has_captured_x_attn()
-        state.use_captured_x_attn = use_captured_x_attn
+        # Automatic x_attn source selection based on verification profile.
+        # - QKV Freivalds enabled (Llama): MUST use bridge-derived x_attn.
+        #   Prover and verifier both derive x_attn from the residual chain,
+        #   so QKV accumulators match for Freivalds checks.
+        # - QKV Freivalds disabled (Qwen): use captured x_attn when available.
+        #   Bridge diverges from GPU fused norm_quant; captured x_attn is
+        #   needed for score/corridor paths.
+        #
+        # TODO(C): Once captured x_attn_i8 is bound into retained state and
+        # Merkle leaf, captured x_attn can safely support QKV Freivalds too.
+        if self._supports_qkv_freivalds:
+            if use_captured_x_attn is True:
+                logger.warning(
+                    "Ignoring use_captured_x_attn=True: QKV Freivalds is enabled "
+                    "for this model (%s). Using bridge-derived x_attn to ensure "
+                    "prover/verifier agreement.",
+                    self._model_type,
+                )
+            state.use_captured_x_attn = False
+        else:
+            # QKV Freivalds disabled — safe to use captured x_attn.
+            if use_captured_x_attn is not None:
+                state.use_captured_x_attn = use_captured_x_attn
+            else:
+                state.use_captured_x_attn = state.has_captured_x_attn()
         output_text = entry.get("output_text")
 
         if binary:
@@ -1260,6 +1311,8 @@ def create_app(llm, **kwargs):
                 tier=request.get("tier", "routine"),
                 binary=use_binary,
                 deep_prefix=request.get("deep_prefix", False),
+                # Diagnostic only — server.audit() enforces safe defaults
+                # based on verification profile. Ignored when unsafe.
                 use_captured_x_attn=request.get("use_captured_x_attn"),
             )
             # Binary response returns bytes.
