@@ -174,7 +174,8 @@ def _run():
             layer_indices=layers,
             tier=tier,
             binary=True,
-            use_captured_x_attn=True,
+            # Llama bridge-derived x_attn is accurate — don't use captured x_attn
+            # (captured x_attn is for Qwen where bridge != GPU fused norm_quant)
         )
 
         # Step 6: Verifier checks
@@ -215,7 +216,8 @@ def _run():
             layer_indices=full_layers,
             tier="full",
             binary=True,
-            use_captured_x_attn=True,
+            # Llama bridge-derived x_attn is accurate — don't use captured x_attn
+            # (captured x_attn is for Qwen where bridge != GPU fused norm_quant)
         )
         r = verilm_rs.verify_v4_full_binary(bytes(a), key_bin, artifact_bin)
         check(r["passed"], f"position {tok_idx}: {r['checks_passed']}/{r['checks_run']} checks")
