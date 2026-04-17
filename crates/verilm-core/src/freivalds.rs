@@ -297,6 +297,105 @@ pub fn check_128(v: &[Fp128], x: &[i8], r: &[Fp128], z: &[i32]) -> bool {
     lhs == rhs
 }
 
+// ---------------------------------------------------------------------------
+// CapturedLogits Freivalds binding (f64 arithmetic, ±1 random vector)
+// ---------------------------------------------------------------------------
+
+/// Derive a ±1 random vector of length `n` from a 32-byte seed.
+///
+/// Each element is +1.0 or -1.0, derived via CSPRNG. The seed is
+/// verifier-secret (stored in the key), so the prover cannot predict
+/// the projection and forge logits that satisfy the Freivalds check.
+pub fn derive_pm1_vector(seed: &[u8; 32], n: usize) -> Vec<f64> {
+    use sha2::{Digest, Sha256};
+
+    let mut r = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut hasher = Sha256::new();
+        hasher.update(b"vi-captured-logits-r-v1");
+        hasher.update(seed);
+        hasher.update((i as u64).to_le_bytes());
+        let hash = hasher.finalize();
+        // Use the LSB to decide ±1
+        r.push(if hash[0] & 1 == 0 { 1.0f64 } else { -1.0f64 });
+    }
+    r
+}
+
+/// Precompute v = r^T @ lm_head_bf16 in f64.
+///
+/// `r` is a ±1 vector of length `vocab_size` (output dimension of lm_head).
+/// `lm_head_bf16` contains u16 bf16 bit patterns, row-major (vocab_size × hidden_dim).
+/// Returns v of length `hidden_dim`.
+///
+/// Since r entries are ±1, this is just a sum/difference of rows — no overflow risk.
+pub fn precompute_v_lm_head_f64(
+    r: &[f64],
+    lm_head_bf16: &[u16],
+    vocab_size: usize,
+    hidden_dim: usize,
+) -> Vec<f64> {
+    assert_eq!(r.len(), vocab_size);
+    assert_eq!(lm_head_bf16.len(), vocab_size * hidden_dim);
+
+    // Parallelize over columns — each column's sum is independent.
+    // For Llama 8B: 4,096 columns, each summing 128,256 rows.
+    use rayon::prelude::*;
+    (0..hidden_dim)
+        .into_par_iter()
+        .map(|col| {
+            let mut acc = 0.0f64;
+            for row in 0..vocab_size {
+                let bits = lm_head_bf16[row * hidden_dim + col];
+                let f = f32::from_bits((bits as u32) << 16) as f64;
+                acc += r[row] * f;
+            }
+            acc
+        })
+        .collect()
+}
+
+/// Check captured logits against lp_hidden via Freivalds binding.
+///
+/// Verifies: `r · captured_logits ≈ v · lp_hidden`
+///
+/// where r is the ±1 random vector, v = r^T @ lm_head_bf16 (precomputed),
+/// captured_logits is the GPU's actual f32 output, and lp_hidden is the
+/// bf16 hidden state (as u16 bit patterns) at the LogitsProcessor input.
+///
+/// Both sides computed in f64. The tolerance accounts for the GPU's internal
+/// accumulation order differing from our f64 reference.
+///
+/// Returns (pass, lhs, rhs) so the caller can log the gap.
+pub fn check_captured_logits(
+    r: &[f64],
+    v_precomputed: &[f64],
+    captured_logits: &[f32],
+    lp_hidden_bf16: &[u16],
+    tolerance: f64,
+) -> (bool, f64, f64) {
+    assert_eq!(r.len(), captured_logits.len(), "r and captured_logits must have same length (vocab_size)");
+    assert_eq!(v_precomputed.len(), lp_hidden_bf16.len(), "v and lp_hidden must have same length (hidden_dim)");
+
+    // LHS: r · captured_logits
+    let lhs: f64 = r.iter()
+        .zip(captured_logits.iter())
+        .map(|(&ri, &li)| ri * (li as f64))
+        .sum();
+
+    // RHS: v · lp_hidden (bf16 → f64)
+    let rhs: f64 = v_precomputed.iter()
+        .zip(lp_hidden_bf16.iter())
+        .map(|(&vi, &bits)| {
+            let f = f32::from_bits((bits as u32) << 16) as f64;
+            vi * f
+        })
+        .sum();
+
+    let diff = (lhs - rhs).abs();
+    (diff <= tolerance, lhs, rhs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,5 +679,76 @@ mod tests {
 
         let v = precompute_v_128(&r, &w, 3, 3);
         assert!(check_128(&v, &x, &r, &z));
+    }
+
+    // -------------------------------------------------------------------
+    // CapturedLogits Freivalds tests
+    // -------------------------------------------------------------------
+
+    /// Helper: f32 to bf16 bit pattern (round-to-nearest-even).
+    fn f32_to_bf16(v: f32) -> u16 {
+        (v.to_bits() >> 16) as u16
+    }
+
+    #[test]
+    fn test_derive_pm1_vector() {
+        let seed = [42u8; 32];
+        let r = derive_pm1_vector(&seed, 100);
+        assert_eq!(r.len(), 100);
+        for &v in &r {
+            assert!(v == 1.0 || v == -1.0);
+        }
+        // Deterministic
+        let r2 = derive_pm1_vector(&seed, 100);
+        assert_eq!(r, r2);
+        // Different seed → different vector
+        let r3 = derive_pm1_vector(&[43u8; 32], 100);
+        assert_ne!(r, r3);
+    }
+
+    #[test]
+    fn test_captured_logits_freivalds_correct() {
+        // Small 3×2 lm_head (vocab=3, hidden=2).
+        // lm_head_bf16[row][col] as bf16 bit patterns.
+        let weights_f32: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let lm_head_bf16: Vec<u16> = weights_f32.iter().map(|&v| f32_to_bf16(v)).collect();
+
+        // lp_hidden = [0.5, 1.5] as bf16
+        let hidden_f32: Vec<f32> = vec![0.5, 1.5];
+        let lp_hidden_bf16: Vec<u16> = hidden_f32.iter().map(|&v| f32_to_bf16(v)).collect();
+
+        // True logits = lp_hidden @ lm_head.T
+        // = [0.5*1+1.5*2, 0.5*3+1.5*4, 0.5*5+1.5*6]
+        // = [3.5, 7.5, 11.5]
+        let logits: Vec<f32> = vec![3.5, 7.5, 11.5];
+
+        let seed = [7u8; 32];
+        let r = derive_pm1_vector(&seed, 3);
+        let v = precompute_v_lm_head_f64(&r, &lm_head_bf16, 3, 2);
+
+        let (pass, _lhs, _rhs) = check_captured_logits(
+            &r, &v, &logits, &lp_hidden_bf16, 1e-6,
+        );
+        assert!(pass);
+    }
+
+    #[test]
+    fn test_captured_logits_freivalds_wrong_logits() {
+        let weights_f32: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let lm_head_bf16: Vec<u16> = weights_f32.iter().map(|&v| f32_to_bf16(v)).collect();
+        let hidden_f32: Vec<f32> = vec![0.5, 1.5];
+        let lp_hidden_bf16: Vec<u16> = hidden_f32.iter().map(|&v| f32_to_bf16(v)).collect();
+
+        // Wrong logits — one element off by 100
+        let logits: Vec<f32> = vec![3.5, 107.5, 11.5];
+
+        let seed = [7u8; 32];
+        let r = derive_pm1_vector(&seed, 3);
+        let v = precompute_v_lm_head_f64(&r, &lm_head_bf16, 3, 2);
+
+        let (pass, _lhs, _rhs) = check_captured_logits(
+            &r, &v, &logits, &lp_hidden_bf16, 1e-6,
+        );
+        assert!(!pass);
     }
 }

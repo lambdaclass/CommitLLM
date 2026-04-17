@@ -232,6 +232,7 @@ fn golden_e2e_verify() {
         None,
         None,
         None,
+        None,
     );
     let response = open_v4(
         &state,
@@ -301,6 +302,7 @@ fn binary_v4_audit_roundtrip() {
         &params,
         None,
         vec![unit_scales(cfg.n_layers)],
+        None,
         None,
         None,
         None,
@@ -391,6 +393,7 @@ fn binary_commitment_version_preserved() {
         &params,
         None,
         vec![unit_scales(cfg.n_layers)],
+        None,
         None,
         None,
         None,

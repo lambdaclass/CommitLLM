@@ -679,29 +679,33 @@ impl MinimalBatchStateHandle {
     /// token's retained state, Merkle/IO proofs, all prefix tokens' retained
     /// states + proofs, and prover-computed shell openings for the challenged
     /// token (so the verifier can check with key-only Freivalds).
-    #[pyo3(signature = (token_index, layer_indices=None, output_text=None))]
+    #[pyo3(signature = (token_index, layer_indices=None, output_text=None, include_kv=true))]
     fn audit_v4(
         &self,
         token_index: u32,
         layer_indices: Option<Vec<usize>>,
         output_text: Option<String>,
+        include_kv: bool,
     ) -> PyResult<String> {
-        let mut response = self.build_v4_response(token_index, layer_indices.as_deref())?;
+        let mut response =
+            self.build_v4_response(token_index, layer_indices.as_deref(), include_kv)?;
         response.output_text = output_text;
         serde_json::to_string(&response)
             .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
     }
 
     /// Binary V4 audit: bincode + zstd. Returns bytes.
-    #[pyo3(signature = (token_index, layer_indices=None, output_text=None))]
+    #[pyo3(signature = (token_index, layer_indices=None, output_text=None, include_kv=true))]
     fn audit_v4_binary<'py>(
         &self,
         py: Python<'py>,
         token_index: u32,
         layer_indices: Option<Vec<usize>>,
         output_text: Option<String>,
+        include_kv: bool,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let mut response = self.build_v4_response(token_index, layer_indices.as_deref())?;
+        let mut response =
+            self.build_v4_response(token_index, layer_indices.as_deref(), include_kv)?;
         response.output_text = output_text;
         let data = verilm_core::serialize::serialize_v4_audit(&response);
         Ok(PyBytes::new(py, &data))
@@ -713,6 +717,7 @@ impl MinimalBatchStateHandle {
         &self,
         token_index: u32,
         layer_filter: Option<&[usize]>,
+        include_kv: bool,
     ) -> PyResult<verilm_core::types::V4AuditResponse> {
         if token_index >= self.inner.all_retained.len() as u32 {
             return Err(PyValueError::new_err(format!(
@@ -758,7 +763,7 @@ impl MinimalBatchStateHandle {
             } else {
                 None
             };
-        Ok(verilm_prover::open_v4(
+        let mut response = verilm_prover::open_v4(
             &self.inner,
             token_index,
             provider.as_ref(),
@@ -771,7 +776,13 @@ impl MinimalBatchStateHandle {
             emb_lookup,
             self.deep_prefix,
             self.use_captured_x_attn,
-        ))
+        );
+        if !include_kv {
+            response.kv_entries = None;
+            response.kv_proofs = None;
+            response.witnessed_scores = None;
+        }
+        Ok(response)
     }
 }
 
@@ -801,6 +812,7 @@ impl MinimalBatchStateHandle {
     n_prompt_tokens = None,
     x_attn_inputs = None,
     lp_hidden_bf16 = None,
+    captured_logits_f32 = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn commit_minimal_from_captures(
@@ -817,6 +829,7 @@ fn commit_minimal_from_captures(
     n_prompt_tokens: Option<u32>,
     x_attn_inputs: Option<&Bound<'_, PyList>>,
     lp_hidden_bf16: Option<&Bound<'_, PyList>>,
+    captured_logits_f32: Option<&Bound<'_, PyList>>,
 ) -> PyResult<MinimalBatchStateHandle> {
     let scales = extract_f32_vec(scales)?;
     let n_entries = o_proj_inputs.len();
@@ -914,6 +927,17 @@ fn commit_minimal_from_captures(
         None
     };
 
+    // Extract per-token captured f32 logits if provided.
+    let captured_logits = if let Some(cl_list) = captured_logits_f32 {
+        let mut vecs = Vec::with_capacity(cl_list.len());
+        for i in 0..cl_list.len() {
+            vecs.push(extract_f32_vec(&cl_list.get_item(i)?)?);
+        }
+        Some(vecs)
+    } else {
+        None
+    };
+
     // Compute KV transcript from captured x_attn + weights when both are available.
     // This produces the committed KV entries that the verifier will replay against.
     let kv_transcripts = if captured_x_attn.is_some() && weight_provider.is_some() {
@@ -947,6 +971,7 @@ fn commit_minimal_from_captures(
         captured_x_attn,
         kv_transcripts,
         lp_hidden,
+        captured_logits,
     );
 
     Ok(MinimalBatchStateHandle {
@@ -1037,28 +1062,32 @@ impl PackedBatchStateHandle {
         self.commitment.kv_roots.iter().map(hex::encode).collect()
     }
 
-    #[pyo3(signature = (token_index, layer_indices=None, output_text=None))]
+    #[pyo3(signature = (token_index, layer_indices=None, output_text=None, include_kv=true))]
     fn audit_v4(
         &self,
         token_index: u32,
         layer_indices: Option<Vec<usize>>,
         output_text: Option<String>,
+        include_kv: bool,
     ) -> PyResult<String> {
-        let mut response = self.build_v4_response(token_index, layer_indices.as_deref())?;
+        let mut response =
+            self.build_v4_response(token_index, layer_indices.as_deref(), include_kv)?;
         response.output_text = output_text;
         serde_json::to_string(&response)
             .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
     }
 
-    #[pyo3(signature = (token_index, layer_indices=None, output_text=None))]
+    #[pyo3(signature = (token_index, layer_indices=None, output_text=None, include_kv=true))]
     fn audit_v4_binary<'py>(
         &self,
         py: Python<'py>,
         token_index: u32,
         layer_indices: Option<Vec<usize>>,
         output_text: Option<String>,
+        include_kv: bool,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let mut response = self.build_v4_response(token_index, layer_indices.as_deref())?;
+        let mut response =
+            self.build_v4_response(token_index, layer_indices.as_deref(), include_kv)?;
         response.output_text = output_text;
         let data = verilm_core::serialize::serialize_v4_audit(&response);
         Ok(PyBytes::new(py, &data))
@@ -1070,6 +1099,7 @@ impl PackedBatchStateHandle {
         &self,
         token_index: u32,
         layer_filter: Option<&[usize]>,
+        include_kv: bool,
     ) -> PyResult<verilm_core::types::V4AuditResponse> {
         if token_index >= self.inner.n_tokens() as u32 {
             return Err(PyValueError::new_err(format!(
@@ -1115,7 +1145,7 @@ impl PackedBatchStateHandle {
             } else {
                 None
             };
-        Ok(verilm_prover::open_v4_packed(
+        let mut response = verilm_prover::open_v4_packed(
             &self.inner,
             token_index,
             provider.as_ref(),
@@ -1127,7 +1157,13 @@ impl PackedBatchStateHandle {
             layer_filter,
             emb_lookup,
             self.deep_prefix,
-        ))
+        );
+        if !include_kv {
+            response.kv_entries = None;
+            response.kv_proofs = None;
+            response.witnessed_scores = None;
+        }
+        Ok(response)
     }
 }
 
@@ -1319,6 +1355,92 @@ fn generate_key_binary<'py>(py: Python<'py>, model_dir: String, seed: Vec<u8>) -
         PyBytes::new(py, &data)
     });
     Ok((PyBytes::new(py, &key_binary), artifact_binary))
+}
+
+/// Generate a verifier key in binary format with a profile override.
+///
+/// `profile_name` selects a named profile: "llama-w8a8", "qwen-w8a8",
+/// "llama-w8a8-lp-hidden". If None, auto-detects from the model.
+#[pyfunction]
+#[pyo3(signature = (model_dir, seed, profile_name=None))]
+fn generate_key_binary_with_profile<'py>(
+    py: Python<'py>,
+    model_dir: String,
+    seed: Vec<u8>,
+    profile_name: Option<String>,
+) -> PyResult<(Bound<'py, PyBytes>, Option<Bound<'py, PyBytes>>)> {
+    if seed.len() != 32 {
+        return Err(PyValueError::new_err("seed must be exactly 32 bytes"));
+    }
+    let mut seed_arr = [0u8; 32];
+    seed_arr.copy_from_slice(&seed);
+
+    let profile_override = match profile_name.as_deref() {
+        Some("llama-w8a8") => Some(verilm_core::types::VerificationProfile::llama_w8a8()),
+        Some("qwen-w8a8") => Some(verilm_core::types::VerificationProfile::qwen_w8a8()),
+        Some("llama-w8a8-lp-hidden") => Some(verilm_core::types::VerificationProfile::llama_w8a8_lp_hidden()),
+        Some("llama-w8a8-captured-logits") => Some(verilm_core::types::VerificationProfile::llama_w8a8_captured_logits()),
+        Some("qwen-w8a8-captured-logits") => Some(verilm_core::types::VerificationProfile::qwen_w8a8_captured_logits()),
+        Some(other) => return Err(PyValueError::new_err(format!("unknown profile: {}", other))),
+        None => None,
+    };
+
+    let output = verilm_keygen::generate_key_with_profile(
+        std::path::Path::new(&model_dir),
+        seed_arr,
+        profile_override,
+    )
+    .map_err(|e| PyValueError::new_err(format!("keygen failed: {}", e)))?;
+
+    let key_binary = verilm_core::serialize::serialize_key(&output.key);
+    let artifact_binary = output.decode_artifact.as_ref().map(|a| {
+        let data = verilm_core::serialize::serialize_decode_artifact(a);
+        PyBytes::new(py, &data)
+    });
+    Ok((PyBytes::new(py, &key_binary), artifact_binary))
+}
+
+/// Inspect small metadata from a binary verifier key.
+///
+/// This keeps production-scale E2E tests on the binary key path. Serializing
+/// the full key to JSON is impractical for real checkpoints because it can
+/// include large lm_head/Freivalds matrices.
+#[pyfunction]
+fn inspect_key_binary<'py>(
+    py: Python<'py>,
+    key_binary: &[u8],
+) -> PyResult<Bound<'py, PyDict>> {
+    let key = verilm_core::serialize::deserialize_key(key_binary)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize binary key: {}", e)))?;
+
+    let result = PyDict::new(py);
+    result.set_item("n_layers", key.config.n_layers)?;
+    result.set_item("hidden_dim", key.config.hidden_dim)?;
+    result.set_item("vocab_size", key.config.vocab_size)?;
+    result.set_item("n_q_heads", key.config.n_q_heads)?;
+    result.set_item("n_kv_heads", key.config.n_kv_heads)?;
+    result.set_item("has_lm_head", key.lm_head.is_some())?;
+    result.set_item("has_lm_head_bf16_hash", key.lm_head_bf16_hash.is_some())?;
+
+    if let Some(profile) = &key.verification_profile {
+        let profile_dict = PyDict::new(py);
+        profile_dict.set_item("name", &profile.name)?;
+        profile_dict.set_item("model_family", &profile.model_family)?;
+        profile_dict.set_item("bridge_tolerance", profile.bridge_tolerance)?;
+        profile_dict.set_item("attention_tolerance", profile.attention_tolerance)?;
+        profile_dict.set_item("max_validated_context", profile.max_validated_context)?;
+        profile_dict.set_item("requires_score_anchoring", profile.requires_score_anchoring)?;
+        profile_dict.set_item("score_anchor_threshold", profile.score_anchor_threshold)?;
+        profile_dict.set_item("supports_qkv_freivalds", profile.supports_qkv_freivalds)?;
+        profile_dict.set_item("attention_mode", format!("{:?}", profile.attention_mode))?;
+        profile_dict.set_item(
+            "decode_acceptance",
+            format!("{:?}", profile.decode_acceptance),
+        )?;
+        result.set_item("verification_profile", profile_dict)?;
+    }
+
+    Ok(result)
 }
 
 /// Verify a V4 audit response with both audit and key in binary format.
@@ -2336,6 +2458,8 @@ fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compute_weight_hash, m)?)?;
     m.add_function(wrap_pyfunction!(generate_key, m)?)?;
     m.add_function(wrap_pyfunction!(generate_key_binary, m)?)?;
+    m.add_function(wrap_pyfunction!(generate_key_binary_with_profile, m)?)?;
+    m.add_function(wrap_pyfunction!(inspect_key_binary, m)?)?;
     m.add_function(wrap_pyfunction!(verify_v4, m)?)?;
     m.add_function(wrap_pyfunction!(verify_v4_binary, m)?)?;
     m.add_function(wrap_pyfunction!(verify_v4_full_binary, m)?)?;

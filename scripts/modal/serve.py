@@ -50,7 +50,7 @@ image = (
     )
     # Build and install verilm_rs (PyO3 bridge to Rust commitment engine).
     .add_local_dir(".", remote_path="/build", copy=True, ignore=[
-        ".git", "target", "scripts/__pycache__", "*.pdf",
+        ".git", "target", "scripts/__pycache__", "*.pdf", "*.md",
     ])
     .run_commands(
         "cd /build/crates/verilm-py && maturin build --release",

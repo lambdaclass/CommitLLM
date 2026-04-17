@@ -55,6 +55,8 @@ class CanonicalSamplerHook:
         # In minimal mode, no logit capture hook is installed, so we can
         # mask logits in-place (no clone needed to protect async D2H).
         self._minimal = minimal
+        # Per-token captured f32 logits for CapturedLogits verification mode.
+        self._captured_logits: list = []
 
     def install(self, model) -> bool:
         """Install forward hook on the LogitsProcessor module.
@@ -87,6 +89,7 @@ class CanonicalSamplerHook:
         self._top_k = top_k
         self._top_p = top_p
         self._call_count = 0
+        self._captured_logits = []
         self._active = True
 
     def deactivate(self):
@@ -144,6 +147,12 @@ class CanonicalSamplerHook:
         else:
             sample_logits = output
 
+        # Capture logits as f32 numpy for CapturedLogits verification mode.
+        # Both greedy and sampled paths need this — the verifier samples from
+        # the exact GPU logits.
+        logits_np = sample_logits.float().cpu().numpy()
+        self._captured_logits.append(logits_np)
+
         # Greedy fast path: argmax on GPU, skip entire CPU round-trip.
         if self._temperature == 0.0:
             chosen = int(sample_logits.argmax().item())
@@ -175,12 +184,7 @@ class CanonicalSamplerHook:
         if timers:
             t_seed = time.monotonic()
 
-        # Transfer logits to CPU as numpy array. extract_f32_vec on the Rust
-        # side reads the buffer protocol directly — no .tolist() needed.
-        logits_np = sample_logits.float().cpu().numpy()
-
-        if timers:
-            t_cpu = time.monotonic()
+        # logits_np already captured above (for CapturedLogits mode).
 
         chosen = verilm_rs.canonical_sample(
             logits_np,

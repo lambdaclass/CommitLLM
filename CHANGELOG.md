@@ -4,23 +4,101 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 
 Historical references below to “roadmap #N” refer to the pre-2026-03-30 roadmap numbering. On 2026-03-30 the roadmap was renumbered into a single linear open-items-only sequence.
 
+## 2026-04-17
+
+### Measured
+
+- **Shell/decode benchmark on A100-80GB** — first systematic measurement of the current E2E verification surface (everything except arbitrary-position attention), across greedy/sampled × short/long generation × routine/full tiers.
+  - **Llama 8B W8A8**: ~15ms verify (full tier, 32 tokens), ~4.1MB payload per audit, ~1.7s audit-open time. Cheap enough for routine use.
+  - **Qwen 7B W8A8**: **~1.87s verify** per audited token (full tier, 32 tokens), ~4.2MB payload, ~1.75s audit-open time. The CPU cost is dominated by the full 152,064×3,584 bf16 lm_head matmul in `LpHiddenBf16` decode verification. Correct but too expensive for routine audits.
+  - Qwen: all configurations pass (greedy + sampled, short + long, routine + full).
+  - Llama greedy: all configurations pass.
+  - **Llama sampled: intermittent failures on ExactTokenIdentity (i32) path** — ~20% of sampled decode audits fail `lm_head: expected token X but got Y`. Failures are stochastic (same prompt sometimes passes, sometimes fails), not clustered at gen_index==0 (no off-by-one), and hit diverse token positions. Root cause: verifier samples from i32 quantized logits which diverge from the GPU's real bf16 logits; with top_k/top_p this difference is enough to flip the sampled token. Llama greedy on i32 is unaffected because the argmax is stable.
+- **Llama A/B diagnostic (30 runs × 10 prompts = 300 comparisons, T=0.8 top_k=50 top_p=0.9)**:
+  - Path A (i32 ExactTokenIdentity): **239/300 (79.7%)** — fail rate varies 7-33% per prompt.
+  - Path B (LP-hidden bf16): **296/300 (98.7%)** — dramatically better, but not 100%. All 4 Path B failures also failed Path A (hardest cases where GPU output diverges from both CPU replay methods).
+  - LP-hidden bf16 verify cost on Llama is comparable to Qwen (~1.87s/token CPU) — the same cost blocker applies.
+  - Run timed out at 3600s after 10/12 prompts; remaining 2 prompts would not change the conclusion.
+
+### Added
+
+- **Profile override for keygen**: `generate_key_binary_with_profile()` API allows generating verifier keys with non-default verification profiles (e.g., `llama-w8a8-lp-hidden` for A/B testing Llama with LP-hidden bf16 decode instead of its default ExactTokenIdentity).
+- **`DecodeAcceptanceMode::CapturedLogits` — exact sampled decode via captured GPU logits.** Full end-to-end implementation across all crates:
+  - **Core types**: `CapturedLogits` variant, `captured_logits_f32` on `ShellTokenOpening`, `v_lm_head_f64` and `captured_logits_freivalds_seed` on `VerifierKey`, profiles `llama-w8a8-captured-logits` and `qwen-w8a8-captured-logits`.
+  - **Merkle**: `hash_retained_with_captured_logits()` with domain separator `"vi-retained-logits-v1"`.
+  - **Freivalds**: `derive_pm1_vector()` (CSPRNG ±1 from seed), `precompute_v_lm_head_f64()` (v = r^T @ lm_head_bf16 in f64), `check_captured_logits()` (r · logits ≈ v · hidden).
+  - **Keygen**: CapturedLogits profiles generate Freivalds seed + precomputed v_lm_head_f64 from bf16 weights.
+  - **Prover**: `MinimalBatchState.captured_logits_f32`, bound into Merkle leaf at commit, included in shell opening.
+  - **Verifier**: `phase_lm_head_captured_logits()` — exact sampling check + Freivalds binding.
+  - **Python bindings**: `commit_minimal_from_captures()` accepts `captured_logits_f32`; profile names registered.
+  - **Sidecar**: `CanonicalSamplerHook` captures `logits_np` per-token; server drains and passes to Rust commit.
+  - **Decode proof structure**: exact token sampling from captured GPU logits + probabilistic algebraic binding (Freivalds) back to lm_head. No CPU matmul replay needed.
+  - **Cost structure**: (a) Prover-side retained state: ~501 KiB/token (Llama) or ~594 KiB/token (Qwen) held in memory until audit. For 256 tokens: ~125 MiB (Llama) or ~149 MiB (Qwen) retained. (b) Audit bandwidth: +~0.5-0.6 MiB per *opened* (challenged) token — not per whole answer. The Merkle commitment binds the logits; only opened tokens ship them. (c) Verifier CPU: two dot products per challenged token (negligible vs the eliminated ~1.87s/token matmul replay).
+  - **Decode policy**: sampled decode → CapturedLogits (exact). Greedy decode → cheaper paths (i32 or LP-hidden) remain acceptable.
+
+### Validated
+
+- **CapturedLogits decode is GPU-validated end-to-end on both dense families.** Modal A100-80GB E2E runs with the `llama-w8a8-captured-logits` and `qwen-w8a8-captured-logits` profiles now pass decode verification cleanly:
+  - **Qwen 7B W8A8**: `3/3` greedy, `20/20` sampled, `17,336/17,336` decode checks passed.
+  - **Llama 8B W8A8**: `3/3` greedy, `20/20` sampled, `23,335/23,335` decode checks passed.
+  - Tamper rejection passes on both models.
+  - The remaining Llama failures in those runs are the known arbitrary-position attention gap, not decode.
+- **Sampled decode exactness is now closed by boundary capture, not replay.** The replay-based paths remain historically important diagnostics:
+  - `ExactTokenIdentity` on sampled Llama is rejected (`239/300 = 79.7%`).
+  - `LpHiddenBf16` improves sampled replay (`296/300 = 98.7%`) but is still not exact.
+  - `CapturedLogits` is the kept path because it samples from the exact GPU logits and only uses algebraic binding to tie them back to `lm_head`.
+- **CapturedLogits keygen is expensive but offline.** First-run keygen for captured-logits profiles now includes the extra `v = r^T @ lm_head_bf16` precompute:
+  - **Qwen 7B**: ~55.4s
+  - **Llama 8B**: ~152.0s
+  This is an artifact-build cost, not a steady-state verifier cost. Keys and decode artifacts should be cached.
+
+### Known issues
+
+- **Llama sampled decode on i32 path: rejected.** ExactTokenIdentity fails ~20% of sampled decode audits. The i32 quantized logits diverge enough from GPU bf16 logits that top_k/top_p sampling flips tokens. Greedy is unaffected (argmax is stable). This path is dead for sampled decode.
+- **Llama sampled decode on LP-hidden bf16 replay: promising but still not exact.** LP-hidden bf16 passes 98.7% (296/300) vs i32's 79.7% (239/300). The improvement confirms the main problem was the quantized logit path. But 98.7% is not "exact sampled decode." The 4 residual failures prove CPU replay arithmetic ≠ GPU tensor-core arithmetic for sampled-token probabilities — this is not about quantization anymore, it is about accumulation-order divergence in the lm_head matmul. Neither current replay path achieves exact sampled decode.
+- **CapturedLogits economics are now the decode-side question.** Correctness is closed; the remaining work is operational: measure capture overhead, retained memory, open payload, and steady-state verifier cost with cached keys/artifacts. The prover must retain/commit all sampled-token logits because the challenge is chosen after generation.
+- **Arbitrary-position attention is the main remaining dense-model correctness blocker.** Decode and shell audits are now green on the kept path. Attention still needs either a FlashAttention/kernel-aligned witness with hard success criteria or deterministic attention kernels. Captured attention outputs are useful plumbing, not proof.
+
+## 2026-04-16
+
+### Fixed
+
+- **f32 accumulator for LP-hidden bf16 lm_head replay**: the canonical verifier was accumulating the bf16 lm_head matmul in bf16, but GPU tensor cores accumulate in f32 within tiles. Changed the accumulator from `half::bf16::ZERO` to `0.0_f32` in `canonical.rs`. This fixed 3/~20 argmax divergences on Qwen sampled decode.
+- **Generation-local seed indexing in all verifier sampling sites**: the prover's sampler uses a generation-local `_call_count` (0-based from the first generated token), but the verifier was passing the absolute `token_index` to `derive_token_seed`. Fixed all three call sites (`canonical.rs` ExactTokenIdentity path, `canonical.rs` LpHiddenBf16 path, `lib.rs` adversarial path) to use `token_index - gen_start` where `gen_start = n_prompt - 1`. This fixed the remaining 2/~20 sampled decode divergences.
+- **Tier assertion in E2E tests**: routine-tier audits on 28-layer Qwen can randomly select all layers, causing the verifier to report "full" coverage. Tests now accept "full" when "routine" was requested.
+
+### Confirmed
+
+- **Qwen sampled decode passes E2E on LP-hidden bf16 path (261/261)**: after the f32 accumulator and seed indexing fixes, Qwen E2E passes all checks (greedy + sampled decode, routine + full tiers, tamper rejection). Adversarial 36/36 passed. **Caveat (added 2026-04-17)**: the Llama A/B diagnostic at 300 runs exposed a ~1.3% residual failure rate on LP-hidden bf16 sampled decode due to CPU-vs-GPU accumulation-order divergence. Qwen's 261/261 was a smaller sample; the same failure mode may exist. A Qwen-specific A/B stress test at comparable scale is needed before claiming Qwen sampled is exact.
+- **Llama greedy decode is fully green on ExactTokenIdentity (i32) path**: Llama E2E greedy checks all pass. Llama sampled appeared green in the narrow E2E test but the broader benchmark (2026-04-17) exposed ~20% failure rate on the i32 path and ~1.3% on LP-hidden bf16.
+- **The LP-hidden bf16 decode path failures were verifier bugs, not fundamental** (partially revised): the Qwen sampled-decode divergences at the time traced to accumulator and indexing bugs. Fixing those bugs made the path much better. However, the Llama A/B diagnostic (2026-04-17) proved that even with correct accumulator and indexing, CPU bf16 replay does not perfectly match GPU tensor-core arithmetic for sampled decode — a residual ~1.3% gap remains.
+
+### Known issues
+
+- **Arbitrary-position attention remains the only major dense-model gap**: decode and shell audits are shipped and green. Attention at arbitrary positions is still not verified on stock kernels. The next accepted paths are a FlashAttention/kernel-aligned witness (Path B) or deterministic attention kernels (Path C). Committed attention-output boundaries (Path A) are useful plumbing but do not prove attention correctness.
+
 ## 2026-04-14
 
 ### Added
 
-- **Explicit attention-verification routing in the canonical verifier**: `VerificationProfile` now carries `AttentionVerificationMode` with `ExactReplay` and `WitnessedScores`. The verifier routes attention checking through an explicit mode instead of overloading `score_anchor_threshold` as an implicit selector. Current intended split: **Llama stays on exact attention replay**; **Qwen uses witnessed-score attention**.
-- **Standalone witnessed-score attention phase**: `phase_witnessed_score_attention` is now a first-class verifier phase. It performs (1) witnessed-score structural checks, (2) score anchoring against canonical `QK^T / sqrt(d)`, (3) softmax replay from the witnessed score rows, and (4) comparison against committed `a` with the local requantization tolerance. This separates the “witnessed score” claim cleanly from raw `Q/K/V` replay.
+- **Explicit attention-verification routing in the canonical verifier**: `VerificationProfile` now carries `AttentionVerificationMode` with `ExactReplay` and `WitnessedScores`. The verifier routes attention checking through an explicit mode instead of overloading `score_anchor_threshold` as an implicit selector. Current production test policy is stricter than the available phases: Llama keeps exact attention replay only as a token-0 smoke/reference check, and Qwen witnessed-score replay is diagnostic only until a kernel-aligned witness or deterministic attention kernel lands.
+- **Standalone witnessed-score attention phase**: `phase_witnessed_score_attention` is now a first-class verifier phase. It performs (1) witnessed-score structural checks, (2) score anchoring against canonical `QK^T / sqrt(d)`, (3) softmax replay from the witnessed score rows, and (4) comparison against committed `a` with the local requantization tolerance. This separates the “witnessed score” claim cleanly from raw `Q/K/V` replay, but it is not promoted as a production strong-tier rule after the Qwen sweep breached the fixed tolerance.
 - **Exact attention reference phase**: `phase_exact_attention` is now kept as a pure reference-tier phase that replays canonical attention directly from reconstructed `Q` plus committed `K/V`. It no longer doubles as the stock-kernel Qwen strong-tier path.
+- **E2E everything-except-attention policy**: the maintained Modal E2E tests now target the full production wiring except arbitrary-position attention. They cover binary key/decode artifacts, commitment-derived random generated-token challenges, greedy and sampled decode, routine/full shell openings, long prompts/generations, multi-position escalation, tamper rejection, EOS, payload size, and verifier timing. Random-position audits omit KV attention openings (`include_kv=false`); token-0 attention remains a smoke/reference check only.
+- **Binary-key inspection API**: `inspect_key_binary()` exposes small verifier-key metadata to Python tests without JSON-serializing production-scale keys.
 
 ### Measured
 
 - **Qwen brute-force exact attention replay is a reference tier, not the kept path**: with committed KV transcript and canonical f64 replay, token 0 passes under a `±1` LSB tolerance at the final `a` requantization boundary, but later tokens still diverge heavily (`max_diff` on the order of `100–170` in i8 space). This is not a small rounding issue; it is the stock-kernel attention arithmetic gap showing up across longer prefixes. Conclusion: brute-force exact replay remains useful as an upper-bound payload/CPU benchmark and diagnostic tier, but it is not the honest Qwen production attention path.
 - **Witnessed-score and exact replay are now treated as different claims, not two checks on the same claim**: the earlier benchmark confusion came from routing witnessed-score logic through a separate corridor/anchoring path while `phase_exact_attention` still enforced raw f64 replay first. The verifier now has an explicit phase split so Qwen is no longer blocked by the wrong attention claim.
-- **Qwen witnessed-score attention nearly passes on real late-token audits, but the bound is not frozen yet**: reruns on short / medium / long prompts with the **last generated token** show deterministic, small residual failures on only a few layers per prompt. The witnessed-score path reduces the last-token `a` replay gap from the old `100–170` scale down to `max_diff = 2–3`, with `2–5 / 28` failing layers depending on prompt and a stable bad-layer set (notably layer 11 across all three prompts). Measured payloads scale roughly linearly with context (`~13 MB` at ~43 tokens, `~33 MB` at ~136 tokens, `~117 MB` at ~532 tokens), and verifier runtime stays around `~4.0–4.4 s`, with the attention phase itself still cheap compared to the rest of verification. This is strong evidence that the kept stock-kernel path is close, but **`±3` is not yet a frozen protocol bound**: it still needs a broader randomized / longer-context sweep before docs can treat it as final.
+- **Initial Qwen witnessed-score attention looked close on narrow late-token audits, but this was superseded by the broader sweep**: reruns on short / medium / long prompts with the **last generated token** reduced the old `100–170` scale gap down to `max_diff = 2–3` on only a few layers. That result was useful diagnostically, but it was not a valid production bound.
+- **Qwen witnessed-score f64 softmax·V replay was stress-tested and rejected as a production strong-tier path**: the broader tolerance sweep over 39 prompts breached the proposed `±3` bound. Global max diff reached `9`; only `23/39` prompts passed at `±3`; failures were deterministic and dominated by layer 11. Breakdown: factual prompts were worst (`1/6`, max `9`), adversarial `3/6` max `4`, code `4/7` max `4`, prose `5/7` max `4`, math `5/6` max `6`, mixed `5/7` max `6`; greedy was not safer than sampled (`15/24`, max `9` vs sampled `8/15`, max `6`). Conclusion: fixed-tolerance replay of softmax·V from witnessed scores is not an honest Qwen strong-tier rule. The remaining serious stock-kernel branch is a later/kernel-aligned witness (for example FlashAttention block-state or post-aggregation boundary witness); otherwise the clean fix is a deterministic attention kernel path.
+- **Llama arbitrary-position exact attention is not solved by stock f64 replay either**: token-0 exact attention can remain as a smoke/reference check, but non-zero token positions can diverge substantially from GPU FlashAttention/bf16. The E2E tests therefore omit KV attention openings for random generated-token audits rather than widening attention tolerance.
 
 ### Known issues
 
 - **Last-token LP-hidden opening bug remains separate from the attention result**: in the same benchmark runs, the final generated token can still miss `lp_hidden_bf16` in the shell opening even when the attention path is otherwise behaving as expected. This is an independent commit/open bug and should not be conflated with the witnessed-score attention tail.
+- **Arbitrary-position attention remains unresolved on stock kernels**: decode and shell audits are shipped/covered, but Llama and Qwen should not claim arbitrary-position attention verification via brute-force f64 replay or fixed-tolerance witnessed-score replay. The next accepted paths are either a later/kernel-aligned witness or deterministic attention kernels.
 
 ## 2026-04-13
 

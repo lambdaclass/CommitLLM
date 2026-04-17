@@ -770,6 +770,7 @@ class VerifiedInferenceServer:
 
         final_residuals_raw = self.final_res_capture.drain() if self.final_res_capture is not None else []
         lp_hidden_raw = self.lp_hidden_capture.drain() if self.lp_hidden_capture is not None else []
+        captured_logits_raw = list(self.sampler_hook._captured_logits) if self.sampler_hook._captured_logits else []
 
         if _chat_timers:
             _ct_fr_drain = time.monotonic()
@@ -845,6 +846,8 @@ class VerifiedInferenceServer:
                 final_residuals_raw = final_residuals_raw[:-1]
             if len(lp_hidden_raw) == n_fwd + 1:
                 lp_hidden_raw = lp_hidden_raw[:-1]
+            if captured_logits_raw and len(captured_logits_raw) == len(gen_token_ids) + 1:
+                captured_logits_raw = captured_logits_raw[:-1]
             n_tokens = sum(fwd_batch_sizes)
 
         if _chat_timers:
@@ -920,7 +923,8 @@ class VerifiedInferenceServer:
         use_packed = os.environ.get("VERILM_PACKED_COMMIT", "1") == "1"
         has_x_attn = bool(x_attn_inputs)
         has_lp_hidden = bool(lp_hidden_raw)
-        if use_packed and not has_x_attn and not has_lp_hidden:
+        has_captured_logits = bool(captured_logits_raw)
+        if use_packed and not has_x_attn and not has_lp_hidden and not has_captured_logits:
             state = self._commit_minimal_packed(
                 o_inputs, scales, n_fwd, n_layers, fwd_batch_sizes,
                 all_token_ids, prompt, seed, manifest, final_residuals_raw,
@@ -933,6 +937,7 @@ class VerifiedInferenceServer:
                 n_prompt_tokens,
                 x_attn_inputs=x_attn_inputs if x_attn_inputs else None,
                 lp_hidden_raw=lp_hidden_raw,
+                captured_logits_raw=captured_logits_raw,
             )
 
         # Log LP hidden captures (decode boundary).
@@ -1008,7 +1013,8 @@ class VerifiedInferenceServer:
     def _commit_minimal(self, o_inputs, scales, n_fwd, n_layers,
                          fwd_batch_sizes, all_token_ids, prompt, seed, manifest,
                          final_residuals_raw=None, n_prompt_tokens=None,
-                         x_attn_inputs=None, lp_hidden_raw=None):
+                         x_attn_inputs=None, lp_hidden_raw=None,
+                         captured_logits_raw=None):
         """V4 retained-state commitment path (no _int_mm, no full traces).
 
         Args:
@@ -1082,6 +1088,7 @@ class VerifiedInferenceServer:
             n_prompt_tokens=n_prompt_tokens,
             x_attn_inputs=x_attn_np,
             lp_hidden_bf16=lp_hidden_list,
+            captured_logits_f32=captured_logits_raw if captured_logits_raw else None,
         )
 
     def _commit_minimal_packed(self, o_inputs, scales, n_fwd, n_layers,
@@ -1186,6 +1193,7 @@ class VerifiedInferenceServer:
         binary: bool = True,
         deep_prefix: bool = False,
         use_captured_x_attn: Optional[bool] = None,
+        include_kv: bool = True,
     ):
         """Open an audit proof.
 
@@ -1203,6 +1211,9 @@ class VerifiedInferenceServer:
                 x_attn source selection. Do not set in production — the server
                 chooses the correct source based on the verification profile.
                 Ignored when QKV Freivalds is enabled (would cause mismatch).
+            include_kv: if False, omit KV entries/proofs and witnessed scores
+                from the opening. This gives a shell/decode audit without
+                running the attention replay phase.
         """
         entry = self._audit_store.get(request_id)
         if entry is None:
@@ -1243,8 +1254,8 @@ class VerifiedInferenceServer:
         output_text = entry.get("output_text")
 
         if binary:
-            return state.audit_v4_binary(token_index, layer_indices, output_text)
-        return state.audit_v4(token_index, layer_indices, output_text)
+            return state.audit_v4_binary(token_index, layer_indices, output_text, include_kv)
+        return state.audit_v4(token_index, layer_indices, output_text, include_kv)
 
     def _store_audit(self, request_id: str, state, output_text: str = ""):
         """Store audit state with TTL."""
@@ -1314,6 +1325,7 @@ def create_app(llm, **kwargs):
                 # Diagnostic only — server.audit() enforces safe defaults
                 # based on verification profile. Ignored when unsafe.
                 use_captured_x_attn=request.get("use_captured_x_attn"),
+                include_kv=bool(request.get("include_kv", True)),
             )
             # Binary response returns bytes.
             if isinstance(result, (bytes, memoryview)):

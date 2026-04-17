@@ -42,7 +42,7 @@ image = (
         "python3 -c 'import site, os; open(os.path.join(site.getsitepackages()[0], \"verilm_capture.pth\"), \"w\").write(\"import verilm._startup\\n\")'",
     )
     .add_local_dir(".", remote_path="/build", copy=True, ignore=[
-        ".git", "target", "scripts/__pycache__", "*.pdf", "CHANGELOG.md",
+        ".git", "target", "scripts/__pycache__", "*.pdf", "*.md", "site",
     ])
     .run_commands(
         "cd /build/crates/verilm-py && maturin build --release",

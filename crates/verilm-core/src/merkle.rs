@@ -214,6 +214,32 @@ pub fn hash_retained_with_lp_hidden(
     }
 }
 
+/// Compute the committed leaf hash binding captured GPU logits.
+///
+/// Extends the lp_hidden leaf hash with the actual f32 logits captured from
+/// the GPU's LogitsProcessor output. The verifier samples from these logits
+/// directly (exact), then Freivalds-binds them to `lp_hidden × lm_head`.
+///
+/// Backward compatible: without captured logits, returns the lp_hidden hash.
+pub fn hash_retained_with_captured_logits(
+    state: &crate::types::RetainedTokenState,
+    final_residual: Option<&[f32]>,
+    lp_hidden_bf16: Option<&[u16]>,
+    captured_logits_f32: Option<&[f32]>,
+) -> [u8; 32] {
+    let base = hash_retained_with_lp_hidden(state, final_residual, lp_hidden_bf16);
+    match captured_logits_f32 {
+        Some(logits) => {
+            let mut hasher = Sha256::new();
+            hasher.update(b"vi-retained-logits-v1");
+            hasher.update(base);
+            hash_f32_into(&mut hasher, logits);
+            hasher.finalize().into()
+        }
+        None => base,
+    }
+}
+
 /// Compute the V4 IO chain hash for a token.
 ///
 /// `io_t = H("vi-io-v4" || leaf_hash_t || token_id_t || prev_io_hash)`

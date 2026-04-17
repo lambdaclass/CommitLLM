@@ -37,7 +37,7 @@ image = (
     })
     .pip_install(*KEYGEN)
     .add_local_dir(".", remote_path="/build", copy=True, ignore=[
-        ".git", "target", "scripts/__pycache__", "*.pdf",
+        ".git", "target", "scripts/__pycache__", "*.pdf", "*.md",
     ])
     .run_commands(
         "cd /build/crates/verilm-py && maturin build --release",

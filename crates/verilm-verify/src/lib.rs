@@ -899,8 +899,9 @@ pub fn verify_v4_legacy(
                         checks_run += 1;
                         let fr_ref = shell_j.final_residual.as_deref();
                         let lp_ref = shell_j.lp_hidden_bf16.as_deref();
+                        let cl_ref = shell_j.captured_logits_f32.as_deref();
                         let hash_j =
-                            verilm_core::merkle::hash_retained_with_lp_hidden(ret_j, fr_ref, lp_ref);
+                            verilm_core::merkle::hash_retained_with_captured_logits(ret_j, fr_ref, lp_ref, cl_ref);
                         if hash_j != expected_hash {
                             failures.push(vfail_ctx(
                                 FailureCode::RetainedHashMismatch,
@@ -1684,9 +1685,11 @@ pub fn verify_v4_legacy(
                                 claimed_logits.iter().map(|&v| v as f32).collect();
 
                             let expected_token = if let Some(ref dp) = decode_params {
+                                // Prover uses generation-local index (0-based).
+                                let gen_index = response.token_index.saturating_sub(gen_start);
                                 let token_seed = verilm_core::sampling::derive_token_seed(
                                     &response.revealed_seed,
-                                    response.token_index,
+                                    gen_index,
                                 );
                                 verilm_core::sampling::sample(&logits, dp, &token_seed)
                             } else {
@@ -2339,7 +2342,11 @@ fn verify_v4_structural(response: &V4AuditResponse) -> (usize, Vec<VerificationF
         .shell_opening
         .as_ref()
         .and_then(|s| s.lp_hidden_bf16.as_deref());
-    let leaf_hash = merkle::hash_retained_with_lp_hidden(&response.retained, final_residual_ref, lp_hidden_ref);
+    let cl_ref = response
+        .shell_opening
+        .as_ref()
+        .and_then(|s| s.captured_logits_f32.as_deref());
+    let leaf_hash = merkle::hash_retained_with_captured_logits(&response.retained, final_residual_ref, lp_hidden_ref, cl_ref);
     if !merkle::verify(
         &response.commitment.merkle_root,
         &leaf_hash,

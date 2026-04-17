@@ -55,14 +55,51 @@ pub enum DecodeAcceptanceMode {
     /// and commits it in the Merkle leaf. The verifier reconstructs logits
     /// via `lp_hidden_bf16 @ lm_head_bf16.T` and checks argmax/sample.
     ///
-    /// Validated: 192/192 exact greedy, 32/32 exact sampled on Qwen W8A8.
-    /// See docs/design/decode-boundary-spike.md.
+    /// ~98.7% pass rate on Llama sampled (300 runs). Not exact — CPU replay
+    /// arithmetic ≠ GPU tensor-core arithmetic. Superseded by CapturedLogits.
     LpHiddenBf16,
+
+    /// Verify token identity from the actual GPU logits captured at inference.
+    ///
+    /// The prover captures the f32 logits that `CanonicalSamplerHook` sampled
+    /// from and commits them in the Merkle leaf alongside `lp_hidden_bf16`.
+    /// The verifier:
+    ///   1. Checks `sample(captured_logits, seed) == token_id` — exact.
+    ///   2. Freivalds-binds `captured_logits` to `lp_hidden × lm_head_bf16`
+    ///      using a secret ±1 random projection (cheap, probabilistic).
+    ///
+    /// Solves both correctness (exact sampling from real GPU logits) and
+    /// cost (no full lm_head matmul replay, just two dot products).
+    CapturedLogits,
 }
 
 impl Default for DecodeAcceptanceMode {
     fn default() -> Self {
         DecodeAcceptanceMode::ExactTokenIdentity
+    }
+}
+
+/// How the verifier checks the attention output `a` for the challenged token.
+///
+/// This is the phase-selection key in the canonical verifier's `run()`:
+/// - `ExactReplay` → `phase_exact_attention` (f64 Q·K^T replay)
+/// - `WitnessedScores` → `phase_witnessed_score_attention` (GPU scores)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AttentionVerificationMode {
+    /// Replay Q·K^T/√d → softmax → V in f64, compare against committed `a`.
+    /// Strongest claim: verifier independently recomputes the full attention.
+    /// Requires that f64 replay matches GPU bf16 within the profile tolerance.
+    ExactReplay,
+
+    /// Use GPU-captured pre-softmax scores, anchored against canonical Q·K^T/√d.
+    /// Replay softmax(witnessed) @ V → requantize, compare against committed `a`.
+    /// Used when f64 replay diverges from GPU at later token positions.
+    WitnessedScores,
+}
+
+impl Default for AttentionVerificationMode {
+    fn default() -> Self {
+        AttentionVerificationMode::ExactReplay
     }
 }
 
@@ -116,6 +153,16 @@ pub struct VerificationProfile {
     #[serde(default = "default_true")]
     pub supports_qkv_freivalds: bool,
 
+    /// How the verifier checks attention output for the challenged token.
+    ///
+    /// Selects between f64 Q·K^T exact replay (`ExactReplay`) and
+    /// GPU-witnessed score replay (`WitnessedScores`). Independent of
+    /// `score_anchor_threshold`, which parameterizes the witnessed path.
+    ///
+    /// Default: `ExactReplay` (backward compatible).
+    #[serde(default)]
+    pub attention_mode: AttentionVerificationMode,
+
     /// Token-identity acceptance mode for the lm_head decode check.
     ///
     /// Controls whether the verifier checks that `argmax(quantized_logits)`
@@ -145,8 +192,9 @@ impl VerificationProfile {
             attention_tolerance: 10,
             max_validated_context: 1164,
             requires_score_anchoring: false,
-            score_anchor_threshold: None, // anchor gap ~14, too loose for strong tier
+            score_anchor_threshold: Some(20.0), // f64 anchor gap ~14; bf16 TBD
             supports_qkv_freivalds: false,
+            attention_mode: AttentionVerificationMode::WitnessedScores,
             decode_acceptance: DecodeAcceptanceMode::LpHiddenBf16, // i8→i32 logits diverge (6556 gap), but LP hidden bf16 matmul is 192/192 exact
         }
     }
@@ -164,12 +212,44 @@ impl VerificationProfile {
             name: "llama-w8a8".into(),
             model_family: "llama".into(),
             bridge_tolerance: 1,
+            // Small corridor tolerance only. Large FlashAttention/f64 replay
+            // gaps at non-zero token positions are not accepted here; they
+            // require a kernel-aligned witness or deterministic attention kernel.
             attention_tolerance: 10,
             max_validated_context: 1165,
             requires_score_anchoring: true,
             score_anchor_threshold: Some(0.25), // bf16 anchor gap ~0.06, 4x headroom
             supports_qkv_freivalds: true,
+            attention_mode: AttentionVerificationMode::ExactReplay,
             decode_acceptance: DecodeAcceptanceMode::ExactTokenIdentity,
+        }
+    }
+
+    /// Llama W8A8 with LP-hidden bf16 decode (for sampled decode verification).
+    /// Same as llama_w8a8 but uses LpHiddenBf16 instead of ExactTokenIdentity.
+    pub fn llama_w8a8_lp_hidden() -> Self {
+        VerificationProfile {
+            name: "llama-w8a8-lp-hidden".into(),
+            decode_acceptance: DecodeAcceptanceMode::LpHiddenBf16,
+            ..Self::llama_w8a8()
+        }
+    }
+
+    /// Llama W8A8 with captured-logits decode (exact sampled decode).
+    pub fn llama_w8a8_captured_logits() -> Self {
+        VerificationProfile {
+            name: "llama-w8a8-captured-logits".into(),
+            decode_acceptance: DecodeAcceptanceMode::CapturedLogits,
+            ..Self::llama_w8a8()
+        }
+    }
+
+    /// Qwen W8A8 with captured-logits decode (exact sampled decode).
+    pub fn qwen_w8a8_captured_logits() -> Self {
+        VerificationProfile {
+            name: "qwen-w8a8-captured-logits".into(),
+            decode_acceptance: DecodeAcceptanceMode::CapturedLogits,
+            ..Self::qwen_w8a8()
         }
     }
 
@@ -704,6 +784,18 @@ pub struct VerifierKey {
     /// Global (not per-layer). Use `r_for(MatrixType::LmHead)` for the r vector.
     pub v_lm_head: Option<Vec<Fp>>,
 
+    /// SECRET: Precomputed v = r^T @ lm_head_bf16 in f64 for CapturedLogits
+    /// Freivalds binding. Length = hidden_dim. The random ±1 vector r is
+    /// re-derived from `captured_logits_freivalds_seed` at verify time.
+    #[serde(default)]
+    pub v_lm_head_f64: Option<Vec<f64>>,
+
+    /// SECRET: Seed for deriving the ±1 random vector used in the
+    /// CapturedLogits Freivalds binding. Re-derived at verify time
+    /// to compute r · captured_logits for the check.
+    #[serde(default)]
+    pub captured_logits_freivalds_seed: Option<[u8; 32]>,
+
     /// SHA-256 hash of the decode artifact containing lm_head bf16 weights.
     /// The decode artifact is a separate binary object (VDEC magic + bincode)
     /// that carries the full unembedding matrix for LP hidden verification.
@@ -867,6 +959,15 @@ impl VerifierKey {
         self.verification_profile
             .as_ref()
             .and_then(|p| p.score_anchor_threshold)
+    }
+
+    /// Attention verification mode from the verification profile.
+    /// Defaults to `ExactReplay` when no profile is set.
+    pub fn attention_mode(&self) -> AttentionVerificationMode {
+        self.verification_profile
+            .as_ref()
+            .map(|p| p.attention_mode.clone())
+            .unwrap_or_default()
     }
     /// Random vector r for any matrix type (including LmHead).
     pub fn r_for(&self, mt: MatrixType) -> &[Fp] {
@@ -1244,6 +1345,11 @@ pub struct ShellTokenOpening {
     /// and checks argmax/sample for token identity.
     #[serde(default)]
     pub lp_hidden_bf16: Option<Vec<u16>>,
+    /// Captured f32 logits from the GPU's actual LogitsProcessor output.
+    /// Length = vocab_size. The verifier samples from these directly (exact)
+    /// and Freivalds-binds them to `lp_hidden × lm_head_bf16`.
+    #[serde(default)]
+    pub captured_logits_f32: Option<Vec<f32>>,
 }
 
 /// Parameters for the full bridge computation (dequant → residual → RMSNorm → quantize).

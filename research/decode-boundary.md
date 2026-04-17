@@ -1,181 +1,167 @@
-# Decode Boundary Findings
+# Decode Boundary Research
 
 Dates:
-- initial diagnosis: 2026-04-12
-- protocol integration update: 2026-04-13
+- initial decode-boundary investigation: 2026-04-12
+- LP-hidden protocol integration: 2026-04-13
+- replay-path A/B diagnostic: 2026-04-17
+- captured-logits E2E validation: 2026-04-17
 
-## Problem
+## Executive summary
 
-Qwen W8A8 could pass exact `lm_head` Freivalds while still failing final token-identity
-checks on honest runs. The original verifier path used:
+The decode-side problem is no longer "find a better replay." That work is done.
 
-`final_residual -> RMSNorm replay -> i8 -> i32 lm_head matmul -> argmax/sample`
+What we learned:
 
-That path turned out to be wrong for token identity on Qwen. Honest-gap measurement on
-the quantized replay logits showed a heavy tail from `0` to `6556` i32 units on a ~7000
-range, which killed any tolerance-based acceptance rule.
+1. The old quantized replay path (`i8 -> i32 lm_head`) is unusable for sampled decode.
+2. `LogitsProcessor` input hidden state (`LP-hidden`) is the correct runtime boundary, and capturing it was a necessary intermediate step.
+3. LP-hidden replay is still not exact enough for sampled decode under broad stress because CPU replay arithmetic does not exactly match GPU tensor-core arithmetic.
+4. The kept exact sampled-decode path is now **CapturedLogits**:
+   - capture the exact GPU logits the sampler used
+   - verify the exact sampled token from those logits
+   - Freivalds-bind those logits back to `lp_hidden × lm_head_bf16`
 
-The open question was whether there existed a cheap captured boundary for the decode step,
-analogous to captured `x_attn` on the attention side.
+Decode-side sampled exactness is therefore closed by boundary capture, not by replay.
 
-## Result
+## Chronology
 
-There is a viable decode boundary:
+### 1. Quantized replay failed
 
-- **Not** `model.norm` output
-- **Yes** `LogitsProcessor` input hidden state (`args[1]`)
+The original verifier path used:
 
-This hidden state is already pruned to the sampled row and sits immediately before the
-final logits computation used by the sampler.
+`final_residual -> RMSNorm replay -> i8 -> i32 lm_head -> argmax/sample`
 
-This is no longer just a hypothesis. The protocol surface now carries LP hidden in code,
-and the remaining gate is the full real-weight end-to-end prover/verifier run.
+This failed badly on Qwen W8A8 and later on Llama sampled decode:
 
-## Diagnostics
+- the quantized logits diverged enough from the GPU bf16 logits to reorder the sampled distribution
+- Llama sampled `ExactTokenIdentity` on the cheap path passed only `239/300 = 79.7%`
 
-### 1. `model.norm` is not the decode boundary
+Conclusion: replaying approximate logits is not a viable sampled-decode rule.
 
-`model.norm` returns a tuple, but neither output is the object that reaches the sampler.
+### 2. LP-hidden identified the right boundary
 
-Observed on Qwen W8A8:
+`model.norm` output was not the decode boundary. The object that actually reaches the sampler is:
 
-- `model.norm output[0]` is residual passthrough
-- `model.norm output[1]` is normed hidden
-- `model.norm output[1]` vs `LogitsProcessor args[1]` differed by `38–318`
+`LogitsProcessor.forward(lm_head, hidden_states, sampling_metadata)`
 
-Using `model.norm` output for token replay gave only `1/192` exact matches.
+specifically `args[1]`, the pruned hidden state at the sampler boundary.
 
-Conclusion:
+Capturing LP-hidden was an important protocol result:
 
-- `model.norm` is not the decode boundary
-- there is a transform/pruning step between `model.norm` and `LogitsProcessor`
+- it proved the verifier had been using the wrong object
+- it gave a much cheaper decode boundary than full logits
+- it enabled real end-to-end decode-boundary experiments
 
-### 2. `LogitsProcessor` input is the real decode boundary
+LP-hidden cost:
 
-Diagnostic on 3 prompts x 64 generated tokens (`192` total), greedy decode:
+- Llama 8B: `4096 × 2 bytes ≈ 8 KiB/token`
+- Qwen 7B: `3584 × 2 bytes ≈ 7 KiB/token`
 
-| Path | Exact | Rate |
+### 3. LP-hidden replay improved things, but did not solve sampled exactness
+
+Broad sampled A/B diagnostic on Llama (`300` runs, `T=0.8`, `top_k=50`, `top_p=0.9`):
+
+| Path | Pass rate |
+|---|---:|
+| i32 ExactTokenIdentity | `239/300 = 79.7%` |
+| LP-hidden bf16 replay | `296/300 = 98.7%` |
+
+This proved two things:
+
+- LP-hidden was directionally right
+- replay arithmetic was still wrong for the sampling tail
+
+The residual `4/300` failures are not about quantization anymore. They are about CPU replay arithmetic vs GPU tensor-core accumulation order.
+
+Conclusion: LP-hidden remains useful as an intermediate/local boundary and for cheaper greedy paths, but **it is not the kept sampled-decode exactness rule**.
+
+## Kept answer: CapturedLogits
+
+### Proof structure
+
+The kept sampled-decode protocol is:
+
+1. capture the exact GPU f32 logits used by the sampler
+2. commit them into the retained Merkle leaf
+3. verify exact token sampling from those logits
+4. Freivalds-bind them back to `lp_hidden × lm_head_bf16`
+
+This avoids full CPU `lm_head` replay and removes the replay-mismatch class from the token-choice check.
+
+### Why this is better than LP-hidden for sampled decode
+
+LP-hidden is smaller, but it still requires replaying `lm_head`.
+Captured logits are larger, but they are the exact sampling object.
+
+For sampled decode, exactness matters more than compactness.
+
+### GPU E2E result
+
+CapturedLogits is now GPU-validated end-to-end on both dense families:
+
+| Model | Greedy | Sampled | Decode checks |
+|---|---:|---:|---:|
+| Qwen 7B W8A8 | `3/3` | `20/20` | `17,336/17,336` |
+| Llama 8B W8A8 | `3/3` | `20/20` | `23,335/23,335` |
+
+Tamper rejection also passes on both models.
+
+Conclusion: sampled decode exactness is now closed on the shipped path.
+
+## Economics
+
+CapturedLogits shifts the problem from verifier CPU to retained-state economics.
+
+Per-token retained bytes:
+
+| Object | Llama 8B | Qwen 7B |
 |---|---:|---:|
-| `LogitsProcessor` output logits argmax | 192/192 | 100% |
-| Recomputed `bf16` matmul from `LogitsProcessor args[1]` | 192/192 | 100% |
-| Recomputed `fp32` matmul from `LogitsProcessor args[1]` | 189/192 | 98.4% |
-| Recomputed `i8 -> i32` matmul from `LogitsProcessor args[1]` | 0/192 | 0% |
+| LP-hidden bf16 | ~8 KiB | ~7 KiB |
+| Captured logits f32 | ~501 KiB | ~594 KiB |
 
-Observed max diff between recomputed `bf16` logits and `LogitsProcessor` output:
+For a 256-token answer:
 
-- `max_diff = 0.125`
+- Llama: ~125 MiB retained
+- Qwen: ~149 MiB retained
 
-This is negligible and consistent with `bf16` rounding noise.
+Important distinction:
 
-Conclusion:
+- retained-state cost is per generated answer
+- audit bandwidth is per **opened token**, not per answer
 
-- the hidden state at `LogitsProcessor args[1]` is the correct decode boundary
-- verifier-side `bf16 lm_head` replay from that hidden reproduces the GPU token choice on the measured set
-- the quantized `i8 -> i32` surrogate is unsuitable for token identity
+Opened-token bandwidth is roughly:
 
-### 3. Capture-hook validation after integration
+- Llama: ~0.5 MiB per challenged token
+- Qwen: ~0.6 MiB per challenged token
 
-After wiring LP-hidden through the sidecar capture path, the hook itself was validated
-on the real Qwen W8A8 inference loop:
+Verifier cost is cheap again:
 
-| Check | Result |
-|---|---|
-| Count alignment | exact on greedy and sampled runs |
-| Shape / dtype | `(1, 3584)`, `bf16` |
-| Reference-hook match | `max_diff = 0.0` |
-| Greedy replay | `192/192` |
-| Sampled replay | `32/32` exact |
-| Prefill leakage | none |
+- two dot products per challenged token
+- no full `lm_head` CPU matmul
 
-The earlier mismatch was caused by runtime behavior, not protocol semantics:
+## Current policy
 
-- CUDA allocator reuse recycled the producer-side tensor storage
-- an async D2H copy stream then read from stale storage
-- the kept fix snapshots on the producer stream before copy
+- **Sampled decode**: `CapturedLogits` only
+- **Greedy decode**: cheaper validated paths remain acceptable where explicitly supported
+- **Attention**: still the main correctness blocker
 
-This matters because it upgrades LP hidden from “right tensor in a diagnostic” to
-“correctly capturable protocol object.”
+## Implications
 
-## Cost
+This changes the architecture:
 
-For Qwen:
+- sampled decode is no longer an open correctness problem
+- replay tuning is no longer the right decode work
+- the next decode-side question is economics
+- the next main correctness problem is arbitrary-position attention
 
-- hidden dim = `3584`
-- `bf16` hidden = `3584 * 2 = 7168 bytes ~= 7 KB/token`
+## Open work
 
-For comparison, full logits capture would cost:
+1. benchmark captured-logits economics in steady state
+2. cache key + decode artifact so keygen is treated as offline
+3. define production audit policy around retained-state cost
+4. close arbitrary-position attention with either:
+   - a strict FlashAttention/kernel-aligned witness, or
+   - deterministic attention kernels
 
-- vocab size ~= `152064`
-- `bf16` logits = `152064 * 2 = 304128 bytes ~= 297 KB/token`
+## Bottom line
 
-So captured LP-input hidden is roughly `42x` cheaper than captured `bf16` logits while
-still being sufficient to reconstruct logits for token verification.
-
-## Security Interpretation
-
-Captured LP-input hidden is not “free evidence.” It only becomes a strong protocol object
-if all of the following hold:
-
-1. the hidden is committed in retained state / Merkle binding
-2. the verifier replays `bf16 lm_head` from that exact hidden
-3. the token is checked against the committed decode policy and seed
-
-If those conditions are met, LP-input hidden is at least as useful for decode verification
-as captured logits, and in one sense cleaner: logits are derived from the hidden via the
-committed `lm_head`, rather than being a separate captured witness with a weaker tie to the
-linear check.
-
-This does **not** by itself prove the whole upstream model execution. It proves the decode
-step given that boundary object.
-
-That distinction remains the central protocol boundary:
-
-- LP hidden is enough to prove the final `hidden -> token` transition
-- it is not enough to prove how the hidden was produced
-- attention-side and prefix-side verification remain separate work
-
-## Protocol Implication
-
-The decode-strengthening path is now:
-
-1. capture `LogitsProcessor args[1]` for generated tokens only
-2. commit it into retained state
-3. verify token identity via `captured_lp_hidden -> bf16 lm_head -> canonical sampler`
-
-Not:
-
-- tolerance tuning
-- `model.norm` capture
-- full-logit capture as the default path
-
-Deterministic `lm_head` kernels remain the clean long-term backstop, but the measured data
-now says the first practical local-boundary path is captured LP-input hidden.
-
-As of 2026-04-13, the code path already includes:
-
-- committed `lp_hidden_bf16`
-- retained-state / Merkle binding for LP hidden
-- `VerifierKey.lm_head_bf16`
-- `DecodeAcceptanceMode::LpHiddenBf16`
-- verifier-side bf16 replay for greedy and sampled decode
-
-So the protocol question has changed from “should we try this?” to “does the full
-real-weight E2E prove cleanly, and what does the kept capture path cost?”
-
-## Open Questions
-
-- real-weight Qwen E2E on the integrated protocol path
-- longer generations
-- more diverse prompts
-- exact verifier-side `bf16` arithmetic pinning
-- retained-state / opened-payload benchmark after actual LP-hidden capture lands
-- capture overhead of the kept synchronous snapshot vs a future safe async variant
-
-## Bottom Line
-
-The decode problem was not “Qwen is too numerically noisy to verify.” The problem was that
-the verifier was using the wrong object. Once the boundary was moved to `LogitsProcessor`
-input hidden, `bf16 lm_head` replay matched the GPU token choice exactly on the measured
-greedy and sampled runs, at a cost of only about `7 KB/token`. The decode side of the
-protocol is now on the right architectural path. The main open verifier problem is no
-longer decode; it is attention-side and prefix-side computation.  
+LP-hidden was the correct intermediate discovery because it found the real runtime boundary and killed the wrong replay object. But it was not the final answer. The shipped sampled-decode protocol is now `CapturedLogits`: exact GPU-logit sampling plus algebraic binding back to `lm_head`.

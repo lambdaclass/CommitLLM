@@ -355,9 +355,9 @@
     <div class="section-split section-split--top">
       <div class="section-main">
         <div class="section-label">Guarantee boundary</div>
-        <h2 class="section-title">What is exact, approximate, and statistical</h2>
+        <h2 class="section-title">What is verified, what is open</h2>
         <p class="section-sub">
-          Decode is fail-closed. The remaining boundary lives inside native attention and unopened retained state during routine audit.
+          Embedding, shell matmuls, bridges, decode, and all bindings are independently verified. Attention at arbitrary token positions is an open problem on stock GPU kernels.
         </p>
         <div class="pipeline-wrap">
           <div class="pipeline">
@@ -366,27 +366,28 @@
             <div class="pipe pipe--alg"><div class="pipe-name">Shell matmuls</div><div class="pipe-tag">Freivalds</div></div>
             <div class="pipe pipe--exact"><div class="pipe-name">INT8 bridges</div><div class="pipe-tag">Exact</div></div>
             <div class="pipe pipe--stat"><div class="pipe-name">Prefix/KV</div><div class="pipe-tag">Statistical*</div></div>
-            <div class="pipe pipe--approx"><div class="pipe-name">Attention</div><div class="pipe-tag">Approximate</div></div>
+            <div class="pipe pipe--open"><div class="pipe-name">Attention</div><div class="pipe-tag">Open</div></div>
             <div class="pipe pipe--exact"><div class="pipe-name">Final tail</div><div class="pipe-tag">Exact</div></div>
             <div class="pipe pipe--alg"><div class="pipe-name">LM head</div><div class="pipe-tag">Freivalds</div></div>
-            <div class="pipe pipe--fail"><div class="pipe-name">Decode</div><div class="pipe-tag">Fail-closed</div></div>
+            <div class="pipe pipe--exact"><div class="pipe-name">Decode</div><div class="pipe-tag">Exact*</div></div>
           </div>
         </div>
         <div class="pipeline-legend">
           <span class="legend-exact">Exact / canonical replay</span>
           <span class="legend-alg">Algebraic checks</span>
-          <span class="legend-approx">Approximate (FP16/BF16)</span>
-          <span class="legend-stat">Statistical - exact in deep audit</span>
-          <span class="legend-fail">Fail-closed</span>
+          <span class="legend-open">Open &mdash; committed but not yet independently verified</span>
+          <span class="legend-stat">Statistical &mdash; exact in deep audit</span>
+          <span class="legend-fail">* Supported decode modes exact; unsupported modes fail closed</span>
         </div>
       </div>
       <aside class="section-aside">
         <div class="aside-card">
           <div class="aside-card-label">Reading guide</div>
-          <h3>Three guarantee classes</h3>
+          <h3>Guarantee classes</h3>
           <ul class="aside-list">
-            <li><strong>Exact:</strong> input handling, canonical replay, INT8 bridges, final tail, and decode checks are deterministic.</li>
-            <li><strong>Approximate:</strong> attention replay is bounded, but native FP16/BF16 GPU attention is not bit-reproducible.</li>
+            <li><strong>Exact:</strong> input handling, canonical replay, INT8 bridges, final tail, and supported decode checks are deterministic.</li>
+            <li><strong>Algebraic:</strong> large matrix multiplications are checked by Freivalds with verifier-secret randomness.</li>
+            <li><strong>Open:</strong> attention output is committed but GPU FlashAttention bf16 arithmetic does not match verifier-side replay at arbitrary positions. Token&nbsp;0 passes exact replay; later positions require a kernel-aligned witness or deterministic attention kernel.</li>
             <li><strong>Statistical:</strong> routine audit samples retained prefix and KV state; deep audit opens the full retained window.</li>
           </ul>
         </div>
@@ -414,7 +415,7 @@
           <li>Freivalds-based checks on large linear layers</li>
           <li>Canonical replay for supported nonlinear subcomputations</li>
           <li>Sampled prefix and KV provenance with statistical coverage</li>
-          <li>Bounded approximate attention replay on CPU</li>
+          <li>Attention output is committed; arbitrary-position verification is open</li>
         </ul>
       </div>
       <div class="audit-card audit-card--highlight">
@@ -580,13 +581,13 @@
       </div>
       <div class="faq-item">
         <div class="faq-label">Coverage</div>
-        <h3>What is exact, what is approximate, and what is statistical?</h3>
-        <p>Large INT8 matrix multiplications are checked by exact algebraic fingerprints. Supported nonlinear boundaries are replayed canonically. Native FP16/BF16 attention is bounded approximate replay on the current path. Routine audit gives statistical coverage on unopened retained state; deep audit opens more of that state and upgrades coverage.</p>
+        <h3>What is exact, what is open, and what is statistical?</h3>
+        <p>Large INT8 matrix multiplications are checked by exact algebraic fingerprints. Supported nonlinear boundaries are replayed canonically. Sampled decode correctness is checked from exact captured GPU logits plus algebraic LM-head binding; cheaper replay-based paths remain acceptable for some greedy profiles. Attention at arbitrary token positions is an open problem: stock GPU FlashAttention bf16 arithmetic does not match verifier-side f64 replay beyond token&nbsp;0. Routine audit gives statistical coverage on unopened retained state; deep audit opens more of that state and upgrades coverage.</p>
       </div>
       <div class="faq-item">
         <div class="faq-label">Boundary</div>
         <h3>Does this verify the whole model exactly?</h3>
-        <p>No. The protocol is honest about its guarantee boundary. Some parts are exact, some are bounded approximate on the current path, and some are statistical unless deep audit is used. The point is not to pretend everything is exact, but to make the exact, approximate, and fail-closed parts explicit and auditable.</p>
+        <p>No. The protocol is honest about its guarantee boundary. Embedding, all linear projections, bridge chain, decode, and all bindings are independently verified. Attention at arbitrary token positions is an open problem on stock GPU kernels. Routine prefix provenance is statistical unless deep audit is used. The point is not to pretend everything is exact, but to make the verified, open, and statistical parts explicit.</p>
       </div>
       <div class="faq-item">
         <div class="faq-label">Attacker model</div>
@@ -693,7 +694,7 @@
           <div class="timeline-step">
             <div class="timeline-step-label">Phase 3 &middot; Verify</div>
             <h3>CPU-only checks</h3>
-            <p>Embedding Merkle proof. Freivalds on shell matmuls. Exact INT8 bridge recomputation. KV provenance. Attention replay against committed post-attention output. Final-token tail from captured residual. LM-head binding. Decode and output policy replay.</p>
+            <p>Embedding Merkle proof. Freivalds on all shell matmuls. Exact INT8 bridge recomputation. KV transcript proofs. Attention replay at token&nbsp;0 (arbitrary positions are open). Final-token tail from captured residual. LM-head binding. Decode and output policy replay. Prompt, manifest, and IO chain binding.</p>
           </div>
         </div>
       </div>

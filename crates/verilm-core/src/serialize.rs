@@ -132,6 +132,8 @@ mod tests {
             rope_aware_replay: false,
             qkv_biases: Vec::new(),
             verification_profile: None,
+            v_lm_head_f64: None,
+            captured_logits_freivalds_seed: None,
         };
         let data = serialize_key(&key);
         let key2 = deserialize_key(&data).unwrap();
@@ -187,6 +189,7 @@ mod tests {
             final_residual: None,
             logits_i32: None,
             lp_hidden_bf16: None,
+            captured_logits_f32: None,
         };
         let resp = V4AuditResponse {
             token_index: 7,

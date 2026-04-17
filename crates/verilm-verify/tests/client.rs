@@ -318,6 +318,7 @@ fn build_audit() -> (
         None,
         None,
         None,
+        None,
     );
     let response = open_v4(
         &state,

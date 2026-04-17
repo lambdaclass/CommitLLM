@@ -60,6 +60,9 @@ pub struct MinimalBatchState {
     /// Per-token captured LP hidden state (bf16 bit patterns) at LogitsProcessor input.
     /// Used at audit time for decode boundary verification via bf16 lm_head matmul.
     pub lp_hidden_bf16: Option<Vec<Vec<u16>>>,
+    /// Per-token captured f32 logits from the GPU's actual LogitsProcessor output.
+    /// Used at audit time for exact decode verification (CapturedLogits mode).
+    pub captured_logits_f32: Option<Vec<Vec<f32>>>,
     /// Raw prompt bytes, stored for inclusion in audit responses.
     pub prompt: Vec<u8>,
     /// Number of prompt tokens (full count including first).
@@ -338,6 +341,7 @@ pub fn commit_minimal(
     captured_x_attn: Option<Vec<Vec<Vec<i8>>>>,
     kv_transcripts: Option<Vec<Vec<KvEntry>>>,
     lp_hidden_bf16: Option<Vec<Vec<u16>>>,
+    captured_logits_f32: Option<Vec<Vec<f32>>>,
 ) -> (BatchCommitment, MinimalBatchState) {
     let n_tokens = all_retained.len();
     assert_eq!(
@@ -354,7 +358,16 @@ pub fn commit_minimal(
     };
 
     // Trace tree: hash retained state per token (parallel).
-    // When final_residuals or lp_hidden is present, bind each into the leaf hash.
+    // When final_residuals, lp_hidden, or captured_logits is present,
+    // bind each into the leaf hash.
+    //
+    // Captured logits are per gen token only (from sampler hook), while
+    // all_retained covers all positions (prompt + gen, minus BOS).
+    // Offset so captured_logits[0] maps to the first gen position.
+    let gen_start = params
+        .n_prompt_tokens
+        .map(|n| n.saturating_sub(1) as usize)
+        .unwrap_or(0);
     let trace_leaves: Vec<[u8; 32]> = all_retained
         .par_iter()
         .enumerate()
@@ -367,7 +380,15 @@ pub fn commit_minimal(
                 .as_ref()
                 .and_then(|lps| lps.get(i))
                 .map(|v| v.as_slice());
-            merkle::hash_retained_with_lp_hidden(rs, fr, lp)
+            let cl = if i >= gen_start {
+                captured_logits_f32
+                    .as_ref()
+                    .and_then(|cls| cls.get(i - gen_start))
+                    .map(|v| v.as_slice())
+            } else {
+                None
+            };
+            merkle::hash_retained_with_captured_logits(rs, fr, lp, cl)
         })
         .collect();
 
@@ -494,6 +515,7 @@ pub fn commit_minimal(
         manifest: params.manifest.cloned(),
         final_residuals,
         lp_hidden_bf16,
+        captured_logits_f32,
         prompt: params.prompt.to_vec(),
         n_prompt_tokens: params.n_prompt_tokens,
         captured_scales,
@@ -1364,6 +1386,7 @@ pub fn compute_shell_opening(
         final_residual: None,    // Set by open_v4 from captured GPU state
         logits_i32: None,        // Set by open_v4 when tail params available
         lp_hidden_bf16: None,    // Set by open_v4 from captured LP hidden
+        captured_logits_f32: None, // Set by open_v4 from captured logits
     }
 }
 
@@ -1432,6 +1455,23 @@ pub fn open_v4(
         .as_ref()
         .and_then(|lps| lps.get(token_index as usize))
         .cloned();
+
+    // Attach captured f32 logits (CapturedLogits mode).
+    // Captured logits are per gen token only; offset by gen_start.
+    let gen_start = state
+        .n_prompt_tokens
+        .map(|n| n.saturating_sub(1) as usize)
+        .unwrap_or(0);
+    let ti = token_index as usize;
+    shell.captured_logits_f32 = if ti >= gen_start {
+        state
+            .captured_logits_f32
+            .as_ref()
+            .and_then(|cls| cls.get(ti - gen_start))
+            .cloned()
+    } else {
+        None
+    };
 
     // Compute LM-head logits claim for Freivalds verification.
     if let (Some(ref fr), Some(tp)) = (&shell.final_residual, tail) {
@@ -1576,6 +1616,10 @@ pub fn open_v4_structural(state: &MinimalBatchState, token_index: u32) -> V4Audi
         kv_roots,
     };
 
+    let gen_start = state
+        .n_prompt_tokens
+        .map(|n| n.saturating_sub(1) as usize)
+        .unwrap_or(0);
     let mut prefix_leaf_hashes = Vec::with_capacity(i);
     let mut prefix_merkle_proofs = Vec::with_capacity(i);
     let mut prefix_token_ids = Vec::with_capacity(i);
@@ -1590,10 +1634,20 @@ pub fn open_v4_structural(state: &MinimalBatchState, token_index: u32) -> V4Audi
             .as_ref()
             .and_then(|lps| lps.get(j))
             .map(|v| v.as_slice());
-        prefix_leaf_hashes.push(merkle::hash_retained_with_lp_hidden(
+        let cl = if j >= gen_start {
+            state
+                .captured_logits_f32
+                .as_ref()
+                .and_then(|cls| cls.get(j - gen_start))
+                .map(|v| v.as_slice())
+        } else {
+            None
+        };
+        prefix_leaf_hashes.push(merkle::hash_retained_with_captured_logits(
             &state.all_retained[j],
             fr,
             lp,
+            cl,
         ));
         prefix_merkle_proofs.push(merkle::prove(&state.retained_tree, j));
         prefix_token_ids.push(state.token_ids[j]);
@@ -1790,7 +1844,7 @@ mod tests {
             n_prompt_tokens: Some(1),
         };
 
-        let (commitment, state) = commit_minimal(retained, &params, None, scales, None, None, None);
+        let (commitment, state) = commit_minimal(retained, &params, None, scales, None, None, None, None);
 
         assert_eq!(commitment.version, CommitmentVersion::V4);
         assert_eq!(commitment.n_tokens, 3);
@@ -1820,7 +1874,7 @@ mod tests {
             n_prompt_tokens: Some(1),
         };
 
-        let (_, state) = commit_minimal(retained.clone(), &params, None, scales, None, None, None);
+        let (_, state) = commit_minimal(retained.clone(), &params, None, scales, None, None, None, None);
 
         // Verify IO chain uses leaf hashes, not ad hoc features.
         let leaf0 = merkle::hash_retained_state_direct(&retained[0]);
@@ -1853,8 +1907,8 @@ mod tests {
         let (retained2, scales2, _) =
             build_retained_from_captures(&captures, n_layers, &fwd_batch_sizes);
 
-        let (c1, _) = commit_minimal(retained1, &params, None, scales1, None, None, None);
-        let (c2, _) = commit_minimal(retained2, &params, None, scales2, None, None, None);
+        let (c1, _) = commit_minimal(retained1, &params, None, scales1, None, None, None, None);
+        let (c2, _) = commit_minimal(retained2, &params, None, scales2, None, None, None, None);
 
         assert_eq!(c1.merkle_root, c2.merkle_root);
         assert_eq!(c1.io_root, c2.io_root);
@@ -1876,7 +1930,7 @@ mod tests {
             n_prompt_tokens: Some(1),
         };
 
-        let (commitment, state) = commit_minimal(retained, &params, None, scales, None, None, None);
+        let (commitment, state) = commit_minimal(retained, &params, None, scales, None, None, None, None);
 
         // Open token 2 — should include prefix tokens 0, 1.
         let response = open_v4_structural(&state, 2);
@@ -1929,7 +1983,7 @@ mod tests {
             n_prompt_tokens: Some(1),
         };
 
-        let (_, state) = commit_minimal(retained, &params, None, captured_scales, None, None, None);
+        let (_, state) = commit_minimal(retained, &params, None, captured_scales, None, None, None, None);
         let response = open_v4_structural(&state, 0);
 
         assert_eq!(response.prefix_leaf_hashes.len(), 0);
@@ -1996,7 +2050,7 @@ mod tests {
             n_prompt_tokens: Some(1),
         };
         let (commit_old, state_old) =
-            commit_minimal(retained, &params, None, captured_scales, None, None, None);
+            commit_minimal(retained, &params, None, captured_scales, None, None, None, None);
 
         // Packed path.
         let (packed_a, packed_scales) =
@@ -2066,7 +2120,7 @@ mod tests {
             n_prompt_tokens: Some(1),
         };
         let (commit_old, state_old) =
-            commit_minimal(retained, &params, None, captured_scales, None, None, None);
+            commit_minimal(retained, &params, None, captured_scales, None, None, None, None);
 
         // Packed path.
         let (packed_a, packed_scales) =
@@ -2152,7 +2206,7 @@ mod tests {
             n_prompt_tokens: Some(1),
         };
 
-        let (_, state_old) = commit_minimal(retained.clone(), &params, None, scales, None, None, None);
+        let (_, state_old) = commit_minimal(retained.clone(), &params, None, scales, None, None, None, None);
         let (packed_a, packed_scales) =
             make_packed_data(n_layers, n_tokens, hidden, &fwd_batch_sizes);
         let (_, packed_state) = commit_minimal_packed(
@@ -2205,7 +2259,7 @@ mod tests {
             n_prompt_tokens: Some(1),
         };
         let (commit_old, _) =
-            commit_minimal(retained, &params, final_residuals, scales, None, None, None);
+            commit_minimal(retained, &params, final_residuals, scales, None, None, None, None);
 
         // Packed path: pack final residuals as contiguous f32 bytes.
         let (packed_a, packed_scales) =

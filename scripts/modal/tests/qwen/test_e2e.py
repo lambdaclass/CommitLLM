@@ -1,16 +1,22 @@
 """
 Qwen 2.5 7B W8A8 — E2E protocol regression test.
 
-Verifies the Qwen-specific wiring works end-to-end:
-  - Decode path: LpHiddenBf16 acceptance (bf16 lm_head matmul)
-  - Captured x_attn as QKV boundary input
-  - Bridge, Freivalds, KV transcript, embedding proof
-  - Tamper detection
+Exercises the supported Qwen path the way a real verifier would:
+  - Greedy and sampled decoding through LpHiddenBf16 acceptance
+  - Challenge seeds derived from commitment (not hardcoded)
+  - Mix of routine and full audits
+  - Random generated-token positions selected by the challenge
+  - Longer generations and longer prompts
+  - Multi-position escalation on one request
+  - Tamper detection (bit-flip -> verifier rejects)
+  - EOS early-stop handling
+  - Payload size and verification timing
 
-This test does NOT exercise attention verification. The witnessed-score
-f64 softmax·V replay has known precision gaps (max_diff=9 in sweep)
-and fixed tolerances are not viable. Attention is a known open problem
-for Qwen, tracked separately.
+This test intentionally does NOT claim Qwen attention strong-tier
+verification. The witnessed-score f64 softmax*V replay breached the proposed
+fixed tolerance in the 39-prompt sweep (global max_diff=9), so score witnessing
+stays disabled here. Attention is tracked separately under the kernel-aligned
+witness / deterministic attention-kernel roadmap.
 
 Usage:
     modal run --detach scripts/modal/tests/qwen/test_e2e.py
@@ -42,7 +48,9 @@ image = (
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
         "VERILM_CAPTURE": "1",
         "VERILM_CAPTURE_X_ATTN": "1",
-        # "VERILM_SCORE_WITNESS": "1",  # disabled — attention tolerance not solved
+        # Score witnesses are intentionally disabled until the Qwen attention
+        # path is replaced by a kernel-aligned witness or deterministic kernel.
+        # "VERILM_SCORE_WITNESS": "1",
     })
     .pip_install(*VERIFICATION)
     .add_local_dir("sidecar", remote_path="/opt/verilm", copy=True)
@@ -51,7 +59,7 @@ image = (
         "python3 -c 'import site, os; open(os.path.join(site.getsitepackages()[0], \"verilm_capture.pth\"), \"w\").write(\"import verilm._startup\\n\")'",
     )
     .add_local_dir(".", remote_path="/build", copy=True, ignore=[
-        ".git", "target", "**/__pycache__", "*.pyc", "*.pdf", "site",
+        ".git", "target", "**/__pycache__", "*.pyc", "*.pdf", "*.md", "site",
     ])
     .run_commands(
         "cd /build/crates/verilm-py && maturin build --release",
@@ -64,7 +72,6 @@ image = (
 
 def _run():
     import hashlib
-    import json
     import time
 
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -82,7 +89,7 @@ def _run():
         if not cond:
             failures.append(msg)
 
-    # ── Load model ──
+    # -- Load model --
     print(f"\nLoading {MODEL_ID}...")
     llm = LLM(model=MODEL_ID, dtype="auto", max_model_len=2048,
               enforce_eager=True, enable_prefix_caching=False)
@@ -92,23 +99,25 @@ def _run():
     full_layers = list(range(n_layers))
     print(f"  {n_layers} layers")
 
-    # Score witness disabled — attention tolerance not solved (max_diff=9 in sweep)
-    # buf = cap.get_capture_buffer()
-    # print(f"  score witness: {'enabled' if buf._sw_enabled else 'DISABLED'}")
-    # check(buf._sw_enabled, "score witnessing enabled")
+    buf = cap.get_capture_buffer()
+    score_witness_enabled = getattr(buf, "_sw_enabled", False)
+    print(f"  score witness: {'enabled' if score_witness_enabled else 'disabled'}")
+    check(not score_witness_enabled, "score witnessing disabled for Qwen regression test")
     print()
 
-    # ── Keygen ──
+    # -- Keygen --
     print("Generating verifier key...")
-    seed = hashlib.sha256(b"test-qwen-e2e").digest()
+    verifier_secret = hashlib.sha256(b"test-qwen-e2e-verifier-secret").digest()
     t0 = time.time()
-    key_bin, artifact_bin = verilm_rs.generate_key_binary(model_dir, seed)
-    print(f"  {len(key_bin)/1024/1024:.1f} MB, {(time.time()-t0)*1000:.0f} ms")
+    key_bin, artifact_bin = verilm_rs.generate_key_binary(model_dir, verifier_secret)
+    keygen_ms = (time.time() - t0) * 1000
+    print(f"  key={len(key_bin)/1024/1024:.1f} MB, artifact="
+          f"{(len(artifact_bin)/1024/1024 if artifact_bin else 0):.1f} MB, "
+          f"{keygen_ms:.0f} ms")
+    check(artifact_bin is not None, "decode artifact present for LpHiddenBf16")
 
-    # Also generate JSON key to inspect the profile
-    key_json = verilm_rs.generate_key(model_dir, seed)
-    key = json.loads(key_json)
-    profile = key.get("verification_profile", {})
+    key_meta = verilm_rs.inspect_key_binary(key_bin)
+    profile = key_meta.get("verification_profile", {})
     attn_mode = profile.get("attention_mode", "unknown")
     decode_mode = profile.get("decode_acceptance", "unknown")
     print(f"  profile: {profile.get('name', 'unknown')}")
@@ -118,138 +127,302 @@ def _run():
     check(decode_mode == "LpHiddenBf16", f"decode acceptance is LpHiddenBf16 (got {decode_mode})")
     print()
 
-    # ── Test 1: Full-tier verify (token 0 — decode + bridge checks) ──
-    print("Test 1: Full-tier verify (token 0)")
-    result = server.chat(prompt="What causes rainbows?", max_tokens=64, temperature=0.0)
-    commitment = result["commitment"]
-    n_gen = result["n_tokens"] - commitment.get("n_prompt_tokens", 0)
-    print(f"  generated {n_gen} tokens")
-    print(f"  text: {result['generated_text'][:80]}...")
+    # -- Helpers --
+    def derive_test_challenge_seed(commitment, verifier_secret):
+        """Test helper. Production should hash the canonical receipt bytes."""
+        merkle_root = commitment.get("merkle_root", "")
+        io_root = commitment.get("io_root", "")
+        return hashlib.sha256(
+            f"{merkle_root}:{io_root}".encode() + verifier_secret
+        ).digest()
 
-    check(commitment.get("version") == "V4", "commitment is V4")
-    check(len(commitment.get("kv_roots", [])) == n_layers, "KV roots cover all layers")
+    def build_test_challenge(commitment, n_tokens, tier, *, generated_only=True):
+        challenge_seed = derive_test_challenge_seed(commitment, verifier_secret)
+        gen_start = max(commitment.get("n_prompt_tokens", 1) - 1, 0)
+        for counter in range(64):
+            seed = challenge_seed if counter == 0 else hashlib.sha256(
+                challenge_seed + counter.to_bytes(4, "little")
+            ).digest()
+            challenge = verilm_rs.build_audit_challenge(
+                list(seed), n_tokens, n_layers, tier
+            )
+            if not generated_only or challenge["token_index"] >= gen_start:
+                return challenge
+        raise RuntimeError("could not derive generated-token challenge")
 
-    audit = server.audit(
-        request_id=result["request_id"],
-        token_index=0,
+    def check_qwen_report(report, label, *, expected_tier=None, require_qkv_skip=False):
+        check(report["passed"], f"{label}: {report['checks_passed']}/{report['checks_run']} checks")
+        if not report["passed"]:
+            for f in report.get("failures", [])[:3]:
+                print(f"    {f}")
+
+        if expected_tier is not None:
+            coverage = report.get("coverage", {})
+            actual_level = coverage.get("level")
+            # "full" is always acceptable — it means more coverage than requested.
+            tier_ok = actual_level == expected_tier or actual_level == "full"
+            check(tier_ok, f"{label}: coverage level is {expected_tier} (got {actual_level})")
+
+        skipped = report.get("skipped", [])
+        lp_skipped = [
+            s for s in skipped
+            if "lp_hidden" in s.lower() or "lm_head token identity" in s.lower()
+        ]
+        check(len(lp_skipped) == 0, f"{label}: LP-hidden decode check ran")
+        if require_qkv_skip:
+            qkv_skipped = any("Wq/Wk/Wv Freivalds" in s for s in skipped)
+            check(qkv_skipped, f"{label}: QKV Freivalds explicitly skipped by Qwen profile")
+
+    def audit_and_verify(
+        prompt,
+        max_tokens,
+        temperature,
+        tier,
+        label,
+        *,
+        top_k=0,
+        top_p=1.0,
+        min_tokens=0,
+        ignore_eos=False,
+        include_kv=False,
+        require_qkv_skip=False,
+    ):
+        t_chat = time.time()
+        result = server.chat(
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            min_tokens=min_tokens,
+            ignore_eos=ignore_eos,
+        )
+        chat_ms = (time.time() - t_chat) * 1000
+        commitment = result["commitment"]
+        n_gen = len(result.get("token_ids", [])) - commitment.get("n_prompt_tokens", 0)
+
+        check(commitment.get("version") == "V4", f"{label}: commitment is V4")
+        check(len(commitment.get("kv_roots", [])) == n_layers, f"{label}: KV roots cover all layers")
+
+        challenge = build_test_challenge(
+            commitment,
+            result["n_tokens"],
+            tier,
+            generated_only=True,
+        )
+        tok_idx = challenge["token_index"]
+        layers = challenge["layer_indices"]
+
+        t_audit = time.time()
+        audit = server.audit(
+            request_id=result["request_id"],
+            token_index=tok_idx,
+            layer_indices=layers,
+            tier=tier,
+            binary=True,
+            include_kv=include_kv,
+        )
+        audit_ms = (time.time() - t_audit) * 1000
+        audit_kb = len(audit) / 1024
+
+        t_verify = time.time()
+        report = verilm_rs.verify_v4_full_binary(bytes(audit), key_bin, artifact_bin)
+        verify_ms = (time.time() - t_verify) * 1000
+
+        if temperature > 0:
+            mode = f"T={temperature}, top_k={top_k}, top_p={top_p}"
+        else:
+            mode = "greedy"
+        tier_str = f"{tier} ({len(layers)}/{n_layers} layers)"
+        kv_str = "kv=on" if include_kv else "kv=off"
+        print(f"  {label}: {n_gen} tok, {mode}, {tier_str}, "
+              f"{kv_str}, token={tok_idx}, {audit_kb:.0f} KB, "
+              f"chat={chat_ms:.0f}ms audit={audit_ms:.0f}ms verify={verify_ms:.0f}ms")
+
+        check_qwen_report(
+            report,
+            label,
+            expected_tier=tier,
+            require_qkv_skip=require_qkv_skip,
+        )
+        return result, report, audit
+
+    # -- Test 1: Greedy batch with mixed tiers --
+    greedy_prompts = [
+        ("What causes rainbows?", 64),
+        ("Explain how a CPU pipeline works.", 96),
+        ("What is the difference between TCP and UDP?", 80),
+        ("Why is the sky blue?", 64),
+    ]
+    print(f"Test 1: Greedy batch ({len(greedy_prompts)} requests, mixed tiers)")
+    for i, (prompt, max_tok) in enumerate(greedy_prompts):
+        tier = "full" if (i % 3 == 0) else "routine"
+        audit_and_verify(
+            prompt,
+            max_tok,
+            0.0,
+            tier,
+            f"req {i}",
+            require_qkv_skip=(i == 0),
+        )
+    print()
+
+    # -- Test 2: Sampled decoding --
+    sampled_prompts = [
+        ("Write a creative story about a robot learning to paint.", 96, 0.8, 50, 0.9),
+        ("Invent a new recipe using only five ingredients.", 80, 0.7, 40, 0.95),
+        ("Describe an alien civilization in three sentences.", 64, 0.9, 0, 0.9),
+    ]
+    print(f"Test 2: Sampled decoding ({len(sampled_prompts)} requests)")
+    for i, (prompt, max_tok, temp, top_k, top_p) in enumerate(sampled_prompts):
+        tier = "full" if i == 0 else "routine"
+        audit_and_verify(
+            prompt,
+            max_tok,
+            temp,
+            tier,
+            f"sampled {i}",
+            top_k=top_k,
+            top_p=top_p,
+        )
+    print()
+
+    # -- Test 3: Longer generation --
+    print("Test 3: Longer generation")
+    audit_and_verify(
+        "Write a detailed explanation of how public-key cryptography works, "
+        "including RSA key generation, encryption, decryption, and why it is secure.",
+        256,
+        0.0,
+        "full",
+        "long-gen",
+        min_tokens=64,
+    )
+    print()
+
+    # -- Test 4: Longer prompt --
+    context_block = (
+        "You are an expert systems architect. You are evaluating a cryptographic "
+        "commit-and-audit protocol for LLM inference verification. The provider "
+        "runs inference on GPU, commits retained state with Merkle roots, and opens "
+        "challenged token positions after the verifier derives a challenge seed. "
+        "The verifier checks shell matrix multiplications with Freivalds, validates "
+        "decode with LP-hidden bf16 replay, and treats Qwen attention as an open "
+        "problem until a kernel-aligned witness or deterministic attention kernel lands."
+    )
+    long_prompt = "\n\n".join([
+        context_block,
+        "Operational constraints: average audit bandwidth must stay low, but the "
+        "verifier may escalate suspicious requests to deeper audits. The provider "
+        "must not be able to predict which token or layer will open before committing.",
+        "Adversarial constraints: a dishonest provider may tamper with sampling "
+        "parameters, omit retained state, replay receipts, or attempt to steer hidden "
+        "states while preserving local consistency.",
+        "Give a concrete production audit policy for this Qwen profile and be explicit "
+        "about which claims are proven today and which attention claims remain open.",
+    ])
+    print("Test 4: Long prompt (~350 tokens input)")
+    audit_and_verify(long_prompt, 128, 0.0, "full", "long-prompt")
+    print()
+
+    # -- Test 5: Multi-position escalation --
+    print("Test 5: Multi-position escalation on one request")
+    result_multi = server.chat(
+        prompt="Write a short poem about the ocean.",
+        max_tokens=128,
+        temperature=0.0,
+    )
+    commitment_multi = result_multi["commitment"]
+    gen_start_multi = max(commitment_multi.get("n_prompt_tokens", 1) - 1, 0)
+    base_seed = derive_test_challenge_seed(commitment_multi, verifier_secret)
+    for j in range(2):
+        challenge = None
+        for attempt in range(64):
+            seed_j = hashlib.sha256(
+                base_seed
+                + j.to_bytes(4, "little")
+                + attempt.to_bytes(4, "little")
+            ).digest()
+            candidate = verilm_rs.build_audit_challenge(
+                list(seed_j), result_multi["n_tokens"], n_layers, "full"
+            )
+            if candidate["token_index"] >= gen_start_multi:
+                challenge = candidate
+                break
+        if challenge is None:
+            raise RuntimeError("could not derive generated-token escalation challenge")
+        tok_idx = challenge["token_index"]
+
+        t_audit = time.time()
+        audit = server.audit(
+            request_id=result_multi["request_id"],
+            token_index=tok_idx,
+            layer_indices=full_layers,
+            tier="full",
+            binary=True,
+            include_kv=False,
+        )
+        audit_ms = (time.time() - t_audit) * 1000
+
+        t_verify = time.time()
+        report = verilm_rs.verify_v4_full_binary(bytes(audit), key_bin, artifact_bin)
+        verify_ms = (time.time() - t_verify) * 1000
+        print(f"  challenge {j}: token={tok_idx}, {len(audit)/1024:.0f} KB, "
+              f"audit={audit_ms:.0f}ms verify={verify_ms:.0f}ms")
+        check_qwen_report(report, f"position {tok_idx}", expected_tier="full")
+    print()
+
+    # -- Test 6: Tamper detection --
+    print("Test 6: Tamper detection (bit-flip -> verifier rejects)")
+    result_tamper = server.chat(prompt="What is gravity?", max_tokens=32, temperature=0.0)
+    challenge = build_test_challenge(
+        result_tamper["commitment"],
+        result_tamper["n_tokens"],
+        "full",
+        generated_only=True,
+    )
+    audit_honest = server.audit(
+        request_id=result_tamper["request_id"],
+        token_index=challenge["token_index"],
         layer_indices=full_layers,
         tier="full",
         binary=True,
+        include_kv=False,
     )
-    report = verilm_rs.verify_v4_full_binary(bytes(audit), key_bin, artifact_bin)
-    check(report["passed"], f"full verify: {report['checks_passed']}/{report['checks_run']} checks")
-    if not report["passed"]:
-        for f in report.get("failures", [])[:5]:
-            print(f"    {f}")
+    report_honest = verilm_rs.verify_v4_full_binary(bytes(audit_honest), key_bin, artifact_bin)
+    check_qwen_report(report_honest, "honest tamper baseline", expected_tier="full")
 
-    # Assert LP-hidden decode check actually ran (not skipped)
-    cf = report.get("classified_failures", [])
-    skipped = report.get("skipped", [])
-    lp_skipped = [s for s in skipped if "lp_hidden" in s.lower() or "lm_head" in s.lower()]
-    check(len(lp_skipped) == 0, f"LP-hidden decode check ran (not skipped)")
-    if lp_skipped:
-        print(f"    skipped: {lp_skipped}")
-    print()
-
-    # ── Test 2: Routine-tier verify ──
-    print("Test 2: Routine-tier verify")
-    result2 = server.chat(prompt="What is a CPU pipeline?", max_tokens=64, temperature=0.0)
-    challenge_seed = hashlib.sha256(b"test-qwen-routine").digest()
-    challenge = verilm_rs.build_audit_challenge(
-        list(challenge_seed), result2["n_tokens"], n_layers, "routine"
-    )
-    routine_layers = challenge["layer_indices"]
-    routine_token = challenge["token_index"]
-    print(f"  challenge: token={routine_token}, {len(routine_layers)}/{n_layers} layers")
-
-    audit2 = server.audit(
-        request_id=result2["request_id"],
-        token_index=routine_token,
-        layer_indices=routine_layers,
-        tier="routine",
-        binary=True,
-    )
-    report2 = verilm_rs.verify_v4_full_binary(bytes(audit2), key_bin, artifact_bin)
-    check(report2["passed"], f"routine verify: {report2['checks_passed']}/{report2['checks_run']} checks")
-    if not report2["passed"]:
-        for f in report2.get("failures", [])[:5]:
-            print(f"    {f}")
-
-    full_kb = len(audit) / 1024
-    routine_kb = len(audit2) / 1024
-    print(f"  payload: {routine_kb:.0f} KB routine vs {full_kb:.0f} KB full")
-    print()
-
-    # ── Test 3: Tamper detection ──
-    print("Test 3: Tamper detection")
-    result3 = server.chat(prompt="What is gravity?", max_tokens=32, temperature=0.0)
-    audit3 = server.audit(
-        request_id=result3["request_id"],
-        token_index=0,
-        layer_indices=full_layers,
-        tier="full",
-        binary=True,
-    )
-    report_honest = verilm_rs.verify_v4_full_binary(bytes(audit3), key_bin, artifact_bin)
-    check(report_honest["passed"], "honest audit passes")
-
-    tampered = bytearray(audit3)
+    tampered = bytearray(audit_honest)
     if len(tampered) > 100:
         tampered[100] ^= 0xFF
     report_tamper = verilm_rs.verify_v4_full_binary(bytes(tampered), key_bin, artifact_bin)
     check(not report_tamper["passed"], "tampered audit rejected")
     print()
 
-    # ── Test 4: EOS early stop ──
-    print("Test 4: EOS early stop")
+    # -- Test 7: EOS early stop --
+    print("Test 7: EOS early stop")
     eos = server.chat(prompt="What is 2+2? Just the number.", max_tokens=256, temperature=0.0)
-    eos_n = eos["n_tokens"]
-    print(f"  {eos_n} tokens (EOS {'early' if eos_n < 256 else 'at limit'})")
+    print(f"  {eos['n_tokens']} audit tokens")
 
+    challenge = build_test_challenge(
+        eos["commitment"],
+        eos["n_tokens"],
+        "full",
+        generated_only=True,
+    )
     eos_audit = server.audit(
         request_id=eos["request_id"],
-        token_index=0,
+        token_index=challenge["token_index"],
         layer_indices=full_layers,
         tier="full",
         binary=True,
+        include_kv=False,
     )
     eos_report = verilm_rs.verify_v4_full_binary(bytes(eos_audit), key_bin, artifact_bin)
-    check(eos_report["passed"], f"EOS verify: {eos_report['checks_passed']}/{eos_report['checks_run']} checks")
+    check_qwen_report(eos_report, "EOS verify", expected_tier="full")
     print()
 
-    # ── Test 5: Score witness at last generated token ──
-    # Disabled — witnessed-score f64 softmax·V replay has known precision gaps
-    # (max_diff=9 in sweep). Fixed tolerances are not viable. Re-enable when
-    # the custom deterministic GEMM kernel lands.
-    #
-    # print("Test 5: Score witness at last generated token")
-    # print("  NOTE: score witness captures Q for last decode step only")
-    # print("  NOTE: first/mid token attention verification intentionally skipped")
-    # result5 = server.chat(
-    #     prompt="Explain what a hash function does.",
-    #     max_tokens=64, temperature=0.0,
-    # )
-    # n5_prompt = result5["commitment"].get("n_prompt_tokens", 0)
-    # n5_gen = result5["n_tokens"] - n5_prompt
-    # last_tok = n5_prompt + n5_gen - 1
-    # print(f"  last gen token: {last_tok} (prompt={n5_prompt}, gen={n5_gen})")
-    #
-    # a5 = server.audit(
-    #     request_id=result5["request_id"],
-    #     token_index=last_tok,
-    #     layer_indices=full_layers,
-    #     tier="full",
-    #     binary=True,
-    #     use_captured_x_attn=True,
-    # )
-    # r5 = verilm_rs.verify_v4_full_binary(bytes(a5), key_bin, artifact_bin)
-    # check(r5["passed"], f"token {last_tok}: {r5['checks_passed']}/{r5['checks_run']} checks")
-    # if not r5["passed"]:
-    #     for f in r5.get("failures", [])[:3]:
-    #         print(f"    {f}")
-    # print()
-
-    # ── Summary ──
+    # -- Summary --
     print("=" * 50)
     if failures:
         print(f"FAILED — {len(failures)} failure(s):")
@@ -262,14 +435,14 @@ def _run():
     return {"passed": len(failures) == 0, "failures": failures}
 
 
-@app.function(image=image, gpu="A100-80GB", timeout=900)
+@app.function(image=image, gpu="A100-80GB", timeout=1800)
 def run():
     return _run()
 
 
 @app.local_entrypoint()
 def main():
-    print("CommitLLM E2E — Qwen 2.5 7B W8A8 (regression test)")
+    print("CommitLLM E2E — Qwen 2.5 7B W8A8 (decode/shell regression)")
     print("=" * 50)
     result = run.remote()
     if not result["passed"]:

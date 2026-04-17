@@ -102,7 +102,7 @@ fn make_valid_response(
     };
     let n_tok = all_retained.len();
     let all_scales = vec![unit_scales(cfg.n_layers); n_tok];
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None, None);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None, None, None);
     // Open token 0 (has no prefix).
     let response = open_v4(
         &state,
@@ -150,7 +150,7 @@ fn make_valid_response_at(
     };
     let n_tok = all_retained.len();
     let all_scales = vec![unit_scales(cfg.n_layers); n_tok];
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None, None);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None, None, None);
     let response = open_v4(
         &state,
         token_index,
@@ -1180,7 +1180,7 @@ fn long_prompt_short_output_pass() {
     };
     let n_tok = all_retained.len();
     let all_scales = vec![unit_scales(cfg.n_layers); n_tok];
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None, None);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None, None, None);
     // Open the last token (the single generated token).
     let response = open_v4(
         &state,
@@ -1241,7 +1241,7 @@ fn short_prompt_long_output_pass() {
     };
     let n_tok = all_retained.len();
     let all_scales = vec![unit_scales(cfg.n_layers); n_tok];
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None, None);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None, None, None);
     // Open a token in the middle of the generated range.
     let mid = (n_tokens / 2) as u32;
     let response = open_v4(
@@ -1304,7 +1304,7 @@ fn all_prompt_no_generation_boundary() {
     };
     let n_tok = all_retained.len();
     let all_scales = vec![unit_scales(cfg.n_layers); n_tok];
-    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None, None);
+    let (_commitment, state) = commit_minimal(all_retained, &params, None, all_scales, None, None, None, None);
     let response = open_v4(
         &state,
         0,

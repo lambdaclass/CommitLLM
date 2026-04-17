@@ -304,6 +304,7 @@ fn bench_gate_a() {
             None,
             None,
             None,
+            None,
         );
         commit_times.push(start.elapsed());
         state = Some(s);
@@ -383,6 +384,7 @@ fn bench_gate_a() {
         &fb_params,
         None,
         vec![fb_captured_scales],
+        None,
         None,
         None,
         None,

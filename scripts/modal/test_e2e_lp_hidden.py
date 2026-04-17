@@ -46,7 +46,7 @@ image = (
         "python3 -c 'import site, os; open(os.path.join(site.getsitepackages()[0], \"verilm_capture.pth\"), \"w\").write(\"import verilm._startup\\n\")'",
     )
     .add_local_dir(".", remote_path="/build", copy=True, ignore=[
-        ".git", "target", "scripts/__pycache__", "*.pdf", "site",
+        ".git", "target", "scripts/__pycache__", "*.pdf", "*.md", "site",
     ])
     .run_commands(
         "cd /build/crates/verilm-py && maturin build --release",
@@ -101,9 +101,11 @@ def _run_e2e():
     print("\n1. Generate verifier key (binary)...")
     seed = hashlib.sha256(b"lp-hidden-e2e-test").digest()
     t0 = time.time()
-    key_binary = verilm_rs.generate_key_binary(model_dir, seed)
+    key_binary, artifact_binary = verilm_rs.generate_key_binary(model_dir, seed)
     keygen_ms = (time.time() - t0) * 1000
     print(f"  keygen: {keygen_ms:.0f}ms, key size: {len(key_binary)} bytes ({len(key_binary)/1024/1024:.1f} MB)")
+    if artifact_binary:
+        print(f"  decode artifact: {len(artifact_binary)} bytes ({len(artifact_binary)/1024/1024:.1f} MB)")
     assert_true(
         key_binary[:4] == b"VKEY",
         f"key binary magic is VKEY (got {key_binary[:4]})"
@@ -156,7 +158,7 @@ def _run_e2e():
         # Verify — this is the critical test. The canonical verifier must
         # run phase_lm_head_lp_hidden and confirm token identity via bf16
         # lm_head matmul.
-        report = verilm_rs.verify_v4_full_binary(bytes(audit_binary), key_binary)
+        report = verilm_rs.verify_v4_full_binary(bytes(audit_binary), key_binary, artifact_binary)
         checks = report["checks_run"]
         passed = report["checks_passed"]
         assert_true(
@@ -228,7 +230,7 @@ def _run_e2e():
 
         # Verify — canonical verifier must replay sampled token identity
         # using derive_token_seed + canonical_sample over bf16 logits.
-        report = verilm_rs.verify_v4_full_binary(bytes(audit_binary), key_binary)
+        report = verilm_rs.verify_v4_full_binary(bytes(audit_binary), key_binary, artifact_binary)
         checks = report["checks_run"]
         passed = report["checks_passed"]
         assert_true(
@@ -261,7 +263,7 @@ def _run_e2e():
     tampered = bytearray(audit_tamper)
     if len(tampered) > 100:
         tampered[100] ^= 0xFF
-    report_tampered = verilm_rs.verify_v4_full_binary(bytes(tampered), key_binary)
+    report_tampered = verilm_rs.verify_v4_full_binary(bytes(tampered), key_binary, artifact_binary)
     assert_true(
         not report_tampered["passed"],
         "tampered audit correctly rejected"
@@ -294,7 +296,7 @@ def _run_e2e():
         tier="full",
         binary=True,
     )
-    eos_report = verilm_rs.verify_v4_full_binary(bytes(eos_audit), key_binary)
+    eos_report = verilm_rs.verify_v4_full_binary(bytes(eos_audit), key_binary, artifact_binary)
     assert_true(
         eos_report["passed"],
         f"EOS trim verify passed ({eos_report['checks_passed']}/{eos_report['checks_run']} checks)"

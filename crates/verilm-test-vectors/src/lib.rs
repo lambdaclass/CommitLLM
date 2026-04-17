@@ -416,6 +416,8 @@ pub fn generate_key(cfg: &ModelConfig, model: &[LayerWeights], seed: [u8; 32]) -
         rope_aware_replay: false,
         qkv_biases: Vec::new(),
         verification_profile: None,
+        v_lm_head_f64: None,
+        captured_logits_freivalds_seed: None,
     }
 }
 

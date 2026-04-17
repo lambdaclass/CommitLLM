@@ -2,6 +2,14 @@
 
 This document tracks measurements, open questions, and the evolving understanding of the attention corridor's security properties. The corridor allows ±τ tolerance on INT8 attention outputs per layer. The central question: **can an adversary exploit this tolerance to flip output tokens?**
 
+Current protocol interpretation as of 2026-04-17:
+
+- sampled decode exactness is now closed separately via `CapturedLogits`
+- greedy shell/decode is in good shape on the supported paths
+- arbitrary-position attention is the main remaining dense-model correctness blocker
+- the next accepted stock-kernel attempt is a FlashAttention/kernel-aligned witness
+- if that fails broad randomized tests cleanly, the fallback is deterministic attention kernels
+
 ---
 
 ## 1. Measurement results

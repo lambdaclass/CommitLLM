@@ -455,7 +455,25 @@ pub struct KeygenOutput {
     pub decode_artifact: Option<verilm_core::types::DecodeArtifact>,
 }
 
+/// Generate a verifier key with an optional profile override.
+/// If `profile_override` is Some, it replaces the auto-detected profile.
+pub fn generate_key_with_profile(
+    dir: &Path,
+    seed: [u8; 32],
+    profile_override: Option<verilm_core::types::VerificationProfile>,
+) -> Result<KeygenOutput> {
+    generate_key_inner(dir, seed, profile_override)
+}
+
 pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<KeygenOutput> {
+    generate_key_inner(dir, seed, None)
+}
+
+fn generate_key_inner(
+    dir: &Path,
+    seed: [u8; 32],
+    profile_override: Option<verilm_core::types::VerificationProfile>,
+) -> Result<KeygenOutput> {
     let cfg = detect_config(dir)?;
     let json_cfg = read_model_config_json(dir);
     let rmsnorm_eps = json_cfg.rmsnorm_eps;
@@ -692,18 +710,21 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<KeygenOutput> {
         None
     };
 
-    let verification_profile = verilm_core::types::VerificationProfile::detect(
-        json_cfg.model_type.as_deref().unwrap_or(""),
-        quant_family.as_deref(),
-    );
+    let verification_profile = profile_override.or_else(|| {
+        verilm_core::types::VerificationProfile::detect(
+            json_cfg.model_type.as_deref().unwrap_or(""),
+            quant_family.as_deref(),
+        )
+    });
 
-    // Build decode artifact when verification profile uses LpHiddenBf16 mode.
-    // The artifact contains the full bf16 lm_head matrix; the verifier key
-    // stores only its content hash (keeping the key small).
-    let (decode_artifact, lm_head_bf16_hash) = if verification_profile
-        .as_ref()
-        .is_some_and(|p| p.decode_acceptance == verilm_core::types::DecodeAcceptanceMode::LpHiddenBf16)
-    {
+    // Build decode artifact when verification profile uses LpHiddenBf16 or CapturedLogits mode.
+    // Both modes need the bf16 lm_head matrix. CapturedLogits additionally needs
+    // the Freivalds ±1 random projection precomputed against lm_head.
+    let needs_bf16_lm_head = verification_profile.as_ref().is_some_and(|p| {
+        p.decode_acceptance == verilm_core::types::DecodeAcceptanceMode::LpHiddenBf16
+            || p.decode_acceptance == verilm_core::types::DecodeAcceptanceMode::CapturedLogits
+    });
+    let (decode_artifact, lm_head_bf16_hash) = if needs_bf16_lm_head {
         match find_tensor_raw(&parsed, "lm_head.weight") {
             Ok((data, shape, dtype)) => {
                 let expected_len = shape.iter().product::<usize>();
@@ -745,6 +766,39 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<KeygenOutput> {
         (None, None)
     };
 
+    // CapturedLogits: precompute Freivalds ±1 projection against lm_head_bf16.
+    let (v_lm_head_f64, captured_logits_freivalds_seed) = if verification_profile
+        .as_ref()
+        .is_some_and(|p| p.decode_acceptance == verilm_core::types::DecodeAcceptanceMode::CapturedLogits)
+    {
+        if let Some(ref artifact) = decode_artifact {
+            // Generate a secret seed for the ±1 random vector.
+            let mut freivalds_seed = [0u8; 32];
+            rng.fill(&mut freivalds_seed);
+
+            let r = verilm_core::freivalds::derive_pm1_vector(
+                &freivalds_seed,
+                artifact.vocab_size,
+            );
+            let v = verilm_core::freivalds::precompute_v_lm_head_f64(
+                &r,
+                &artifact.lm_head_bf16,
+                artifact.vocab_size,
+                artifact.hidden_dim,
+            );
+            eprintln!(
+                "  captured-logits Freivalds: v_lm_head_f64 ({} elements)",
+                v.len(),
+            );
+            (Some(v), Some(freivalds_seed))
+        } else {
+            eprintln!("  warning: CapturedLogits profile but no decode artifact, skipping Freivalds precompute");
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
     let key = VerifierKey {
         version: 1,
         config,
@@ -775,6 +829,8 @@ pub fn generate_key(dir: &Path, seed: [u8; 32]) -> Result<KeygenOutput> {
         rope_aware_replay,
         qkv_biases,
         verification_profile,
+        v_lm_head_f64,
+        captured_logits_freivalds_seed,
     };
 
     Ok(KeygenOutput { key, decode_artifact })
