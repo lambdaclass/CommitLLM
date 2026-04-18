@@ -4,6 +4,30 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 
 Historical references below to “roadmap #N” refer to the pre-2026-03-30 roadmap numbering. On 2026-03-30 the roadmap was renumbered into a single linear open-items-only sequence.
 
+## 2026-04-18
+
+### Measured
+
+- **Tiled online-softmax replay was rejected as the stock-kernel attention fix.** On both Qwen and Llama, global replay and tiled replay (`block_n=64` / `128`) produced identical `L∞` gaps on every measured run (`delta = 0`). Matching FlashAttention tile order does not reduce the arbitrary-position attention gap.
+- **`LSE` feasibility was also rejected.** Capturing FlashAttention decode-time `LSE` does not let the verifier recover stock-kernel attention closely enough to matter:
+  - **Qwen 7B W8A8**: max `|CPU_LSE - GPU_LSE| = 6160`
+  - **Llama 8B W8A8**: max `|CPU_LSE - GPU_LSE| = 15.6`
+  - Even when replay uses the exact GPU `LSE`, the attention-output gap stays in the same `L∞ ≈ 182–254` range. This isolates the remaining mismatch to the stock kernel's `P @ V` aggregation / cast path, not softmax normalization.
+- **CapturedLogits A/B economics are partly isolated.** On the completed Qwen run, capture hooks added about `~3.6 ms/token` over baseline generation, while commit/finalize added about `~37 ms/token`. This is enough to say capture itself is not the dominant decode-side cost; commit/materialization is. The Llama capture A/B still needs a clean rerun because one Modal capture leg failed to receive a GPU.
+
+### Decided
+
+- **Exact arbitrary-position stock-kernel attention replay is closed.** The project no longer treats kernel-aligned replay as the mainline exact-attention path. Tiled replay and `LSE` replay both failed; no more replay-shape or softmax-normalization tuning belongs on the critical path.
+- **The dense-model story now has two explicit modes.**
+  - **Stock-compatible mode** keeps the current vLLM / FlashAttention runtime and therefore preserves current answer semantics. Shell and decode remain exact on the kept paths (`CapturedLogits` for sampled decode). Arbitrary-position attention is either certified by a practical low-bandwidth non-hackability tier (`top-k` / tail bound / final-logit margin gating) or reported as unsupported.
+  - **Verified-attention mode** replaces stock attention on the verified path with deterministic attention kernels. This is the exact-attention mode. It may change answers relative to stock mode and must be documented as a distinct runtime/profile.
+- **Deterministic attention kernels are now a separate verified mode, not the default runtime.** The default plan is to keep stock semantics where possible and only use verified-attention mode when the stock-compatible practical tier cannot certify the answer or when stronger guarantees are required.
+
+### Known issues
+
+- **Stock-compatible arbitrary-position attention is still open.** `LSE` and tiled replay are both rejected. The remaining stock-kernel option is a practical low-bandwidth tier based on tiny attention evidence, tail bounds against committed `V`, and exact final-logit margin gating. Until that lands, stock-compatible mode should treat arbitrary-position attention as unsupported beyond token-0 smoke/reference.
+- **Verified-attention mode is not implemented yet.** Deterministic kernels are the clean exact path, but they imply a distinct runtime mode and may drift from stock answers. CPU/GPU arithmetic spec, harness, integration, and drift benchmarks are all still open.
+
 ## 2026-04-17
 
 ### Measured
