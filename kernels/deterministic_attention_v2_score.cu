@@ -1,16 +1,15 @@
 /**
- * Deterministic Attention Kernel v3 — bit-exact against CPU reference.
+ * Deterministic Attention Kernel v2 — bit-exact against CPU reference.
  *
  * Single-query decode attention with fully specified arithmetic:
  *   Step 1: Score = Q · K^T * inv_sqrt_d  (v2: parallel multiply + tree reduce)
- *   Step 2: Softmax (v3: parallel tree max, parallel exp, tree sum, parallel normalize)
+ *   Step 2: Softmax with canonical exp polynomial (v1: thread 0, sequential)
  *   Step 3: Output = P @ V  (v1: sequential per-thread, parallel across d_head)
  *
- * v3 change (softmax path):
- *   - Max score: tree_reduce_max over scores[] (was: thread 0 sequential)
- *   - Exp: all threads compute exp_canonical in parallel (was: thread 0 sequential)
- *   - Sum exp: tree_reduce_sum over exp_scores[] (was: thread 0 sequential)
- *   - Normalize: all threads divide in parallel (was: thread 0 sequential)
+ * v2 change (score path only):
+ *   - Each thread computes one element product q[i]*k[i]
+ *   - Products are reduced via frozen binary tree (shared memory)
+ *   - Tree structure matches the CPU reference tree_reduce_sum_f32()
  *
  * All library-dependent math is eliminated:
  *   - No scalbnf/ldexp — bit-level exponent manipulation instead
@@ -92,18 +91,17 @@ static __host__ __device__ unsigned int next_pow2(unsigned int v) {
 }
 
 /**
- * Deterministic decode attention kernel (v3 — tree-reduced scores + parallel softmax).
+ * Deterministic decode attention kernel (v2 — tree-reduced scores).
  *
- * One block per query head. blockDim.x = max(next_pow2(d_head), next_pow2(seq_len)).
+ * One block per query head. blockDim.x = next_pow2(d_head).
  *
  * Step 1 (v2): All threads compute element-wise products, then tree-reduce
  *   in shared memory to get dot product. Thread 0 applies inv_sqrt_d.
- * Step 2 (v3): Parallel tree max, parallel exp, tree sum, parallel normalize.
- * Step 3 (v1): All threads compute V aggregation (parallel across d_head,
- *   sequential across seq_len).
+ * Step 2 (v1): Thread 0 computes softmax (sequential).
+ * Step 3 (v1): All threads compute V aggregation (parallel across d_head, sequential across seq_len).
  *
  * Shared memory layout:
- *   reduce_buf:  [padded_reduce]  — tree reduction workspace (max of padded_d, padded_seq)
+ *   reduce_buf:  [padded_d_head]  — tree reduction workspace
  *   scores:      [seq_len]        — attention scores
  *   exp_scores:  [seq_len]        — softmax weights
  */
@@ -117,10 +115,7 @@ __global__ void deterministic_attention_kernel(
     int n_kv_heads,
     int d_head,
     int seq_len,
-    float inv_sqrt_d,
-    int padded_d,
-    int padded_seq,
-    int padded_reduce
+    float inv_sqrt_d
 ) {
     int qh = blockIdx.x;
     if (qh >= n_q_heads) return;
@@ -128,14 +123,18 @@ __global__ void deterministic_attention_kernel(
     int heads_per_kv = n_q_heads / n_kv_heads;
     int kv_group = qh / heads_per_kv;
 
+    int padded_d = next_pow2(d_head);
+
     extern __shared__ float smem[];
-    float* reduce_buf = smem;                                  // [padded_reduce]
-    float* scores     = smem + padded_reduce;                  // [seq_len]
-    float* exp_scores = smem + padded_reduce + seq_len;        // [seq_len]
+    float* reduce_buf = smem;                            // [padded_d]
+    float* scores     = smem + padded_d;                 // [seq_len]
+    float* exp_scores = smem + padded_d + seq_len;       // [seq_len]
 
     int tid = threadIdx.x;
 
     // --- Step 1 (v2): Scores via parallel multiply + tree reduce ---
+    float max_score = -INFINITY;
+
     for (int t = 0; t < seq_len; t++) {
         // Phase A: element-wise multiply (each thread handles one dimension)
         if (tid < d_head) {
@@ -157,61 +156,29 @@ __global__ void deterministic_attention_kernel(
 
         // Thread 0 has the dot product in reduce_buf[0]
         if (tid == 0) {
-            scores[t] = __fmul_rn(reduce_buf[0], inv_sqrt_d);
+            float s = __fmul_rn(reduce_buf[0], inv_sqrt_d);
+            scores[t] = s;
+            if (s > max_score) max_score = s;
         }
         __syncthreads();
     }
 
-    // --- Step 2 (v3): Softmax — parallel tree max, exp, tree sum, normalize ---
-
-    // 2a. Tree reduce max over scores[]
-    //     Load scores into reduce_buf with -inf padding
-    for (int base = tid; base < padded_seq; base += blockDim.x) {
-        reduce_buf[base] = (base < seq_len) ? scores[base] : -INFINITY;
-    }
-    __syncthreads();
-
-    for (int stride = padded_seq / 2; stride >= 1; stride >>= 1) {
-        for (int base = tid; base < stride; base += blockDim.x) {
-            float left = reduce_buf[base];
-            float right = reduce_buf[base + stride];
-            reduce_buf[base] = (left >= right) ? left : right;
+    // --- Step 2: Softmax (thread 0, sequential — unchanged from v1) ---
+    if (tid == 0) {
+        float sum_exp = 0.0f;
+        for (int t = 0; t < seq_len; t++) {
+            float e = exp_canonical(__fadd_rn(scores[t], -max_score));
+            exp_scores[t] = e;
+            sum_exp = __fadd_rn(sum_exp, e);
         }
-        __syncthreads();
-    }
 
-    float max_score = reduce_buf[0];  // all threads read (broadcast via smem)
-    __syncthreads();
-
-    // 2b. Parallel exp computation
-    for (int base = tid; base < seq_len; base += blockDim.x) {
-        exp_scores[base] = exp_canonical(__fadd_rn(scores[base], -max_score));
-    }
-    __syncthreads();
-
-    // 2c. Tree reduce sum of exp_scores[]
-    //     Load exp_scores into reduce_buf with 0.0 padding
-    for (int base = tid; base < padded_seq; base += blockDim.x) {
-        reduce_buf[base] = (base < seq_len) ? exp_scores[base] : 0.0f;
-    }
-    __syncthreads();
-
-    for (int stride = padded_seq / 2; stride >= 1; stride >>= 1) {
-        for (int base = tid; base < stride; base += blockDim.x) {
-            reduce_buf[base] = __fadd_rn(reduce_buf[base], reduce_buf[base + stride]);
+        for (int t = 0; t < seq_len; t++) {
+            float w = __fdiv_rn(exp_scores[t], sum_exp);
+            exp_scores[t] = w;
+            weights[qh * seq_len + t] = w;
         }
-        __syncthreads();
     }
 
-    float sum_exp = reduce_buf[0];  // all threads read
-    __syncthreads();
-
-    // 2d. Parallel normalize + write weights
-    for (int base = tid; base < seq_len; base += blockDim.x) {
-        float w = __fdiv_rn(exp_scores[base], sum_exp);
-        exp_scores[base] = w;
-        weights[qh * seq_len + base] = w;
-    }
     __syncthreads();
 
     // --- Step 3: V aggregation (parallel across d_head, sequential across seq_len — v1) ---
@@ -244,23 +211,14 @@ int deterministic_attention(
     float inv_sqrt_d
 ) {
     int padded_d = next_pow2(d_head);
-    int padded_seq = next_pow2(seq_len);
-    int padded_reduce = (padded_d > padded_seq) ? padded_d : padded_seq;
-
-    // Threads = padded_d (same as v2). Softmax tree reductions over larger
-    // padded_seq are handled via stride loop: each thread processes multiple
-    // elements per reduction step. This avoids the occupancy penalty of
-    // launching max(padded_d, padded_seq) threads where most are idle in
-    // Steps 1 and 3.
-    int threads = padded_d;
+    int threads = padded_d;  // v2: one thread per padded d_head dimension
     int blocks = n_q_heads;
-    // smem: reduce_buf[padded_reduce] + scores[seq_len] + exp_scores[seq_len]
-    size_t smem_bytes = (padded_reduce + 2 * seq_len) * sizeof(float);
+    // smem layout: reduce_buf[padded_d] + scores[seq_len] + exp_scores[seq_len]
+    size_t smem_bytes = (padded_d + 2 * seq_len) * sizeof(float);
 
     deterministic_attention_kernel<<<blocks, threads, smem_bytes>>>(
         q_dev, k_dev, v_dev, output_dev, weights_dev,
-        n_q_heads, n_kv_heads, d_head, seq_len, inv_sqrt_d,
-        padded_d, padded_seq, padded_reduce
+        n_q_heads, n_kv_heads, d_head, seq_len, inv_sqrt_d
     );
 
     cudaError_t err = cudaGetLastError();

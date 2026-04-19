@@ -99,17 +99,55 @@ inv_sqrt_d: f32 = 1.0_f32 / sqrt(d_head as f32)
 
 Both sides receive the same f32 bits. Neither side recomputes this value.
 
-### Rule 4: Left-to-right sequential f32 accumulation
+### Rule 4: Frozen parallel reduction tree (v2)
 
-All dot products and weighted sums accumulate left-to-right:
+> **v1 (serial)**: Left-to-right sequential accumulation. Replaced in v2.
+>
+> **v2 (current)**: Fixed binary tree reduction. Both prover and verifier
+> use the same tree structure. The tree is deterministic because the
+> pair order at each level is fixed.
 
-```
-acc: f32 = 0.0
-for i in 0..N:
-    acc = acc + (a[i] * b[i])    // separate mul then add, NOT fma
-```
+Reduction contract:
 
-No tree reduction, no tile-parallel accumulation, no reordering.
+1. **Padding**: Logical length is rounded up to next power of two.
+   Padding elements use the operation's identity:
+   - sum: `0.0` (positive zero, `0x00000000`)
+   - max: `-inf` (`0xFF800000`)
+   Padding is appended to the END of the input.
+
+2. **Tree structure**: At each level, adjacent pairs combine:
+   ```
+   for stride = padded_len/2, padded_len/4, ..., 1:
+       for i = 0..stride:
+           buf[i] = op(buf[i], buf[i + stride])
+   ```
+   Left operand always has the lower index.
+
+3. **Pair order**: Within each pair:
+   - sum: `result = left + right`  (f32 add, round-to-nearest-even)
+   - max: `result = (left >= right) ? left : right`
+     (IEEE 754 comparison; left operand wins on ties, including signed zeros)
+
+4. **NaN**: Inputs must not contain NaN. Behavior undefined.
+
+5. **Signed zero**: sum: `0.0 + (-0.0) = 0.0` (positive). max: left wins ties.
+
+6. **Empty**: Returns identity (`0.0` for sum, `-inf` for max).
+
+7. **Length 1**: Returns the single element unchanged.
+
+**Dot products**: For `a · b` of length N, each thread computes `a[i] * b[i]`
+(separate multiply, Rule 1), then the products are reduced via `tree_reduce_sum`.
+This replaces the sequential `acc = acc + (a[i] * b[i])` loop.
+
+**Note**: The tree sum produces DIFFERENT f32 bits than left-to-right accumulation
+(f32 addition is not associative). Both CPU and GPU must use the same tree.
+v1 serial kernel results are not comparable to v2 tree kernel results.
+
+Reference implementation: `tree_reduce_sum_f32`, `tree_reduce_max_f32` in
+`crates/verilm-core/src/attention.rs`.
+
+CUDA implementation: `kernels/tree_reduce.cu`.
 
 ### Rule 5: Bit-level ldexp (no library scalbn/ldexp)
 
@@ -189,21 +227,25 @@ S[qh, t] = acc * inv_sqrt_d                 // Rule 3
 For each query head `qh`:
 
 ```
-// Max score
-m = -inf
-for t in 0..seq_len:
-    if S[qh, t] > m: m = S[qh, t]
+// Max score (tree reduce — Rule 4)
+m = tree_reduce_max(S[qh, 0..seq_len])
 
-// Exp + sum
-sum_exp: f32 = 0.0
+// Exp (embarrassingly parallel — Rule 6)
 for t in 0..seq_len:
-    e[t] = exp_canonical(S[qh, t] - m)      // Rule 6
-    sum_exp = sum_exp + e[t]                 // Rule 4
+    e[t] = exp_canonical(S[qh, t] - m)
 
-// Normalize
+// Sum (tree reduce — Rule 4)
+sum_exp = tree_reduce_sum(e[0..seq_len])
+
+// Normalize (embarrassingly parallel — Rule 7)
 for t in 0..seq_len:
-    P[qh, t] = e[t] / sum_exp               // Rule 7
+    P[qh, t] = e[t] / sum_exp
 ```
+
+**v3 change**: Max and sum use the frozen tree reduction primitives (Rule 4)
+instead of sequential left-to-right accumulation. This produces different f32
+bits for `sum_exp` (and therefore different weights) compared to v2. Both CPU
+and GPU must use the same tree structure.
 
 ### Step 3: V Aggregation — O = P @ V
 
@@ -222,9 +264,11 @@ O[qh, i] = acc
 
 ## GPU Kernel Design
 
-One CUDA block per query head. Thread 0 computes scores + softmax
-(sequential, Rules 1/4/6). All threads compute V aggregation (parallel
-across `d_head` dimension — Rule 4 still applies per-thread).
+One CUDA block per query head. `blockDim.x = max(next_pow2(d_head), next_pow2(seq_len))`.
+Step 1: all threads compute score dot products via parallel multiply + tree reduce.
+Step 2: all threads compute softmax via parallel tree max, parallel exp,
+tree sum, parallel normalize. Step 3: `d_head` threads compute V aggregation
+(parallel across `d_head`, sequential across `seq_len`).
 
 Compiled with: `nvcc -O2 --fmad=false -shared -Xcompiler -fPIC`
 

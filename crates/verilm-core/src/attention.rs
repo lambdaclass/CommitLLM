@@ -1481,6 +1481,105 @@ pub fn certify_token(
 }
 
 // ---------------------------------------------------------------------------
+// Frozen parallel reduction tree — deterministic attention v2 primitive
+// ---------------------------------------------------------------------------
+//
+// CONTRACT (protocol-level — changing this changes the protocol):
+//
+// Both `tree_reduce_sum_f32` and `tree_reduce_max_f32` implement a binary
+// reduction tree over an f32 slice. The tree shape is fully defined by the
+// input length and must be identical on CPU (Rust) and GPU (CUDA).
+//
+// 1. PADDING: The logical length is rounded up to the next power of two.
+//    Padding elements use the identity for the operation:
+//      - sum:  0.0 (positive zero, 0x00000000)
+//      - max:  -inf (0xFF800000)
+//    Padding is appended to the END of the input.
+//
+// 2. TREE STRUCTURE: At each level, adjacent pairs are combined:
+//      buf[i] = op(buf[i], buf[i + stride])
+//    where stride = padded_len / 2, padded_len / 4, ..., 1.
+//    Left operand always has the lower index.
+//
+// 3. PAIR ORDER: Within each pair, the operation is always:
+//      result = left OP right
+//    For sum: result = left + right   (f32 add, round-to-nearest-even)
+//    For max: result = if left >= right { left } else { right }
+//            (IEEE 754 comparison; on equal values, left operand wins.
+//             For signed zeros: -0.0 >= +0.0 is true, so left wins on ties.)
+//
+// 4. NaN POLICY: Inputs must not contain NaN. Behavior on NaN input is
+//    undefined. Callers are responsible for NaN-free inputs.
+//
+// 5. SIGNED ZERO: For sum, 0.0 + (-0.0) = 0.0 in IEEE 754 (positive zero).
+//    For max, +0.0 >= -0.0 is true, so +0.0 is preferred over -0.0.
+//    Both sides (CPU/GPU) use IEEE 754 default rounding mode.
+//
+// 6. EMPTY INPUT: Length 0 returns the identity element (0.0 for sum, -inf
+//    for max).
+//
+// 7. LENGTH 1: Returns the single element unchanged.
+//
+// 8. WARP/BLOCK STAGING: The GPU kernel may use warp shuffles for the last
+//    5 levels (stride <= 16) as an optimization, but the LOGICAL tree
+//    structure is the same as the CPU reference. Warp shuffle respects
+//    lane ordering which matches the array index ordering.
+
+/// Fixed binary tree reduction: f32 sum.
+///
+/// Deterministic across CPU and GPU when both follow the frozen tree contract.
+/// See the contract comment above for the full specification.
+pub fn tree_reduce_sum_f32(values: &[f32]) -> f32 {
+    if values.is_empty() {
+        return 0.0_f32;
+    }
+    if values.len() == 1 {
+        return values[0];
+    }
+    let n = values.len().next_power_of_two();
+    let mut buf = Vec::with_capacity(n);
+    buf.extend_from_slice(values);
+    buf.resize(n, 0.0_f32); // identity for sum
+    let mut stride = n / 2;
+    while stride >= 1 {
+        for i in 0..stride {
+            buf[i] = buf[i] + buf[i + stride];
+        }
+        stride /= 2;
+    }
+    buf[0]
+}
+
+/// Fixed binary tree reduction: f32 max.
+///
+/// Deterministic across CPU and GPU when both follow the frozen tree contract.
+/// See the contract comment above for the full specification.
+pub fn tree_reduce_max_f32(values: &[f32]) -> f32 {
+    if values.is_empty() {
+        return f32::NEG_INFINITY;
+    }
+    if values.len() == 1 {
+        return values[0];
+    }
+    let n = values.len().next_power_of_two();
+    let mut buf = Vec::with_capacity(n);
+    buf.extend_from_slice(values);
+    buf.resize(n, f32::NEG_INFINITY); // identity for max
+    let mut stride = n / 2;
+    while stride >= 1 {
+        for i in 0..stride {
+            buf[i] = if buf[i] >= buf[i + stride] {
+                buf[i]
+            } else {
+                buf[i + stride]
+            };
+        }
+        stride /= 2;
+    }
+    buf[0]
+}
+
+// ---------------------------------------------------------------------------
 // Deterministic attention: bit-exact CPU reference for verified-attention mode
 // ---------------------------------------------------------------------------
 
@@ -1567,12 +1666,12 @@ pub fn canonical_inv_sqrt_d(d_head: usize) -> f32 {
     1.0_f32 / (d_head as f32).sqrt()
 }
 
-/// Deterministic attention: bit-exact CPU reference implementation.
+/// Deterministic attention: bit-exact CPU reference implementation (v2).
 ///
 /// Computes single-query decode attention with fully specified arithmetic:
-/// - Score: sequential f32 dot product (no FMA)
-/// - Softmax: canonical exp polynomial + sequential f32 sum
-/// - V aggregation: sequential f32 weighted sum (no FMA)
+/// - Score: parallel multiply + tree_reduce_sum (v2 — replaces v1 serial)
+/// - Softmax: canonical exp polynomial + sequential f32 sum (unchanged from v1)
+/// - V aggregation: sequential f32 weighted sum (unchanged from v1)
 ///
 /// # Arguments
 ///
@@ -1604,52 +1703,53 @@ pub fn replay_attention_deterministic(
     let mut output = vec![0.0_f32; n_q_heads * d_head];
     let mut all_weights = vec![0.0_f32; n_q_heads * seq_len];
 
+    // Reusable buffer for per-element products (avoids allocation per dot product).
+    let mut products = vec![0.0_f32; d_head];
+
     for qh in 0..n_q_heads {
         let kv_group = qh / heads_per_kv;
 
-        // --- Step 1: Scores S[t] = Q[qh] · K[t, kv_group] / √d ---
+        // --- Step 1 (v2): Scores via parallel multiply + tree reduce ---
         let mut scores = vec![0.0_f32; seq_len];
-        let mut max_score = f32::NEG_INFINITY;
 
         for t in 0..seq_len {
-            // Sequential f32 dot product, no FMA
-            let mut acc: f32 = 0.0;
+            // Phase A: element-wise multiply (embarrassingly parallel on GPU)
             for i in 0..d_head {
                 let q_val = bf16_to_f32(q_bf16[qh * d_head + i]);
                 let k_val = bf16_to_f32(k_bf16[t][kv_group * d_head + i]);
-                // Explicit multiply then add (no FMA)
-                let prod = q_val * k_val;
-                acc = acc + prod;
+                products[i] = q_val * k_val;
             }
-            scores[t] = acc * inv_sqrt_d;
-            if scores[t] > max_score {
-                max_score = scores[t];
-            }
+            // Phase B: fixed binary tree reduction
+            let dot = tree_reduce_sum_f32(&products);
+            scores[t] = dot * inv_sqrt_d;
         }
 
-        // --- Step 2: Softmax with canonical exp ---
-        let mut exp_scores = vec![0.0_f32; seq_len];
-        let mut sum_exp: f32 = 0.0;
+        // --- Step 2 (v3): Softmax — parallel max, exp, tree sum, normalize ---
 
+        // 2a. Max via tree reduce (parallel on GPU)
+        let max_score = tree_reduce_max_f32(&scores);
+
+        // 2b. Exp (embarrassingly parallel on GPU)
+        let mut exp_scores = vec![0.0_f32; seq_len];
         for t in 0..seq_len {
             exp_scores[t] = exp_canonical(scores[t] - max_score);
-            // Sequential left-to-right sum
-            sum_exp = sum_exp + exp_scores[t];
         }
 
-        // Weights = exp / sum (IEEE 754 f32 division, correctly rounded)
+        // 2c. Sum via tree reduce (parallel on GPU)
+        let sum_exp = tree_reduce_sum_f32(&exp_scores);
+
+        // 2d. Normalize (embarrassingly parallel on GPU)
         for t in 0..seq_len {
             let w = exp_scores[t] / sum_exp;
             all_weights[qh * seq_len + t] = w;
         }
 
-        // --- Step 3: V aggregation O[qh, i] = sum_t P[t] * V[t, kv_group, i] ---
+        // --- Step 3: V aggregation (unchanged from v1, sequential) ---
         for i in 0..d_head {
             let mut acc: f32 = 0.0;
             for t in 0..seq_len {
                 let v_val = bf16_to_f32(v_bf16[t][kv_group * d_head + i]);
                 let w = all_weights[qh * seq_len + t];
-                // Explicit multiply then add (no FMA)
                 let prod = w * v_val;
                 acc = acc + prod;
             }
@@ -1679,8 +1779,7 @@ pub fn f32_to_bf16(x: f32) -> u16 {
     (rounded >> 16) as u16
 }
 
-/// Deterministic attention with f32 inputs (for models using fp32 Q/K/V or
-/// when inputs are already converted to f32).
+/// Deterministic attention with f32 inputs (v2 — tree-reduced scores).
 pub fn replay_attention_deterministic_f32(
     q_f32: &[f32],
     k_f32: &[Vec<f32>],
@@ -1699,38 +1798,34 @@ pub fn replay_attention_deterministic_f32(
 
     let mut output = vec![0.0_f32; n_q_heads * d_head];
     let mut all_weights = vec![0.0_f32; n_q_heads * seq_len];
+    let mut products = vec![0.0_f32; d_head];
 
     for qh in 0..n_q_heads {
         let kv_group = qh / heads_per_kv;
 
-        // Step 1: Scores
+        // Step 1 (v2): Scores via parallel multiply + tree reduce
         let mut scores = vec![0.0_f32; seq_len];
-        let mut max_score = f32::NEG_INFINITY;
 
         for t in 0..seq_len {
-            let mut acc: f32 = 0.0;
             for i in 0..d_head {
-                let prod = q_f32[qh * d_head + i] * k_f32[t][kv_group * d_head + i];
-                acc = acc + prod;
+                products[i] = q_f32[qh * d_head + i] * k_f32[t][kv_group * d_head + i];
             }
-            scores[t] = acc * inv_sqrt_d;
-            if scores[t] > max_score {
-                max_score = scores[t];
-            }
+            let dot = tree_reduce_sum_f32(&products);
+            scores[t] = dot * inv_sqrt_d;
         }
 
-        // Step 2: Softmax
+        // Step 2 (v3): Softmax — parallel max, exp, tree sum, normalize
+        let max_score = tree_reduce_max_f32(&scores);
         let mut exp_scores = vec![0.0_f32; seq_len];
-        let mut sum_exp: f32 = 0.0;
         for t in 0..seq_len {
             exp_scores[t] = exp_canonical(scores[t] - max_score);
-            sum_exp = sum_exp + exp_scores[t];
         }
+        let sum_exp = tree_reduce_sum_f32(&exp_scores);
         for t in 0..seq_len {
             all_weights[qh * seq_len + t] = exp_scores[t] / sum_exp;
         }
 
-        // Step 3: V aggregation
+        // Step 3: V aggregation (v1 — sequential)
         for i in 0..d_head {
             let mut acc: f32 = 0.0;
             for t in 0..seq_len {
@@ -2690,6 +2785,313 @@ mod tests {
         // With a lower threshold of 0.85, it should pass.
         let cert2 = certify_token(&[layer0], 5.0, 0.85);
         assert!(cert2.certified, "single good layer should pass: {}", cert2.reason);
+    }
+
+    // ── Tree reduction primitive tests ─────────────────────────────
+
+    #[test]
+    fn test_tree_reduce_sum_empty() {
+        assert_eq!(tree_reduce_sum_f32(&[]).to_bits(), 0.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_sum_single() {
+        assert_eq!(tree_reduce_sum_f32(&[42.0]).to_bits(), 42.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_sum_power_of_two() {
+        // len=2: one level, buf[0] = 1.0 + 2.0 = 3.0
+        assert_eq!(tree_reduce_sum_f32(&[1.0, 2.0]).to_bits(), 3.0_f32.to_bits());
+        // len=4: two levels
+        let r = tree_reduce_sum_f32(&[1.0, 2.0, 3.0, 4.0]);
+        // Level 1 (stride=2): buf = [1+3, 2+4] = [4.0, 6.0]
+        // Level 2 (stride=1): buf = [4+6] = [10.0]
+        assert_eq!(r.to_bits(), 10.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_sum_non_power_of_two() {
+        // len=3: padded to 4 with 0.0
+        // buf = [1.0, 2.0, 3.0, 0.0]
+        // Level 1 (stride=2): [1+3, 2+0] = [4.0, 2.0]
+        // Level 2 (stride=1): [4+2] = [6.0]
+        assert_eq!(tree_reduce_sum_f32(&[1.0, 2.0, 3.0]).to_bits(), 6.0_f32.to_bits());
+
+        // len=5: padded to 8
+        let r = tree_reduce_sum_f32(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        // buf = [1,2,3,4,5,0,0,0]
+        // stride=4: [1+5, 2+0, 3+0, 4+0] = [6,2,3,4]
+        // stride=2: [6+3, 2+4] = [9,6]
+        // stride=1: [9+6] = [15]
+        assert_eq!(r.to_bits(), 15.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_sum_len_7() {
+        // Padded to 8: [1,2,3,4,5,6,7,0]
+        // stride=4: [1+5, 2+6, 3+7, 4+0] = [6,8,10,4]
+        // stride=2: [6+10, 8+4] = [16,12]
+        // stride=1: [16+12] = [28]
+        assert_eq!(tree_reduce_sum_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]).to_bits(), 28.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_sum_len_15() {
+        let v: Vec<f32> = (1..=15).map(|i| i as f32).collect();
+        let r = tree_reduce_sum_f32(&v);
+        // Sum 1..15 = 120, but tree reduction may differ from sequential due
+        // to f32 non-associativity. For these small integers, should be exact.
+        assert_eq!(r.to_bits(), 120.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_sum_len_16() {
+        let v: Vec<f32> = (1..=16).map(|i| i as f32).collect();
+        let r = tree_reduce_sum_f32(&v);
+        assert_eq!(r.to_bits(), 136.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_sum_len_31() {
+        let v: Vec<f32> = (1..=31).map(|i| i as f32).collect();
+        let r = tree_reduce_sum_f32(&v);
+        // 31*32/2 = 496
+        assert_eq!(r.to_bits(), 496.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_sum_len_32() {
+        let v: Vec<f32> = (1..=32).map(|i| i as f32).collect();
+        let r = tree_reduce_sum_f32(&v);
+        assert_eq!(r.to_bits(), 528.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_sum_len_33() {
+        let v: Vec<f32> = (1..=33).map(|i| i as f32).collect();
+        let r = tree_reduce_sum_f32(&v);
+        // 33*34/2 = 561
+        assert_eq!(r.to_bits(), 561.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_sum_len_127() {
+        let v: Vec<f32> = (1..=127).map(|i| i as f32).collect();
+        let r = tree_reduce_sum_f32(&v);
+        // 127*128/2 = 8128
+        assert_eq!(r.to_bits(), 8128.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_sum_len_128() {
+        let v: Vec<f32> = (1..=128).map(|i| i as f32).collect();
+        let r = tree_reduce_sum_f32(&v);
+        assert_eq!(r.to_bits(), 8256.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_sum_len_129() {
+        let v: Vec<f32> = (1..=129).map(|i| i as f32).collect();
+        let r = tree_reduce_sum_f32(&v);
+        // 129*130/2 = 8385
+        assert_eq!(r.to_bits(), 8385.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_sum_len_1024() {
+        let v: Vec<f32> = (1..=1024).map(|i| i as f32).collect();
+        let r = tree_reduce_sum_f32(&v);
+        // 1024*1025/2 = 524800
+        assert_eq!(r.to_bits(), 524800.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_sum_cancellation() {
+        // Large positive + large negative that nearly cancel.
+        // Tests that tree reduction handles cancellation deterministically.
+        let v = vec![1e8_f32, -1e8, 1.0, 2.0, 3.0];
+        let r = tree_reduce_sum_f32(&v);
+        // Padded: [1e8, -1e8, 1.0, 2.0, 3.0, 0.0, 0.0, 0.0]
+        // stride=4: [1e8+3, -1e8+0, 1+0, 2+0] = [1e8+3, -1e8, 1, 2]
+        // stride=2: [(1e8+3)+1, -1e8+2] = [1e8+4, -1e8+2]  (but 1e8+3=1e8, 1e8+1=1e8 in f32...)
+        // Actually 1e8 + 3.0 = 1e8 in f32 (lost precision). So the tree result
+        // may differ from the sequential sum. That's fine — what matters is
+        // CPU and GPU agree on the SAME tree result. Just check determinism.
+        let r2 = tree_reduce_sum_f32(&v);
+        assert_eq!(r.to_bits(), r2.to_bits(), "must be deterministic");
+    }
+
+    #[test]
+    fn test_tree_reduce_sum_all_zeros() {
+        let v = vec![0.0_f32; 16];
+        assert_eq!(tree_reduce_sum_f32(&v).to_bits(), 0.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_sum_signed_zeros() {
+        // IEEE 754: 0.0 + (-0.0) = 0.0 (positive zero)
+        let v = vec![0.0_f32, -0.0, 0.0, -0.0];
+        let r = tree_reduce_sum_f32(&v);
+        // stride=2: [0.0+0.0, -0.0+(-0.0)] = [0.0, -0.0]
+        // stride=1: [0.0+(-0.0)] = [0.0]
+        assert_eq!(r.to_bits(), 0.0_f32.to_bits(), "sum of signed zeros should be +0.0");
+    }
+
+    #[test]
+    fn test_tree_reduce_sum_very_small() {
+        let v = vec![1e-38_f32; 8];
+        let r = tree_reduce_sum_f32(&v);
+        let r2 = tree_reduce_sum_f32(&v);
+        assert_eq!(r.to_bits(), r2.to_bits());
+        assert!(r > 0.0);
+    }
+
+    #[test]
+    fn test_tree_reduce_sum_very_large() {
+        let v = vec![1e38_f32; 4];
+        let r = tree_reduce_sum_f32(&v);
+        // 4 * 1e38 = 4e38 > f32::MAX ≈ 3.4e38, so this overflows to inf
+        assert!(r.is_infinite() && r > 0.0);
+    }
+
+    // ── tree_reduce_max tests ──
+
+    #[test]
+    fn test_tree_reduce_max_empty() {
+        assert_eq!(tree_reduce_max_f32(&[]).to_bits(), f32::NEG_INFINITY.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_max_single() {
+        assert_eq!(tree_reduce_max_f32(&[42.0]).to_bits(), 42.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_max_power_of_two() {
+        assert_eq!(tree_reduce_max_f32(&[1.0, 3.0]).to_bits(), 3.0_f32.to_bits());
+        assert_eq!(tree_reduce_max_f32(&[3.0, 1.0]).to_bits(), 3.0_f32.to_bits());
+        assert_eq!(tree_reduce_max_f32(&[1.0, 4.0, 2.0, 3.0]).to_bits(), 4.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_max_non_power_of_two() {
+        // len=3, padded to 4 with -inf
+        assert_eq!(tree_reduce_max_f32(&[1.0, 3.0, 2.0]).to_bits(), 3.0_f32.to_bits());
+        // len=5, padded to 8 with -inf
+        assert_eq!(tree_reduce_max_f32(&[1.0, 5.0, 3.0, 2.0, 4.0]).to_bits(), 5.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_max_len_7() {
+        let v = vec![1.0, 7.0, 3.0, 5.0, 2.0, 6.0, 4.0];
+        assert_eq!(tree_reduce_max_f32(&v).to_bits(), 7.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_max_len_15() {
+        let v: Vec<f32> = (1..=15).map(|i| i as f32).collect();
+        assert_eq!(tree_reduce_max_f32(&v).to_bits(), 15.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_max_len_33() {
+        let v: Vec<f32> = (1..=33).map(|i| i as f32).collect();
+        assert_eq!(tree_reduce_max_f32(&v).to_bits(), 33.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_max_len_127() {
+        let v: Vec<f32> = (1..=127).map(|i| i as f32).collect();
+        assert_eq!(tree_reduce_max_f32(&v).to_bits(), 127.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_max_len_128() {
+        let v: Vec<f32> = (1..=128).map(|i| i as f32).collect();
+        assert_eq!(tree_reduce_max_f32(&v).to_bits(), 128.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_max_len_129() {
+        let v: Vec<f32> = (1..=129).map(|i| i as f32).collect();
+        assert_eq!(tree_reduce_max_f32(&v).to_bits(), 129.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_max_len_1024() {
+        let v: Vec<f32> = (1..=1024).map(|i| i as f32).collect();
+        assert_eq!(tree_reduce_max_f32(&v).to_bits(), 1024.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_max_all_negative() {
+        let v = vec![-10.0, -5.0, -20.0, -1.0];
+        assert_eq!(tree_reduce_max_f32(&v).to_bits(), (-1.0_f32).to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_max_repeated_maxima() {
+        // Multiple elements equal to the max
+        let v = vec![1.0, 5.0, 3.0, 5.0, 2.0, 5.0, 4.0, 5.0];
+        assert_eq!(tree_reduce_max_f32(&v).to_bits(), 5.0_f32.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_max_signed_zeros() {
+        // IEEE 754: -0.0 >= +0.0 is true (they compare equal).
+        // Our contract: left operand wins on ties.
+        // buf = [-0.0, +0.0, -0.0, +0.0]
+        // stride=2: [-0.0 vs -0.0 → -0.0, +0.0 vs +0.0 → +0.0]
+        // stride=1: [-0.0 vs +0.0 → -0.0 (left wins)]
+        let v = vec![-0.0_f32, 0.0, -0.0, 0.0];
+        let r = tree_reduce_max_f32(&v);
+        assert_eq!(r.to_bits(), (-0.0_f32).to_bits(), "left wins on ties (signed zeros)");
+
+        // Reversed: [+0.0, -0.0, +0.0, -0.0]
+        // stride=2: [+0.0 vs +0.0 → +0.0, -0.0 vs -0.0 → -0.0]
+        // stride=1: [+0.0 vs -0.0 → +0.0 (left wins)]
+        let v2 = vec![0.0_f32, -0.0, 0.0, -0.0];
+        let r2 = tree_reduce_max_f32(&v2);
+        assert_eq!(r2.to_bits(), 0.0_f32.to_bits(), "left wins on ties (reversed)");
+    }
+
+    #[test]
+    fn test_tree_reduce_max_neg_inf_preserved() {
+        let v = vec![f32::NEG_INFINITY, f32::NEG_INFINITY];
+        assert_eq!(tree_reduce_max_f32(&v).to_bits(), f32::NEG_INFINITY.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_max_very_large() {
+        let v = vec![f32::MAX, 1.0, f32::MAX, -1.0];
+        assert_eq!(tree_reduce_max_f32(&v).to_bits(), f32::MAX.to_bits());
+    }
+
+    #[test]
+    fn test_tree_reduce_max_very_small() {
+        let v = vec![1e-38_f32, 1e-37, 1e-39, 1e-36];
+        assert_eq!(tree_reduce_max_f32(&v).to_bits(), 1e-36_f32.to_bits());
+    }
+
+    // ── Cross-check: tree reduce is deterministic ──
+
+    #[test]
+    fn test_tree_reduce_deterministic_random_like() {
+        // Pseudo-random-ish values from a simple PRNG-like sequence.
+        let mut v = Vec::with_capacity(128);
+        let mut x = 0.123456789_f32;
+        for _ in 0..128 {
+            x = (x * 1234.5678 + 0.987654).fract() * 200.0 - 100.0;
+            v.push(x);
+        }
+        let r1 = tree_reduce_sum_f32(&v);
+        let r2 = tree_reduce_sum_f32(&v);
+        assert_eq!(r1.to_bits(), r2.to_bits(), "sum must be deterministic");
+
+        let m1 = tree_reduce_max_f32(&v);
+        let m2 = tree_reduce_max_f32(&v);
+        assert_eq!(m1.to_bits(), m2.to_bits(), "max must be deterministic");
     }
 
     // ── Deterministic attention tests ──────────────────────────────
