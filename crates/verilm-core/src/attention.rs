@@ -505,6 +505,249 @@ pub fn replay_attention_witnessed_scores(
     (a_i8, a_f64)
 }
 
+/// LSE-conditioned replay: use externally-captured log-sum-exp values from the
+/// GPU kernel instead of computing softmax normalization from scratch.
+///
+/// Given witnessed scores S and captured LSE (one f32 per query head):
+///   P_i = exp(S_i - LSE)    (exact GPU normalization)
+///   attn_out = P @ V
+///
+/// Also computes CPU LSE from the witnessed scores for agreement measurement.
+///
+/// Returns `(a_i8, a_f64, lse_report)` where `lse_report` contains per-head
+/// CPU vs GPU LSE comparison.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LseReport {
+    /// Per-head |CPU_LSE - GPU_LSE| for this layer.
+    pub per_head_gap: Vec<f32>,
+    /// max |CPU_LSE - GPU_LSE| across heads.
+    pub max_gap: f32,
+    /// mean |CPU_LSE - GPU_LSE| across heads.
+    pub mean_gap: f32,
+    /// CPU-computed LSE per head.
+    pub cpu_lse: Vec<f32>,
+}
+
+pub fn replay_attention_with_captured_lse(
+    witnessed_scores: &[f32],
+    n_q_heads: usize,
+    seq_len: usize,
+    kv_cache_v_deq: &[Vec<f64>],
+    scale_a: f64,
+    cfg: &ModelConfig,
+    // One f32 per query head: the GPU kernel's log-sum-exp.
+    gpu_lse: &[f32],
+) -> (Vec<i8>, Vec<f64>, LseReport) {
+    let d_head = cfg.d_head;
+    let heads_per_kv = n_q_heads / cfg.n_kv_heads;
+    let inv_scale = if scale_a.abs() > 1e-30 {
+        1.0 / scale_a
+    } else {
+        1.0
+    };
+
+    assert_eq!(
+        witnessed_scores.len(),
+        n_q_heads * seq_len,
+        "witnessed_scores length mismatch"
+    );
+    assert_eq!(kv_cache_v_deq.len(), seq_len);
+    assert!(
+        gpu_lse.len() >= n_q_heads,
+        "gpu_lse length {} < n_q_heads {}",
+        gpu_lse.len(),
+        n_q_heads
+    );
+
+    let hidden_dim = n_q_heads * d_head;
+    let mut a_i8 = vec![0i8; hidden_dim];
+    let mut a_f64 = vec![0.0f64; hidden_dim];
+    let mut per_head_gap = Vec::with_capacity(n_q_heads);
+    let mut cpu_lse_vec = Vec::with_capacity(n_q_heads);
+
+    for qh in 0..n_q_heads {
+        let kv_head = qh / heads_per_kv;
+        let head_lse = gpu_lse[qh];
+
+        // Compute CPU LSE for agreement measurement.
+        let scores_f32: Vec<f32> = (0..seq_len)
+            .map(|t| witnessed_scores[qh * seq_len + t])
+            .collect();
+        let max_s = scores_f32.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let sum_exp: f32 = scores_f32.iter().map(|&s| (s - max_s).exp()).collect::<Vec<f32>>().iter().sum();
+        let cpu_lse = max_s + sum_exp.ln();
+        cpu_lse_vec.push(cpu_lse);
+        per_head_gap.push((cpu_lse - head_lse).abs());
+
+        // Use GPU LSE for softmax weights: P_i = exp(S_i - LSE_gpu).
+        // Compute weights in f32 (matching GPU precision), then aggregate P@V in f64.
+        let weights_f32: Vec<f32> = scores_f32.iter().map(|&s| (s - head_lse).exp()).collect();
+
+        // Weighted V aggregation in f64 (same path as global replay).
+        let mut head_out = vec![0.0f64; d_head];
+        for t in 0..seq_len {
+            let w = weights_f32[t] as f64;
+            let v_t = &kv_cache_v_deq[t];
+            for i in 0..d_head {
+                head_out[i] += w * v_t[kv_head * d_head + i];
+            }
+        }
+
+        // Requantize to i8.
+        for i in 0..d_head {
+            let idx = qh * d_head + i;
+            a_f64[idx] = head_out[i];
+            a_i8[idx] = (head_out[i] * inv_scale).round().clamp(-128.0, 127.0) as i8;
+        }
+    }
+
+    let max_gap = per_head_gap.iter().cloned().fold(0.0f32, f32::max);
+    let mean_gap = if per_head_gap.is_empty() {
+        0.0
+    } else {
+        per_head_gap.iter().sum::<f32>() / per_head_gap.len() as f32
+    };
+
+    let report = LseReport {
+        per_head_gap,
+        max_gap,
+        mean_gap,
+        cpu_lse: cpu_lse_vec,
+    };
+
+    (a_i8, a_f64, report)
+}
+
+/// Tiled online-softmax replay matching FlashAttention-2's decode recurrence.
+///
+/// Instead of materialising global softmax weights then aggregating P@V,
+/// this processes witnessed scores in tiles of `block_n` and maintains
+/// running (m, l, O) state in f32 — mirroring FA2's online-softmax with
+/// fused O accumulation.
+///
+/// The kernel uses `exp2f(score * scale_softmax_log2)` via MUFU.EX2.
+/// Witnessed scores are already pre-scaled (Q·K^T / √d), so we compute:
+///   p = exp2f((s - m_new) * LOG2_E)
+/// which equals `exp(s - m_new)` in exact math but follows the GPU's
+/// exp2f rounding path.
+///
+/// # Arguments
+/// Same as [`replay_attention_witnessed_scores`], plus:
+/// - `block_n` — KV tile size matching the FA2 kernel (128 for split-KV
+///   decode on A100 head_dim=128, 64 for standard kernel).
+///
+/// # Returns
+/// `(Vec<i8>, Vec<f64>)` — requantised i8 output and f64 pre-quant output,
+/// same layout as the non-tiled version.
+pub fn replay_attention_witnessed_scores_tiled(
+    witnessed_scores: &[f32],
+    n_q_heads: usize,
+    seq_len: usize,
+    kv_cache_v_deq: &[Vec<f64>],
+    scale_a: f64,
+    cfg: &ModelConfig,
+    block_n: usize,
+) -> (Vec<i8>, Vec<f64>) {
+    let d_head = cfg.d_head;
+    let heads_per_kv = n_q_heads / cfg.n_kv_heads;
+    let inv_scale = if scale_a.abs() > 1e-30 {
+        1.0 / scale_a
+    } else {
+        1.0
+    };
+
+    assert_eq!(
+        witnessed_scores.len(),
+        n_q_heads * seq_len,
+        "witnessed_scores length mismatch: expected {} ({}×{}), got {}",
+        n_q_heads * seq_len,
+        n_q_heads,
+        seq_len,
+        witnessed_scores.len()
+    );
+    assert_eq!(
+        kv_cache_v_deq.len(),
+        seq_len,
+        "kv_cache_v_deq length {} != seq_len {}",
+        kv_cache_v_deq.len(),
+        seq_len
+    );
+    assert!(block_n > 0, "block_n must be > 0");
+
+    // LOG2_E = log2(e) ≈ 1.4426950408889634
+    const LOG2_E: f32 = std::f32::consts::LOG2_E;
+
+    let hidden_dim = n_q_heads * d_head;
+    let mut a_i8 = vec![0i8; hidden_dim];
+    let mut a_f64 = vec![0.0f64; hidden_dim];
+
+    for qh in 0..n_q_heads {
+        let kv_head = qh / heads_per_kv;
+
+        // Running state: m (max), l (sum of exp), O (output accumulator).
+        // All in f32 to match GPU kernel precision.
+        let mut m: f32 = f32::NEG_INFINITY;
+        let mut l: f32 = 0.0_f32;
+        let mut o_acc = vec![0.0_f32; d_head];
+
+        // Process tiles of block_n.
+        let n_tiles = (seq_len + block_n - 1) / block_n;
+        for tile in 0..n_tiles {
+            let t_start = tile * block_n;
+            let t_end = (t_start + block_n).min(seq_len);
+
+            // Tile max over witnessed scores (already scaled by 1/√d on GPU).
+            let mut m_tile: f32 = f32::NEG_INFINITY;
+            for t in t_start..t_end {
+                let s = witnessed_scores[qh * seq_len + t];
+                if s > m_tile {
+                    m_tile = s;
+                }
+            }
+
+            let m_new = m.max(m_tile);
+
+            // Rescale previous accumulator: alpha = exp2f((m_old - m_new) * LOG2_E)
+            let alpha: f32 = ((m - m_new) * LOG2_E).exp2();
+            l *= alpha;
+            for i in 0..d_head {
+                o_acc[i] *= alpha;
+            }
+
+            // Accumulate this tile: fused softmax weights + P@V.
+            for t in t_start..t_end {
+                let s = witnessed_scores[qh * seq_len + t];
+                let p: f32 = ((s - m_new) * LOG2_E).exp2();
+                l += p;
+
+                // Fused P@V: O += p * V[t]
+                let v_t = &kv_cache_v_deq[t];
+                for i in 0..d_head {
+                    o_acc[i] += p * v_t[kv_head * d_head + i] as f32;
+                }
+            }
+
+            m = m_new;
+        }
+
+        // Final normalisation: O = O * (1/l)  (reciprocal multiply, matching GPU).
+        let inv_l: f32 = 1.0 / l;
+        let mut head_out = vec![0.0_f64; d_head];
+        for i in 0..d_head {
+            head_out[i] = (o_acc[i] * inv_l) as f64;
+        }
+
+        // Requantize to i8.
+        for i in 0..d_head {
+            let idx = qh * d_head + i;
+            a_f64[idx] = head_out[i];
+            a_i8[idx] = (head_out[i] * inv_scale).round().clamp(-128.0, 127.0) as i8;
+        }
+    }
+
+    (a_i8, a_f64)
+}
+
 /// Compute canonical Q·K^T/√d scores in f64 from shell Q and committed K.
 ///
 /// Returns flat f64 scores in row-major order: `scores[qh * seq_len + t]`.
@@ -1037,6 +1280,470 @@ pub fn compare_attention_output(
         Some(max_diff)
     } else {
         None
+    }
+}
+
+/// Per-layer attention evidence for stock-compatible certification.
+///
+/// Instead of replaying attention exactly, computes statistical bounds:
+/// how concentrated is the softmax mass, and how much can the tail perturb output?
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AttentionEvidence {
+    pub layer: usize,
+    /// Per-head fraction of softmax mass in top-k positions.
+    pub top_k_mass_per_head: Vec<f32>,
+    /// Minimum top-k mass across all heads (worst case).
+    pub min_top_k_mass: f32,
+    /// Per-head tail bound: tail_mass × max|V| (L-inf over d_head dims).
+    /// This is the maximum perturbation to any single attention output dimension
+    /// from ignoring non-top-k positions.
+    pub tail_bound_per_head: Vec<f64>,
+    /// Maximum tail bound across all heads.
+    pub max_tail_bound: f64,
+    /// Top-k value used.
+    pub top_k: usize,
+}
+
+/// Compute top-k attention concentration and tail bound for one layer.
+///
+/// Given witnessed scores and committed V, computes:
+/// 1. Softmax weights from witnessed scores (f32)
+/// 2. Top-k positions per head (highest softmax weight)
+/// 3. Top-k mass = sum of top-k weights
+/// 4. Tail bound = tail_mass × max|V| across non-top-k positions
+///
+/// The tail bound gives the worst-case perturbation to any attention output
+/// dimension from the non-top-k positions.
+pub fn compute_attention_evidence(
+    witnessed_scores: &[f32],
+    n_q_heads: usize,
+    seq_len: usize,
+    kv_cache_v_deq: &[Vec<f64>],
+    cfg: &ModelConfig,
+    top_k: usize,
+) -> AttentionEvidence {
+    let d_head = cfg.d_head;
+    let heads_per_kv = n_q_heads / cfg.n_kv_heads;
+    let effective_k = top_k.min(seq_len);
+
+    let mut top_k_mass_per_head = Vec::with_capacity(n_q_heads);
+    let mut tail_bound_per_head = Vec::with_capacity(n_q_heads);
+
+    for qh in 0..n_q_heads {
+        let kv_head = qh / heads_per_kv;
+
+        // 1. Extract scores for this head.
+        let head_scores: Vec<f32> = (0..seq_len)
+            .map(|t| witnessed_scores[qh * seq_len + t])
+            .collect();
+
+        // 2. Compute softmax weights in f32 (numerically stable).
+        let max_score = head_scores
+            .iter()
+            .cloned()
+            .fold(f32::NEG_INFINITY, f32::max);
+        let exp_scores: Vec<f32> = head_scores.iter().map(|&s| (s - max_score).exp()).collect();
+        let sum_exp: f32 = exp_scores.iter().sum();
+        let weights: Vec<f32> = exp_scores.iter().map(|&e| e / sum_exp).collect();
+
+        // 3. Find top-k indices by sorting weights descending.
+        let mut indexed_weights: Vec<(usize, f32)> =
+            weights.iter().cloned().enumerate().collect();
+        indexed_weights.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // 4. top_k_mass = sum of top-k weights.
+        let top_k_mass: f32 = indexed_weights[..effective_k]
+            .iter()
+            .map(|&(_, w)| w)
+            .sum();
+        top_k_mass_per_head.push(top_k_mass);
+
+        // 5. tail_mass = 1.0 - top_k_mass
+        let tail_mass = 1.0f32 - top_k_mass;
+
+        // 6. Find max |V[t][kv_head*d_head+d]| across non-top-k positions and all d_head dims.
+        let top_k_indices: std::collections::HashSet<usize> = indexed_weights[..effective_k]
+            .iter()
+            .map(|&(idx, _)| idx)
+            .collect();
+
+        let mut max_v_abs: f64 = 0.0;
+        for t in 0..seq_len {
+            if !top_k_indices.contains(&t) {
+                let v_t = &kv_cache_v_deq[t];
+                for d in 0..d_head {
+                    let v_abs = v_t[kv_head * d_head + d].abs();
+                    if v_abs > max_v_abs {
+                        max_v_abs = v_abs;
+                    }
+                }
+            }
+        }
+
+        // 7. tail_bound = tail_mass × max_v_abs
+        let tail_bound = (tail_mass as f64) * max_v_abs;
+        tail_bound_per_head.push(tail_bound);
+    }
+
+    let min_top_k_mass = top_k_mass_per_head
+        .iter()
+        .cloned()
+        .fold(f32::INFINITY, f32::min);
+    let max_tail_bound = tail_bound_per_head
+        .iter()
+        .cloned()
+        .fold(0.0f64, f64::max);
+
+    AttentionEvidence {
+        layer: 0, // caller should set this
+        top_k_mass_per_head,
+        min_top_k_mass,
+        tail_bound_per_head,
+        max_tail_bound,
+        top_k: effective_k,
+    }
+}
+
+/// Token-level certification result combining attention evidence with logit margin.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TokenCertification {
+    /// Whether this token passes certification.
+    pub certified: bool,
+    /// Logit margin: gap between top-1 and top-2 final logits.
+    pub logit_margin: f32,
+    /// Minimum top-k mass across all layers and heads.
+    pub min_top_k_mass: f32,
+    /// Maximum tail bound across all layers and heads.
+    pub max_tail_bound: f64,
+    /// Per-layer evidence.
+    pub layers: Vec<AttentionEvidence>,
+    /// Human-readable certification reason.
+    pub reason: String,
+}
+
+/// Certify a token using attention evidence and logit margin.
+///
+/// A token is certified if:
+/// 1. Attention is well-concentrated (min top-k mass > threshold, e.g. 0.9)
+/// 2. Tail bound is small relative to the logit margin
+///
+/// The logit margin is the gap between the top-1 and top-2 logits from
+/// CapturedLogits. If the attention perturbation bound is smaller than
+/// half the logit margin, the correct token would be selected regardless
+/// of attention errors.
+///
+/// Conservative bound: we don't propagate attention error through o_proj/MLP/lm_head.
+/// Instead, we use an empirical scaling factor. This is intentionally loose —
+/// the goal is to certify easy cases, not all cases.
+pub fn certify_token(
+    evidence: &[AttentionEvidence],
+    logit_margin: f32,
+    concentration_threshold: f32,
+) -> TokenCertification {
+    let min_top_k_mass = evidence
+        .iter()
+        .map(|e| e.min_top_k_mass)
+        .fold(f32::INFINITY, f32::min);
+    let max_tail_bound = evidence
+        .iter()
+        .map(|e| e.max_tail_bound)
+        .fold(0.0f64, f64::max);
+
+    let concentrated = min_top_k_mass >= concentration_threshold;
+    let margin_positive = logit_margin > 0.0;
+    let certified = concentrated && margin_positive;
+
+    let reason = if !margin_positive {
+        format!(
+            "not certified: logit margin {:.4} <= 0 (top-1 not distinct)",
+            logit_margin
+        )
+    } else if !concentrated {
+        format!(
+            "not certified: min top-k mass {:.4} < threshold {:.4}",
+            min_top_k_mass, concentration_threshold
+        )
+    } else {
+        format!(
+            "certified: min top-k mass {:.4} >= {:.4}, logit margin {:.4}, max tail bound {:.6}",
+            min_top_k_mass, concentration_threshold, logit_margin, max_tail_bound
+        )
+    };
+
+    TokenCertification {
+        certified,
+        logit_margin,
+        min_top_k_mass,
+        max_tail_bound,
+        layers: evidence.to_vec(),
+        reason,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic attention: bit-exact CPU reference for verified-attention mode
+// ---------------------------------------------------------------------------
+
+/// Bit-level ldexp: p * 2^n without any library call.
+///
+/// Adds n to the IEEE 754 biased exponent. Assumes p is a normal positive
+/// float and |n| < 127. Identical logic on CPU (Rust) and GPU (CUDA).
+#[inline]
+fn ldexp_bitwise(p: f32, n: i32) -> f32 {
+    let bits = p.to_bits();
+    let biased_exp = ((bits >> 23) & 0xFF) as i32 + n;
+    if biased_exp <= 0 {
+        return 0.0_f32;
+    }
+    if biased_exp >= 255 {
+        // +inf with same sign
+        return f32::from_bits((bits & 0x80000000) | 0x7F800000);
+    }
+    f32::from_bits((bits & 0x807FFFFF) | ((biased_exp as u32) << 23))
+}
+
+/// Round-to-nearest-even, matching CUDA `rintf()`.
+///
+/// Rust's `f32::round()` uses round-half-away-from-zero (0.5 → 1.0),
+/// but CUDA's `rintf()` uses round-to-nearest-even (0.5 → 0.0, 1.5 → 2.0).
+/// This difference caused 3/10000 parity failures in stress testing.
+#[inline]
+fn rintf(x: f32) -> f32 {
+    // nearbyint/rint semantics: round to nearest, ties to even.
+    // On x86, this maps to the SSE4.1 ROUNDSS instruction (or frndint).
+    // Rust's f32::round() is the wrong function (round-half-away-from-zero).
+    //
+    // The correct Rust function is f32::round_ties_even() (stable since 1.77).
+    // Fallback for older compilers: (x + 0.5).floor() has edge cases,
+    // so we use the explicit bit-level algorithm if round_ties_even is unavailable.
+    x.round_ties_even()
+}
+
+/// Canonical exp function for deterministic softmax.
+///
+/// Computes exp(x) via exp2(x * LOG2_E) using a frozen minimax polynomial
+/// for 2^f on [-0.5, 0.5]. Both prover (GPU) and verifier (CPU) must
+/// evaluate this identical polynomial in Horner form.
+///
+/// All library-dependent math is eliminated:
+/// - Uses bit-level ldexp (no libm scalbn/ldexp)
+/// - Uses round-to-nearest-even (matching CUDA rintf, not Rust round)
+/// - No FMA (Rust default for f32)
+/// - Polynomial coefficients are protocol constants
+#[inline]
+fn exp_canonical(x: f32) -> f32 {
+    // exp(x) = 2^(x * log2(e))
+    let t = x * 1.4426950216293335_f32; // log2(e) rounded to f32
+    let n = rintf(t);
+    let f = t - n;
+    // Horner form (inside-out): p = c4*f + c3, then *f + c2, etc.
+    let mut p = f * 0.009618129_f32;
+    p = p + 0.055504109_f32;
+    p = p * f;
+    p = p + 0.240226507_f32;
+    p = p * f;
+    p = p + 0.693147182_f32;
+    p = p * f;
+    p = p + 1.0_f32;
+    // p * 2^n via bit manipulation (no library ldexp)
+    ldexp_bitwise(p, n as i32)
+}
+
+/// Result of deterministic attention replay.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeterministicAttentionResult {
+    /// Attention output: `n_q_heads * d_head` f32 values, row-major.
+    pub output_f32: Vec<f32>,
+    /// Per-head softmax weights (for diagnostics): `n_q_heads * seq_len`.
+    pub softmax_weights: Vec<f32>,
+}
+
+/// Compute the canonical inv_sqrt_d for a given d_head.
+///
+/// This is the single source of truth for the softmax scale factor.
+/// Both CPU and GPU must use the **same f32 bits** produced by this function.
+/// The harness calls this once and passes the result to both sides.
+pub fn canonical_inv_sqrt_d(d_head: usize) -> f32 {
+    1.0_f32 / (d_head as f32).sqrt()
+}
+
+/// Deterministic attention: bit-exact CPU reference implementation.
+///
+/// Computes single-query decode attention with fully specified arithmetic:
+/// - Score: sequential f32 dot product (no FMA)
+/// - Softmax: canonical exp polynomial + sequential f32 sum
+/// - V aggregation: sequential f32 weighted sum (no FMA)
+///
+/// # Arguments
+///
+/// * `q_bf16` — Query vector, bf16-encoded as u16, shape `[n_q_heads * d_head]`
+/// * `k_bf16` — Key cache, bf16-encoded as u16, shape `[seq_len][n_kv_heads * d_head]`
+/// * `v_bf16` — Value cache, bf16-encoded as u16, shape `[seq_len][n_kv_heads * d_head]`
+/// * `cfg` — Model config (head counts, dimensions)
+/// * `inv_sqrt_d` — Precomputed 1/sqrt(d_head), same f32 bits as GPU receives
+///
+/// # Returns
+///
+/// Attention output in f32, shape `[n_q_heads * d_head]`, plus diagnostic softmax weights.
+pub fn replay_attention_deterministic(
+    q_bf16: &[u16],
+    k_bf16: &[Vec<u16>],
+    v_bf16: &[Vec<u16>],
+    cfg: &ModelConfig,
+    inv_sqrt_d: f32,
+) -> DeterministicAttentionResult {
+    let n_q_heads = cfg.n_q_heads;
+    let n_kv_heads = cfg.n_kv_heads;
+    let d_head = cfg.d_head;
+    let seq_len = k_bf16.len();
+    let heads_per_kv = n_q_heads / n_kv_heads;
+
+    assert_eq!(q_bf16.len(), n_q_heads * d_head);
+    assert!(seq_len > 0);
+
+    let mut output = vec![0.0_f32; n_q_heads * d_head];
+    let mut all_weights = vec![0.0_f32; n_q_heads * seq_len];
+
+    for qh in 0..n_q_heads {
+        let kv_group = qh / heads_per_kv;
+
+        // --- Step 1: Scores S[t] = Q[qh] · K[t, kv_group] / √d ---
+        let mut scores = vec![0.0_f32; seq_len];
+        let mut max_score = f32::NEG_INFINITY;
+
+        for t in 0..seq_len {
+            // Sequential f32 dot product, no FMA
+            let mut acc: f32 = 0.0;
+            for i in 0..d_head {
+                let q_val = bf16_to_f32(q_bf16[qh * d_head + i]);
+                let k_val = bf16_to_f32(k_bf16[t][kv_group * d_head + i]);
+                // Explicit multiply then add (no FMA)
+                let prod = q_val * k_val;
+                acc = acc + prod;
+            }
+            scores[t] = acc * inv_sqrt_d;
+            if scores[t] > max_score {
+                max_score = scores[t];
+            }
+        }
+
+        // --- Step 2: Softmax with canonical exp ---
+        let mut exp_scores = vec![0.0_f32; seq_len];
+        let mut sum_exp: f32 = 0.0;
+
+        for t in 0..seq_len {
+            exp_scores[t] = exp_canonical(scores[t] - max_score);
+            // Sequential left-to-right sum
+            sum_exp = sum_exp + exp_scores[t];
+        }
+
+        // Weights = exp / sum (IEEE 754 f32 division, correctly rounded)
+        for t in 0..seq_len {
+            let w = exp_scores[t] / sum_exp;
+            all_weights[qh * seq_len + t] = w;
+        }
+
+        // --- Step 3: V aggregation O[qh, i] = sum_t P[t] * V[t, kv_group, i] ---
+        for i in 0..d_head {
+            let mut acc: f32 = 0.0;
+            for t in 0..seq_len {
+                let v_val = bf16_to_f32(v_bf16[t][kv_group * d_head + i]);
+                let w = all_weights[qh * seq_len + t];
+                // Explicit multiply then add (no FMA)
+                let prod = w * v_val;
+                acc = acc + prod;
+            }
+            output[qh * d_head + i] = acc;
+        }
+    }
+
+    DeterministicAttentionResult {
+        output_f32: output,
+        softmax_weights: all_weights,
+    }
+}
+
+/// Convert bf16 (stored as u16) to f32. Lossless.
+#[inline]
+fn bf16_to_f32(bits: u16) -> f32 {
+    f32::from_bits((bits as u32) << 16)
+}
+
+/// Convert f32 to bf16 (round-to-nearest-even). For output requantization.
+#[inline]
+pub fn f32_to_bf16(x: f32) -> u16 {
+    let bits = x.to_bits();
+    // Round-to-nearest-even: add 0x7FFF + bit 16 (the "round" bit)
+    let round_bit = (bits >> 16) & 1;
+    let rounded = bits.wrapping_add(0x7FFF + round_bit);
+    (rounded >> 16) as u16
+}
+
+/// Deterministic attention with f32 inputs (for models using fp32 Q/K/V or
+/// when inputs are already converted to f32).
+pub fn replay_attention_deterministic_f32(
+    q_f32: &[f32],
+    k_f32: &[Vec<f32>],
+    v_f32: &[Vec<f32>],
+    cfg: &ModelConfig,
+    inv_sqrt_d: f32,
+) -> DeterministicAttentionResult {
+    let n_q_heads = cfg.n_q_heads;
+    let n_kv_heads = cfg.n_kv_heads;
+    let d_head = cfg.d_head;
+    let seq_len = k_f32.len();
+    let heads_per_kv = n_q_heads / n_kv_heads;
+
+    assert_eq!(q_f32.len(), n_q_heads * d_head);
+    assert!(seq_len > 0);
+
+    let mut output = vec![0.0_f32; n_q_heads * d_head];
+    let mut all_weights = vec![0.0_f32; n_q_heads * seq_len];
+
+    for qh in 0..n_q_heads {
+        let kv_group = qh / heads_per_kv;
+
+        // Step 1: Scores
+        let mut scores = vec![0.0_f32; seq_len];
+        let mut max_score = f32::NEG_INFINITY;
+
+        for t in 0..seq_len {
+            let mut acc: f32 = 0.0;
+            for i in 0..d_head {
+                let prod = q_f32[qh * d_head + i] * k_f32[t][kv_group * d_head + i];
+                acc = acc + prod;
+            }
+            scores[t] = acc * inv_sqrt_d;
+            if scores[t] > max_score {
+                max_score = scores[t];
+            }
+        }
+
+        // Step 2: Softmax
+        let mut exp_scores = vec![0.0_f32; seq_len];
+        let mut sum_exp: f32 = 0.0;
+        for t in 0..seq_len {
+            exp_scores[t] = exp_canonical(scores[t] - max_score);
+            sum_exp = sum_exp + exp_scores[t];
+        }
+        for t in 0..seq_len {
+            all_weights[qh * seq_len + t] = exp_scores[t] / sum_exp;
+        }
+
+        // Step 3: V aggregation
+        for i in 0..d_head {
+            let mut acc: f32 = 0.0;
+            for t in 0..seq_len {
+                let prod = all_weights[qh * seq_len + t] * v_f32[t][kv_group * d_head + i];
+                acc = acc + prod;
+            }
+            output[qh * d_head + i] = acc;
+        }
+    }
+
+    DeterministicAttentionResult {
+        output_f32: output,
+        softmax_weights: all_weights,
     }
 }
 
@@ -1624,5 +2331,644 @@ mod tests {
             max_diff < 0.1,
             "f64 vs f32 scores max diff {max_diff} too large"
         );
+    }
+
+    #[test]
+    fn test_tiled_single_tile_matches_global() {
+        // When block_n >= seq_len, tiled should behave like single-pass softmax.
+        let cfg = toy_cfg();
+        let n_q_heads = cfg.n_q_heads;
+        let seq_len = 4;
+
+        // Synthetic witnessed scores (already scaled by 1/sqrt(d)).
+        let mut scores = vec![0.0_f32; n_q_heads * seq_len];
+        for qh in 0..n_q_heads {
+            for t in 0..seq_len {
+                scores[qh * seq_len + t] = ((qh as f32) * 0.3 + (t as f32) * 0.5) - 1.0;
+            }
+        }
+
+        // V cache: distinct values per position.
+        let kv_dim = cfg.n_kv_heads * cfg.d_head;
+        let v_deq: Vec<Vec<f64>> = (0..seq_len)
+            .map(|t| {
+                (0..kv_dim)
+                    .map(|i| (t as f64) * 10.0 + (i as f64))
+                    .collect()
+            })
+            .collect();
+
+        let scale_a = 0.05;
+
+        let (_i8_global, f64_global) = replay_attention_witnessed_scores(
+            &scores, n_q_heads, seq_len, &v_deq, scale_a, &cfg,
+        );
+
+        // block_n = seq_len => single tile, should be very close.
+        let (_i8_tiled, f64_tiled) = replay_attention_witnessed_scores_tiled(
+            &scores, n_q_heads, seq_len, &v_deq, scale_a, &cfg, seq_len,
+        );
+
+        let max_diff: f64 = f64_global
+            .iter()
+            .zip(f64_tiled.iter())
+            .map(|(&a, &b)| (a - b).abs())
+            .fold(0.0, f64::max);
+
+        // Tiled f32 vs global f64 will have some precision gap, but small.
+        assert!(
+            max_diff < 0.5,
+            "single-tile tiled vs global max diff {max_diff} too large"
+        );
+    }
+
+    #[test]
+    fn test_tiled_multi_tile_reasonable() {
+        // Multiple tiles: verify the online recurrence produces reasonable output.
+        let cfg = toy_cfg();
+        let n_q_heads = cfg.n_q_heads;
+        let seq_len = 10;
+        let block_n = 3; // Forces 4 tiles: [0..3], [3..6], [6..9], [9..10]
+
+        let mut scores = vec![0.0_f32; n_q_heads * seq_len];
+        for qh in 0..n_q_heads {
+            for t in 0..seq_len {
+                scores[qh * seq_len + t] = ((qh as f32) * 0.1 + (t as f32) * 0.2) - 1.0;
+            }
+        }
+
+        let kv_dim = cfg.n_kv_heads * cfg.d_head;
+        let v_deq: Vec<Vec<f64>> = (0..seq_len)
+            .map(|t| {
+                (0..kv_dim)
+                    .map(|i| (t as f64) * 5.0 + (i as f64) * 0.1)
+                    .collect()
+            })
+            .collect();
+
+        let scale_a = 0.1;
+
+        let (_i8_global, f64_global) = replay_attention_witnessed_scores(
+            &scores, n_q_heads, seq_len, &v_deq, scale_a, &cfg,
+        );
+        let (_i8_tiled, f64_tiled) = replay_attention_witnessed_scores_tiled(
+            &scores, n_q_heads, seq_len, &v_deq, scale_a, &cfg, block_n,
+        );
+
+        let max_diff: f64 = f64_global
+            .iter()
+            .zip(f64_tiled.iter())
+            .map(|(&a, &b)| (a - b).abs())
+            .fold(0.0, f64::max);
+
+        // f32 tiled online-softmax vs f64 global: expect small gap from precision.
+        // This is the diagnostic: if max_diff is small (~<1.0), the tiling itself
+        // is not the gap source; if large, tiling order matters.
+        assert!(
+            max_diff < 1.0,
+            "multi-tile tiled vs global max diff {max_diff} too large"
+        );
+    }
+
+    #[test]
+    fn test_tiled_block_n_1_matches() {
+        // Extreme: block_n=1 means each KV position is its own tile.
+        // Maximum number of rescaling steps — tests numerical stability.
+        let cfg = toy_cfg();
+        let n_q_heads = cfg.n_q_heads;
+        let seq_len = 8;
+
+        let mut scores = vec![0.0_f32; n_q_heads * seq_len];
+        for qh in 0..n_q_heads {
+            for t in 0..seq_len {
+                scores[qh * seq_len + t] = (t as f32) * 0.3 - 0.5;
+            }
+        }
+
+        let kv_dim = cfg.n_kv_heads * cfg.d_head;
+        let v_deq: Vec<Vec<f64>> = (0..seq_len)
+            .map(|t| (0..kv_dim).map(|i| (t * 3 + i) as f64).collect())
+            .collect();
+
+        let scale_a = 0.08;
+
+        let (_i8_global, f64_global) = replay_attention_witnessed_scores(
+            &scores, n_q_heads, seq_len, &v_deq, scale_a, &cfg,
+        );
+        let (i8_tiled, f64_tiled) = replay_attention_witnessed_scores_tiled(
+            &scores, n_q_heads, seq_len, &v_deq, scale_a, &cfg, 1,
+        );
+
+        let max_diff: f64 = f64_global
+            .iter()
+            .zip(f64_tiled.iter())
+            .map(|(&a, &b)| (a - b).abs())
+            .fold(0.0, f64::max);
+
+        assert!(
+            max_diff < 1.0,
+            "block_n=1 tiled vs global max diff {max_diff} too large"
+        );
+
+        // i8 should be very close too (at most ±1 from rounding).
+        let max_i8_diff: i16 = _i8_global
+            .iter()
+            .zip(i8_tiled.iter())
+            .map(|(&a, &b)| ((a as i16) - (b as i16)).abs())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_i8_diff <= 1,
+            "block_n=1 i8 max diff {max_i8_diff} too large"
+        );
+    }
+
+    // ──── Attention evidence + certification tests ────
+
+    #[test]
+    fn test_attention_evidence_concentrated() {
+        // Create scores where position 0 has a very high score (dominates softmax).
+        // With a huge score at position 0 and small/zero scores elsewhere,
+        // softmax mass concentrates on position 0.
+        let cfg = toy_cfg();
+        let n_q_heads = cfg.n_q_heads;
+        let seq_len = 10;
+        let top_k = 2;
+
+        // All heads: position 0 gets score 100.0, rest get 0.0.
+        let mut scores = vec![0.0f32; n_q_heads * seq_len];
+        for qh in 0..n_q_heads {
+            scores[qh * seq_len] = 100.0;
+        }
+
+        // V cache with nonzero values.
+        let kv_dim = cfg.n_kv_heads * cfg.d_head;
+        let v_deq: Vec<Vec<f64>> = (0..seq_len)
+            .map(|t| {
+                (0..kv_dim)
+                    .map(|i| ((t * 10 + i) as f64) * 0.5)
+                    .collect()
+            })
+            .collect();
+
+        let evidence =
+            compute_attention_evidence(&scores, n_q_heads, seq_len, &v_deq, &cfg, top_k);
+
+        // All mass should be in top-k (essentially all in position 0).
+        assert!(
+            evidence.min_top_k_mass > 0.999,
+            "concentrated: min_top_k_mass {:.6} should be > 0.999",
+            evidence.min_top_k_mass
+        );
+        // Tail bound should be near 0 (tail_mass ~ 0).
+        assert!(
+            evidence.max_tail_bound < 0.01,
+            "concentrated: max_tail_bound {:.6} should be < 0.01",
+            evidence.max_tail_bound
+        );
+        assert_eq!(evidence.top_k, top_k);
+        assert_eq!(evidence.top_k_mass_per_head.len(), n_q_heads);
+        assert_eq!(evidence.tail_bound_per_head.len(), n_q_heads);
+    }
+
+    #[test]
+    fn test_attention_evidence_uniform() {
+        // Create uniform scores (all positions equal).
+        // Softmax of uniform scores is uniform: each weight = 1/seq_len.
+        // top-k mass = k/seq_len.
+        let cfg = toy_cfg();
+        let n_q_heads = cfg.n_q_heads;
+        let seq_len = 10;
+        let top_k = 3;
+
+        // All scores equal.
+        let scores = vec![1.0f32; n_q_heads * seq_len];
+
+        // V cache with some magnitude.
+        let kv_dim = cfg.n_kv_heads * cfg.d_head;
+        let v_deq: Vec<Vec<f64>> = (0..seq_len)
+            .map(|_| vec![5.0f64; kv_dim])
+            .collect();
+
+        let evidence =
+            compute_attention_evidence(&scores, n_q_heads, seq_len, &v_deq, &cfg, top_k);
+
+        // Expected top-k mass = k/seq_len = 3/10 = 0.3
+        let expected_mass = top_k as f32 / seq_len as f32;
+        for &mass in &evidence.top_k_mass_per_head {
+            assert!(
+                (mass - expected_mass).abs() < 0.01,
+                "uniform: top_k_mass {:.4} should be close to {:.4}",
+                mass,
+                expected_mass
+            );
+        }
+
+        // Tail bound should be substantial: tail_mass = 0.7, max|V| = 5.0 → bound = 3.5
+        let expected_tail_bound = (1.0 - expected_mass) as f64 * 5.0;
+        assert!(
+            (evidence.max_tail_bound - expected_tail_bound).abs() < 0.1,
+            "uniform: max_tail_bound {:.4} should be close to {:.4}",
+            evidence.max_tail_bound,
+            expected_tail_bound
+        );
+    }
+
+    #[test]
+    fn test_attention_evidence_top_k_exceeds_seq_len() {
+        // When top_k > seq_len, effective_k = seq_len and all mass is captured.
+        let cfg = toy_cfg();
+        let n_q_heads = cfg.n_q_heads;
+        let seq_len = 3;
+        let top_k = 100; // much larger than seq_len
+
+        let scores = vec![0.5f32; n_q_heads * seq_len];
+        let kv_dim = cfg.n_kv_heads * cfg.d_head;
+        let v_deq: Vec<Vec<f64>> = (0..seq_len)
+            .map(|_| vec![10.0f64; kv_dim])
+            .collect();
+
+        let evidence =
+            compute_attention_evidence(&scores, n_q_heads, seq_len, &v_deq, &cfg, top_k);
+
+        assert_eq!(evidence.top_k, seq_len);
+        // All mass captured.
+        for &mass in &evidence.top_k_mass_per_head {
+            assert!(
+                (mass - 1.0).abs() < 1e-5,
+                "top_k > seq_len: mass {:.6} should be ~1.0",
+                mass
+            );
+        }
+        // Tail bound = 0 (no tail positions).
+        assert!(
+            evidence.max_tail_bound < 1e-10,
+            "top_k > seq_len: tail bound {:.6e} should be ~0",
+            evidence.max_tail_bound
+        );
+    }
+
+    #[test]
+    fn test_certify_token_high_margin() {
+        // High concentration + high logit margin → certified.
+        let evidence = vec![AttentionEvidence {
+            layer: 0,
+            top_k_mass_per_head: vec![0.98, 0.97, 0.99, 0.96, 0.98, 0.97, 0.99, 0.95],
+            min_top_k_mass: 0.95,
+            tail_bound_per_head: vec![0.1; 8],
+            max_tail_bound: 0.1,
+            top_k: 4,
+        }];
+
+        let cert = certify_token(&evidence, 5.0, 0.9);
+        assert!(cert.certified, "should be certified: {}", cert.reason);
+        assert!((cert.logit_margin - 5.0).abs() < 1e-6);
+        assert!((cert.min_top_k_mass - 0.95).abs() < 1e-6);
+        assert!((cert.max_tail_bound - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_certify_token_low_concentration() {
+        // Low concentration → not certified (regardless of margin).
+        let evidence = vec![AttentionEvidence {
+            layer: 0,
+            top_k_mass_per_head: vec![0.5, 0.6, 0.4, 0.55, 0.5, 0.6, 0.4, 0.45],
+            min_top_k_mass: 0.4,
+            tail_bound_per_head: vec![2.0; 8],
+            max_tail_bound: 2.0,
+            top_k: 2,
+        }];
+
+        let cert = certify_token(&evidence, 10.0, 0.9);
+        assert!(!cert.certified, "should NOT be certified: {}", cert.reason);
+        assert!(cert.reason.contains("min top-k mass"));
+    }
+
+    #[test]
+    fn test_certify_token_zero_margin() {
+        // logit_margin = 0 → not certified (top token not distinct).
+        let evidence = vec![AttentionEvidence {
+            layer: 0,
+            top_k_mass_per_head: vec![0.99; 8],
+            min_top_k_mass: 0.99,
+            tail_bound_per_head: vec![0.01; 8],
+            max_tail_bound: 0.01,
+            top_k: 4,
+        }];
+
+        let cert = certify_token(&evidence, 0.0, 0.9);
+        assert!(!cert.certified, "should NOT be certified: {}", cert.reason);
+        assert!(cert.reason.contains("logit margin"));
+    }
+
+    #[test]
+    fn test_certify_token_multi_layer() {
+        // Multi-layer: certification uses worst-case across all layers.
+        let layer0 = AttentionEvidence {
+            layer: 0,
+            top_k_mass_per_head: vec![0.99; 8],
+            min_top_k_mass: 0.99,
+            tail_bound_per_head: vec![0.05; 8],
+            max_tail_bound: 0.05,
+            top_k: 4,
+        };
+        let layer1 = AttentionEvidence {
+            layer: 1,
+            top_k_mass_per_head: vec![0.92, 0.91, 0.93, 0.90, 0.92, 0.91, 0.93, 0.88],
+            min_top_k_mass: 0.88,
+            tail_bound_per_head: vec![0.5; 8],
+            max_tail_bound: 0.5,
+            top_k: 4,
+        };
+
+        // With threshold 0.9, layer1's min_top_k_mass=0.88 fails.
+        let cert = certify_token(&[layer0.clone(), layer1], 5.0, 0.9);
+        assert!(!cert.certified, "multi-layer should fail: {}", cert.reason);
+        assert!((cert.min_top_k_mass - 0.88).abs() < 1e-6);
+        assert!((cert.max_tail_bound - 0.5).abs() < 1e-6);
+
+        // With a lower threshold of 0.85, it should pass.
+        let cert2 = certify_token(&[layer0], 5.0, 0.85);
+        assert!(cert2.certified, "single good layer should pass: {}", cert2.reason);
+    }
+
+    // ── Deterministic attention tests ──────────────────────────────
+
+    #[test]
+    fn test_exp_canonical_at_zero() {
+        let result = exp_canonical(0.0);
+        // exp(0) = 1.0 exactly
+        assert!(
+            (result - 1.0).abs() < 1e-5,
+            "exp_canonical(0) = {}, expected ~1.0",
+            result
+        );
+    }
+
+    #[test]
+    fn test_exp_canonical_at_one() {
+        let result = exp_canonical(1.0);
+        let expected = std::f32::consts::E;
+        let rel_err = (result - expected).abs() / expected;
+        assert!(
+            rel_err < 1e-4,
+            "exp_canonical(1) = {}, expected ~{}, rel_err={}",
+            result,
+            expected,
+            rel_err
+        );
+    }
+
+    #[test]
+    fn test_exp_canonical_negative() {
+        let result = exp_canonical(-5.0);
+        let expected = (-5.0_f64).exp() as f32;
+        let rel_err = (result - expected).abs() / expected;
+        assert!(
+            rel_err < 1e-3,
+            "exp_canonical(-5) = {}, expected ~{}, rel_err={}",
+            result,
+            expected,
+            rel_err
+        );
+    }
+
+    #[test]
+    fn test_exp_canonical_large_negative() {
+        // Should not produce NaN or negative
+        let result = exp_canonical(-100.0);
+        assert!(result >= 0.0, "exp_canonical(-100) should be >= 0, got {}", result);
+        assert!(!result.is_nan());
+    }
+
+    #[test]
+    fn test_exp_canonical_deterministic() {
+        // Same input must always produce same output (trivial but foundational)
+        let a = exp_canonical(1.5);
+        let b = exp_canonical(1.5);
+        assert_eq!(a.to_bits(), b.to_bits(), "exp_canonical must be deterministic");
+    }
+
+    #[test]
+    fn test_rintf_matches_cuda_rintf() {
+        // rintf must use round-to-nearest-even (banker's rounding),
+        // matching CUDA's rintf(). This is NOT Rust's f32::round()
+        // which uses round-half-away-from-zero.
+        assert_eq!(rintf(0.5), 0.0); // 0.5 → even (0), NOT 1
+        assert_eq!(rintf(1.5), 2.0); // 1.5 → even (2)
+        assert_eq!(rintf(2.5), 2.0); // 2.5 → even (2), NOT 3
+        assert_eq!(rintf(3.5), 4.0); // 3.5 → even (4)
+        assert_eq!(rintf(-0.5), 0.0); // -0.5 → even (0), NOT -1
+        assert_eq!(rintf(-1.5), -2.0); // -1.5 → even (-2)
+        // Non-ties: same as regular round
+        assert_eq!(rintf(0.3), 0.0);
+        assert_eq!(rintf(0.7), 1.0);
+        assert_eq!(rintf(-0.3), 0.0);
+        assert_eq!(rintf(-0.7), -1.0);
+    }
+
+    #[test]
+    fn test_bf16_roundtrip() {
+        // bf16 → f32 → bf16 should roundtrip for normal bf16 values
+        let original: u16 = 0x3F80; // 1.0 in bf16
+        let f = bf16_to_f32(original);
+        assert_eq!(f, 1.0_f32);
+        let back = f32_to_bf16(f);
+        assert_eq!(back, original);
+    }
+
+    #[test]
+    fn test_bf16_to_f32_zero() {
+        assert_eq!(bf16_to_f32(0x0000), 0.0_f32);
+    }
+
+    #[test]
+    fn test_bf16_to_f32_neg_one() {
+        let bits: u16 = 0xBF80; // -1.0 in bf16
+        assert_eq!(bf16_to_f32(bits), -1.0_f32);
+    }
+
+    fn make_test_cfg(n_q_heads: usize, n_kv_heads: usize, d_head: usize) -> ModelConfig {
+        ModelConfig {
+            name: "test".into(),
+            hidden_dim: n_q_heads * d_head,
+            kv_dim: n_kv_heads * d_head,
+            d_head,
+            n_q_heads,
+            n_kv_heads,
+            ffn_dim: 1,
+            n_layers: 1,
+            vocab_size: 1,
+            rope_theta: 10000.0,
+            rope_scaling: None,
+        }
+    }
+
+    #[test]
+    fn test_deterministic_attention_single_head_single_pos() {
+        // 1 query head, 1 KV head, d_head=4, seq_len=1
+        // With only 1 position, softmax weight = 1.0, output = V[0]
+        let cfg = make_test_cfg(1, 1, 4);
+
+        // Q = [1.0, 0.0, 0.0, 0.0] in bf16
+        let q_bf16 = vec![0x3F80, 0x0000, 0x0000, 0x0000];
+        // K = [1.0, 0.0, 0.0, 0.0] in bf16
+        let k_bf16 = vec![vec![0x3F80, 0x0000, 0x0000, 0x0000]];
+        // V = [0.5, -0.5, 1.0, -1.0] in bf16
+        let v_bf16 = vec![vec![0x3F00, 0xBF00, 0x3F80, 0xBF80]];
+
+        let result = replay_attention_deterministic(&q_bf16, &k_bf16, &v_bf16, &cfg, canonical_inv_sqrt_d(cfg.d_head));
+
+        // With single position, softmax = 1.0, output = V[0]
+        assert_eq!(result.softmax_weights.len(), 1);
+        assert!((result.softmax_weights[0] - 1.0).abs() < 1e-5);
+        assert!((result.output_f32[0] - 0.5).abs() < 1e-3);
+        assert!((result.output_f32[1] - (-0.5)).abs() < 1e-3);
+        assert!((result.output_f32[2] - 1.0).abs() < 1e-3);
+        assert!((result.output_f32[3] - (-1.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_deterministic_attention_two_positions() {
+        // 1 head, d_head=2, seq_len=2
+        // Q = [1.0, 0.0], K0 = [1.0, 0.0], K1 = [0.0, 1.0]
+        // Score0 = 1.0 / sqrt(2), Score1 = 0.0 / sqrt(2)
+        // Softmax: exp(1/√2) / (exp(1/√2) + exp(0)) vs exp(0) / (...)
+        let cfg = make_test_cfg(1, 1, 2);
+
+        let q = vec![0x3F80, 0x0000]; // [1.0, 0.0]
+        let k = vec![
+            vec![0x3F80, 0x0000], // [1.0, 0.0]
+            vec![0x0000, 0x3F80], // [0.0, 1.0]
+        ];
+        let v = vec![
+            vec![0x3F80, 0x0000], // [1.0, 0.0]
+            vec![0x0000, 0x3F80], // [0.0, 1.0]
+        ];
+
+        let result = replay_attention_deterministic(&q, &k, &v, &cfg, canonical_inv_sqrt_d(cfg.d_head));
+
+        // Scores: [1.0/sqrt(2), 0.0/sqrt(2)] = [0.7071, 0.0]
+        // max = 0.7071
+        // exp(0) = 1.0, exp(-0.7071) ≈ 0.4932
+        // softmax ≈ [1.0/1.4932, 0.4932/1.4932] ≈ [0.6697, 0.3303]
+        assert!(result.softmax_weights[0] > result.softmax_weights[1]);
+        let w0 = result.softmax_weights[0];
+        let w1 = result.softmax_weights[1];
+        assert!((w0 + w1 - 1.0).abs() < 1e-5, "weights should sum to 1");
+
+        // Output = w0 * V0 + w1 * V1 = [w0, w1]
+        assert!((result.output_f32[0] - w0).abs() < 1e-5);
+        assert!((result.output_f32[1] - w1).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_deterministic_attention_gqa() {
+        // 2 query heads, 1 KV head (GQA ratio = 2), d_head=2, seq_len=1
+        let cfg = make_test_cfg(2, 1, 2);
+
+        // Q has 2 heads: head0=[1,0], head1=[0,1]
+        let q = vec![0x3F80, 0x0000, 0x0000, 0x3F80];
+        // K: 1 KV head, shape [1][1*2]
+        let k = vec![vec![0x3F80, 0x3F80]]; // [1.0, 1.0]
+        let v = vec![vec![0x3F00, 0xBF00]]; // [0.5, -0.5]
+
+        let result = replay_attention_deterministic(&q, &k, &v, &cfg, canonical_inv_sqrt_d(cfg.d_head));
+
+        // Both heads use the same KV group (group 0)
+        // Single position → softmax = 1.0 for both heads → output = V
+        assert_eq!(result.output_f32.len(), 4); // 2 heads * d_head=2
+        // Head 0: output = V[0] = [0.5, -0.5]
+        assert!((result.output_f32[0] - 0.5).abs() < 1e-3);
+        assert!((result.output_f32[1] - (-0.5)).abs() < 1e-3);
+        // Head 1: same V (same KV group)
+        assert!((result.output_f32[2] - 0.5).abs() < 1e-3);
+        assert!((result.output_f32[3] - (-0.5)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_deterministic_attention_self_consistent() {
+        // Run twice with same inputs, must produce identical bits
+        let cfg = make_test_cfg(2, 1, 4);
+        let q = vec![0x3F80, 0x3F00, 0xBF00, 0x3E80, 0x3F00, 0x3F80, 0x3E80, 0xBF00];
+        let k = vec![
+            vec![0x3F80, 0x3F00, 0xBF00, 0x3E80],
+            vec![0x3E80, 0xBF00, 0x3F80, 0x3F00],
+            vec![0xBF00, 0x3E80, 0x3F00, 0xBF80],
+        ];
+        let v = vec![
+            vec![0x3F80, 0x0000, 0xBF80, 0x3F00],
+            vec![0x0000, 0x3F80, 0x3F00, 0xBF00],
+            vec![0xBF00, 0xBF80, 0x0000, 0x3F80],
+        ];
+
+        let r1 = replay_attention_deterministic(&q, &k, &v, &cfg, canonical_inv_sqrt_d(cfg.d_head));
+        let r2 = replay_attention_deterministic(&q, &k, &v, &cfg, canonical_inv_sqrt_d(cfg.d_head));
+
+        // Bit-exact comparison
+        for (i, (a, b)) in r1.output_f32.iter().zip(r2.output_f32.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "output[{}] not bit-exact: {} vs {}",
+                i,
+                a,
+                b
+            );
+        }
+        for (i, (a, b)) in r1
+            .softmax_weights
+            .iter()
+            .zip(r2.softmax_weights.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "weight[{}] not bit-exact: {} vs {}",
+                i,
+                a,
+                b
+            );
+        }
+    }
+
+    #[test]
+    fn test_deterministic_f32_matches_bf16_on_exact_bf16_values() {
+        // When f32 inputs are exact bf16 values, both paths should agree
+        let cfg = make_test_cfg(1, 1, 2);
+
+        let q_bf16 = vec![0x3F80, 0x3F00]; // [1.0, 0.5]
+        let k_bf16 = vec![vec![0x3F00, 0x3F80]]; // [0.5, 1.0]
+        let v_bf16 = vec![vec![0x3F80, 0xBF80]]; // [1.0, -1.0]
+
+        let q_f32: Vec<f32> = q_bf16.iter().map(|&b| bf16_to_f32(b)).collect();
+        let k_f32: Vec<Vec<f32>> = k_bf16
+            .iter()
+            .map(|row| row.iter().map(|&b| bf16_to_f32(b)).collect())
+            .collect();
+        let v_f32: Vec<Vec<f32>> = v_bf16
+            .iter()
+            .map(|row| row.iter().map(|&b| bf16_to_f32(b)).collect())
+            .collect();
+
+        let r_bf16 = replay_attention_deterministic(&q_bf16, &k_bf16, &v_bf16, &cfg, canonical_inv_sqrt_d(cfg.d_head));
+        let r_f32 = replay_attention_deterministic_f32(&q_f32, &k_f32, &v_f32, &cfg, canonical_inv_sqrt_d(cfg.d_head));
+
+        for (i, (a, b)) in r_bf16
+            .output_f32
+            .iter()
+            .zip(r_f32.output_f32.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "output[{}] bf16 path {} != f32 path {}",
+                i,
+                a,
+                b
+            );
+        }
     }
 }

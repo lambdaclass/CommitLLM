@@ -124,6 +124,7 @@ struct St {
     checks: usize,
     failures: Vec<VerificationFailure>,
     skipped: Vec<String>,
+    attention_status: Option<crate::AttentionStatus>,
 }
 
 impl St {
@@ -132,6 +133,7 @@ impl St {
             checks: 0,
             failures: Vec::new(),
             skipped: Vec::new(),
+            attention_status: None,
         }
     }
     fn check(&mut self) {
@@ -195,6 +197,13 @@ fn run(ctx: &Ctx) -> V4VerifyReport {
         }
         verilm_core::types::AttentionVerificationMode::ExactReplay => {
             phase_exact_attention(ctx, kv_transcript_ok, &mut st);
+        }
+        verilm_core::types::AttentionVerificationMode::StockBounded => {
+            phase_stock_bounded_attention(ctx, &mut st);
+        }
+        verilm_core::types::AttentionVerificationMode::DeterministicKernel => {
+            // Future: deterministic kernel path — not yet implemented.
+            st.skipped.push("attention: deterministic-kernel mode — not yet implemented".into());
         }
     }
     phase_deep_prefix(ctx, kv_transcript_ok, &mut st);
@@ -2422,6 +2431,115 @@ fn exact_attention_toy(
     }
 }
 
+// --- Phase 7a-sb: Stock-bounded attention certification
+
+/// Computes statistical attention certification from witnessed scores + committed V.
+///
+/// Does NOT verify attention exactly — instead computes top-k softmax concentration
+/// and tail bounds per layer, combined with the logit margin from CapturedLogits,
+/// to produce a certification decision.
+fn phase_stock_bounded_attention(ctx: &Ctx, st: &mut St) {
+    const TOP_K: usize = 16;
+    const CONCENTRATION_THRESHOLD: f32 = 0.9;
+
+    // Need witnessed scores and KV entries.
+    let _witnessed = match ctx.r.witnessed_scores.as_ref() {
+        Some(w) if !w.is_empty() => w,
+        _ => {
+            st.attention_status = Some(crate::AttentionStatus::NotChecked {
+                reason: "no witnessed_scores in audit response".into(),
+            });
+            st.skipped.push(
+                "attention (stock-bounded): no witnessed_scores — cannot compute certification"
+                    .into(),
+            );
+            return;
+        }
+    };
+    let _kv_entries = match ctx.r.kv_entries.as_ref() {
+        Some(kv) if !kv.is_empty() => kv,
+        _ => {
+            st.attention_status = Some(crate::AttentionStatus::NotChecked {
+                reason: "no kv_entries in audit response".into(),
+            });
+            st.skipped.push(
+                "attention (stock-bounded): no kv_entries — cannot compute tail bounds".into(),
+            );
+            return;
+        }
+    };
+
+    // Compute logit margin from captured logits.
+    let logit_margin = match ctx
+        .r
+        .shell_opening
+        .as_ref()
+        .and_then(|s| s.captured_logits_f32.as_ref())
+    {
+        Some(cl) if cl.len() >= 2 => {
+            let mut top2 = [f32::NEG_INFINITY; 2];
+            for &v in cl.iter() {
+                if v > top2[0] {
+                    top2[1] = top2[0];
+                    top2[0] = v;
+                } else if v > top2[1] {
+                    top2[1] = v;
+                }
+            }
+            top2[0] - top2[1]
+        }
+        _ => {
+            st.attention_status = Some(crate::AttentionStatus::NotChecked {
+                reason: "no captured_logits_f32 — cannot compute logit margin".into(),
+            });
+            st.skipped.push(
+                "attention (stock-bounded): no captured_logits — cannot gate on margin".into(),
+            );
+            return;
+        }
+    };
+
+    // Compute per-layer attention evidence.
+    match crate::corridor::compute_attention_evidence_from_audit(ctx.key, ctx.r, TOP_K) {
+        Ok(evidence) if !evidence.is_empty() => {
+            let cert = verilm_core::attention::certify_token(
+                &evidence,
+                logit_margin,
+                CONCENTRATION_THRESHOLD,
+            );
+            st.attention_status = Some(crate::AttentionStatus::StockBounded {
+                min_top_k_mass: cert.min_top_k_mass,
+                max_tail_bound: cert.max_tail_bound as f32,
+                logit_margin: cert.logit_margin,
+                certified: cert.certified,
+            });
+            if !cert.certified {
+                st.skipped.push(format!(
+                    "attention (stock-bounded): not certified — {}",
+                    cert.reason
+                ));
+            }
+        }
+        Ok(_) => {
+            st.attention_status = Some(crate::AttentionStatus::NotChecked {
+                reason: "attention evidence empty after computation".into(),
+            });
+            st.skipped.push(
+                "attention (stock-bounded): no evidence layers produced".into(),
+            );
+        }
+        Err(e) => {
+            st.attention_status = Some(crate::AttentionStatus::NotChecked {
+                reason: format!("evidence computation failed: {}", e),
+            });
+            st.skipped.push(format!(
+                "attention (stock-bounded): evidence computation failed: {}",
+                e
+            ));
+        }
+    }
+}
+
 // --- Phase 7b: Deep prefix
 
 fn phase_deep_prefix(ctx: &Ctx, kv_transcript_ok: bool, st: &mut St) {
@@ -3229,6 +3347,7 @@ fn finish(ctx: &Ctx, st: St, coverage: AuditCoverage) -> V4VerifyReport {
         coverage,
         duration: ctx.start.elapsed(),
         skipped: st.skipped,
+        attention_status: st.attention_status,
     }
 }
 

@@ -193,6 +193,9 @@ pub enum FailureCode {
     PrefixTokenCountMismatch,
     DetokenizationMismatch,
 
+    // -- Attention certification --
+    AttentionCertificationFailed,
+
     // -- Operational --
     TokenizerError,
     DetokenizerError,
@@ -250,7 +253,8 @@ impl FailureCode {
             | WitnessedScoreStructuralError
             | DecodeArtifactHashMismatch
             | AttentionExactMismatch
-            | AttentionKvCoverageIncomplete => FailureCategory::CryptographicBinding,
+            | AttentionKvCoverageIncomplete
+            | AttentionCertificationFailed => FailureCategory::CryptographicBinding,
 
             SpecFieldMismatch => FailureCategory::SpecMismatch,
 
@@ -597,6 +601,23 @@ pub fn build_audit_challenge(
 // V4 retained-state verification
 // ---------------------------------------------------------------------------
 
+/// Attention verification status — explicit about what was checked.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum AttentionStatus {
+    /// Attention was exactly replayed and matched within tolerance.
+    ExactReplay { linf: i16, tolerance: u8 },
+    /// Attention was bounded via top-k concentration + tail bound.
+    StockBounded {
+        min_top_k_mass: f32,
+        max_tail_bound: f32,
+        logit_margin: f32,
+        certified: bool,
+    },
+    /// Attention was not checked (stock-bounded mode, insufficient evidence).
+    NotChecked { reason: String },
+}
+
 /// Result from V4 retained-state verification.
 #[derive(Debug)]
 pub struct V4VerifyReport {
@@ -613,6 +634,9 @@ pub struct V4VerifyReport {
     /// Checks that were skipped because the profile does not support them.
     /// Each entry describes what was skipped and why.
     pub skipped: Vec<String>,
+    /// Attention verification status — explicit about what was checked.
+    /// `None` = attention not checked (e.g. no shell opening for this token).
+    pub attention_status: Option<AttentionStatus>,
 }
 
 impl V4VerifyReport {
@@ -1841,6 +1865,7 @@ pub fn verify_v4_legacy(
         coverage,
         duration,
         skipped: Vec::new(), // legacy path does not support tier-aware skipping
+        attention_status: None,
     }
 }
 
@@ -2216,6 +2241,7 @@ pub fn verify_v4_with_weights(
         coverage,
         duration,
         skipped: Vec::new(), // legacy path does not support tier-aware skipping
+        attention_status: None,
     }
 }
 

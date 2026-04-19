@@ -31,6 +31,7 @@ from .trace import (
     requantize_i32_to_i8,
 )
 from .hooks import EmbeddingLogitCapture
+from .det_attn import DeterministicAttentionHook
 from .server import VerifiedInferenceServer, create_app
 
 __all__ = [
@@ -45,6 +46,7 @@ __all__ = [
     "split_gate_up",
     "requantize_i32_to_i8",
     "EmbeddingLogitCapture",
+    "DeterministicAttentionHook",
     "VerifiedInferenceServer",
     "create_app",
 ]

@@ -930,11 +930,25 @@ pub fn measure_corridor_witnessed_scores(
         }
 
         // Use witnessed scores for replay (skip Q·K^T).
+        // Slice scores to match available KV entries (audit may not have all positions).
+        let actual_seq_len = kv_v.len();
+        let scores_sliced: Vec<f32> = if actual_seq_len < ws.seq_len {
+            // Truncate: take first actual_seq_len scores per head.
+            (0..ws.n_q_heads)
+                .flat_map(|qh| {
+                    let start = qh * ws.seq_len;
+                    ws.scores[start..start + actual_seq_len].iter().copied()
+                })
+                .collect()
+        } else {
+            ws.scores.clone()
+        };
+
         let (replayed, _a_f64) =
             verilm_core::attention::replay_attention_witnessed_scores(
-                &ws.scores,
+                &scores_sliced,
                 ws.n_q_heads,
-                ws.seq_len,
+                actual_seq_len,
                 &kv_v,
                 rs.scale_a as f64,
                 cfg,
@@ -946,6 +960,271 @@ pub fn measure_corridor_witnessed_scores(
     }
 
     build_report(all_stats, n_layers)
+}
+
+/// Same as [`measure_corridor_witnessed_scores`] but uses the tiled
+/// online-softmax replay matching FlashAttention-2's decode recurrence.
+///
+/// `block_n` is the KV tile size (128 for split-KV decode, 64 for standard).
+/// Returns the same `CorridorReport` so L-inf can be compared directly.
+pub fn measure_corridor_witnessed_scores_tiled(
+    key: &VerifierKey,
+    response: &V4AuditResponse,
+    _scale_overrides: Option<&CorridorScaleOverrides>,
+    block_n: usize,
+) -> Result<CorridorReport, String> {
+    let witnessed = response
+        .witnessed_scores
+        .as_ref()
+        .ok_or("no witnessed_scores in audit response")?;
+
+    let kv_entries = response
+        .kv_entries
+        .as_ref()
+        .ok_or("no kv_entries in audit response (need committed V)")?;
+
+    let cfg = &key.config;
+    let n_layers = cfg
+        .n_layers
+        .min(witnessed.len())
+        .min(kv_entries.len())
+        .min(response.retained.layers.len());
+    let token_pos = response.token_index as usize;
+
+    let mut all_stats = Vec::new();
+
+    for layer_idx in 0..n_layers {
+        let ws = &witnessed[layer_idx];
+        let layer_kv = &kv_entries[layer_idx];
+        let rs = &response.retained.layers[layer_idx];
+
+        let n_positions = (token_pos + 1).min(layer_kv.len());
+        let kv_v: Vec<Vec<f64>> = layer_kv[..n_positions]
+            .iter()
+            .map(|e| e.v_deq.clone())
+            .collect();
+
+        if kv_v.is_empty() {
+            continue;
+        }
+
+        // Slice scores to match available KV entries.
+        let actual_seq_len = kv_v.len();
+        let scores_sliced: Vec<f32> = if actual_seq_len < ws.seq_len {
+            (0..ws.n_q_heads)
+                .flat_map(|qh| {
+                    let start = qh * ws.seq_len;
+                    ws.scores[start..start + actual_seq_len].iter().copied()
+                })
+                .collect()
+        } else {
+            ws.scores.clone()
+        };
+
+        let (replayed, _a_f64) =
+            verilm_core::attention::replay_attention_witnessed_scores_tiled(
+                &scores_sliced,
+                ws.n_q_heads,
+                actual_seq_len,
+                &kv_v,
+                rs.scale_a as f64,
+                cfg,
+                block_n,
+            );
+
+        all_stats.push(measure_attention_diff(
+            &rs.a, &replayed, layer_idx, token_pos,
+        )?);
+    }
+
+    build_report(all_stats, n_layers)
+}
+
+/// LSE-conditioned corridor measurement.
+///
+/// Uses externally-captured GPU LSE (log-sum-exp) values for softmax
+/// normalization instead of computing from scratch. Answers two questions:
+///
+/// 1. **LSE agreement** (Q1): Does CPU-computed LSE from witnessed scores
+///    match the GPU kernel's captured LSE?
+/// 2. **Attention gap** (Q2): Does using exact GPU normalization collapse
+///    the L-inf gap between replayed and actual attention output?
+///
+/// `per_layer_lse[layer]` has shape `[n_q_heads]` — one f32 per head.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LseCorridorReport {
+    /// Standard corridor report (L-inf computed with LSE-conditioned replay).
+    pub corridor: CorridorReport,
+    /// Per-layer LSE agreement.
+    pub lse_reports: Vec<verilm_core::attention::LseReport>,
+    /// Global max |CPU_LSE - GPU_LSE| across all layers and heads.
+    pub global_lse_max_gap: f32,
+    /// Mean |CPU_LSE - GPU_LSE| across all layers and heads.
+    pub global_lse_mean_gap: f32,
+}
+
+pub fn measure_corridor_with_captured_lse(
+    key: &VerifierKey,
+    response: &V4AuditResponse,
+    _scale_overrides: Option<&CorridorScaleOverrides>,
+    per_layer_lse: &[Vec<f32>],
+) -> Result<LseCorridorReport, String> {
+    let witnessed = response
+        .witnessed_scores
+        .as_ref()
+        .ok_or("no witnessed_scores in audit response")?;
+
+    let kv_entries = response
+        .kv_entries
+        .as_ref()
+        .ok_or("no kv_entries in audit response (need committed V)")?;
+
+    let cfg = &key.config;
+    let n_layers = cfg
+        .n_layers
+        .min(witnessed.len())
+        .min(kv_entries.len())
+        .min(response.retained.layers.len())
+        .min(per_layer_lse.len());
+    let token_pos = response.token_index as usize;
+
+    let mut all_stats = Vec::new();
+    let mut lse_reports = Vec::new();
+
+    for layer_idx in 0..n_layers {
+        let ws = &witnessed[layer_idx];
+        let layer_kv = &kv_entries[layer_idx];
+        let rs = &response.retained.layers[layer_idx];
+        let gpu_lse = &per_layer_lse[layer_idx];
+
+        let n_positions = (token_pos + 1).min(layer_kv.len());
+        let kv_v: Vec<Vec<f64>> = layer_kv[..n_positions]
+            .iter()
+            .map(|e| e.v_deq.clone())
+            .collect();
+
+        if kv_v.is_empty() {
+            continue;
+        }
+
+        let actual_seq_len = kv_v.len();
+        let scores_sliced: Vec<f32> = if actual_seq_len < ws.seq_len {
+            (0..ws.n_q_heads)
+                .flat_map(|qh| {
+                    let start = qh * ws.seq_len;
+                    ws.scores[start..start + actual_seq_len].iter().copied()
+                })
+                .collect()
+        } else {
+            ws.scores.clone()
+        };
+
+        let (replayed, _a_f64, lse_report) =
+            verilm_core::attention::replay_attention_with_captured_lse(
+                &scores_sliced,
+                ws.n_q_heads,
+                actual_seq_len,
+                &kv_v,
+                rs.scale_a as f64,
+                cfg,
+                gpu_lse,
+            );
+
+        lse_reports.push(lse_report);
+
+        all_stats.push(measure_attention_diff(
+            &rs.a, &replayed, layer_idx, token_pos,
+        )?);
+    }
+
+    let global_lse_max_gap = lse_reports
+        .iter()
+        .map(|r| r.max_gap)
+        .fold(0.0f32, f32::max);
+    let global_lse_mean_gap = if lse_reports.is_empty() {
+        0.0
+    } else {
+        lse_reports.iter().map(|r| r.mean_gap).sum::<f32>() / lse_reports.len() as f32
+    };
+
+    let corridor = build_report(all_stats, n_layers)?;
+
+    Ok(LseCorridorReport {
+        corridor,
+        lse_reports,
+        global_lse_max_gap,
+        global_lse_mean_gap,
+    })
+}
+
+/// Compute attention evidence for stock-bounded certification from an audit response.
+///
+/// For each challenged layer, computes top-k softmax concentration and tail
+/// bound against committed V. Combined with the logit margin from CapturedLogits,
+/// this gives a statistical certification of the attention output.
+pub fn compute_attention_evidence_from_audit(
+    key: &VerifierKey,
+    response: &V4AuditResponse,
+    top_k: usize,
+) -> Result<Vec<verilm_core::attention::AttentionEvidence>, String> {
+    let witnessed = response
+        .witnessed_scores
+        .as_ref()
+        .ok_or("no witnessed_scores in audit response")?;
+
+    let kv_entries = response
+        .kv_entries
+        .as_ref()
+        .ok_or("no kv_entries in audit response (need committed V)")?;
+
+    let cfg = &key.config;
+    let n_layers = cfg
+        .n_layers
+        .min(witnessed.len())
+        .min(kv_entries.len());
+    let token_pos = response.token_index as usize;
+
+    let mut all_evidence = Vec::new();
+
+    for layer_idx in 0..n_layers {
+        let ws = &witnessed[layer_idx];
+        let layer_kv = &kv_entries[layer_idx];
+
+        let n_positions = (token_pos + 1).min(layer_kv.len());
+        let kv_v: Vec<Vec<f64>> = layer_kv[..n_positions]
+            .iter()
+            .map(|e| e.v_deq.clone())
+            .collect();
+
+        if kv_v.is_empty() {
+            continue;
+        }
+
+        let actual_seq_len = kv_v.len();
+        let scores_sliced: Vec<f32> = if actual_seq_len < ws.seq_len {
+            (0..ws.n_q_heads)
+                .flat_map(|qh| {
+                    let start = qh * ws.seq_len;
+                    ws.scores[start..start + actual_seq_len].iter().copied()
+                })
+                .collect()
+        } else {
+            ws.scores.clone()
+        };
+
+        let mut evidence = verilm_core::attention::compute_attention_evidence(
+            &scores_sliced,
+            ws.n_q_heads,
+            actual_seq_len,
+            &kv_v,
+            cfg,
+            top_k,
+        );
+        evidence.layer = layer_idx;
+        all_evidence.push(evidence);
+    }
+
+    Ok(all_evidence)
 }
 
 /// Score anchoring report: compares witnessed scores against canonical

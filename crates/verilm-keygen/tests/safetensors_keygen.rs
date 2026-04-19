@@ -609,10 +609,10 @@ fn test_w8a8_qwen_profile_detected_and_roundtrips() {
         .verification_profile
         .as_ref()
         .expect("expected qwen profile");
-    assert_eq!(profile.name, "qwen-w8a8");
+    assert_eq!(profile.name, "qwen-w8a8-stock-bounded");
     assert_eq!(profile.model_family, "qwen2");
     assert_eq!(profile.bridge_tolerance, 1);
-    assert_eq!(profile.attention_tolerance, 10);
+    assert_eq!(profile.attention_tolerance, 255);
     assert_eq!(profile.max_validated_context, 1164);
     assert!(!profile.requires_score_anchoring);
 
@@ -631,10 +631,10 @@ fn test_w8a8_llama_profile_detected() {
         .verification_profile
         .as_ref()
         .expect("expected llama profile");
-    assert_eq!(profile.name, "llama-w8a8");
+    assert_eq!(profile.name, "llama-w8a8-stock-bounded");
     assert_eq!(profile.model_family, "llama");
     assert_eq!(profile.bridge_tolerance, 1);
-    assert_eq!(profile.attention_tolerance, 10);
+    assert_eq!(profile.attention_tolerance, 255);
     assert_eq!(profile.max_validated_context, 1165);
     assert!(profile.requires_score_anchoring);
     assert_eq!(profile.score_anchor_threshold, Some(0.25));

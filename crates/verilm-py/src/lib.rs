@@ -2124,6 +2124,135 @@ fn measure_corridor_witnessed_scores(
         .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
 }
 
+/// Tiled online-softmax corridor measurement matching FA2 decode recurrence.
+///
+/// Same as `measure_corridor_witnessed_scores` but replays attention using
+/// the tiled online-softmax with fused O accumulator, matching FlashAttention-2's
+/// decode path.
+///
+/// Args:
+///     audit_binary: bytes — serialized V4 audit response.
+///     key_json: str — JSON-serialized VerifierKey.
+///     block_n: int — KV tile size (128 for split-KV, 64 for standard FA2).
+///     scale_overrides_json: Optional[str] — JSON-serialized CorridorScaleOverrides.
+///
+/// Returns:
+///     str — JSON-serialized CorridorReport.
+#[pyfunction]
+#[pyo3(signature = (audit_binary, key_json, block_n, scale_overrides_json=None))]
+fn measure_corridor_witnessed_scores_tiled(
+    audit_binary: &[u8],
+    key_json: &str,
+    block_n: usize,
+    scale_overrides_json: Option<&str>,
+) -> PyResult<String> {
+    let key: VerifierKey = serde_json::from_str(key_json)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize key: {}", e)))?;
+    let response = verilm_core::serialize::deserialize_v4_audit(audit_binary)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize audit: {}", e)))?;
+    let overrides = scale_overrides_json
+        .map(|json| {
+            serde_json::from_str::<verilm_verify::corridor::CorridorScaleOverrides>(json).map_err(
+                |e| PyValueError::new_err(format!("failed to deserialize scale overrides: {}", e)),
+            )
+        })
+        .transpose()?;
+    let report = verilm_verify::corridor::measure_corridor_witnessed_scores_tiled(
+        &key,
+        &response,
+        overrides.as_ref(),
+        block_n,
+    )
+    .map_err(|e| PyValueError::new_err(format!("tiled witnessed corridor measurement failed: {}", e)))?;
+    serde_json::to_string(&report)
+        .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+}
+
+/// LSE-conditioned corridor measurement.
+///
+/// Uses externally-captured GPU LSE values for softmax normalization
+/// instead of computing from scratch. Measures both:
+/// - Q1: CPU vs GPU LSE agreement (normalization)
+/// - Q2: Whether LSE-conditioned P@V collapses the attention output gap
+///
+/// Args:
+///     audit_binary: bytes — serialized V4 audit response.
+///     key_json: str — JSON-serialized VerifierKey.
+///     per_layer_lse_json: str — JSON array of arrays: `[[f32; n_q_heads]; n_layers]`.
+///     scale_overrides_json: Optional[str] — JSON-serialized CorridorScaleOverrides.
+///
+/// Returns:
+///     str — JSON-serialized LseCorridorReport.
+#[pyfunction]
+#[pyo3(signature = (audit_binary, key_json, per_layer_lse_json, scale_overrides_json=None))]
+fn measure_corridor_with_captured_lse(
+    audit_binary: &[u8],
+    key_json: &str,
+    per_layer_lse_json: &str,
+    scale_overrides_json: Option<&str>,
+) -> PyResult<String> {
+    let key: VerifierKey = serde_json::from_str(key_json)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize key: {}", e)))?;
+    let response = verilm_core::serialize::deserialize_v4_audit(audit_binary)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize audit: {}", e)))?;
+    let per_layer_lse: Vec<Vec<f32>> = serde_json::from_str(per_layer_lse_json)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize per_layer_lse: {}", e)))?;
+    let overrides = scale_overrides_json
+        .map(|json| {
+            serde_json::from_str::<verilm_verify::corridor::CorridorScaleOverrides>(json).map_err(
+                |e| PyValueError::new_err(format!("failed to deserialize scale overrides: {}", e)),
+            )
+        })
+        .transpose()?;
+    let report = verilm_verify::corridor::measure_corridor_with_captured_lse(
+        &key,
+        &response,
+        overrides.as_ref(),
+        &per_layer_lse,
+    )
+    .map_err(|e| PyValueError::new_err(format!("LSE corridor measurement failed: {}", e)))?;
+    serde_json::to_string(&report)
+        .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+}
+
+/// Compute attention evidence for stock-bounded certification.
+///
+/// Returns per-layer top-k softmax concentration and tail bounds against
+/// committed V, plus a token-level certification result.
+///
+/// Args:
+///     audit_binary: bytes — bincode-serialized V4AuditResponse.
+///     key_json: str — JSON-serialized VerifierKey.
+///     logit_margin: float — gap between top-1 and top-2 final logits.
+///     top_k: int — number of top softmax positions to track (default 16).
+///     concentration_threshold: float — min top-k mass for certification (default 0.9).
+///
+/// Returns:
+///     str — JSON-serialized TokenCertification.
+#[pyfunction]
+#[pyo3(signature = (audit_binary, key_json, logit_margin, top_k=16, concentration_threshold=0.9))]
+fn compute_attention_certification(
+    audit_binary: &[u8],
+    key_json: &str,
+    logit_margin: f32,
+    top_k: usize,
+    concentration_threshold: f32,
+) -> PyResult<String> {
+    let key: VerifierKey = serde_json::from_str(key_json)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize key: {}", e)))?;
+    let response = verilm_core::serialize::deserialize_v4_audit(audit_binary)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize audit: {}", e)))?;
+    let evidence = verilm_verify::corridor::compute_attention_evidence_from_audit(
+        &key, &response, top_k,
+    )
+    .map_err(|e| PyValueError::new_err(format!("attention evidence failed: {}", e)))?;
+    let cert = verilm_core::attention::certify_token(
+        &evidence, logit_margin, concentration_threshold,
+    );
+    serde_json::to_string(&cert)
+        .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+}
+
 /// Verify that witnessed scores are consistent with shell Q and committed K.
 ///
 /// Reconstructs canonical Q·K^T/√d from shell opening + committed KV entries,
@@ -2474,6 +2603,9 @@ fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(measure_corridor_precision, m)?)?;
     m.add_function(wrap_pyfunction!(measure_corridor_committed_kv_f32, m)?)?;
     m.add_function(wrap_pyfunction!(measure_corridor_witnessed_scores, m)?)?;
+    m.add_function(wrap_pyfunction!(measure_corridor_witnessed_scores_tiled, m)?)?;
+    m.add_function(wrap_pyfunction!(measure_corridor_with_captured_lse, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_attention_certification, m)?)?;
     m.add_function(wrap_pyfunction!(verify_witnessed_score_anchoring, m)?)?;
     m.add_function(wrap_pyfunction!(verify_witnessed_score_anchoring_gpu_like, m)?)?;
     m.add_function(wrap_pyfunction!(verify_witnessed_score_anchoring_bf16, m)?)?;
@@ -2485,5 +2617,67 @@ fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(diagnose_cast_order, m)?)?;
     m.add_class::<CaptureHook>()?;
     m.add_function(wrap_pyfunction!(verify_input_tokenization, m)?)?;
+    m.add_function(wrap_pyfunction!(deterministic_attention_bf16, m)?)?;
     Ok(())
+}
+
+/// CPU reference: deterministic attention from bf16 inputs.
+///
+/// Args:
+///   q_bf16: list[int] — bf16 values as u16, shape [n_q_heads * d_head]
+///   k_bf16: list[list[int]] — bf16 values as u16, shape [seq_len][n_kv_heads * d_head]
+///   v_bf16: list[list[int]] — bf16 values as u16, shape [seq_len][n_kv_heads * d_head]
+///   n_q_heads: int
+///   n_kv_heads: int
+///   d_head: int
+///
+/// Returns: JSON string with:
+///   output_f32: list[float] — [n_q_heads * d_head]
+///   softmax_weights: list[float] — [n_q_heads * seq_len]
+///   inv_sqrt_d: float — the precomputed scale factor used
+#[pyfunction]
+#[pyo3(signature = (q_bf16, k_bf16, v_bf16, n_q_heads, n_kv_heads, d_head, inv_sqrt_d=None))]
+fn deterministic_attention_bf16(
+    q_bf16: Vec<u16>,
+    k_bf16: Vec<Vec<u16>>,
+    v_bf16: Vec<Vec<u16>>,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    d_head: usize,
+    inv_sqrt_d: Option<f32>,
+) -> PyResult<String> {
+    let cfg = verilm_core::constants::ModelConfig {
+        name: "deterministic-test".into(),
+        hidden_dim: n_q_heads * d_head,
+        kv_dim: n_kv_heads * d_head,
+        d_head,
+        n_q_heads,
+        n_kv_heads,
+        ffn_dim: 1,
+        n_layers: 1,
+        vocab_size: 1,
+        rope_theta: 10000.0,
+        rope_scaling: None,
+    };
+
+    let scale = inv_sqrt_d.unwrap_or_else(|| {
+        verilm_core::attention::canonical_inv_sqrt_d(d_head)
+    });
+
+    let result = verilm_core::attention::replay_attention_deterministic(
+        &q_bf16, &k_bf16, &v_bf16, &cfg, scale,
+    );
+
+    // Return f32 values as their u32 bit representations for bit-exact comparison.
+    // This avoids float-to-string precision loss.
+    let out_bits: Vec<u32> = result.output_f32.iter().map(|v| v.to_bits()).collect();
+    let w_bits: Vec<u32> = result.softmax_weights.iter().map(|v| v.to_bits()).collect();
+    let out_str: Vec<String> = out_bits.iter().map(|b| b.to_string()).collect();
+    let w_str: Vec<String> = w_bits.iter().map(|b| b.to_string()).collect();
+    Ok(format!(
+        "{{\"output_bits\":[{}],\"weight_bits\":[{}],\"inv_sqrt_d_bits\":{}}}",
+        out_str.join(","),
+        w_str.join(","),
+        scale.to_bits(),
+    ))
 }

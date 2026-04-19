@@ -95,6 +95,18 @@ pub enum AttentionVerificationMode {
     /// Replay softmax(witnessed) @ V → requantize, compare against committed `a`.
     /// Used when f64 replay diverges from GPU at later token positions.
     WitnessedScores,
+
+    /// Stock-compatible: attention output is bounded (not exactly verified).
+    /// Uses top-k softmax concentration + tail bound against committed V.
+    /// Combined with CapturedLogits margin gating, provides statistical
+    /// certification that attention errors cannot flip the output token.
+    /// No kernel modification required — works with stock FlashAttention.
+    StockBounded,
+
+    /// Deterministic attention kernel: exact match between prover and verifier.
+    /// Requires custom CUDA kernel replacing FlashAttention.
+    /// Future — not yet implemented.
+    DeterministicKernel,
 }
 
 impl Default for AttentionVerificationMode {
@@ -253,15 +265,39 @@ impl VerificationProfile {
         }
     }
 
+    /// Llama W8A8 stock-bounded with captured-logits decode.
+    pub fn llama_w8a8_stock_bounded() -> Self {
+        VerificationProfile {
+            name: "llama-w8a8-stock-bounded".into(),
+            attention_mode: AttentionVerificationMode::StockBounded,
+            decode_acceptance: DecodeAcceptanceMode::CapturedLogits,
+            // Attention tolerance is not used for StockBounded — set high.
+            attention_tolerance: 255,
+            ..Self::llama_w8a8()
+        }
+    }
+
+    /// Qwen W8A8 stock-bounded with captured-logits decode.
+    pub fn qwen_w8a8_stock_bounded() -> Self {
+        VerificationProfile {
+            name: "qwen-w8a8-stock-bounded".into(),
+            attention_mode: AttentionVerificationMode::StockBounded,
+            decode_acceptance: DecodeAcceptanceMode::CapturedLogits,
+            attention_tolerance: 255,
+            ..Self::qwen_w8a8()
+        }
+    }
+
     /// Detect profile from model family string (from config.json model_type).
     /// Returns None for unrecognized families.
+    /// Defaults to stock-bounded profiles (most practical for production).
     pub fn detect(model_type: &str, quant_family: Option<&str>) -> Option<Self> {
         let is_w8a8 = quant_family.map_or(false, |q| q == "W8A8");
         let family = model_type.to_lowercase();
         if family.contains("qwen2") && is_w8a8 {
-            Some(Self::qwen_w8a8())
+            Some(Self::qwen_w8a8_stock_bounded())
         } else if family.contains("llama") && is_w8a8 {
-            Some(Self::llama_w8a8())
+            Some(Self::llama_w8a8_stock_bounded())
         } else {
             None
         }

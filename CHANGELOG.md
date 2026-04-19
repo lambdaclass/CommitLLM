@@ -4,6 +4,46 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 
 Historical references below to “roadmap #N” refer to the pre-2026-03-30 roadmap numbering. On 2026-03-30 the roadmap was renumbered into a single linear open-items-only sequence.
 
+## 2026-04-19
+
+### Measured
+
+- **CapturedLogits economics are now measured enough to isolate the dominant decode-side cost.** Across both dense families and 128/512/1024-token generations, retained sampled-decode state stays in the same `~500–600 KiB/token` range already established. The new A/B split shows:
+  - **hook/copy overhead**: about `~3–4 ms/token` (`~20–25%` over plain generation)
+  - **commit/finalize cost**: dominant, roughly `~55–100 ms/token`
+  The decode-side operational bottleneck is commit/materialization, not the sampler hook itself.
+- **`StockBounded` attention certification was measured and rejected as the mainline attention answer.** On the first broad certification sweep (`k=16`, mass threshold `0.9`, temperature `0.8`):
+  - **Qwen 7B W8A8**: `23/100` certified
+  - **Llama 8B W8A8**: `28/100` certified
+  - **Low logit margin was not the bottleneck**: `0/100` failures on margin for both families.
+  - **Attention concentration was the bottleneck**: roughly `72–77%` of challenged tokens failed because top-k mass was too diffuse. This is too weak for the main shipped attention story.
+
+### Added
+
+- **`StockBounded` verifier plumbing and attention evidence prototype.** The verifier surface now includes a stock-bounded attention mode, explicit attention status reporting, attention-evidence computation, and token-certification plumbing. This keeps the practical stock-compatible tier as an explicit best-effort path rather than an implicit replay/tolerance story.
+- **Deterministic attention arithmetic spec, CPU reference, and CUDA parity harness.** The exact verified-attention path now has:
+  - a frozen arithmetic spec in [docs/design/deterministic-attention-spec.md](./docs/design/deterministic-attention-spec.md)
+  - CPU reference replay in Rust
+  - standalone CUDA kernel and parity harness
+  - explicit round-to-nearest-even handling (`rintf` / `round_ties_even`) after fixing the only observed parity bug
+
+### Validated
+
+- **Deterministic attention arithmetic is now frozen for the first verified-attention slice.** After the rounding fix, the standalone CPU and CUDA implementations are bit-exact on:
+  - **10,000/10,000 randomized parity tests**
+  - **45/45 targeted edge cases**
+  Scope: decode-time attention, `seqlen_q = 1`, dense GQA, `head_dim = 128`, A100/SM80, post-RoPE `Q/K`, bf16 inputs, f32 arithmetic. This validates the arithmetic contract strongly enough to freeze it and treat future arithmetic changes as protocol changes.
+
+### Decided
+
+- **`StockBounded` remains a narrow stock-compatible tier, not the mainline attention guarantee.** It is useful as an opportunistic certification layer when the bound passes, but the measured `23–28%` certification rate is too low for the main production attention story.
+- **Verified-attention mode is now the mainline exact-attention path.** The next engineering step is no longer arithmetic research; it is integration of the frozen deterministic attention contract into vLLM as an explicit verified-attention mode, followed by drift and throughput measurement against stock mode.
+
+### Known issues
+
+- **Verified-attention mode still needs runtime integration.** The arithmetic contract is frozen and the standalone parity harness is green, but vLLM integration, profile/runtime wiring, fail-closed serving behavior, and drift/throughput benchmarks versus stock mode are still open.
+- **Stock-compatible arbitrary-position attention remains best-effort only.** Until the low-bandwidth bound can certify more than a minority of tokens, stock-compatible mode should treat arbitrary-position attention as opportunistic/experimental certification or unsupported beyond token-0 smoke/reference.
+
 ## 2026-04-18
 
 ### Measured

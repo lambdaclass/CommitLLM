@@ -145,6 +145,26 @@ class VerifiedInferenceServer:
         if cap._hidden_size > 0:
             self.buf.init_pinned_slab(cap._hidden_size)
 
+        # Deterministic attention mode: replaces FlashAttention with custom
+        # CUDA kernel during decode. Produces bit-exact f32 output matching
+        # the CPU Rust reference. Enabled via VERILM_ATTN_MODE=deterministic.
+        self.det_attn_hook = None
+        attn_mode = os.environ.get("VERILM_ATTN_MODE", "stock")
+        if attn_mode == "deterministic":
+            from .det_attn import DeterministicAttentionHook
+            self.det_attn_hook = DeterministicAttentionHook()
+            n_hooks = self.det_attn_hook.install(model)
+            logger.info(
+                "verilm: deterministic attention mode — %d layers hooked, "
+                "geometry: %s",
+                n_hooks, self.det_attn_hook.geometry,
+            )
+        elif attn_mode != "stock":
+            raise ValueError(
+                f"Unknown VERILM_ATTN_MODE={attn_mode!r}. "
+                f"Valid: 'stock' (default), 'deterministic'."
+            )
+
         # Score witness: capture pre-RoPE K on GPU for attention score reconstruction.
         # Enabled via VERILM_SCORE_WITNESS=1 env var (opt-in).
         if os.environ.get("VERILM_SCORE_WITNESS", "0") == "1":
@@ -896,6 +916,7 @@ class VerifiedInferenceServer:
             # ModelSpec fields.
             "adapter_hash": self._adapter_hash,
             "attn_backend": self._attn_backend,
+            "attn_mode": "deterministic" if self.det_attn_hook else "stock",
             "attn_dtype": self._attn_dtype,
             "quant_family": self._quant_family,
             "scale_derivation": self._scale_derivation,
