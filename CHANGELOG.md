@@ -4,6 +4,40 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 
 Historical references below to “roadmap #N” refer to the pre-2026-03-30 roadmap numbering. On 2026-03-30 the roadmap was renumbered into a single linear open-items-only sequence.
 
+## 2026-04-20
+
+### Measured
+
+- **`StockBounded` attention is now conclusively dead as a shipped guarantee.** The first `k=16` sweep was already weak (`23%` Qwen, `28%` Llama). Follow-up work made that verdict decisive rather than provisional:
+  - adaptive-`k` + tail-bound + margin gating
+  - explicit budgeted greedy allocation
+  - exact `o_proj` sensitivity (`alpha[l,h]`)
+  - scalar downstream gain calibration (`beta[l]`)
+  - directional margin sensitivity (`gamma[l,h]`)
+  All still failed by orders of magnitude. The budgeted certifier reached **0% certification** on the broad rerun, almost entirely as `budget_exhausted`, and the directional-gamma diagnostic still left the bound roughly `10^3–10^4` above the `margin / 2` target. This is not a threshold-tuning problem; the entire stock-bounded certification line is rejected.
+- **Deterministic exact attention works technically but is not the product path.** The deterministic kernel, CPU replay, and commit/open/verify plumbing are all real and exact on their supported slice, but the operational benchmark makes the product tradeoff clear:
+  - stock decode median: `21.58 ms/token`
+  - deterministic decode median: `71.16 ms/token`
+  - overhead: `+49.58 ms/token` (`+230%`)
+  - greedy agreement vs stock: `1/30`
+  This is valuable as a research/reference path, not as the kept shipped runtime.
+
+### Decided
+
+- **The kept product claim is now: exact decode, audited attention inputs/wiring, no arbitrary-position attention verification.** The project no longer treats either `StockBounded` certification or deterministic attention mode as part of the mainline product guarantee.
+- **The attention audit surface is now explicitly narrower and honest.** The kept stock-mode attention work is:
+  - exact score anchoring (`QK^T / sqrt(d)`)
+  - KV provenance / cache-row correctness
+  - mask / RoPE / GQA wiring checks
+  - token-0 / local replay smoke checks and offline differential testing as regression tools
+  These are useful audits, but they are not full attention verification.
+- **The failed attention branches are archived, not promoted.** No more stock-bounded certification work, no more replay-shape or witness tuning, and no more deterministic-kernel optimization on the main product path.
+
+### Known issues
+
+- **Arbitrary-position attention outputs are not verified in stock mode.** The verifier can still audit scores, KV provenance, and attention wiring, but it cannot honestly claim full `softmax(scores) @ V` verification on arbitrary positions.
+- **Paper / README / verifier-report cleanup still needs to be finished everywhere.** The roadmap and changelog now reflect the final claim, but any remaining `StockBounded`, `verified-attention`, or “verified attention” language in the paper, README, and report surface still needs to be removed or restated.
+
 ## 2026-04-19
 
 ### Measured
