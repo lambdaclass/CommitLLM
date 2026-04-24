@@ -6,7 +6,7 @@ Proves the post-B3 attention audit status populates on real GPU:
   1. VerifiedInferenceServer.chat() — capture + commit (witnessed scores
      auto-install for W8A8 llama/qwen).
   2. verilm_rs.generate_key_binary_with_profile("{model}-w8a8-audited", ...)
-  3. server.audit() on a random generated-token index.
+  3. server.audit() on the LAST generated token (see contract note below).
   4. verilm_rs.verify_v4_full_binary() returns report["attention_status_json"].
   5. Assertions on the decoded status:
        - mode == "audited_inputs_not_verified"
@@ -14,6 +14,19 @@ Proves the post-B3 attention audit status populates on real GPU:
        - kv_provenance.checked == True
        - wiring is present (any sub-field populated)
        - local_replay may be None (B4 not wired yet)
+
+Current witness contract (narrow, last-token-only):
+    The sidecar score-witness path retains pre-RoPE K for every step but
+    stores Q only for the final decode step (capture._sw_q_last is
+    overwritten each decode). compute_witnessed_scores therefore yields
+    (n_heads, n_tokens) scores for the LAST generated token. Any audit
+    at token_index < n_tokens - 1 will fail the verifier's structural
+    shape check. Score anchoring AND the score-derived causal-mask audit
+    (wiring.mask_ok) are therefore last-generated-token only today.
+
+    Follow-up B (deferred): retain per-step Q on the sidecar and slice
+    compute_witnessed_scores at the audited token_index so arbitrary
+    generated-token score audits are supported.
 
 Both llama and qwen run in parallel.
 
@@ -75,7 +88,6 @@ PROMPTS = [
 def _run_model(model_name, model_id):
     import hashlib
     import json
-    import random
     import time
 
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -103,7 +115,6 @@ def _run_model(model_name, model_id):
     print(f"  keygen: {keygen_ms:.0f}ms, key={len(key_binary)/1024/1024:.1f} MB")
 
     full_layers = list(range(n_layers))
-    rng = random.Random(42)
 
     results = []
     failures = []
@@ -134,9 +145,10 @@ def _run_model(model_name, model_id):
         print(f"  text: {result['generated_text'][:80]}...")
         check(n_gen > 0, f"generated {n_gen} tokens")
 
-        gen_start = n_prompt - 1
-        gen_offset = rng.randint(0, max(0, n_gen - 1))
-        challenge_idx = gen_start + gen_offset
+        # Last-generated-token only: the sidecar witness holds Q for the
+        # final decode step only, so structural shape (heads, n_tokens)
+        # matches only at this index. See module docstring.
+        challenge_idx = n_tokens - 1
 
         audit_binary = server.audit(
             request_id=request_id,
@@ -145,7 +157,11 @@ def _run_model(model_name, model_id):
             tier="full",
             binary=True,
         )
-        print(f"  audit token_index={challenge_idx}, payload={len(audit_binary)/1024:.1f} KiB")
+        print(
+            f"  audit token_index={challenge_idx} "
+            f"(last generated, witness contract), "
+            f"payload={len(audit_binary)/1024:.1f} KiB"
+        )
 
         report = verilm_rs.verify_v4_full_binary(
             bytes(audit_binary), key_binary, artifact_binary,

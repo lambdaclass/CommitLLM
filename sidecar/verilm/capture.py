@@ -522,6 +522,10 @@ class CaptureBuffer:
             for _ in range(n_layers)
         ]
         self._sw_k_counts = [0] * n_layers
+        # Current witness contract: Q is retained for the final decode
+        # step only — score_anchor and wiring.mask_ok audit the last
+        # generated token. Follow-up B: store Q per decode step and slice
+        # at the audited token_index to support arbitrary-token audits.
         self._sw_q_last = [None] * n_layers
         self._sw_n_q_heads = n_q_heads
         self._sw_n_kv_heads = n_kv_heads

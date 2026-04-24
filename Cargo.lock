@@ -889,6 +889,7 @@ dependencies = [
  "rand_chacha 0.3.1",
  "safetensors",
  "serde_json",
+ "sha2",
  "tempfile",
  "verilm-core",
  "verilm-test-vectors",
