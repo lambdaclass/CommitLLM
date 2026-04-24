@@ -4,6 +4,12 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 
 Historical references below to “roadmap #N” refer to the pre-2026-03-30 roadmap numbering. On 2026-03-30 the roadmap was renumbered into a single linear open-items-only sequence.
 
+## 2026-04-21
+
+### Added
+
+- **`verilm_rs.deserialize_v4_audit(audit_binary) -> dict`** in `verilm-py`. Exposes the publicly-committed fields of a V4 audit binary (`output_text`, `prompt`, `prompt_hash`, `input/model/decode/output_spec_hash`, `manifest_hash`, `n_tokens`, etc.) as a Python dict. Internal verification state (Merkle proofs, retained state, shell openings, KV entries/roots/proofs, prefix embeddings, witnessed scores) is intentionally not surfaced. Enables relay-layer callers that already trust the binary (having passed `verify_v4_binary`) to extract the committed output text directly rather than accepting a parallel "claimed output" value from the client.
+
 ## 2026-04-20
 
 ### Measured

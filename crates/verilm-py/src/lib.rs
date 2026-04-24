@@ -1725,6 +1725,124 @@ fn run_verify_with_artifact(
     verilm_verify::verify_v4_full_with_artifact(key, response, decode_artifact, tok_ref, detok_ref)
 }
 
+/// Deserialize a V4 audit binary and expose its publicly committed
+/// fields as a Python dict.
+///
+/// The `V4AuditResponse` struct is cryptographically bound by
+/// `verify_v4_binary`: callers who want a trustworthy view of the
+/// committed values should run `verify_v4_binary(audit_binary, key)`
+/// first, then read this dict. Fields that are verification internals
+/// (Merkle proofs, retained state, shell openings, KV
+/// entries/roots/proofs, prefix embeddings, witnessed scores) are
+/// intentionally **not** surfaced — they are consumed by the verifier
+/// and have no meaning to downstream callers.
+///
+/// Returned dict shape (fields may be `None` / missing when not
+/// populated by the prover):
+///
+/// ```text
+/// {
+///   "token_index": int,
+///   "token_id": int,
+///   "prev_io_hash": bytes,               # 32 bytes
+///   "revealed_seed": bytes,              # 32 bytes
+///   "output_text": str | None,
+///   "prompt": bytes | None,
+///   "n_prompt_tokens": int | None,
+///   "prefix_token_ids": list[int],
+///   "commitment": {
+///       "version": str,                  # e.g. "v4"
+///       "n_tokens": int,
+///       "merkle_root": bytes,            # 32 bytes
+///       "io_root": bytes,                # 32 bytes
+///       "prompt_hash": bytes | None,
+///       "seed_commitment": bytes | None,
+///       "manifest_hash": bytes | None,
+///       "input_spec_hash": bytes | None,
+///       "model_spec_hash": bytes | None,
+///       "decode_spec_hash": bytes | None,
+///       "output_spec_hash": bytes | None,
+///       "n_prompt_tokens": int | None,
+///   }
+/// }
+/// ```
+///
+/// Args:
+///     audit_binary: bytes — V4AuditResponse binary payload.
+///
+/// Returns:
+///     dict of publicly-committed fields.
+///
+/// Raises:
+///     ValueError — if `audit_binary` cannot be deserialized.
+#[pyfunction]
+fn deserialize_v4_audit<'py>(
+    py: Python<'py>,
+    audit_binary: &[u8],
+) -> PyResult<Bound<'py, PyDict>> {
+    let r = verilm_core::serialize::deserialize_v4_audit(audit_binary)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize V4 binary: {}", e)))?;
+
+    fn opt_bytes_32<'py>(
+        py: Python<'py>,
+        v: Option<[u8; 32]>,
+    ) -> Option<Bound<'py, PyBytes>> {
+        v.map(|h| PyBytes::new(py, &h))
+    }
+
+    let commitment = PyDict::new(py);
+    commitment.set_item(
+        "version",
+        match r.commitment.version {
+            verilm_core::types::CommitmentVersion::V4 => "v4",
+        },
+    )?;
+    commitment.set_item("n_tokens", r.commitment.n_tokens)?;
+    commitment.set_item("merkle_root", PyBytes::new(py, &r.commitment.merkle_root))?;
+    commitment.set_item("io_root", PyBytes::new(py, &r.commitment.io_root))?;
+    commitment.set_item("prompt_hash", opt_bytes_32(py, r.commitment.prompt_hash))?;
+    commitment.set_item(
+        "seed_commitment",
+        opt_bytes_32(py, r.commitment.seed_commitment),
+    )?;
+    commitment.set_item(
+        "manifest_hash",
+        opt_bytes_32(py, r.commitment.manifest_hash),
+    )?;
+    commitment.set_item(
+        "input_spec_hash",
+        opt_bytes_32(py, r.commitment.input_spec_hash),
+    )?;
+    commitment.set_item(
+        "model_spec_hash",
+        opt_bytes_32(py, r.commitment.model_spec_hash),
+    )?;
+    commitment.set_item(
+        "decode_spec_hash",
+        opt_bytes_32(py, r.commitment.decode_spec_hash),
+    )?;
+    commitment.set_item(
+        "output_spec_hash",
+        opt_bytes_32(py, r.commitment.output_spec_hash),
+    )?;
+    commitment.set_item("n_prompt_tokens", r.commitment.n_prompt_tokens)?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("token_index", r.token_index)?;
+    dict.set_item("token_id", r.token_id)?;
+    dict.set_item("prev_io_hash", PyBytes::new(py, &r.prev_io_hash))?;
+    dict.set_item("revealed_seed", PyBytes::new(py, &r.revealed_seed))?;
+    dict.set_item("output_text", r.output_text.as_deref())?;
+    dict.set_item(
+        "prompt",
+        r.prompt.as_deref().map(|b| PyBytes::new(py, b)),
+    )?;
+    dict.set_item("n_prompt_tokens", r.n_prompt_tokens)?;
+    dict.set_item("prefix_token_ids", r.prefix_token_ids.clone())?;
+    dict.set_item("commitment", commitment)?;
+    Ok(dict)
+}
+
 /// Verify that externally-computed prompt token IDs match the committed token chain.
 ///
 /// The caller tokenizes the raw prompt using the committed InputSpec and passes
@@ -2669,6 +2787,7 @@ fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(diagnose_cast_order, m)?)?;
     m.add_class::<CaptureHook>()?;
     m.add_function(wrap_pyfunction!(verify_input_tokenization, m)?)?;
+    m.add_function(wrap_pyfunction!(deserialize_v4_audit, m)?)?;
     m.add_function(wrap_pyfunction!(deterministic_attention_bf16, m)?)?;
     Ok(())
 }
