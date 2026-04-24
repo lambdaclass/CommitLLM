@@ -1493,6 +1493,9 @@ fn verify_v4_full_binary<'py>(
         let skipped: Vec<&str> = report.skipped.iter().map(|s| s.as_str()).collect();
         result.set_item("skipped", &skipped)?;
     }
+    if let Some(s) = attention_status_json(report.attention_status.as_ref()) {
+        result.set_item("attention_status_json", s)?;
+    }
     Ok(result)
 }
 
@@ -1559,6 +1562,9 @@ fn verify_v4<'py>(
         let skipped: Vec<&str> = report.skipped.iter().map(|s| s.as_str()).collect();
         result.set_item("skipped", &skipped)?;
     }
+    if let Some(s) = attention_status_json(report.attention_status.as_ref()) {
+        result.set_item("attention_status_json", s)?;
+    }
     Ok(result)
 }
 
@@ -1613,7 +1619,18 @@ fn verify_v4_binary<'py>(
         let skipped: Vec<&str> = report.skipped.iter().map(|s| s.as_str()).collect();
         result.set_item("skipped", &skipped)?;
     }
+    if let Some(s) = attention_status_json(report.attention_status.as_ref()) {
+        result.set_item("attention_status_json", s)?;
+    }
     Ok(result)
+}
+
+/// Serialize `attention_status` to a JSON string for the Python caller.
+/// Returns `None` when the report carries no status (attention not checked).
+fn attention_status_json(
+    status: Option<&verilm_verify::AttentionStatus>,
+) -> Option<String> {
+    status.and_then(|s| serde_json::to_string(s).ok())
 }
 
 /// Convert classified failures to a Python list of dicts.
