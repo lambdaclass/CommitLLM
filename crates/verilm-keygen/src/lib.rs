@@ -28,10 +28,40 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use safetensors::{Dtype, SafeTensors};
 
+use sha2::{Digest, Sha256};
+
 use verilm_core::constants::{MatrixType, ModelConfig};
 use verilm_core::field::Fp;
 use verilm_core::freivalds;
 use verilm_core::types::{ShellWeights, VerifierKey};
+
+/// Hash the RoPE configuration from `config.json` into the 32-byte
+/// commitment bound into the verifier key.
+///
+/// The hash covers `rope_theta` and `rope_scaling` exactly as they appear
+/// in `config.json`. Missing keys produce a JSON `null`. The canonical form
+/// is compact, sorted-key JSON (`json.dumps(..., sort_keys=True,
+/// separators=(",", ":"))` on the Python side); serde_json with its default
+/// `BTreeMap`-backed `Value::Object` produces the exact same string.
+///
+/// Returns `None` when `config.json` cannot be read or parsed, or when
+/// neither field is present.
+pub fn compute_rope_config_hash(dir: &Path) -> Option<[u8; 32]> {
+    let data = std::fs::read_to_string(dir.join("config.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&data).ok()?;
+    let theta = v.get("rope_theta").cloned().unwrap_or(serde_json::Value::Null);
+    let scaling = v.get("rope_scaling").cloned().unwrap_or(serde_json::Value::Null);
+    if theta.is_null() && scaling.is_null() {
+        return None;
+    }
+    let mut obj = serde_json::Map::new();
+    obj.insert("rope_scaling".to_string(), scaling);
+    obj.insert("rope_theta".to_string(), theta);
+    let canonical = serde_json::to_string(&serde_json::Value::Object(obj)).ok()?;
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    Some(hasher.finalize().into())
+}
 
 /// A memory-mapped safetensors file.
 struct MappedShard {
@@ -861,7 +891,7 @@ fn generate_key_inner(
         rmsnorm_attn_weights,
         rmsnorm_ffn_weights,
         rmsnorm_eps: rmsnorm_eps,
-        rope_config_hash: None,
+        rope_config_hash: compute_rope_config_hash(dir),
         embedding_merkle_root,
         final_norm_weights,
         quant_block_size: None,

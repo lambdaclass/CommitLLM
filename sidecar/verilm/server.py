@@ -103,7 +103,7 @@ class VerifiedInferenceServer:
         self._model_dir = self._resolve_model_dir(llm)
         self._weight_hash = self._compute_weight_hash_rw(llm)
         self._quant_hash = self._compute_quant_hash(model)
-        self._rope_config_hash = self._compute_rope_config_hash(model)
+        self._rope_config_hash = self._compute_rope_config_hash(self._model_dir)
         self._rmsnorm_eps = self._extract_rmsnorm_eps(model)
         self._system_prompt_hash = hashlib.sha256(b"").hexdigest()  # Default: empty prompt
         self._bos_eos_policy = self._extract_bos_eos_policy(llm)
@@ -283,15 +283,41 @@ class VerifiedInferenceServer:
         Mirrors VerificationProfile::detect() in verilm-core/types.rs:
         llama-w8a8 and qwen-w8a8 both default to AuditedInputsOnly (with
         score-anchor audit), and qwen-w8a8 WitnessedScores mode also needs
-        them. Inspects `model` directly since `self._model_type` /
-        `self._quant_family` are assigned later in __init__.
+        them.
+
+        Must detect from the HF config alone since `self._quant_family`
+        (sourced from WeightProvider, which canonicalizes to "W8A8") is
+        not assigned until after this runs. HF reports `quant_method =
+        "compressed-tensors"` for neuralmagic W8A8 checkpoints; combined
+        with `format == "int-quantized"` and weight/activation num_bits
+        of 8, that is the same thing as W8A8.
         """
         cfg = getattr(model, "config", None)
-        mt = (getattr(cfg, "model_type", None) or "").lower() if cfg else ""
-        qf = (self._extract_quant_family(model) or "").upper()
-        if qf != "W8A8":
+        if cfg is None:
             return False
-        return ("llama" in mt) or ("qwen" in mt)
+        mt = (getattr(cfg, "model_type", None) or "").lower()
+        if "llama" not in mt and "qwen" not in mt:
+            return False
+        quant_cfg = getattr(cfg, "quantization_config", None)
+        if quant_cfg is None:
+            return False
+        d = quant_cfg.to_dict() if hasattr(quant_cfg, "to_dict") else (
+            dict(quant_cfg) if isinstance(quant_cfg, dict) else None
+        )
+        if d is None:
+            return False
+        method = str(d.get("quant_method", "")).lower()
+        fmt = str(d.get("format", "")).lower()
+        if method != "compressed-tensors" or fmt != "int-quantized":
+            return False
+        # Verify it is W8A8 (weights + activations both 8-bit).
+        groups = d.get("config_groups") or {}
+        for g in groups.values():
+            w = (g or {}).get("weights") or {}
+            a = (g or {}).get("input_activations") or {}
+            if w.get("num_bits") == 8 and a.get("num_bits") == 8:
+                return True
+        return False
 
     def _compute_tokenizer_hash(self, llm) -> str:
         """SHA-256 of full tokenizer identity (vocab + normalizer + pre-tokenizer + added tokens).
@@ -365,23 +391,28 @@ class VerifiedInferenceServer:
             logger.warning("Could not hash chat template: %s", e)
             return None
 
-    def _compute_rope_config_hash(self, model) -> Optional[str]:
-        """SHA-256 of RoPE configuration (theta + scaling), if present."""
+    def _compute_rope_config_hash(self, model_dir) -> Optional[str]:
+        """SHA-256 of the `rope_theta` / `rope_scaling` block from config.json.
+
+        Must match verilm-keygen's `compute_rope_config_hash`, which reads the
+        same file and produces the same canonical (sorted-key, compact) JSON
+        object `{"rope_scaling": ..., "rope_theta": ...}` before hashing.
+        Using the raw config.json on both sides avoids drift from transformers
+        normalizing `model.config.rope_scaling`.
+        """
         try:
-            cfg = getattr(model, "config", None)
-            if cfg is None:
+            if model_dir is None:
                 return None
-            rope_theta = getattr(cfg, "rope_theta", None)
-            rope_scaling = getattr(cfg, "rope_scaling", None)
-            if rope_theta is None and rope_scaling is None:
+            config_path = os.path.join(str(model_dir), "config.json")
+            with open(config_path, "r") as f:
+                cfg = json.load(f)
+            theta = cfg.get("rope_theta")
+            scaling = cfg.get("rope_scaling")
+            if theta is None and scaling is None:
                 return None
-            rope_dict = {
-                "rope_theta": rope_theta,
-                "rope_scaling": rope_scaling,
-            }
-            return hashlib.sha256(
-                json.dumps(rope_dict, sort_keys=True, default=str).encode()
-            ).hexdigest()
+            payload = {"rope_scaling": scaling, "rope_theta": theta}
+            canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            return hashlib.sha256(canonical.encode()).hexdigest()
         except Exception as e:
             logger.warning("Could not hash RoPE config: %s", e)
             return None
