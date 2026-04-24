@@ -1381,6 +1381,8 @@ fn generate_key_binary_with_profile<'py>(
         Some("llama-w8a8-lp-hidden") => Some(verilm_core::types::VerificationProfile::llama_w8a8_lp_hidden()),
         Some("llama-w8a8-captured-logits") => Some(verilm_core::types::VerificationProfile::llama_w8a8_captured_logits()),
         Some("qwen-w8a8-captured-logits") => Some(verilm_core::types::VerificationProfile::qwen_w8a8_captured_logits()),
+        Some("llama-w8a8-audited") => Some(verilm_core::types::VerificationProfile::llama_w8a8_audited()),
+        Some("qwen-w8a8-audited") => Some(verilm_core::types::VerificationProfile::qwen_w8a8_audited()),
         Some(other) => return Err(PyValueError::new_err(format!("unknown profile: {}", other))),
         None => None,
     };
