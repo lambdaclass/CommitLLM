@@ -166,8 +166,21 @@ class VerifiedInferenceServer:
             )
 
         # Score witness: capture pre-RoPE K on GPU for attention score reconstruction.
-        # Enabled via VERILM_SCORE_WITNESS=1 env var (opt-in).
-        if os.environ.get("VERILM_SCORE_WITNESS", "0") == "1":
+        # Required by:
+        #   - WitnessedScores mode (Qwen W8A8 anchoring)
+        #   - AuditedInputsOnly mode (score-anchor audit in *_audited profiles,
+        #     which is the product default for llama-w8a8 and qwen-w8a8)
+        # Default: auto-detect from model family (mirrors
+        # VerificationProfile::detect()). Override with VERILM_SCORE_WITNESS=0
+        # to force-disable, =1 to force-enable on unrecognized models.
+        sw_env = os.environ.get("VERILM_SCORE_WITNESS")
+        if sw_env == "0":
+            want_sw = False
+        elif sw_env == "1":
+            want_sw = True
+        else:
+            want_sw = self._profile_needs_witnessed_scores(model)
+        if want_sw:
             cfg = getattr(model, "config", None)
             rope_theta = getattr(cfg, "rope_theta", 10000.0) if cfg else 10000.0
             rope_scaling = getattr(cfg, "rope_scaling", None) if cfg else None
@@ -185,6 +198,10 @@ class VerifiedInferenceServer:
                 d_head=cap._head_dim,
                 rope_theta=rope_theta,
                 rope_scaling=rope_scaling_dict,
+            )
+            logger.info(
+                "verilm: witnessed-score hook installed (auto=%s, env=%r)",
+                sw_env is None, sw_env,
             )
 
         # Try to activate native C++ capture wrapper.
@@ -259,6 +276,22 @@ class VerifiedInferenceServer:
             return True   # Llama W8A8: bridge is accurate
         # Unknown model: default to True (safe — uses bridge, Freivalds works)
         return True
+
+    def _profile_needs_witnessed_scores(self, model) -> bool:
+        """True when the default verification profile needs witnessed scores.
+
+        Mirrors VerificationProfile::detect() in verilm-core/types.rs:
+        llama-w8a8 and qwen-w8a8 both default to AuditedInputsOnly (with
+        score-anchor audit), and qwen-w8a8 WitnessedScores mode also needs
+        them. Inspects `model` directly since `self._model_type` /
+        `self._quant_family` are assigned later in __init__.
+        """
+        cfg = getattr(model, "config", None)
+        mt = (getattr(cfg, "model_type", None) or "").lower() if cfg else ""
+        qf = (self._extract_quant_family(model) or "").upper()
+        if qf != "W8A8":
+            return False
+        return ("llama" in mt) or ("qwen" in mt)
 
     def _compute_tokenizer_hash(self, llm) -> str:
         """SHA-256 of full tokenizer identity (vocab + normalizer + pre-tokenizer + added tokens).

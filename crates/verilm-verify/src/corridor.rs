@@ -1157,8 +1157,10 @@ pub fn measure_corridor_with_captured_lse(
     })
 }
 
-/// Compute attention evidence for stock-bounded certification from an audit response.
+/// Compute attention evidence from an audit response.
 ///
+/// Historical: used by the now-removed stock-bounded certification hot path.
+/// Retained as archived research / diagnostic tooling, not called from product.
 /// For each challenged layer, computes top-k softmax concentration and tail
 /// bound against committed V. Combined with the logit margin from CapturedLogits,
 /// this gives a statistical certification of the attention output.

@@ -36,7 +36,7 @@ Historical references below to “roadmap #N” refer to the pre-2026-03-30 road
 ### Known issues
 
 - **Arbitrary-position attention outputs are not verified in stock mode.** The verifier can still audit scores, KV provenance, and attention wiring, but it cannot honestly claim full `softmax(scores) @ V` verification on arbitrary positions.
-- **Paper / README / verifier-report cleanup still needs to be finished everywhere.** The roadmap and changelog now reflect the final claim, but any remaining `StockBounded`, `verified-attention`, or “verified attention” language in the paper, README, and report surface still needs to be removed or restated.
+- **Paper cleanup still pending.** The verifier, README, and roadmap now carry the audit-only claim: the `StockBounded` variants on `AttentionVerificationMode` and `AttentionStatus` are renamed to `AuditedInputsOnly` / `AuditedInputsNotVerified`, the stock-bounded certification hot path is removed, profile builders/names are `*_audited`, and the README verification-coverage table states the audit-only claim explicitly. `paper/main.typ` still specifies attention replay (§Attention Replay, Proposition 2, Table 1 CommitLLM row) and is the remaining cleanup; it is scheduled as roadmap item 11a (deferred).
 
 ## 2026-04-19
 

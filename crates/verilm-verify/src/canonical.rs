@@ -37,6 +37,7 @@
 use std::time::Instant;
 
 use verilm_core::constants::MatrixType;
+use verilm_core::merkle::MerkleProof;
 use verilm_core::types::{
     CommitmentVersion, DecodeArtifact, InputSpec, KvEntry, OutputSpec, RetainedLayerState,
     RetainedTokenState, ShellTokenOpening, V4AuditResponse, VerifierKey,
@@ -125,6 +126,7 @@ struct St {
     failures: Vec<VerificationFailure>,
     skipped: Vec<String>,
     attention_status: Option<crate::AttentionStatus>,
+    kv_provenance_run: Option<KvProvenanceRun>,
 }
 
 impl St {
@@ -134,6 +136,7 @@ impl St {
             failures: Vec::new(),
             skipped: Vec::new(),
             attention_status: None,
+            kv_provenance_run: None,
         }
     }
     fn check(&mut self) {
@@ -198,8 +201,8 @@ fn run(ctx: &Ctx) -> V4VerifyReport {
         verilm_core::types::AttentionVerificationMode::ExactReplay => {
             phase_exact_attention(ctx, kv_transcript_ok, &mut st);
         }
-        verilm_core::types::AttentionVerificationMode::StockBounded => {
-            phase_stock_bounded_attention(ctx, &mut st);
+        verilm_core::types::AttentionVerificationMode::AuditedInputsOnly => {
+            phase_audited_inputs_only(ctx, &mut st);
         }
         verilm_core::types::AttentionVerificationMode::DeterministicKernel => {
             // Future: deterministic kernel path — not yet implemented.
@@ -2007,61 +2010,127 @@ fn phase_lm_head_lp_hidden(
     }
 }
 
-// --- Phase 7a-ws: Witnessed-score attention verification
+// --- Score-anchor helpers
 //
-// Strong-tier attention path for profiles where f64 Q·K^T replay diverges
-// from GPU bf16 (e.g. Qwen W8A8). Instead of replaying Q·K^T/√d, uses
-// GPU-captured pre-softmax scores anchored against canonical reconstruction.
+// Score anchoring compares GPU-captured pre-softmax scores against the
+// verifier's canonical `Q·K^T/√d` recomputation from opened Q accumulators
+// and committed K entries. It is the strongest cheap attention-input audit
+// we run: it pins scores, exercises Q/K dequantization, RoPE, and GQA head
+// mapping, and rejects tampered witnessed scores.
 //
-// Pipeline:
-//   1. Verify witnessed scores are present and structurally valid
-//   2. Anchor: compare witnessed scores against canonical Q·K^T/√d (f32 or f64)
-//   3. Replay: softmax(witnessed_scores) @ committed_V → requantize
-//   4. Compare resulting `a` against committed `a` with ±1 LSB tolerance
+// Shared between two callers:
+//   - `phase_witnessed_score_attention` (witnessed-score verification mode —
+//     anchor is step 2 of a larger pipeline that also replays softmax @ V).
+//   - `phase_audited_inputs_only` (audit-only mode — anchor is the attention
+//     input audit; no full attention output verification is performed).
 
-fn phase_witnessed_score_attention(ctx: &Ctx, kv_transcript_ok: bool, st: &mut St) {
-    if !kv_transcript_ok {
-        return;
+/// Aggregate result of score-anchor audit across all challenged layers.
+#[derive(Debug, Clone)]
+pub(crate) struct ScoreAnchorResult {
+    /// Number of layers successfully anchored (passed structural checks).
+    pub n_layers_checked: usize,
+    /// Maximum anchor gap across all checked layers, or `None` if zero
+    /// layers were checked.
+    pub max_gap: Option<f64>,
+}
+
+/// Anchor witnessed scores against canonical `Q·K^T/√d` for one layer.
+///
+/// Chooses f32 (CUTLASS-matching) or f64 anchoring pipeline based on whether
+/// the verifier key has per-channel weight scales for this layer's `Wq`.
+/// Shape and KV coverage must be validated by the caller.
+fn anchor_scores_for_layer(
+    key: &VerifierKey,
+    layer_idx: usize,
+    token_index: usize,
+    q_acc: &[i32],
+    scale_x_attn: f32,
+    layer_kv: &[verilm_core::types::KvEntry],
+    ws: &verilm_core::types::WitnessedScores,
+) -> verilm_core::attention::ScoreAnchorStats {
+    let cfg = &key.config;
+    let absolute_pos = token_index + 1;
+    let has_per_channel = key.per_channel_scales_for(layer_idx, MatrixType::Wq).is_some();
+
+    if has_per_channel {
+        let q_roped_f32 = dequant_rope_f32(
+            key,
+            layer_idx,
+            MatrixType::Wq,
+            q_acc,
+            scale_x_attn,
+            cfg.n_q_heads,
+            token_index,
+        );
+        let kv_k_f32: Vec<Vec<f32>> = layer_kv[..=token_index]
+            .iter()
+            .map(|e| e.k_roped.iter().map(|&x| x as f32).collect())
+            .collect();
+        let canonical_f32 =
+            verilm_core::attention::compute_canonical_scores_gpu_like(&q_roped_f32, &kv_k_f32, cfg);
+        let canonical_f64: Vec<f64> = canonical_f32.iter().map(|&x| x as f64).collect();
+        verilm_core::attention::anchor_witnessed_scores(
+            &ws.scores,
+            &canonical_f64,
+            ws.n_q_heads,
+            ws.seq_len,
+            layer_idx,
+        )
+    } else {
+        let q_roped = dequant_rope_q(key, layer_idx, q_acc, scale_x_attn, absolute_pos);
+        let kv_k: Vec<Vec<f64>> = layer_kv[..=token_index]
+            .iter()
+            .map(|e| e.k_roped.clone())
+            .collect();
+        let canonical_scores =
+            verilm_core::attention::compute_canonical_scores(&q_roped, &kv_k, cfg);
+        verilm_core::attention::anchor_witnessed_scores(
+            &ws.scores,
+            &canonical_scores,
+            ws.n_q_heads,
+            ws.seq_len,
+            layer_idx,
+        )
     }
-    let kv_entries = match &ctx.r.kv_entries {
-        Some(e) => e,
-        None => return,
-    };
-    let shell = match &ctx.r.shell_opening {
-        Some(s) => s,
-        None => return,
-    };
-    let witnessed_scores = match &ctx.r.witnessed_scores {
-        Some(ws) => ws,
-        None => return, // silently skip — no scores captured
-    };
-    let threshold = match ctx.key.score_anchor_threshold() {
-        Some(t) => t,
-        None => return, // should not happen (caller checked), but defensive
-    };
+}
+
+/// Run score anchoring across all challenged layers.
+///
+/// Returns `None` when the top-level prerequisites are absent (no shell
+/// opening, no KV entries, no witnessed scores, no profile threshold).
+/// Callers decide whether that is a hard fail (witnessed-score profiles
+/// require scores) or a soft skip (audit-only profiles report `score_anchor
+/// = None`).
+///
+/// Per-layer structural issues (incomplete KV coverage, shape mismatch) are
+/// hard-failed via `st` — those represent bad provider data in either mode.
+/// Per-layer threshold breaches are hard-failed via `st` with
+/// `ScoreAnchorMismatch`.
+fn run_score_anchor_audit(ctx: &Ctx, st: &mut St) -> Option<ScoreAnchorResult> {
+    let kv_entries = ctx.r.kv_entries.as_ref()?;
+    let shell = ctx.r.shell_opening.as_ref()?;
+    let witnessed_scores = ctx.r.witnessed_scores.as_ref()?;
+    let threshold = ctx.key.score_anchor_threshold()?;
 
     let cfg = &ctx.key.config;
     let token_index = ctx.r.token_index as usize;
     let n_layers = cfg
         .n_layers
         .min(shell.layers.len())
-        .min(ctx.r.retained.layers.len())
         .min(kv_entries.len())
         .min(witnessed_scores.len());
 
-    let absolute_pos = token_index + 1;
+    let mut n_layers_checked = 0usize;
+    let mut overall_max: Option<f64> = None;
 
     for layer_idx in 0..n_layers {
         let sl = &shell.layers[layer_idx];
-        let rs = &ctx.r.retained.layers[layer_idx];
         let ws = &witnessed_scores[layer_idx];
-
         let q_acc = match &sl.q {
             Some(q) => q,
             None => continue,
         };
 
-        // KV coverage check.
         let layer_kv = &kv_entries[layer_idx];
         if layer_kv.len() < token_index + 1 {
             st.check();
@@ -2082,14 +2151,7 @@ fn phase_witnessed_score_attention(ctx: &Ctx, kv_transcript_ok: bool, st: &mut S
             continue;
         }
 
-        // Build V cache from committed KV transcript.
-        let kv_v: Vec<Vec<f64>> = layer_kv[..=token_index]
-            .iter()
-            .map(|e| e.v_deq.clone())
-            .collect();
-        let seq_len = kv_v.len();
-
-        // Structural check on witnessed scores shape.
+        let seq_len = token_index + 1;
         st.check();
         if ws.n_q_heads != cfg.n_q_heads || ws.seq_len != seq_len {
             st.fail_ctx(
@@ -2097,8 +2159,7 @@ fn phase_witnessed_score_attention(ctx: &Ctx, kv_transcript_ok: bool, st: &mut S
                 format!(
                     "layer {}: witnessed scores shape ({} heads, {} seq) \
                      doesn't match expected ({} heads, {} seq)",
-                    layer_idx, ws.n_q_heads, ws.seq_len,
-                    cfg.n_q_heads, seq_len,
+                    layer_idx, ws.n_q_heads, ws.seq_len, cfg.n_q_heads, seq_len,
                 ),
                 FailureContext {
                     layer: Some(layer_idx),
@@ -2109,58 +2170,29 @@ fn phase_witnessed_score_attention(ctx: &Ctx, kv_transcript_ok: bool, st: &mut S
             continue;
         }
 
-        // --- Anchor: compare witnessed scores against canonical Q·K^T/√d ---
-        let q_roped = dequant_rope_q(ctx.key, layer_idx, q_acc, sl.scale_x_attn, absolute_pos);
+        let stats = anchor_scores_for_layer(
+            ctx.key,
+            layer_idx,
+            token_index,
+            q_acc,
+            sl.scale_x_attn,
+            layer_kv,
+            ws,
+        );
 
-        let has_per_channel =
-            ctx.key.per_channel_scales_for(layer_idx, MatrixType::Wq).is_some();
-
-        let anchor = if has_per_channel {
-            // f32 anchoring matching GPU precision (CUTLASS epilogue + f32 RoPE).
-            let q_roped_f32 = dequant_rope_f32(
-                ctx.key, layer_idx, MatrixType::Wq,
-                q_acc, sl.scale_x_attn, cfg.n_q_heads, token_index,
-            );
-
-            // Build K cache in f32 from committed KV K entries.
-            let kv_k_f32: Vec<Vec<f32>> = layer_kv[..=token_index]
-                .iter()
-                .map(|e| e.k_roped.iter().map(|&x| x as f32).collect())
-                .collect();
-
-            let canonical_f32 =
-                verilm_core::attention::compute_canonical_scores_gpu_like(
-                    &q_roped_f32, &kv_k_f32, cfg,
-                );
-            let canonical_f64: Vec<f64> =
-                canonical_f32.iter().map(|&x| x as f64).collect();
-            verilm_core::attention::anchor_witnessed_scores(
-                &ws.scores, &canonical_f64,
-                ws.n_q_heads, ws.seq_len, layer_idx,
-            )
-        } else {
-            // f64 anchoring (toy/INT8 models).
-            let kv_k: Vec<Vec<f64>> = layer_kv[..=token_index]
-                .iter()
-                .map(|e| e.k_roped.clone())
-                .collect();
-            let canonical_scores =
-                verilm_core::attention::compute_canonical_scores(
-                    &q_roped, &kv_k, cfg,
-                );
-            verilm_core::attention::anchor_witnessed_scores(
-                &ws.scores, &canonical_scores,
-                ws.n_q_heads, ws.seq_len, layer_idx,
-            )
-        };
+        n_layers_checked += 1;
+        overall_max = Some(match overall_max {
+            Some(m) => m.max(stats.max_gap),
+            None => stats.max_gap,
+        });
 
         st.check();
-        if anchor.max_gap > threshold as f64 {
+        if stats.max_gap > threshold as f64 {
             st.fail_ctx(
                 FailureCode::ScoreAnchorMismatch,
                 format!(
                     "layer {}: witnessed score anchor gap {:.4} exceeds threshold {:.1}",
-                    layer_idx, anchor.max_gap, threshold,
+                    layer_idx, stats.max_gap, threshold,
                 ),
                 FailureContext {
                     layer: Some(layer_idx),
@@ -2169,8 +2201,87 @@ fn phase_witnessed_score_attention(ctx: &Ctx, kv_transcript_ok: bool, st: &mut S
                 },
             );
         }
+    }
 
-        // --- Replay: softmax(witnessed_scores) @ committed_V → requantize ---
+    Some(ScoreAnchorResult {
+        n_layers_checked,
+        max_gap: overall_max,
+    })
+}
+
+// --- Phase 7a-ws: Witnessed-score attention verification
+//
+// Strong-tier attention path for profiles where f64 Q·K^T replay diverges
+// from GPU bf16 (e.g. Qwen W8A8). Instead of replaying Q·K^T/√d, uses
+// GPU-captured pre-softmax scores anchored against canonical reconstruction.
+//
+// Pipeline:
+//   1. Verify witnessed scores are present and structurally valid
+//   2. Anchor: compare witnessed scores against canonical Q·K^T/√d (f32 or f64)
+//      — delegated to `run_score_anchor_audit`
+//   3. Replay: softmax(witnessed_scores) @ committed_V → requantize
+//   4. Compare resulting `a` against committed `a` with ±1 LSB tolerance
+
+fn phase_witnessed_score_attention(ctx: &Ctx, kv_transcript_ok: bool, st: &mut St) {
+    if !kv_transcript_ok {
+        return;
+    }
+    let kv_entries = match &ctx.r.kv_entries {
+        Some(e) => e,
+        None => return,
+    };
+    let shell = match &ctx.r.shell_opening {
+        Some(s) => s,
+        None => return,
+    };
+    let witnessed_scores = match &ctx.r.witnessed_scores {
+        Some(ws) => ws,
+        None => return, // silently skip — no scores captured
+    };
+    if ctx.key.score_anchor_threshold().is_none() {
+        return; // should not happen (caller checked), but defensive
+    }
+
+    // Step 1+2: structural checks + anchor comparison are delegated to the
+    // shared helper. Any threshold breach / KV-coverage / shape mismatch is
+    // hard-failed via `st` inside the helper.
+    run_score_anchor_audit(ctx, st);
+
+    // Step 3+4: softmax(witnessed_scores) @ committed_V → requantize, compare
+    // against committed `a`. This part is specific to the witnessed-score
+    // verification path (not part of audit-only mode).
+    let cfg = &ctx.key.config;
+    let token_index = ctx.r.token_index as usize;
+    let n_layers = cfg
+        .n_layers
+        .min(shell.layers.len())
+        .min(ctx.r.retained.layers.len())
+        .min(kv_entries.len())
+        .min(witnessed_scores.len());
+
+    for layer_idx in 0..n_layers {
+        let sl = &shell.layers[layer_idx];
+        let rs = &ctx.r.retained.layers[layer_idx];
+        let ws = &witnessed_scores[layer_idx];
+
+        if sl.q.is_none() {
+            continue;
+        }
+        let layer_kv = &kv_entries[layer_idx];
+        if layer_kv.len() < token_index + 1 {
+            continue; // already reported by run_score_anchor_audit
+        }
+        let seq_len = token_index + 1;
+        if ws.n_q_heads != cfg.n_q_heads || ws.seq_len != seq_len {
+            continue; // already reported by run_score_anchor_audit
+        }
+
+        // Build V cache from committed KV transcript.
+        let kv_v: Vec<Vec<f64>> = layer_kv[..=token_index]
+            .iter()
+            .map(|e| e.v_deq.clone())
+            .collect();
+
         let (expected_a, _) =
             verilm_core::attention::replay_attention_witnessed_scores(
                 &ws.scores,
@@ -2431,113 +2542,242 @@ fn exact_attention_toy(
     }
 }
 
-// --- Phase 7a-sb: Stock-bounded attention certification
+// --- Wiring audit helpers (B3)
+//
+// Structural checks that the prover's attention wiring matches the committed
+// architecture. These are cheap invariant checks, not replay paths:
+//   - GQA: q_head → kv_head grouping shape (n_q_heads divisible by n_kv_heads,
+//     kv_dim = n_kv_heads * d_head, per-entry K/V row lengths match).
+//   - RoPE / position: rope_config_hash is bound in the verifier key, and KV
+//     transcript covers exactly positions 0..=token_index (no gaps/extras).
+//   - Causal mask: witnessed scores cover exactly seq_len = token_index + 1
+//     (no future positions reachable for the challenged token).
 
-/// Computes statistical attention certification from witnessed scores + committed V.
-///
-/// Does NOT verify attention exactly — instead computes top-k softmax concentration
-/// and tail bounds per layer, combined with the logit margin from CapturedLogits,
-/// to produce a certification decision.
-fn phase_stock_bounded_attention(ctx: &Ctx, st: &mut St) {
-    const TOP_K: usize = 16;
-    const CONCENTRATION_THRESHOLD: f32 = 0.9;
+/// Aggregate result of the wiring audit. Each sub-field is `None` when no
+/// evidence to audit was present in the response, `Some(true)` when evidence
+/// was present and consistent, `Some(false)` when a violation was detected
+/// (and hard-failed via `st` in the same pass).
+#[derive(Debug, Clone)]
+pub(crate) struct WiringAuditRun {
+    pub mask_ok: Option<bool>,
+    pub rope_ok: Option<bool>,
+    pub gqa_ok: Option<bool>,
+}
 
-    // Need witnessed scores and KV entries.
-    let _witnessed = match ctx.r.witnessed_scores.as_ref() {
-        Some(w) if !w.is_empty() => w,
-        _ => {
-            st.attention_status = Some(crate::AttentionStatus::NotChecked {
-                reason: "no witnessed_scores in audit response".into(),
-            });
-            st.skipped.push(
-                "attention (stock-bounded): no witnessed_scores — cannot compute certification"
-                    .into(),
-            );
-            return;
-        }
-    };
-    let _kv_entries = match ctx.r.kv_entries.as_ref() {
-        Some(kv) if !kv.is_empty() => kv,
-        _ => {
-            st.attention_status = Some(crate::AttentionStatus::NotChecked {
-                reason: "no kv_entries in audit response".into(),
-            });
-            st.skipped.push(
-                "attention (stock-bounded): no kv_entries — cannot compute tail bounds".into(),
-            );
-            return;
-        }
-    };
+/// Pure: the model config's GQA invariants are internally consistent.
+fn check_gqa_config(cfg: &verilm_core::constants::ModelConfig) -> bool {
+    cfg.n_q_heads > 0
+        && cfg.n_kv_heads > 0
+        && cfg.n_q_heads % cfg.n_kv_heads == 0
+        && cfg.kv_dim == cfg.n_kv_heads * cfg.d_head
+}
 
-    // Compute logit margin from captured logits.
-    let logit_margin = match ctx
-        .r
-        .shell_opening
-        .as_ref()
-        .and_then(|s| s.captured_logits_f32.as_ref())
-    {
-        Some(cl) if cl.len() >= 2 => {
-            let mut top2 = [f32::NEG_INFINITY; 2];
-            for &v in cl.iter() {
-                if v > top2[0] {
-                    top2[1] = top2[0];
-                    top2[0] = v;
-                } else if v > top2[1] {
-                    top2[1] = v;
+/// Pure: an opened KV entry's K/V row lengths match `n_kv_heads * d_head`.
+fn check_kv_entry_gqa_shape(
+    cfg: &verilm_core::constants::ModelConfig,
+    entry: &verilm_core::types::KvEntry,
+) -> bool {
+    let expected = cfg.n_kv_heads * cfg.d_head;
+    entry.k_roped.len() == expected && entry.v_deq.len() == expected
+}
+
+/// Pure: witnessed scores cover exactly positions 0..=token_index (seq_len
+/// equals token_index + 1 — no future positions, no gaps).
+fn check_causal_mask_ws(
+    ws: &verilm_core::types::WitnessedScores,
+    token_index: usize,
+) -> bool {
+    ws.seq_len == token_index + 1
+}
+
+/// Run wiring audit across GQA, RoPE/position, and causal mask. Returns
+/// `Some(false)` for any sub-audit whose evidence was present and violated,
+/// with a matching hard-fail recorded in `st`. Sub-audits with no basis in
+/// the response remain `None`.
+fn run_wiring_audit(ctx: &Ctx, st: &mut St) -> WiringAuditRun {
+    let cfg = &ctx.key.config;
+    let token_index = ctx.r.token_index as usize;
+
+    // --- GQA ---
+    // Config invariants are checked unconditionally (cheap; catches profile
+    // or key-build bugs). Per-entry K/V row lengths are checked when KV
+    // entries are present.
+    let gqa_config_ok = check_gqa_config(cfg);
+    if !gqa_config_ok {
+        st.check();
+        st.fail(
+            FailureCode::AttentionWiringMismatch,
+            format!(
+                "GQA config inconsistent: n_q_heads={}, n_kv_heads={}, kv_dim={}, d_head={}",
+                cfg.n_q_heads, cfg.n_kv_heads, cfg.kv_dim, cfg.d_head,
+            ),
+        );
+    }
+
+    let mut gqa_ok: Option<bool> = None;
+    if let Some(kv_entries) = ctx.r.kv_entries.as_ref() {
+        let mut shape_ok = true;
+        for (layer_idx, layer_kv) in kv_entries.iter().enumerate() {
+            for (pos, entry) in layer_kv.iter().enumerate() {
+                if !check_kv_entry_gqa_shape(cfg, entry) {
+                    st.check();
+                    st.fail_ctx(
+                        FailureCode::AttentionWiringMismatch,
+                        format!(
+                            "KV entry shape mismatch at layer {} pos {}: k_len={} v_len={} expected={}",
+                            layer_idx,
+                            pos,
+                            entry.k_roped.len(),
+                            entry.v_deq.len(),
+                            cfg.n_kv_heads * cfg.d_head,
+                        ),
+                        FailureContext {
+                            layer: Some(layer_idx),
+                            token_index: Some(pos as u32),
+                            ..Default::default()
+                        },
+                    );
+                    shape_ok = false;
                 }
             }
-            top2[0] - top2[1]
         }
-        _ => {
-            st.attention_status = Some(crate::AttentionStatus::NotChecked {
-                reason: "no captured_logits_f32 — cannot compute logit margin".into(),
-            });
-            st.skipped.push(
-                "attention (stock-bounded): no captured_logits — cannot gate on margin".into(),
-            );
-            return;
-        }
-    };
+        gqa_ok = Some(gqa_config_ok && shape_ok);
+    } else if !gqa_config_ok {
+        gqa_ok = Some(false);
+    }
 
-    // Compute per-layer attention evidence.
-    match crate::corridor::compute_attention_evidence_from_audit(ctx.key, ctx.r, TOP_K) {
-        Ok(evidence) if !evidence.is_empty() => {
-            let cert = verilm_core::attention::certify_token(
-                &evidence,
-                logit_margin,
-                CONCENTRATION_THRESHOLD,
+    // --- RoPE / position ---
+    // Structural checks: rope_config_hash must be bound (it is cross-checked
+    // against the manifest earlier in phase_specs), and KV transcript — if
+    // present — must cover exactly positions 0..=token_index per layer.
+    let mut rope_ok: Option<bool> = None;
+    if let Some(kv_entries) = ctx.r.kv_entries.as_ref() {
+        let hash_bound = ctx.key.rope_config_hash.is_some();
+        if !hash_bound {
+            st.check();
+            st.fail(
+                FailureCode::AttentionWiringMismatch,
+                "rope_config_hash not bound in verifier key — position/RoPE semantics not committed",
             );
-            st.attention_status = Some(crate::AttentionStatus::StockBounded {
-                min_top_k_mass: cert.min_top_k_mass,
-                max_tail_bound: cert.max_tail_bound as f32,
-                logit_margin: cert.logit_margin,
-                certified: cert.certified,
-            });
-            if !cert.certified {
-                st.skipped.push(format!(
-                    "attention (stock-bounded): not certified — {}",
-                    cert.reason
-                ));
+        }
+        let mut coverage_ok = true;
+        for (layer_idx, layer_kv) in kv_entries.iter().enumerate() {
+            if layer_kv.len() != token_index + 1 {
+                st.check();
+                st.fail_ctx(
+                    FailureCode::AttentionWiringMismatch,
+                    format!(
+                        "RoPE position coverage mismatch at layer {}: {} entries for token_index {} (expected {})",
+                        layer_idx,
+                        layer_kv.len(),
+                        token_index,
+                        token_index + 1,
+                    ),
+                    FailureContext {
+                        layer: Some(layer_idx),
+                        ..Default::default()
+                    },
+                );
+                coverage_ok = false;
             }
         }
-        Ok(_) => {
-            st.attention_status = Some(crate::AttentionStatus::NotChecked {
-                reason: "attention evidence empty after computation".into(),
-            });
-            st.skipped.push(
-                "attention (stock-bounded): no evidence layers produced".into(),
-            );
-        }
-        Err(e) => {
-            st.attention_status = Some(crate::AttentionStatus::NotChecked {
-                reason: format!("evidence computation failed: {}", e),
-            });
-            st.skipped.push(format!(
-                "attention (stock-bounded): evidence computation failed: {}",
-                e
-            ));
-        }
+        rope_ok = Some(hash_bound && coverage_ok);
     }
+
+    // --- Causal mask ---
+    // Witnessed scores, if present, must cover exactly seq_len = token_index + 1.
+    let mask_ok = ctx.r.witnessed_scores.as_ref().map(|ws_vec| {
+        let mut ok = true;
+        for (layer_idx, ws) in ws_vec.iter().enumerate() {
+            if !check_causal_mask_ws(ws, token_index) {
+                st.check();
+                st.fail_ctx(
+                    FailureCode::AttentionWiringMismatch,
+                    format!(
+                        "causal-mask violation at layer {}: witnessed seq_len={} but token_index={} (expected seq_len={})",
+                        layer_idx,
+                        ws.seq_len,
+                        token_index,
+                        token_index + 1,
+                    ),
+                    FailureContext {
+                        layer: Some(layer_idx),
+                        token_index: Some(ctx.r.token_index),
+                        ..Default::default()
+                    },
+                );
+                ok = false;
+            }
+        }
+        ok
+    });
+
+    WiringAuditRun {
+        mask_ok,
+        rope_ok,
+        gqa_ok,
+    }
+}
+
+// --- Phase 7a: Audit-only attention reporting
+//
+// Arbitrary-position attention outputs are NOT verified in the kept product
+// path. This phase emits the honest audit-only status. Individual audits
+// (score anchoring, KV provenance, mask/RoPE/GQA wiring, local replay smoke)
+// are wired below; local replay remains `None` until B4.
+
+fn phase_audited_inputs_only(ctx: &Ctx, st: &mut St) {
+    // Score anchoring is the one real audit wired in B1. It returns `None`
+    // when prerequisites are absent (no witnessed scores, no shell opening,
+    // no KV entries, no threshold) — that's a soft skip in audit-only mode.
+    // Threshold breaches / structural errors are hard-failed inside the
+    // helper via `st`.
+    let score_anchor = run_score_anchor_audit(ctx, st).map(|r| crate::ScoreAnchorAudit {
+        checked: r.n_layers_checked > 0,
+        max_gap: r.max_gap.map(|g| g as f32),
+    });
+
+    // KV provenance is run once in `phase_kv_transcript` (before attention
+    // dispatch). We reuse its result here. Absent → `None`; present + good →
+    // `checked: true`; present + bad was already hard-failed via `st`.
+    let kv_provenance = st
+        .kv_provenance_run
+        .as_ref()
+        .filter(|r| r.entries_present)
+        .map(|r| crate::KvProvenanceAudit {
+            checked: r.all_verified,
+        });
+
+    // Wiring audits (B3): GQA shapes, RoPE/position coverage, causal mask.
+    // Each sub-audit is `None` when no evidence was present, `Some(true)` when
+    // present + consistent, `Some(false)` when present + violated (hard-failed
+    // via `st` in the same pass).
+    let wiring_run = run_wiring_audit(ctx, st);
+    let wiring = if wiring_run.mask_ok.is_some()
+        || wiring_run.rope_ok.is_some()
+        || wiring_run.gqa_ok.is_some()
+    {
+        Some(crate::WiringAudit {
+            mask_ok: wiring_run.mask_ok,
+            rope_ok: wiring_run.rope_ok,
+            gqa_ok: wiring_run.gqa_ok,
+        })
+    } else {
+        None
+    };
+
+    st.attention_status = Some(crate::AttentionStatus::AuditedInputsNotVerified {
+        score_anchor,
+        kv_provenance,
+        wiring,
+        local_replay: None,
+    });
+    st.skipped.push(
+        "attention: audit-only mode — arbitrary-position attention outputs \
+         are not verified (score anchoring, KV provenance, and wiring audits \
+         run when inputs present; local replay smoke not yet wired)"
+            .into(),
+    );
 }
 
 // --- Phase 7b: Deep prefix
@@ -3096,15 +3336,61 @@ fn check_attention_result_opened(
 /// opened during audit are exactly the values committed at generation time.
 ///
 /// Skipped silently when `kv_roots` is empty (legacy / no KV commitment).
-fn phase_kv_transcript(ctx: &Ctx, st: &mut St) -> bool {
+// --- KV provenance audit helpers
+//
+// KV provenance checks that each opened (layer, position) KV entry hashes to
+// the committed `kv_roots[layer]` via its Merkle proof. Shared between:
+//   - `phase_kv_transcript` (product path — hard-fails on any mismatch, used
+//     as a gate for downstream attention replay phases).
+//   - `phase_audited_inputs_only` (audit-only mode — reports whether
+//     provenance was audited; hard-fail behavior is inherited from the
+//     single shared run).
+
+/// Aggregate result of the KV provenance audit.
+#[derive(Debug, Clone)]
+pub(crate) struct KvProvenanceRun {
+    /// True when opened KV entries/proofs were present in the response. When
+    /// false, no per-entry verification happened (legacy response or verifier
+    /// did not request KV opening).
+    pub entries_present: bool,
+    /// True when every opened entry's Merkle proof verified against its
+    /// committed `kv_roots[layer]` root.
+    pub all_verified: bool,
+}
+
+/// Pure per-entry KV provenance check.
+///
+/// Recomputes the leaf hash from (layer_idx, pos, k_roped, v_deq) and verifies
+/// the Merkle proof against the committed root. Any tampering of k, v, or
+/// position produces a different leaf and fails verification.
+fn verify_kv_entry_provenance(
+    kv_root: &[u8; 32],
+    layer_idx: usize,
+    pos: usize,
+    entry: &verilm_core::types::KvEntry,
+    proof: &MerkleProof,
+) -> bool {
+    let leaf_hash = merkle::hash_kv_entry(layer_idx, pos, &entry.k_roped, &entry.v_deq);
+    merkle::verify(kv_root, &leaf_hash, proof)
+}
+
+/// Run KV provenance audit across all opened layer groups.
+///
+/// Structural errors (kv_roots count mismatch, entries/proofs pair-up,
+/// out-of-range layer group) and per-entry Merkle failures are hard-failed
+/// via `st`. Returns a summary for callers that need to report audit status.
+fn run_kv_provenance_audit(ctx: &Ctx, st: &mut St) -> KvProvenanceRun {
     let kv_roots = &ctx.r.commitment.kv_roots;
     if kv_roots.is_empty() {
-        return true; // Legacy response without KV commitment — nothing to verify.
+        // Legacy response without KV commitment — nothing to verify.
+        return KvProvenanceRun {
+            entries_present: false,
+            all_verified: true,
+        };
     }
 
     let n_layers = ctx.key.config.n_layers;
 
-    // kv_roots length must match model layer count.
     st.check();
     if kv_roots.len() != n_layers {
         st.fail_ctx(
@@ -3120,27 +3406,33 @@ fn phase_kv_transcript(ctx: &Ctx, st: &mut St) -> bool {
                 ..Default::default()
             },
         );
-        return false;
+        return KvProvenanceRun {
+            entries_present: ctx.r.kv_entries.is_some(),
+            all_verified: false,
+        };
     }
 
-    // If there are no opened KV entries, nothing more to verify — the roots
-    // are committed but the audit did not open any KV positions (e.g. the
-    // verifier didn't request deep-prefix KV opening for this token).
     let (entries, proofs) = match (&ctx.r.kv_entries, &ctx.r.kv_proofs) {
         (Some(e), Some(p)) => (e, p),
-        (None, None) => return true,
+        (None, None) => {
+            return KvProvenanceRun {
+                entries_present: false,
+                all_verified: true,
+            };
+        }
         _ => {
-            // One is present but not the other — structural error.
             st.check();
             st.fail(
                 FailureCode::KvProofCountMismatch,
                 "kv_entries and kv_proofs must both be present or both absent",
             );
-            return false;
+            return KvProvenanceRun {
+                entries_present: true,
+                all_verified: false,
+            };
         }
     };
 
-    // Outer vec is per challenged layer. Lengths must match.
     st.check();
     if entries.len() != proofs.len() {
         st.fail(
@@ -3151,13 +3443,15 @@ fn phase_kv_transcript(ctx: &Ctx, st: &mut St) -> bool {
                 proofs.len()
             ),
         );
-        return false;
+        return KvProvenanceRun {
+            entries_present: true,
+            all_verified: false,
+        };
     }
 
     let mut ok = true;
     for (group_idx, (layer_entries, layer_proofs)) in entries.iter().zip(proofs.iter()).enumerate()
     {
-        // Entries and proofs must be paired.
         st.check();
         if layer_entries.len() != layer_proofs.len() {
             st.fail_ctx(
@@ -3178,12 +3472,8 @@ fn phase_kv_transcript(ctx: &Ctx, st: &mut St) -> bool {
         }
 
         for (pos, (entry, proof)) in layer_entries.iter().zip(layer_proofs.iter()).enumerate() {
-            // Determine the actual layer index from the proof's leaf_index
-            // domain separator. The prover opens layers in order, so
-            // group_idx maps to challenged layers. For now, the prover opens
-            // all layers in order (0..n_layers), so group_idx == layer_idx.
-            // When selective layer opening is implemented, this mapping will
-            // need to come from the challenge specification.
+            // Prover opens layers in order, so group_idx == layer_idx until
+            // selective layer opening is implemented.
             let layer_idx = group_idx;
             if layer_idx >= kv_roots.len() {
                 st.check();
@@ -3204,21 +3494,38 @@ fn phase_kv_transcript(ctx: &Ctx, st: &mut St) -> bool {
             }
 
             st.check();
-            let leaf_hash = merkle::hash_kv_entry(layer_idx, pos, &entry.k_roped, &entry.v_deq);
-            if !merkle::verify(&kv_roots[layer_idx], &leaf_hash, proof) {
-                // Debug: print first few k/v values and hash details
+            if !verify_kv_entry_provenance(&kv_roots[layer_idx], layer_idx, pos, entry, proof) {
                 if std::env::var("VERILM_DEBUG_KV").map_or(false, |v| v == "1") {
-                    let k_preview: Vec<String> = entry.k_roped.iter().take(4)
-                        .map(|v| format!("{:.17e} ({:016x})", v, v.to_bits())).collect();
-                    let v_preview: Vec<String> = entry.v_deq.iter().take(4)
-                        .map(|v| format!("{:.17e} ({:016x})", v, v.to_bits())).collect();
-                    let leaf_hex: String = leaf_hash.iter().map(|b| format!("{:02x}", b)).collect();
-                    let root_hex: String = kv_roots[layer_idx].iter().map(|b| format!("{:02x}", b)).collect();
+                    let leaf_hash =
+                        merkle::hash_kv_entry(layer_idx, pos, &entry.k_roped, &entry.v_deq);
+                    let k_preview: Vec<String> = entry
+                        .k_roped
+                        .iter()
+                        .take(4)
+                        .map(|v| format!("{:.17e} ({:016x})", v, v.to_bits()))
+                        .collect();
+                    let v_preview: Vec<String> = entry
+                        .v_deq
+                        .iter()
+                        .take(4)
+                        .map(|v| format!("{:.17e} ({:016x})", v, v.to_bits()))
+                        .collect();
+                    let leaf_hex: String =
+                        leaf_hash.iter().map(|b| format!("{:02x}", b)).collect();
+                    let root_hex: String = kv_roots[layer_idx]
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect();
                     eprintln!(
                         "[KV DEBUG] layer={} pos={} k_len={} v_len={} leaf={} root={} proof_idx={} siblings={}",
-                        layer_idx, pos, entry.k_roped.len(), entry.v_deq.len(),
-                        leaf_hex, root_hex,
-                        proof.leaf_index, proof.siblings.len()
+                        layer_idx,
+                        pos,
+                        entry.k_roped.len(),
+                        entry.v_deq.len(),
+                        leaf_hex,
+                        root_hex,
+                        proof.leaf_index,
+                        proof.siblings.len()
                     );
                     eprintln!("[KV DEBUG]   k_roped[:4] = {:?}", k_preview);
                     eprintln!("[KV DEBUG]   v_deq[:4]   = {:?}", v_preview);
@@ -3239,6 +3546,17 @@ fn phase_kv_transcript(ctx: &Ctx, st: &mut St) -> bool {
             }
         }
     }
+
+    KvProvenanceRun {
+        entries_present: true,
+        all_verified: ok,
+    }
+}
+
+fn phase_kv_transcript(ctx: &Ctx, st: &mut St) -> bool {
+    let run = run_kv_provenance_audit(ctx, st);
+    let ok = run.all_verified;
+    st.kv_provenance_run = Some(run);
     ok
 }
 
@@ -3490,6 +3808,7 @@ mod tests {
             quant_block_size: None,
             attn_backend: None,
             attn_dtype: None,
+            o_proj_alpha: vec![],
             rope_aware_replay: false,
             qkv_biases: vec![],
             verification_profile: None,
@@ -3611,5 +3930,234 @@ mod tests {
         let r = dummy_response(0, 1, Some(1), Some(1));
         let ctx = Ctx::new(&key, &r, None, None, None);
         assert!(ctx.is_last);
+    }
+
+    // ----- Score-anchor helper tests -----
+
+    fn score_anchor_test_setup() -> (
+        VerifierKey,
+        Vec<i32>,
+        f32,
+        usize,
+        Vec<verilm_core::types::KvEntry>,
+        Vec<f64>,
+    ) {
+        let mut key = dummy_key();
+        let cfg = key.config.clone();
+        let n_mt = MatrixType::PER_LAYER.len();
+        key.weight_scales = (0..cfg.n_layers).map(|_| vec![1.0f32; n_mt]).collect();
+
+        let q_acc: Vec<i32> = (0..cfg.hidden_dim as i32)
+            .map(|i| (i * 7 % 20) - 10)
+            .collect();
+        let scale_x_attn = 0.01f32;
+        let token_index = 0usize;
+        let layer_kv = vec![verilm_core::types::KvEntry {
+            k_roped: (0..cfg.kv_dim).map(|i| 0.05 + 0.01 * (i as f64)).collect(),
+            v_deq: vec![0.1; cfg.kv_dim],
+        }];
+
+        let q_roped = dequant_rope_q(&key, 0, &q_acc, scale_x_attn, token_index + 1);
+        let kv_k: Vec<Vec<f64>> = layer_kv.iter().map(|e| e.k_roped.clone()).collect();
+        let canonical_f64 =
+            verilm_core::attention::compute_canonical_scores(&q_roped, &kv_k, &cfg);
+
+        (key, q_acc, scale_x_attn, token_index, layer_kv, canonical_f64)
+    }
+
+    #[test]
+    fn score_anchor_honest_scores_returns_small_gap() {
+        let (key, q_acc, scale_x_attn, token_index, layer_kv, canonical) =
+            score_anchor_test_setup();
+        let witnessed: Vec<f32> = canonical.iter().map(|&v| v as f32).collect();
+        let ws = verilm_core::types::WitnessedScores {
+            scores: witnessed,
+            n_q_heads: key.config.n_q_heads,
+            seq_len: 1,
+        };
+
+        let stats =
+            anchor_scores_for_layer(&key, 0, token_index, &q_acc, scale_x_attn, &layer_kv, &ws);
+
+        assert!(
+            stats.max_gap < 1e-5,
+            "honest anchor gap too large: {}",
+            stats.max_gap
+        );
+    }
+
+    #[test]
+    fn score_anchor_tampered_scores_returns_large_gap() {
+        let (key, q_acc, scale_x_attn, token_index, layer_kv, canonical) =
+            score_anchor_test_setup();
+        let tampered: Vec<f32> = canonical.iter().map(|&v| (v + 1.0) as f32).collect();
+        let ws = verilm_core::types::WitnessedScores {
+            scores: tampered,
+            n_q_heads: key.config.n_q_heads,
+            seq_len: 1,
+        };
+
+        let stats =
+            anchor_scores_for_layer(&key, 0, token_index, &q_acc, scale_x_attn, &layer_kv, &ws);
+
+        assert!(
+            stats.max_gap > 0.9,
+            "tampered anchor gap too small: {}",
+            stats.max_gap
+        );
+    }
+
+    // --- B2: KV provenance audit helper tests ---
+
+    fn kv_provenance_test_entry() -> (
+        verilm_core::types::KvEntry,
+        usize,
+        usize,
+        [u8; 32],
+        MerkleProof,
+    ) {
+        let layer_idx = 0usize;
+        let pos = 0usize;
+        let entry = verilm_core::types::KvEntry {
+            k_roped: vec![0.1, 0.2, 0.3, 0.4],
+            v_deq: vec![0.5, 0.6, 0.7, 0.8],
+        };
+        // Single-leaf tree: root == leaf hash, empty sibling path.
+        let leaf = merkle::hash_kv_entry(layer_idx, pos, &entry.k_roped, &entry.v_deq);
+        let proof = MerkleProof {
+            leaf_index: 0,
+            siblings: vec![],
+        };
+        (entry, layer_idx, pos, leaf, proof)
+    }
+
+    #[test]
+    fn kv_provenance_honest_entry_verifies() {
+        let (entry, layer_idx, pos, root, proof) = kv_provenance_test_entry();
+        assert!(verify_kv_entry_provenance(
+            &root, layer_idx, pos, &entry, &proof,
+        ));
+    }
+
+    #[test]
+    fn kv_provenance_tampered_k_fails() {
+        let (mut entry, layer_idx, pos, root, proof) = kv_provenance_test_entry();
+        entry.k_roped[0] += 1e-6;
+        assert!(!verify_kv_entry_provenance(
+            &root, layer_idx, pos, &entry, &proof,
+        ));
+    }
+
+    #[test]
+    fn kv_provenance_tampered_v_fails() {
+        let (mut entry, layer_idx, pos, root, proof) = kv_provenance_test_entry();
+        entry.v_deq[2] = 0.0;
+        assert!(!verify_kv_entry_provenance(
+            &root, layer_idx, pos, &entry, &proof,
+        ));
+    }
+
+    #[test]
+    fn kv_provenance_wrong_position_fails() {
+        let (entry, layer_idx, _pos, root, proof) = kv_provenance_test_entry();
+        // Position is mixed into the leaf hash via domain separation; using
+        // a different `pos` recomputes a different leaf that shouldn't match.
+        assert!(!verify_kv_entry_provenance(
+            &root, layer_idx, 1, &entry, &proof,
+        ));
+    }
+
+    // --- B3: wiring audit helper tests ---
+
+    fn wiring_test_cfg() -> ModelConfig {
+        let mut cfg = ModelConfig::toy();
+        cfg.n_q_heads = 8;
+        cfg.n_kv_heads = 2;
+        cfg.d_head = 4;
+        cfg.kv_dim = cfg.n_kv_heads * cfg.d_head; // = 8
+        cfg
+    }
+
+    #[test]
+    fn wiring_gqa_config_honest_passes() {
+        let cfg = wiring_test_cfg();
+        assert!(check_gqa_config(&cfg));
+    }
+
+    #[test]
+    fn wiring_gqa_config_not_divisible_fails() {
+        let mut cfg = wiring_test_cfg();
+        cfg.n_q_heads = 7; // 7 % 2 != 0
+        assert!(!check_gqa_config(&cfg));
+    }
+
+    #[test]
+    fn wiring_gqa_config_kv_dim_mismatch_fails() {
+        let mut cfg = wiring_test_cfg();
+        cfg.kv_dim = 7; // != n_kv_heads * d_head
+        assert!(!check_gqa_config(&cfg));
+    }
+
+    #[test]
+    fn wiring_gqa_shape_honest_entry_passes() {
+        let cfg = wiring_test_cfg();
+        let entry = verilm_core::types::KvEntry {
+            k_roped: vec![0.0; cfg.kv_dim],
+            v_deq: vec![0.0; cfg.kv_dim],
+        };
+        assert!(check_kv_entry_gqa_shape(&cfg, &entry));
+    }
+
+    #[test]
+    fn wiring_gqa_shape_wrong_k_len_fails() {
+        let cfg = wiring_test_cfg();
+        let entry = verilm_core::types::KvEntry {
+            k_roped: vec![0.0; cfg.kv_dim - 1],
+            v_deq: vec![0.0; cfg.kv_dim],
+        };
+        assert!(!check_kv_entry_gqa_shape(&cfg, &entry));
+    }
+
+    #[test]
+    fn wiring_gqa_shape_wrong_v_len_fails() {
+        let cfg = wiring_test_cfg();
+        let entry = verilm_core::types::KvEntry {
+            k_roped: vec![0.0; cfg.kv_dim],
+            v_deq: vec![0.0; cfg.kv_dim + 1],
+        };
+        assert!(!check_kv_entry_gqa_shape(&cfg, &entry));
+    }
+
+    #[test]
+    fn wiring_mask_exact_seq_passes() {
+        let ws = verilm_core::types::WitnessedScores {
+            scores: vec![0.0; 8 * 5],
+            n_q_heads: 8,
+            seq_len: 5,
+        };
+        let token_index = 4usize;
+        assert!(check_causal_mask_ws(&ws, token_index));
+    }
+
+    #[test]
+    fn wiring_mask_future_position_fails() {
+        let ws = verilm_core::types::WitnessedScores {
+            scores: vec![0.0; 8 * 6],
+            n_q_heads: 8,
+            seq_len: 6, // reaches beyond token_index
+        };
+        let token_index = 4usize;
+        assert!(!check_causal_mask_ws(&ws, token_index));
+    }
+
+    #[test]
+    fn wiring_mask_short_seq_fails() {
+        let ws = verilm_core::types::WitnessedScores {
+            scores: vec![0.0; 8 * 3],
+            n_q_heads: 8,
+            seq_len: 3, // too short for token_index
+        };
+        let token_index = 4usize;
+        assert!(!check_causal_mask_ws(&ws, token_index));
     }
 }

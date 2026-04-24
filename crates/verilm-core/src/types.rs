@@ -96,12 +96,13 @@ pub enum AttentionVerificationMode {
     /// Used when f64 replay diverges from GPU at later token positions.
     WitnessedScores,
 
-    /// Stock-compatible: attention output is bounded (not exactly verified).
-    /// Uses top-k softmax concentration + tail bound against committed V.
-    /// Combined with CapturedLogits margin gating, provides statistical
-    /// certification that attention errors cannot flip the output token.
+    /// Audit-only: arbitrary-position attention outputs are NOT verified.
+    /// The verifier instead audits attention inputs and wiring — score
+    /// anchoring, KV provenance, mask/RoPE/GQA checks, and local replay
+    /// smoke. The hot path reports status only; individual audits are
+    /// wired in subsequent phases (see roadmap items 13–15).
     /// No kernel modification required — works with stock FlashAttention.
-    StockBounded,
+    AuditedInputsOnly,
 
     /// Deterministic attention kernel: exact match between prover and verifier.
     /// Requires custom CUDA kernel replacing FlashAttention.
@@ -265,23 +266,23 @@ impl VerificationProfile {
         }
     }
 
-    /// Llama W8A8 stock-bounded with captured-logits decode.
-    pub fn llama_w8a8_stock_bounded() -> Self {
+    /// Llama W8A8 audit-only attention with captured-logits decode.
+    pub fn llama_w8a8_audited() -> Self {
         VerificationProfile {
-            name: "llama-w8a8-stock-bounded".into(),
-            attention_mode: AttentionVerificationMode::StockBounded,
+            name: "llama-w8a8-audited".into(),
+            attention_mode: AttentionVerificationMode::AuditedInputsOnly,
             decode_acceptance: DecodeAcceptanceMode::CapturedLogits,
-            // Attention tolerance is not used for StockBounded — set high.
+            // Attention tolerance is not used in AuditedInputsOnly mode — set high.
             attention_tolerance: 255,
             ..Self::llama_w8a8()
         }
     }
 
-    /// Qwen W8A8 stock-bounded with captured-logits decode.
-    pub fn qwen_w8a8_stock_bounded() -> Self {
+    /// Qwen W8A8 audit-only attention with captured-logits decode.
+    pub fn qwen_w8a8_audited() -> Self {
         VerificationProfile {
-            name: "qwen-w8a8-stock-bounded".into(),
-            attention_mode: AttentionVerificationMode::StockBounded,
+            name: "qwen-w8a8-audited".into(),
+            attention_mode: AttentionVerificationMode::AuditedInputsOnly,
             decode_acceptance: DecodeAcceptanceMode::CapturedLogits,
             attention_tolerance: 255,
             ..Self::qwen_w8a8()
@@ -290,14 +291,14 @@ impl VerificationProfile {
 
     /// Detect profile from model family string (from config.json model_type).
     /// Returns None for unrecognized families.
-    /// Defaults to stock-bounded profiles (most practical for production).
+    /// Defaults to audit-only attention profiles (product mode).
     pub fn detect(model_type: &str, quant_family: Option<&str>) -> Option<Self> {
         let is_w8a8 = quant_family.map_or(false, |q| q == "W8A8");
         let family = model_type.to_lowercase();
         if family.contains("qwen2") && is_w8a8 {
-            Some(Self::qwen_w8a8_stock_bounded())
+            Some(Self::qwen_w8a8_audited())
         } else if family.contains("llama") && is_w8a8 {
-            Some(Self::llama_w8a8_stock_bounded())
+            Some(Self::llama_w8a8_audited())
         } else {
             None
         }
@@ -917,6 +918,19 @@ pub struct VerifierKey {
     /// Cross-checked against the manifest's `attn_dtype` when both are present.
     #[serde(default)]
     pub attn_dtype: Option<String>,
+
+    /// Per-layer, per-head o_proj sensitivity coefficient for attention certification.
+    ///
+    /// `o_proj_alpha[layer][head]` = max_j sum_{i in head_slice(h)} |W_o[j,i]|
+    ///
+    /// This bounds the worst-case residual-stream perturbation from a unit
+    /// attention-output perturbation in head h. Used by the adaptive attention
+    /// certifier to convert per-head attention-space tail bounds into
+    /// residual-space bounds: eps_resid[l,h] = alpha[l,h] * eps_attn[l,h].
+    ///
+    /// Precomputed during keygen. Empty for toy model.
+    #[serde(default)]
+    pub o_proj_alpha: Vec<Vec<f64>>,
 
     /// When true, attention replay dequantizes Q/K accumulators using weight
     /// and activation scales, applies RoPE at each token position, and replays

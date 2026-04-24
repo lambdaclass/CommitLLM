@@ -623,6 +623,49 @@ fn generate_key_inner(
         qkv_biases.clear();
     }
 
+    // Compute o_proj alpha[l,h] = max_j sum_{i in head_slice(h)} |W_o[j,i]|
+    // This bounds how much a unit attention-output perturbation in head h
+    // can perturb any single output dimension of the residual stream.
+    let wo_mt_idx = MatrixType::PER_LAYER.iter().position(|&mt| mt == MatrixType::Wo).unwrap();
+    let hidden_dim = cfg.hidden_dim;
+    let d_head = cfg.d_head;
+    let n_q_heads = cfg.n_q_heads;
+    let mut o_proj_alpha: Vec<Vec<f64>> = Vec::with_capacity(cfg.n_layers);
+
+    for layer_idx in 0..cfg.n_layers {
+        let wo_i8 = &all_weights[layer_idx][wo_mt_idx];
+        // Scale: per-channel if available, else per-tensor.
+        let has_pc = !per_channel_weight_scales.is_empty()
+            && !per_channel_weight_scales[layer_idx][wo_mt_idx].is_empty();
+        let per_tensor_scale = quantization_scales[layer_idx][wo_mt_idx] as f64;
+
+        let mut layer_alpha = vec![0.0f64; n_q_heads];
+
+        for j in 0..hidden_dim {
+            let row_scale = if has_pc {
+                per_channel_weight_scales[layer_idx][wo_mt_idx][j] as f64
+            } else {
+                per_tensor_scale
+            };
+
+            for h in 0..n_q_heads {
+                let col_start = h * d_head;
+                let col_end = col_start + d_head;
+                let mut head_abs_sum: f64 = 0.0;
+                for i in col_start..col_end {
+                    let w_abs = (wo_i8[j * hidden_dim + i] as f64).abs() * row_scale;
+                    head_abs_sum += w_abs;
+                }
+                if head_abs_sum > layer_alpha[h] {
+                    layer_alpha[h] = head_abs_sum;
+                }
+            }
+        }
+
+        o_proj_alpha.push(layer_alpha);
+    }
+    eprintln!("  o_proj alpha: computed for {} layers × {} heads", cfg.n_layers, n_q_heads);
+
     // Compute weight-chain hash
     let weight_hash = verilm_core::merkle::hash_weights(
         &source_dtype,
@@ -826,6 +869,7 @@ fn generate_key_inner(
         attn_dtype: json_cfg.torch_dtype.clone(),
         quant_family,
         scale_derivation,
+        o_proj_alpha,
         rope_aware_replay,
         qkv_biases,
         verification_profile,

@@ -173,6 +173,9 @@ pub enum FailureCode {
     ScoreAnchorMismatch,
     WitnessedScoreStructuralError,
 
+    // -- Attention wiring (GQA / RoPE / causal mask) --
+    AttentionWiringMismatch,
+
     // -- KV transcript --
     KvRootsCountMismatch,
     KvEntriesCountMismatch,
@@ -251,6 +254,7 @@ impl FailureCode {
             | KvProofCountMismatch
             | ScoreAnchorMismatch
             | WitnessedScoreStructuralError
+            | AttentionWiringMismatch
             | DecodeArtifactHashMismatch
             | AttentionExactMismatch
             | AttentionKvCoverageIncomplete
@@ -602,20 +606,60 @@ pub fn build_audit_challenge(
 // ---------------------------------------------------------------------------
 
 /// Attention verification status — explicit about what was checked.
+///
+/// In the kept product (`AuditedInputsOnly`), arbitrary-position attention
+/// outputs are not verified. The structured sub-fields on
+/// [`AttentionStatus::AuditedInputsNotVerified`] are placeholders for
+/// individual audits (score anchoring, KV provenance, mask/RoPE/GQA wiring,
+/// local replay smoke) that are wired in later phases. Until those land, the
+/// status is emitted with all sub-fields `None`.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum AttentionStatus {
     /// Attention was exactly replayed and matched within tolerance.
     ExactReplay { linf: i16, tolerance: u8 },
-    /// Attention was bounded via top-k concentration + tail bound.
-    StockBounded {
-        min_top_k_mass: f32,
-        max_tail_bound: f32,
-        logit_margin: f32,
-        certified: bool,
+    /// Audit-only attention reporting. Arbitrary-position attention outputs
+    /// are NOT verified; the verifier audits attention inputs and wiring.
+    /// Sub-fields are populated as individual audits land.
+    AuditedInputsNotVerified {
+        score_anchor: Option<ScoreAnchorAudit>,
+        kv_provenance: Option<KvProvenanceAudit>,
+        wiring: Option<WiringAudit>,
+        local_replay: Option<LocalReplayAudit>,
     },
-    /// Attention was not checked (stock-bounded mode, insufficient evidence).
+    /// Attention was not checked (no shell opening or insufficient evidence).
     NotChecked { reason: String },
+}
+
+/// Score-anchor audit result (recompute `Q·Kᵀ/√d` on challenged positions and
+/// compare against witnessed scores). Populated when score anchoring is wired.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ScoreAnchorAudit {
+    pub checked: bool,
+    pub max_gap: Option<f32>,
+}
+
+/// KV-provenance audit result (opened K/V rows map to the right token
+/// positions, cache rows, and page boundaries).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct KvProvenanceAudit {
+    pub checked: bool,
+}
+
+/// Wiring audit result (causal mask, RoPE / position IDs, GQA head mapping).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WiringAudit {
+    pub mask_ok: Option<bool>,
+    pub rope_ok: Option<bool>,
+    pub gqa_ok: Option<bool>,
+}
+
+/// Local-replay audit result (token-0 or short-window exact attention replay
+/// as regression smoke — not a product attention claim).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LocalReplayAudit {
+    pub checked: bool,
+    pub scope: Option<String>,
 }
 
 /// Result from V4 retained-state verification.

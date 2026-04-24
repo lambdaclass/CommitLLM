@@ -1283,51 +1283,66 @@ pub fn compare_attention_output(
     }
 }
 
+/// Per-head attention evidence curve: tail bound as a function of k.
+///
+/// For each head, we precompute the sorted softmax weights and max|V_tail|
+/// so the certifier can adaptively pick the smallest k that closes the bound.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HeadEvidenceCurve {
+    /// Sorted softmax weights (descending). weights[0] is the largest.
+    pub sorted_weights: Vec<f32>,
+    /// Prefix mass at each k: prefix_mass[k] = sum of top-(k+1) weights.
+    pub prefix_mass: Vec<f32>,
+    /// Tail bound at each k: tail_bound[k] = (1 - prefix_mass[k]) * max|V_tail(k)|.
+    /// tail_bound[k] bounds the worst-case perturbation to any attention output
+    /// dimension from ignoring positions outside the top-(k+1).
+    pub tail_bounds: Vec<f64>,
+    /// max|V| across ALL positions (used when k=0, the full tail).
+    pub max_v_abs: f64,
+}
+
 /// Per-layer attention evidence for stock-compatible certification.
 ///
-/// Instead of replaying attention exactly, computes statistical bounds:
-/// how concentrated is the softmax mass, and how much can the tail perturb output?
+/// Contains per-head evidence curves, allowing the certifier to adaptively
+/// pick k per head to minimize total certified bound.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AttentionEvidence {
     pub layer: usize,
-    /// Per-head fraction of softmax mass in top-k positions.
-    pub top_k_mass_per_head: Vec<f32>,
-    /// Minimum top-k mass across all heads (worst case).
+    /// Per-head evidence curves (one per query head).
+    pub head_curves: Vec<HeadEvidenceCurve>,
+    /// Legacy fields for backward compatibility with reports.
+    /// Minimum top-k mass across all heads at the default k.
     pub min_top_k_mass: f32,
-    /// Per-head tail bound: tail_mass × max|V| (L-inf over d_head dims).
-    /// This is the maximum perturbation to any single attention output dimension
-    /// from ignoring non-top-k positions.
-    pub tail_bound_per_head: Vec<f64>,
-    /// Maximum tail bound across all heads.
+    /// Maximum tail bound across all heads at the default k.
     pub max_tail_bound: f64,
-    /// Top-k value used.
+    /// Top-k value used for legacy fields.
     pub top_k: usize,
 }
 
-/// Compute top-k attention concentration and tail bound for one layer.
+/// Compute attention evidence curves for one layer.
+///
+/// For each query head, computes the full sorted-weight curve and tail bounds
+/// at every possible k, enabling adaptive k selection by the certifier.
 ///
 /// Given witnessed scores and committed V, computes:
 /// 1. Softmax weights from witnessed scores (f32)
-/// 2. Top-k positions per head (highest softmax weight)
-/// 3. Top-k mass = sum of top-k weights
-/// 4. Tail bound = tail_mass × max|V| across non-top-k positions
+/// 2. Sorted weights (descending) per head
+/// 3. Prefix mass curve: prefix_mass[k] = sum of top-(k+1) weights
+/// 4. Tail bound curve: tail_bound[k] = tail_mass(k) × max|V_tail(k)|
 ///
-/// The tail bound gives the worst-case perturbation to any attention output
-/// dimension from the non-top-k positions.
+/// `default_k` is used only to populate the legacy summary fields.
 pub fn compute_attention_evidence(
     witnessed_scores: &[f32],
     n_q_heads: usize,
     seq_len: usize,
     kv_cache_v_deq: &[Vec<f64>],
     cfg: &ModelConfig,
-    top_k: usize,
+    default_k: usize,
 ) -> AttentionEvidence {
     let d_head = cfg.d_head;
     let heads_per_kv = n_q_heads / cfg.n_kv_heads;
-    let effective_k = top_k.min(seq_len);
 
-    let mut top_k_mass_per_head = Vec::with_capacity(n_q_heads);
-    let mut tail_bound_per_head = Vec::with_capacity(n_q_heads);
+    let mut head_curves = Vec::with_capacity(n_q_heads);
 
     for qh in 0..n_q_heads {
         let kv_head = qh / heads_per_kv;
@@ -1346,138 +1361,385 @@ pub fn compute_attention_evidence(
         let sum_exp: f32 = exp_scores.iter().sum();
         let weights: Vec<f32> = exp_scores.iter().map(|&e| e / sum_exp).collect();
 
-        // 3. Find top-k indices by sorting weights descending.
+        // 3. Sort by weight descending, keeping original indices.
         let mut indexed_weights: Vec<(usize, f32)> =
             weights.iter().cloned().enumerate().collect();
         indexed_weights.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // 4. top_k_mass = sum of top-k weights.
-        let top_k_mass: f32 = indexed_weights[..effective_k]
-            .iter()
-            .map(|&(_, w)| w)
-            .sum();
-        top_k_mass_per_head.push(top_k_mass);
+        let sorted_weights: Vec<f32> = indexed_weights.iter().map(|&(_, w)| w).collect();
 
-        // 5. tail_mass = 1.0 - top_k_mass
-        let tail_mass = 1.0f32 - top_k_mass;
-
-        // 6. Find max |V[t][kv_head*d_head+d]| across non-top-k positions and all d_head dims.
-        let top_k_indices: std::collections::HashSet<usize> = indexed_weights[..effective_k]
+        // 4. Precompute per-position max|V| for the sorted order.
+        //    v_abs_sorted[i] = max over d_head dims of |V[pos_i][kv_head*d_head+d]|
+        let v_abs_sorted: Vec<f64> = indexed_weights
             .iter()
-            .map(|&(idx, _)| idx)
+            .map(|&(pos, _)| {
+                let v_t = &kv_cache_v_deq[pos];
+                (0..d_head)
+                    .map(|d| v_t[kv_head * d_head + d].abs())
+                    .fold(0.0f64, f64::max)
+            })
             .collect();
 
-        let mut max_v_abs: f64 = 0.0;
-        for t in 0..seq_len {
-            if !top_k_indices.contains(&t) {
-                let v_t = &kv_cache_v_deq[t];
-                for d in 0..d_head {
-                    let v_abs = v_t[kv_head * d_head + d].abs();
-                    if v_abs > max_v_abs {
-                        max_v_abs = v_abs;
-                    }
-                }
-            }
+        let max_v_abs = v_abs_sorted
+            .iter()
+            .cloned()
+            .fold(0.0f64, f64::max);
+
+        // 5. Build prefix mass curve and tail bound curve.
+        let mut prefix_mass = Vec::with_capacity(seq_len);
+        let mut tail_bounds = Vec::with_capacity(seq_len);
+        let mut running_mass: f32 = 0.0;
+        // max|V| in the tail (positions k+1..seq_len), starts as global max
+        // We track this by maintaining a running suffix max of v_abs_sorted.
+        // Precompute suffix max: suffix_max_v[k] = max(v_abs_sorted[k..])
+        let mut suffix_max_v = vec![0.0f64; seq_len + 1];
+        for i in (0..seq_len).rev() {
+            suffix_max_v[i] = f64::max(v_abs_sorted[i], suffix_max_v[i + 1]);
         }
 
-        // 7. tail_bound = tail_mass × max_v_abs
-        let tail_bound = (tail_mass as f64) * max_v_abs;
-        tail_bound_per_head.push(tail_bound);
+        for k in 0..seq_len {
+            running_mass += sorted_weights[k];
+            prefix_mass.push(running_mass);
+            let tail_mass = 1.0f32 - running_mass;
+            // max|V| in tail = suffix_max_v[k+1] (positions after the top-(k+1))
+            let max_v_tail = suffix_max_v[k + 1];
+            tail_bounds.push((tail_mass as f64) * max_v_tail);
+        }
+
+        head_curves.push(HeadEvidenceCurve {
+            sorted_weights,
+            prefix_mass,
+            tail_bounds,
+            max_v_abs,
+        });
     }
 
-    let min_top_k_mass = top_k_mass_per_head
+    // Populate legacy summary fields at default_k.
+    let effective_k = default_k.min(seq_len);
+    let min_top_k_mass = head_curves
         .iter()
-        .cloned()
+        .map(|c| if effective_k > 0 { c.prefix_mass[effective_k - 1] } else { 0.0 })
         .fold(f32::INFINITY, f32::min);
-    let max_tail_bound = tail_bound_per_head
+    let max_tail_bound = head_curves
         .iter()
-        .cloned()
+        .map(|c| if effective_k > 0 { c.tail_bounds[effective_k - 1] } else { c.max_v_abs })
         .fold(0.0f64, f64::max);
 
     AttentionEvidence {
         layer: 0, // caller should set this
-        top_k_mass_per_head,
+        head_curves,
         min_top_k_mass,
-        tail_bound_per_head,
         max_tail_bound,
         top_k: effective_k,
+    }
+}
+
+/// Certification outcome — why the certifier accepted or rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CertificationOutcome {
+    /// Bound closed: estimated_logit_bound < logit_margin / 2.
+    Certified,
+    /// Budget spent but bound did not close.
+    BudgetExhausted,
+    /// Logit margin too small (≤ 0): top token not distinct.
+    MarginTooSmall,
+}
+
+/// Certification budget — hard caps on how much work the certifier can do.
+#[derive(Debug, Clone, Copy)]
+pub struct CertificationBudget {
+    /// Maximum k for any single head.
+    pub max_k_per_head: usize,
+    /// Maximum total k summed across all (layer, head) pairs.
+    pub max_total_k: usize,
+}
+
+impl Default for CertificationBudget {
+    fn default() -> Self {
+        Self {
+            max_k_per_head: 128,
+            max_total_k: 8192,
+        }
     }
 }
 
 /// Token-level certification result combining attention evidence with logit margin.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TokenCertification {
-    /// Whether this token passes certification.
-    pub certified: bool,
+    /// Certification outcome.
+    pub outcome: CertificationOutcome,
     /// Logit margin: gap between top-1 and top-2 final logits.
     pub logit_margin: f32,
-    /// Minimum top-k mass across all layers and heads.
-    pub min_top_k_mass: f32,
-    /// Maximum tail bound across all layers and heads.
-    pub max_tail_bound: f64,
-    /// Per-layer evidence.
-    pub layers: Vec<AttentionEvidence>,
+    /// Estimated worst-case final-logit perturbation bound from attention uncertainty.
+    /// Certification requires: estimated_logit_bound < logit_margin / 2.
+    pub estimated_logit_bound: f64,
+    /// Per-layer, per-head chosen k values.
+    pub chosen_k_per_layer: Vec<Vec<usize>>,
+    /// Total k budget spent.
+    pub total_k_spent: usize,
     /// Human-readable certification reason.
     pub reason: String,
 }
 
-/// Certify a token using attention evidence and logit margin.
+impl TokenCertification {
+    pub fn certified(&self) -> bool {
+        self.outcome == CertificationOutcome::Certified
+    }
+}
+
+/// K steps in the schedule. Each step represents a k value to try.
+/// The cost of promoting a head from k_prev to k_next is (k_next - k_prev).
+const ADAPTIVE_K_SCHEDULE: &[usize] = &[4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048];
+
+/// Fallback downstream gain factor used when alpha[l,h] is not available.
+const FALLBACK_DOWNSTREAM_GAIN: f64 = 10.0;
+
+/// Certify a token using budgeted greedy allocation with optional alpha.
 ///
-/// A token is certified if:
-/// 1. Attention is well-concentrated (min top-k mass > threshold, e.g. 0.9)
-/// 2. Tail bound is small relative to the logit margin
+/// Instead of picking k independently per head, this allocator:
+/// 1. Starts every head at k=0 (full tail bound).
+/// 2. Builds a priority queue of (layer, head, next_k_step) entries.
+/// 3. Greedily promotes the head with the best marginal_bound_reduction / marginal_cost.
+/// 4. Stops when the total bound closes (< margin/2) or budget is exhausted.
 ///
-/// The logit margin is the gap between the top-1 and top-2 logits from
-/// CapturedLogits. If the attention perturbation bound is smaller than
-/// half the logit margin, the correct token would be selected regardless
-/// of attention errors.
+/// The bound at any point is:
+///   estimated_logit_bound = sum over (layer, head) of alpha[l,h] * eps_attn[l,h,current_k]
 ///
-/// Conservative bound: we don't propagate attention error through o_proj/MLP/lm_head.
-/// Instead, we use an empirical scaling factor. This is intentionally loose —
-/// the goal is to certify easy cases, not all cases.
-pub fn certify_token(
+/// `o_proj_alpha`: per-layer, per-head sensitivity from o_proj weights.
+/// `budget`: hard caps on per-head k and total k across all heads.
+pub fn certify_token_budgeted(
     evidence: &[AttentionEvidence],
     logit_margin: f32,
-    concentration_threshold: f32,
+    o_proj_alpha: Option<&[Vec<f64>]>,
+    budget: &CertificationBudget,
 ) -> TokenCertification {
-    let min_top_k_mass = evidence
-        .iter()
-        .map(|e| e.min_top_k_mass)
-        .fold(f32::INFINITY, f32::min);
-    let max_tail_bound = evidence
-        .iter()
-        .map(|e| e.max_tail_bound)
-        .fold(0.0f64, f64::max);
+    if logit_margin <= 0.0 {
+        return TokenCertification {
+            outcome: CertificationOutcome::MarginTooSmall,
+            logit_margin,
+            estimated_logit_bound: f64::INFINITY,
+            chosen_k_per_layer: vec![],
+            total_k_spent: 0,
+            reason: format!(
+                "margin_too_small: logit margin {:.4} <= 0",
+                logit_margin
+            ),
+        };
+    }
 
-    let concentrated = min_top_k_mass >= concentration_threshold;
-    let margin_positive = logit_margin > 0.0;
-    let certified = concentrated && margin_positive;
+    let target = (logit_margin as f64) / 2.0;
+    let has_alpha = o_proj_alpha.is_some();
 
-    let reason = if !margin_positive {
-        format!(
-            "not certified: logit margin {:.4} <= 0 (top-1 not distinct)",
-            logit_margin
-        )
-    } else if !concentrated {
-        format!(
-            "not certified: min top-k mass {:.4} < threshold {:.4}",
-            min_top_k_mass, concentration_threshold
-        )
+    // --- Phase 1: Build per-head metadata ---
+    // For each (layer, head), precompute:
+    //   - alpha coefficient
+    //   - seq_len (number of positions in curve)
+    //   - effective max k for this head
+    //   - current resid bound (at k=0 / schedule step 0)
+    //   - schedule of (k, resid_bound_at_k) pairs
+
+    struct HeadState {
+        layer_ev_idx: usize,
+        head_idx: usize,
+        alpha: f64,
+        /// Index into ADAPTIVE_K_SCHEDULE of current step (0 = not yet promoted).
+        schedule_idx: usize,
+        /// Residual-space bound at current k.
+        current_resid_bound: f64,
+        /// Precomputed (k, attn_bound) for each schedule step that fits within max_k.
+        schedule: Vec<(usize, f64)>,
+    }
+
+    let mut heads: Vec<HeadState> = Vec::new();
+    let mut total_resid_bound: f64 = 0.0;
+
+    // Initialize chosen k per layer (all zeros).
+    let mut chosen_k_per_layer: Vec<Vec<usize>> = evidence
+        .iter()
+        .map(|ev| vec![0; ev.head_curves.len()])
+        .collect();
+
+    for (ev_idx, layer_ev) in evidence.iter().enumerate() {
+        let layer_alpha = o_proj_alpha.and_then(|a| a.get(layer_ev.layer));
+
+        for (head_idx, curve) in layer_ev.head_curves.iter().enumerate() {
+            let seq_len = curve.tail_bounds.len();
+            if seq_len == 0 {
+                continue;
+            }
+
+            let alpha = layer_alpha
+                .and_then(|la| la.get(head_idx))
+                .copied()
+                .unwrap_or(FALLBACK_DOWNSTREAM_GAIN);
+
+            let effective_max_k = budget.max_k_per_head.min(seq_len.saturating_sub(1));
+
+            // Build schedule: (k, attn_bound) for each applicable step.
+            let mut schedule: Vec<(usize, f64)> = Vec::new();
+            for &k in ADAPTIVE_K_SCHEDULE {
+                if k > effective_max_k {
+                    break;
+                }
+                let idx = k - 1;
+                if idx < seq_len {
+                    schedule.push((k, curve.tail_bounds[idx]));
+                }
+            }
+
+            // Initial bound: k=0, full tail.
+            let initial_attn_bound = curve.max_v_abs;
+            let initial_resid_bound = alpha * initial_attn_bound;
+            total_resid_bound += initial_resid_bound;
+
+            heads.push(HeadState {
+                layer_ev_idx: ev_idx,
+                head_idx,
+                alpha,
+                schedule_idx: 0, // not yet promoted
+                current_resid_bound: initial_resid_bound,
+                schedule,
+            });
+        }
+    }
+
+    // --- Phase 2: Greedy budget allocation ---
+    // Repeatedly find the head+step with best marginal_reduction / marginal_cost,
+    // promote it, and update the total bound.
+
+    let mut total_k_spent: usize = 0;
+
+    loop {
+        // Check if bound already closes.
+        if total_resid_bound < target {
+            break;
+        }
+
+        // Find best promotion: highest (marginal_reduction / marginal_cost).
+        let mut best_head_idx: Option<usize> = None;
+        let mut best_ratio: f64 = 0.0;
+        let mut best_cost: usize = 0;
+
+        for (hi, head) in heads.iter().enumerate() {
+            if head.schedule_idx >= head.schedule.len() {
+                continue; // fully promoted
+            }
+
+            let (next_k, next_attn_bound) = head.schedule[head.schedule_idx];
+            let new_resid_bound = head.alpha * next_attn_bound;
+            let reduction = head.current_resid_bound - new_resid_bound;
+            if reduction <= 0.0 {
+                continue; // no improvement
+            }
+
+            // Cost = delta k (new positions to check).
+            let prev_k = if head.schedule_idx == 0 {
+                0
+            } else {
+                head.schedule[head.schedule_idx - 1].0
+            };
+            let cost = next_k - prev_k;
+            if cost == 0 {
+                continue;
+            }
+
+            // Check budget.
+            if total_k_spent + cost > budget.max_total_k {
+                continue; // would exceed total budget
+            }
+
+            let ratio = reduction / (cost as f64);
+            if ratio > best_ratio {
+                best_ratio = ratio;
+                best_cost = cost;
+                best_head_idx = Some(hi);
+            }
+        }
+
+        match best_head_idx {
+            Some(hi) => {
+                let head = &mut heads[hi];
+                let (next_k, next_attn_bound) = head.schedule[head.schedule_idx];
+                let new_resid_bound = head.alpha * next_attn_bound;
+
+                total_resid_bound -= head.current_resid_bound;
+                total_resid_bound += new_resid_bound;
+                head.current_resid_bound = new_resid_bound;
+                head.schedule_idx += 1;
+                total_k_spent += best_cost;
+
+                chosen_k_per_layer[head.layer_ev_idx][head.head_idx] = next_k;
+            }
+            None => break, // no promotions available
+        }
+    }
+
+    // --- Phase 3: Produce result ---
+    let estimated_logit_bound = total_resid_bound;
+    let outcome = if estimated_logit_bound < target {
+        CertificationOutcome::Certified
     } else {
-        format!(
-            "certified: min top-k mass {:.4} >= {:.4}, logit margin {:.4}, max tail bound {:.6}",
-            min_top_k_mass, concentration_threshold, logit_margin, max_tail_bound
-        )
+        CertificationOutcome::BudgetExhausted
+    };
+
+    let gain_info = if has_alpha { "alpha" } else { "fallback" };
+    let reason = match outcome {
+        CertificationOutcome::Certified => format!(
+            "certified: bound {:.4} < margin/2 {:.4} (margin {:.4}, k_spent={}, gain={})",
+            estimated_logit_bound, target, logit_margin, total_k_spent, gain_info
+        ),
+        CertificationOutcome::BudgetExhausted => format!(
+            "budget_exhausted: bound {:.4} >= margin/2 {:.4} (margin {:.4}, k_spent={}, gain={})",
+            estimated_logit_bound, target, logit_margin, total_k_spent, gain_info
+        ),
+        CertificationOutcome::MarginTooSmall => unreachable!(),
     };
 
     TokenCertification {
-        certified,
+        outcome,
         logit_margin,
-        min_top_k_mass,
-        max_tail_bound,
-        layers: evidence.to_vec(),
+        estimated_logit_bound,
+        chosen_k_per_layer,
+        total_k_spent,
         reason,
     }
+}
+
+/// Convenience wrapper: budgeted greedy with default budget and no alpha.
+pub fn certify_token_adaptive(
+    evidence: &[AttentionEvidence],
+    logit_margin: f32,
+    max_k: usize,
+) -> TokenCertification {
+    let budget = CertificationBudget {
+        max_k_per_head: max_k,
+        max_total_k: max_k * 64, // reasonable default
+    };
+    certify_token_budgeted(evidence, logit_margin, None, &budget)
+}
+
+/// Convenience wrapper: budgeted greedy with alpha and explicit budget.
+pub fn certify_token_adaptive_with_alpha(
+    evidence: &[AttentionEvidence],
+    logit_margin: f32,
+    max_k: usize,
+    o_proj_alpha: Option<&[Vec<f64>]>,
+) -> TokenCertification {
+    let budget = CertificationBudget {
+        max_k_per_head: max_k,
+        max_total_k: max_k * 64,
+    };
+    certify_token_budgeted(evidence, logit_margin, o_proj_alpha, &budget)
+}
+
+/// Legacy fixed-threshold certifier. Delegates to budgeted greedy.
+pub fn certify_token(
+    evidence: &[AttentionEvidence],
+    logit_margin: f32,
+    _concentration_threshold: f32,
+) -> TokenCertification {
+    certify_token_adaptive(evidence, logit_margin, 128)
 }
 
 // ---------------------------------------------------------------------------
@@ -1744,16 +2006,24 @@ pub fn replay_attention_deterministic(
             all_weights[qh * seq_len + t] = w;
         }
 
-        // --- Step 3: V aggregation (unchanged from v1, sequential) ---
+        // --- Step 3: V aggregation (v4 — tiled partials + tree merge) ---
+        const TILE_SIZE: usize = 128;
         for i in 0..d_head {
-            let mut acc: f32 = 0.0;
-            for t in 0..seq_len {
-                let v_val = bf16_to_f32(v_bf16[t][kv_group * d_head + i]);
-                let w = all_weights[qh * seq_len + t];
-                let prod = w * v_val;
-                acc = acc + prod;
+            let mut tile_partials: Vec<f32> = Vec::new();
+            let mut tile_start = 0;
+            while tile_start < seq_len {
+                let tile_end = (tile_start + TILE_SIZE).min(seq_len);
+                let mut partial: f32 = 0.0;
+                for t in tile_start..tile_end {
+                    let v_val = bf16_to_f32(v_bf16[t][kv_group * d_head + i]);
+                    let w = all_weights[qh * seq_len + t];
+                    let prod = w * v_val;
+                    partial = partial + prod;
+                }
+                tile_partials.push(partial);
+                tile_start += TILE_SIZE;
             }
-            output[qh * d_head + i] = acc;
+            output[qh * d_head + i] = tree_reduce_sum_f32(&tile_partials);
         }
     }
 
@@ -1825,14 +2095,23 @@ pub fn replay_attention_deterministic_f32(
             all_weights[qh * seq_len + t] = exp_scores[t] / sum_exp;
         }
 
-        // Step 3: V aggregation (v1 — sequential)
+        // Step 3: V aggregation (v4 — tiled partials + tree merge)
+        const TILE_SIZE: usize = 128;
         for i in 0..d_head {
-            let mut acc: f32 = 0.0;
-            for t in 0..seq_len {
-                let prod = all_weights[qh * seq_len + t] * v_f32[t][kv_group * d_head + i];
-                acc = acc + prod;
+            let mut tile_partials: Vec<f32> = Vec::new();
+            let mut tile_start = 0;
+            while tile_start < seq_len {
+                let tile_end = (tile_start + TILE_SIZE).min(seq_len);
+                let mut partial: f32 = 0.0;
+                for t in tile_start..tile_end {
+                    let w = all_weights[qh * seq_len + t];
+                    let prod = w * v_f32[t][kv_group * d_head + i];
+                    partial = partial + prod;
+                }
+                tile_partials.push(partial);
+                tile_start += TILE_SIZE;
             }
-            output[qh * d_head + i] = acc;
+            output[qh * d_head + i] = tree_reduce_sum_f32(&tile_partials);
         }
     }
 
@@ -2622,8 +2901,12 @@ mod tests {
             evidence.max_tail_bound
         );
         assert_eq!(evidence.top_k, top_k);
-        assert_eq!(evidence.top_k_mass_per_head.len(), n_q_heads);
-        assert_eq!(evidence.tail_bound_per_head.len(), n_q_heads);
+        assert_eq!(evidence.head_curves.len(), n_q_heads);
+        // Check curves: prefix mass at k=1 should be ~1.0 (all mass in position 0).
+        for curve in &evidence.head_curves {
+            assert!(curve.prefix_mass[0] > 0.999, "prefix_mass[0] should be ~1.0");
+            assert!(curve.tail_bounds[0] < 0.01, "tail_bounds[0] should be ~0");
+        }
     }
 
     #[test]
@@ -2648,18 +2931,18 @@ mod tests {
         let evidence =
             compute_attention_evidence(&scores, n_q_heads, seq_len, &v_deq, &cfg, top_k);
 
-        // Expected top-k mass = k/seq_len = 3/10 = 0.3
+        // Expected top-k mass at k=3: 3/10 = 0.3
         let expected_mass = top_k as f32 / seq_len as f32;
-        for &mass in &evidence.top_k_mass_per_head {
+        for curve in &evidence.head_curves {
+            let mass_at_k = curve.prefix_mass[top_k - 1];
             assert!(
-                (mass - expected_mass).abs() < 0.01,
-                "uniform: top_k_mass {:.4} should be close to {:.4}",
-                mass,
-                expected_mass
+                (mass_at_k - expected_mass).abs() < 0.01,
+                "uniform: prefix_mass[{}] = {:.4} should be close to {:.4}",
+                top_k - 1, mass_at_k, expected_mass
             );
         }
 
-        // Tail bound should be substantial: tail_mass = 0.7, max|V| = 5.0 → bound = 3.5
+        // Tail bound at k=3: tail_mass = 0.7, max|V| = 5.0 → bound = 3.5
         let expected_tail_bound = (1.0 - expected_mass) as f64 * 5.0;
         assert!(
             (evidence.max_tail_bound - expected_tail_bound).abs() < 0.1,
@@ -2671,7 +2954,8 @@ mod tests {
 
     #[test]
     fn test_attention_evidence_top_k_exceeds_seq_len() {
-        // When top_k > seq_len, effective_k = seq_len and all mass is captured.
+        // When top_k > seq_len, effective_k = seq_len.
+        // All mass is captured at full seq_len.
         let cfg = toy_cfg();
         let n_q_heads = cfg.n_q_heads;
         let seq_len = 3;
@@ -2687,104 +2971,130 @@ mod tests {
             compute_attention_evidence(&scores, n_q_heads, seq_len, &v_deq, &cfg, top_k);
 
         assert_eq!(evidence.top_k, seq_len);
-        // All mass captured.
-        for &mass in &evidence.top_k_mass_per_head {
+        // All mass captured at last position in curve.
+        for curve in &evidence.head_curves {
+            let final_mass = *curve.prefix_mass.last().unwrap();
             assert!(
-                (mass - 1.0).abs() < 1e-5,
-                "top_k > seq_len: mass {:.6} should be ~1.0",
-                mass
+                (final_mass - 1.0).abs() < 1e-5,
+                "top_k > seq_len: final prefix_mass {:.6} should be ~1.0",
+                final_mass
+            );
+            // Last tail bound = 0 (no tail positions).
+            let final_bound = *curve.tail_bounds.last().unwrap();
+            assert!(
+                final_bound < 1e-10,
+                "top_k > seq_len: final tail_bound {:.6e} should be ~0",
+                final_bound
             );
         }
-        // Tail bound = 0 (no tail positions).
         assert!(
             evidence.max_tail_bound < 1e-10,
-            "top_k > seq_len: tail bound {:.6e} should be ~0",
+            "top_k > seq_len: max_tail_bound {:.6e} should be ~0",
             evidence.max_tail_bound
         );
     }
 
-    #[test]
-    fn test_certify_token_high_margin() {
-        // High concentration + high logit margin → certified.
-        let evidence = vec![AttentionEvidence {
-            layer: 0,
-            top_k_mass_per_head: vec![0.98, 0.97, 0.99, 0.96, 0.98, 0.97, 0.99, 0.95],
-            min_top_k_mass: 0.95,
-            tail_bound_per_head: vec![0.1; 8],
-            max_tail_bound: 0.1,
-            top_k: 4,
-        }];
-
-        let cert = certify_token(&evidence, 5.0, 0.9);
-        assert!(cert.certified, "should be certified: {}", cert.reason);
-        assert!((cert.logit_margin - 5.0).abs() < 1e-6);
-        assert!((cert.min_top_k_mass - 0.95).abs() < 1e-6);
-        assert!((cert.max_tail_bound - 0.1).abs() < 1e-6);
+    // Helper: create an AttentionEvidence with one curve per head.
+    // `best_tail_bound` is the minimum achievable tail bound for that head
+    // (reached at the largest k in the schedule that fits within seq_len).
+    fn make_evidence(layer: usize, best_tail_bounds: &[f64]) -> AttentionEvidence {
+        // Create a 256-position curve so k=4..128 all have meaningful entries.
+        let seq_len = 256;
+        let head_curves: Vec<HeadEvidenceCurve> = best_tail_bounds
+            .iter()
+            .map(|&tb| {
+                // Uniform-ish weights with a long tail.
+                let w = 1.0 / seq_len as f32;
+                let sorted_weights = vec![w; seq_len];
+                let prefix_mass: Vec<f32> = (1..=seq_len)
+                    .map(|k| (k as f32) * w)
+                    .collect();
+                // Tail bound decreases linearly; at full k it's 0, at k=0 it's max.
+                // Scale so that the best achievable (at k=128) is `tb`.
+                // tail_bound[k] = tb * (seq_len - k - 1) / (seq_len - 129)
+                // when seq_len=256, k=127: tb * 128/127 ≈ tb
+                let scale = if seq_len > 129 { (seq_len - 129) as f64 } else { 1.0 };
+                let tail_bounds: Vec<f64> = (0..seq_len)
+                    .map(|k| {
+                        let remaining = (seq_len - k - 1) as f64;
+                        tb * remaining / scale
+                    })
+                    .collect();
+                let max_v_abs = tb * (seq_len as f64) / scale;
+                HeadEvidenceCurve {
+                    sorted_weights,
+                    prefix_mass,
+                    tail_bounds,
+                    max_v_abs,
+                }
+            })
+            .collect();
+        let max_tail_bound = best_tail_bounds
+            .iter()
+            .cloned()
+            .fold(0.0f64, f64::max);
+        AttentionEvidence {
+            layer,
+            head_curves,
+            min_top_k_mass: 0.5, // not used by adaptive certifier
+            max_tail_bound,
+            top_k: 16,
+        }
     }
 
     #[test]
-    fn test_certify_token_low_concentration() {
-        // Low concentration → not certified (regardless of margin).
-        let evidence = vec![AttentionEvidence {
-            layer: 0,
-            top_k_mass_per_head: vec![0.5, 0.6, 0.4, 0.55, 0.5, 0.6, 0.4, 0.45],
-            min_top_k_mass: 0.4,
-            tail_bound_per_head: vec![2.0; 8],
-            max_tail_bound: 2.0,
-            top_k: 2,
-        }];
+    fn test_certify_token_high_margin() {
+        // Small tail bounds + high logit margin → certified.
+        // 8 heads × ~0.001 attn bound each = ~0.008 attn total.
+        // With 10x gain: ~0.08 logit bound. Margin = 5.0, target = 2.5 → certified.
+        let evidence = vec![make_evidence(0, &[0.001; 8])];
+        let cert = certify_token_adaptive(&evidence, 5.0, 128);
+        assert!(cert.certified(), "should be certified: {}", cert.reason);
+        assert!((cert.logit_margin - 5.0).abs() < 1e-6);
+        assert!(
+            cert.estimated_logit_bound < 2.5,
+            "bound {:.4} should be < 2.5",
+            cert.estimated_logit_bound
+        );
+    }
 
-        let cert = certify_token(&evidence, 10.0, 0.9);
-        assert!(!cert.certified, "should NOT be certified: {}", cert.reason);
-        assert!(cert.reason.contains("min top-k mass"));
+    #[test]
+    fn test_certify_token_large_bound() {
+        // Large tail bounds → not certified.
+        // 8 heads × ~2.0 attn each = ~16 attn. With 10x gain: ~160 logit bound.
+        // Margin = 10.0, target = 5.0. 160 >> 5.0 → not certified.
+        let evidence = vec![make_evidence(0, &[2.0; 8])];
+        let cert = certify_token_adaptive(&evidence, 10.0, 128);
+        assert!(!cert.certified(), "should NOT be certified: {}", cert.reason);
+        assert!(cert.reason.contains("budget_exhausted"));
     }
 
     #[test]
     fn test_certify_token_zero_margin() {
         // logit_margin = 0 → not certified (top token not distinct).
-        let evidence = vec![AttentionEvidence {
-            layer: 0,
-            top_k_mass_per_head: vec![0.99; 8],
-            min_top_k_mass: 0.99,
-            tail_bound_per_head: vec![0.01; 8],
-            max_tail_bound: 0.01,
-            top_k: 4,
-        }];
-
-        let cert = certify_token(&evidence, 0.0, 0.9);
-        assert!(!cert.certified, "should NOT be certified: {}", cert.reason);
-        assert!(cert.reason.contains("logit margin"));
+        let evidence = vec![make_evidence(0, &[0.001; 8])];
+        let cert = certify_token_adaptive(&evidence, 0.0, 128);
+        assert!(!cert.certified(), "should NOT be certified: {}", cert.reason);
+        assert!(cert.reason.contains("margin_too_small"));
     }
 
     #[test]
     fn test_certify_token_multi_layer() {
-        // Multi-layer: certification uses worst-case across all layers.
-        let layer0 = AttentionEvidence {
-            layer: 0,
-            top_k_mass_per_head: vec![0.99; 8],
-            min_top_k_mass: 0.99,
-            tail_bound_per_head: vec![0.05; 8],
-            max_tail_bound: 0.05,
-            top_k: 4,
-        };
-        let layer1 = AttentionEvidence {
-            layer: 1,
-            top_k_mass_per_head: vec![0.92, 0.91, 0.93, 0.90, 0.92, 0.91, 0.93, 0.88],
-            min_top_k_mass: 0.88,
-            tail_bound_per_head: vec![0.5; 8],
-            max_tail_bound: 0.5,
-            top_k: 4,
-        };
+        // Multi-layer: bounds are additive across layers.
+        // Layer 0: 8 heads × 0.001 attn = 0.008 attn
+        // Layer 1: 8 heads × 0.01 attn = 0.08 attn
+        // Sum = 0.088 attn. With 10x gain: 0.88 logit bound.
+        // Margin = 5.0, target = 2.5 → certified.
+        let layer0 = make_evidence(0, &[0.001; 8]);
+        let layer1_ok = make_evidence(1, &[0.01; 8]);
 
-        // With threshold 0.9, layer1's min_top_k_mass=0.88 fails.
-        let cert = certify_token(&[layer0.clone(), layer1], 5.0, 0.9);
-        assert!(!cert.certified, "multi-layer should fail: {}", cert.reason);
-        assert!((cert.min_top_k_mass - 0.88).abs() < 1e-6);
-        assert!((cert.max_tail_bound - 0.5).abs() < 1e-6);
+        let cert = certify_token_adaptive(&[layer0.clone(), layer1_ok], 5.0, 128);
+        assert!(cert.certified(), "multi-layer should certify: {} (bound={:.4})", cert.reason, cert.estimated_logit_bound);
 
-        // With a lower threshold of 0.85, it should pass.
-        let cert2 = certify_token(&[layer0], 5.0, 0.85);
-        assert!(cert2.certified, "single good layer should pass: {}", cert2.reason);
+        // With much larger per-head bounds: 8 × 2.0 = 16 attn. 10x = 160. >> 2.5.
+        let layer1_big = make_evidence(1, &[2.0; 8]);
+        let cert2 = certify_token_adaptive(&[layer0, layer1_big], 5.0, 128);
+        assert!(!cert2.certified(), "multi-layer should fail: {}", cert2.reason);
     }
 
     // ── Tree reduction primitive tests ─────────────────────────────

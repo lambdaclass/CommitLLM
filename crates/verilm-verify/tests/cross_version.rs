@@ -447,9 +447,9 @@ fn frozen_key_sha256_pinned() {
     let data = fixture("v4_key_canonical.bin");
     let hash = hex::encode(Sha256::digest(&data));
     // Pinned on first generation. Update ONLY on intentional format change.
-    // Updated: added CapturedLogits Freivalds fields to VerifierKey.
+    // Updated: added o_proj_alpha field to VerifierKey for adaptive attention certification.
     assert_eq!(
-        hash, "862f7a9615ff461b573838c82a1fba968e3d6e50d1218d5b7ef5df5abc397cb3",
+        hash, "536287ea117cc268825c0022c04c641af78d43405f2bb8ba0df8e1ffd1b325ac",
         "key fixture checksum drifted — was the fixture silently regenerated?"
     );
 }

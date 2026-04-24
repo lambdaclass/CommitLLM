@@ -247,28 +247,51 @@ instead of sequential left-to-right accumulation. This produces different f32
 bits for `sum_exp` (and therefore different weights) compared to v2. Both CPU
 and GPU must use the same tree structure.
 
-### Step 3: V Aggregation — O = P @ V
+### Step 3: V Aggregation — O = P @ V (v4 tiled)
+
+**Tile size**: 128 (protocol constant). `seq_len` is divided into tiles of
+this size; the last tile may be shorter.
 
 For each query head `qh` and output dimension `i`:
 
 ```
 kv_group = qh / (n_q_heads / n_kv_heads)
+TILE_SIZE = 128
 
-acc: f32 = 0.0
-for t in 0..seq_len:
-    v_val = bf16_to_f32(V[t * n_kv_heads * d_head + kv_group * d_head + i])
-    acc = acc + (P[qh, t] * v_val)           // Rule 1, Rule 4
+tile_partials = []
+for tile_start in 0, TILE_SIZE, 2*TILE_SIZE, ...:
+    tile_end = min(tile_start + TILE_SIZE, seq_len)
+    partial: f32 = 0.0
+    for t in tile_start..tile_end:
+        v_val = bf16_to_f32(V[t * n_kv_heads * d_head + kv_group * d_head + i])
+        partial = partial + (P[qh, t] * v_val)    // Rule 1, sequential within tile
+    tile_partials.append(partial)
 
-O[qh, i] = acc
+O[qh, i] = tree_reduce_sum(tile_partials)          // Rule 4
 ```
+
+**v4 change**: V aggregation uses fixed-size tiles with sequential accumulation
+within each tile, then merges tile partials via the frozen tree reduction
+(Rule 4). This produces different f32 bits than v3's fully sequential
+accumulation (f32 addition is not associative). Both CPU and GPU must use
+the same tile size and merge structure.
+
+**Tile ordering**: Tiles are processed in ascending order of `tile_start`.
+The partial for each tile is the result of left-to-right sequential
+accumulation within that tile. Partials are merged via `tree_reduce_sum`
+in tile order (tile 0 partial first, tile 1 partial second, etc.).
 
 ## GPU Kernel Design
 
-One CUDA block per query head. `blockDim.x = max(next_pow2(d_head), next_pow2(seq_len))`.
-Step 1: all threads compute score dot products via parallel multiply + tree reduce.
-Step 2: all threads compute softmax via parallel tree max, parallel exp,
-tree sum, parallel normalize. Step 3: `d_head` threads compute V aggregation
-(parallel across `d_head`, sequential across `seq_len`).
+Three-kernel architecture (v4):
+- **Kernel A** (`kernel_scores_softmax`): One block per query head, `blockDim.x = padded_d`.
+  Steps 1-2: parallel score dot products, tree max, parallel exp, tree sum, parallel normalize.
+  Writes softmax weights to global memory.
+- **Kernel B** (`kernel_v_tiles`): Grid = `n_q_heads × n_tiles`, one block per (head, tile) pair,
+  `blockDim.x = padded_d`. Each thread accumulates one output dimension sequentially within its tile.
+  Writes partial sums to global `partials[head][tile][d_head]`.
+- **Kernel C** (`kernel_v_merge`): One block per query head, `blockDim.x = padded_d`.
+  Each thread loads its tile partials into registers and performs frozen binary tree reduction (Rule 4).
 
 Compiled with: `nvcc -O2 --fmad=false -shared -Xcompiler -fPIC`
 

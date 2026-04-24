@@ -2215,39 +2215,90 @@ fn measure_corridor_with_captured_lse(
         .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
 }
 
-/// Compute attention evidence for stock-bounded certification.
+/// Compute attention evidence (archived stock-bounded certification helper).
 ///
-/// Returns per-layer top-k softmax concentration and tail bounds against
-/// committed V, plus a token-level certification result.
+/// Historical: hot-path certification was removed when the product moved to
+/// audit-only attention reporting. This Python entrypoint is kept as a
+/// diagnostic/research helper and is not wired into the shipped verifier.
+///
+/// Returns adaptive attention certification using bound-vs-margin logic.
+///
+/// For each layer and head, adaptively picks the smallest k that closes
+/// the estimated logit perturbation bound below logit_margin / 2.
 ///
 /// Args:
 ///     audit_binary: bytes — bincode-serialized V4AuditResponse.
 ///     key_json: str — JSON-serialized VerifierKey.
 ///     logit_margin: float — gap between top-1 and top-2 final logits.
-///     top_k: int — number of top softmax positions to track (default 16).
-///     concentration_threshold: float — min top-k mass for certification (default 0.9).
+///     max_k: int — maximum k to try per head (default 2048).
 ///
 /// Returns:
 ///     str — JSON-serialized TokenCertification.
 #[pyfunction]
-#[pyo3(signature = (audit_binary, key_json, logit_margin, top_k=16, concentration_threshold=0.9))]
+#[pyo3(signature = (audit_binary, key_json, logit_margin, max_k=2048))]
 fn compute_attention_certification(
     audit_binary: &[u8],
     key_json: &str,
     logit_margin: f32,
-    top_k: usize,
-    concentration_threshold: f32,
+    max_k: usize,
 ) -> PyResult<String> {
     let key: VerifierKey = serde_json::from_str(key_json)
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize key: {}", e)))?;
     let response = verilm_core::serialize::deserialize_v4_audit(audit_binary)
         .map_err(|e| PyValueError::new_err(format!("failed to deserialize audit: {}", e)))?;
     let evidence = verilm_verify::corridor::compute_attention_evidence_from_audit(
-        &key, &response, top_k,
+        &key, &response, 16, // default_k for legacy summary fields
     )
     .map_err(|e| PyValueError::new_err(format!("attention evidence failed: {}", e)))?;
-    let cert = verilm_core::attention::certify_token(
-        &evidence, logit_margin, concentration_threshold,
+    let cert = verilm_core::attention::certify_token_adaptive(
+        &evidence, logit_margin, max_k,
+    );
+    serde_json::to_string(&cert)
+        .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
+}
+
+/// Budgeted attention certification with alpha from binary key.
+///
+/// Like compute_attention_certification but takes a binary key (so o_proj_alpha
+/// is available) and exposes budget parameters.
+///
+/// Args:
+///     audit_binary: bytes — bincode-serialized V4AuditResponse.
+///     key_binary: bytes — binary-serialized VerifierKey.
+///     logit_margin: float — gap between top-1 and top-2 final logits.
+///     max_k_per_head: int — budget cap per head (default 128).
+///     max_total_k: int — budget cap summed across all heads (default 8192).
+///
+/// Returns:
+///     str — JSON-serialized TokenCertification.
+#[pyfunction]
+#[pyo3(signature = (audit_binary, key_binary, logit_margin, max_k_per_head=128, max_total_k=8192))]
+fn compute_attention_certification_budgeted(
+    audit_binary: &[u8],
+    key_binary: &[u8],
+    logit_margin: f32,
+    max_k_per_head: usize,
+    max_total_k: usize,
+) -> PyResult<String> {
+    let key = verilm_core::serialize::deserialize_key(key_binary)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize key: {}", e)))?;
+    let response = verilm_core::serialize::deserialize_v4_audit(audit_binary)
+        .map_err(|e| PyValueError::new_err(format!("failed to deserialize audit: {}", e)))?;
+    let evidence = verilm_verify::corridor::compute_attention_evidence_from_audit(
+        &key, &response, 16,
+    )
+    .map_err(|e| PyValueError::new_err(format!("attention evidence failed: {}", e)))?;
+    let alpha = if key.o_proj_alpha.is_empty() {
+        None
+    } else {
+        Some(key.o_proj_alpha.as_slice())
+    };
+    let budget = verilm_core::attention::CertificationBudget {
+        max_k_per_head,
+        max_total_k,
+    };
+    let cert = verilm_core::attention::certify_token_budgeted(
+        &evidence, logit_margin, alpha, &budget,
     );
     serde_json::to_string(&cert)
         .map_err(|e| PyValueError::new_err(format!("serialization error: {}", e)))
@@ -2606,6 +2657,7 @@ fn verilm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(measure_corridor_witnessed_scores_tiled, m)?)?;
     m.add_function(wrap_pyfunction!(measure_corridor_with_captured_lse, m)?)?;
     m.add_function(wrap_pyfunction!(compute_attention_certification, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_attention_certification_budgeted, m)?)?;
     m.add_function(wrap_pyfunction!(verify_witnessed_score_anchoring, m)?)?;
     m.add_function(wrap_pyfunction!(verify_witnessed_score_anchoring_gpu_like, m)?)?;
     m.add_function(wrap_pyfunction!(verify_witnessed_score_anchoring_bf16, m)?)?;

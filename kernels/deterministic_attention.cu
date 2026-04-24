@@ -1,16 +1,17 @@
 /**
- * Deterministic Attention Kernel v3 — bit-exact against CPU reference.
+ * Deterministic Attention Kernel v4 — bit-exact against CPU reference.
  *
  * Single-query decode attention with fully specified arithmetic:
  *   Step 1: Score = Q · K^T * inv_sqrt_d  (v2: parallel multiply + tree reduce)
  *   Step 2: Softmax (v3: parallel tree max, parallel exp, tree sum, parallel normalize)
- *   Step 3: Output = P @ V  (v1: sequential per-thread, parallel across d_head)
+ *   Step 3: Output = P @ V  (v4: tiled across seq_len, partials merged via tree reduce)
  *
- * v3 change (softmax path):
- *   - Max score: tree_reduce_max over scores[] (was: thread 0 sequential)
- *   - Exp: all threads compute exp_canonical in parallel (was: thread 0 sequential)
- *   - Sum exp: tree_reduce_sum over exp_scores[] (was: thread 0 sequential)
- *   - Normalize: all threads divide in parallel (was: thread 0 sequential)
+ * v4 change (V aggregation):
+ *   - seq_len is divided into fixed tiles of TILE_SIZE
+ *   - Each (head, tile) pair is computed by a separate CUDA block
+ *   - Within a tile: sequential accumulation per d_head thread (same as v1)
+ *   - Across tiles: partials merged via frozen tree_reduce_sum contract
+ *   - Three-kernel architecture: scores+softmax, V-tile partials, V-merge
  *
  * All library-dependent math is eliminated:
  *   - No scalbnf/ldexp — bit-level exponent manipulation instead
@@ -26,18 +27,13 @@
 #include <cuda_runtime.h>
 
 // ─── Bit-level ldexp: p * 2^n without any library call ───────────
-// Adds n to the IEEE 754 exponent field. Handles n=0 as identity.
-// Assumes p is a normal positive float and |n| < 127.
 static __device__ __forceinline__ float ldexp_bitwise(float p, int n) {
     uint32_t bits;
     memcpy(&bits, &p, sizeof(float));
-    // Extract biased exponent (bits 30:23)
     int biased_exp = (int)((bits >> 23) & 0xFF);
     biased_exp += n;
-    // Clamp to valid range (underflow → 0, overflow → inf)
     if (biased_exp <= 0) return 0.0f;
     if (biased_exp >= 255) {
-        // Return +inf with same sign
         bits = (bits & 0x80000000u) | 0x7F800000u;
         float result;
         memcpy(&result, &bits, sizeof(float));
@@ -50,14 +46,11 @@ static __device__ __forceinline__ float ldexp_bitwise(float p, int n) {
 }
 
 // ─── Canonical exp: protocol-frozen polynomial ───────────────────
-// exp(x) = 2^(x * log2(e)) via minimax polynomial for 2^f on [-0.5, 0.5].
-// Coefficients are protocol constants — changing them changes the protocol.
 static __device__ __forceinline__ float exp_canonical(float x) {
-    float t = __fmul_rn(x, 1.4426950216293335f);  // x * log2(e)
+    float t = __fmul_rn(x, 1.4426950216293335f);
     float n = rintf(t);
     float f = __fadd_rn(t, -n);
 
-    // Horner form: p = 1 + f*(c1 + f*(c2 + f*(c3 + f*c4)))
     float p = __fmul_rn(f, 0.009618129f);
     p = __fadd_rn(p, 0.055504109f);
     p = __fmul_rn(p, f);
@@ -67,7 +60,6 @@ static __device__ __forceinline__ float exp_canonical(float x) {
     p = __fmul_rn(p, f);
     p = __fadd_rn(p, 1.0f);
 
-    // p * 2^n via bit manipulation (no scalbnf)
     return ldexp_bitwise(p, (int)n);
 }
 
@@ -91,27 +83,15 @@ static __host__ __device__ unsigned int next_pow2(unsigned int v) {
     return v + 1;
 }
 
-/**
- * Deterministic decode attention kernel (v3 — tree-reduced scores + parallel softmax).
- *
- * One block per query head. blockDim.x = max(next_pow2(d_head), next_pow2(seq_len)).
- *
- * Step 1 (v2): All threads compute element-wise products, then tree-reduce
- *   in shared memory to get dot product. Thread 0 applies inv_sqrt_d.
- * Step 2 (v3): Parallel tree max, parallel exp, tree sum, parallel normalize.
- * Step 3 (v1): All threads compute V aggregation (parallel across d_head,
- *   sequential across seq_len).
- *
- * Shared memory layout:
- *   reduce_buf:  [padded_reduce]  — tree reduction workspace (max of padded_d, padded_seq)
- *   scores:      [seq_len]        — attention scores
- *   exp_scores:  [seq_len]        — softmax weights
- */
-__global__ void deterministic_attention_kernel(
+// ═══════════════════════════════════════════════════════════════════
+// Kernel A: Scores + Softmax (Steps 1-2, same as v3)
+//
+// Grid: n_q_heads blocks.  Block: padded_d threads.
+// Writes normalized weights to weights[] (global memory).
+// ═══════════════════════════════════════════════════════════════════
+__global__ void kernel_scores_softmax(
     const uint16_t* __restrict__ q,
     const uint16_t* __restrict__ k,
-    const uint16_t* __restrict__ v,
-    float* __restrict__ output,
     float* __restrict__ weights,
     int n_q_heads,
     int n_kv_heads,
@@ -129,25 +109,23 @@ __global__ void deterministic_attention_kernel(
     int kv_group = qh / heads_per_kv;
 
     extern __shared__ float smem[];
-    float* reduce_buf = smem;                                  // [padded_reduce]
-    float* scores     = smem + padded_reduce;                  // [seq_len]
-    float* exp_scores = smem + padded_reduce + seq_len;        // [seq_len]
+    float* reduce_buf = smem;
+    float* scores     = smem + padded_reduce;
+    float* exp_scores = smem + padded_reduce + seq_len;
 
     int tid = threadIdx.x;
 
     // --- Step 1 (v2): Scores via parallel multiply + tree reduce ---
     for (int t = 0; t < seq_len; t++) {
-        // Phase A: element-wise multiply (each thread handles one dimension)
         if (tid < d_head) {
             float q_val = bf16_to_f32(q[qh * d_head + tid]);
             float k_val = bf16_to_f32(k[t * n_kv_heads * d_head + kv_group * d_head + tid]);
             reduce_buf[tid] = __fmul_rn(q_val, k_val);
         } else if (tid < padded_d) {
-            reduce_buf[tid] = 0.0f;  // padding with identity for sum
+            reduce_buf[tid] = 0.0f;
         }
         __syncthreads();
 
-        // Phase B: fixed binary tree reduction (matches tree_reduce_sum_f32)
         for (int stride = padded_d / 2; stride >= 1; stride >>= 1) {
             if (tid < stride) {
                 reduce_buf[tid] = __fadd_rn(reduce_buf[tid], reduce_buf[tid + stride]);
@@ -155,22 +133,19 @@ __global__ void deterministic_attention_kernel(
             __syncthreads();
         }
 
-        // Thread 0 has the dot product in reduce_buf[0]
         if (tid == 0) {
             scores[t] = __fmul_rn(reduce_buf[0], inv_sqrt_d);
         }
         __syncthreads();
     }
 
-    // --- Step 2 (v3): Softmax — parallel tree max, exp, tree sum, normalize ---
+    // --- Step 2 (v3): Softmax ---
 
-    // 2a. Tree reduce max over scores[]
-    //     Load scores into reduce_buf with -inf padding
+    // 2a. Tree reduce max
     for (int base = tid; base < padded_seq; base += blockDim.x) {
         reduce_buf[base] = (base < seq_len) ? scores[base] : -INFINITY;
     }
     __syncthreads();
-
     for (int stride = padded_seq / 2; stride >= 1; stride >>= 1) {
         for (int base = tid; base < stride; base += blockDim.x) {
             float left = reduce_buf[base];
@@ -179,57 +154,128 @@ __global__ void deterministic_attention_kernel(
         }
         __syncthreads();
     }
-
-    float max_score = reduce_buf[0];  // all threads read (broadcast via smem)
+    float max_score = reduce_buf[0];
     __syncthreads();
 
-    // 2b. Parallel exp computation
+    // 2b. Parallel exp
     for (int base = tid; base < seq_len; base += blockDim.x) {
         exp_scores[base] = exp_canonical(__fadd_rn(scores[base], -max_score));
     }
     __syncthreads();
 
-    // 2c. Tree reduce sum of exp_scores[]
-    //     Load exp_scores into reduce_buf with 0.0 padding
+    // 2c. Tree reduce sum
     for (int base = tid; base < padded_seq; base += blockDim.x) {
         reduce_buf[base] = (base < seq_len) ? exp_scores[base] : 0.0f;
     }
     __syncthreads();
-
     for (int stride = padded_seq / 2; stride >= 1; stride >>= 1) {
         for (int base = tid; base < stride; base += blockDim.x) {
             reduce_buf[base] = __fadd_rn(reduce_buf[base], reduce_buf[base + stride]);
         }
         __syncthreads();
     }
-
-    float sum_exp = reduce_buf[0];  // all threads read
+    float sum_exp = reduce_buf[0];
     __syncthreads();
 
-    // 2d. Parallel normalize + write weights
+    // 2d. Parallel normalize + write weights to global
     for (int base = tid; base < seq_len; base += blockDim.x) {
-        float w = __fdiv_rn(exp_scores[base], sum_exp);
-        exp_scores[base] = w;
-        weights[qh * seq_len + base] = w;
+        weights[qh * seq_len + base] = __fdiv_rn(exp_scores[base], sum_exp);
     }
-    __syncthreads();
+}
 
-    // --- Step 3: V aggregation (parallel across d_head, sequential across seq_len — v1) ---
-    if (tid < d_head) {
-        float acc = 0.0f;
-        for (int t = 0; t < seq_len; t++) {
-            float w = exp_scores[t];
-            float v_val = bf16_to_f32(v[t * n_kv_heads * d_head + kv_group * d_head + tid]);
-            float prod = __fmul_rn(w, v_val);
-            acc = __fadd_rn(acc, prod);
-        }
-        output[qh * d_head + tid] = acc;
+// ═══════════════════════════════════════════════════════════════════
+// Kernel B: Tiled V partial sums
+//
+// Grid: n_q_heads * n_tiles blocks (1D flattened).
+// Block: padded_d threads.
+// Each block computes one tile's partial V sum for one head.
+// Reads weights from global memory (output of Kernel A).
+// Writes partials to partials_dev[qh * n_tiles * d_head + tile * d_head + dim].
+// ═══════════════════════════════════════════════════════════════════
+__global__ void kernel_v_tiles(
+    const uint16_t* __restrict__ v,
+    const float* __restrict__ weights,
+    float* __restrict__ partials,
+    int n_q_heads,
+    int n_kv_heads,
+    int d_head,
+    int seq_len,
+    int tile_size,
+    int n_tiles
+) {
+    int block_id = blockIdx.x;
+    int qh = block_id / n_tiles;
+    int tile_idx = block_id % n_tiles;
+    if (qh >= n_q_heads) return;
+
+    int heads_per_kv = n_q_heads / n_kv_heads;
+    int kv_group = qh / heads_per_kv;
+
+    int tid = threadIdx.x;
+    if (tid >= d_head) return;
+
+    int tile_start = tile_idx * tile_size;
+    int tile_end = tile_start + tile_size;
+    if (tile_end > seq_len) tile_end = seq_len;
+
+    float acc = 0.0f;
+    for (int t = tile_start; t < tile_end; t++) {
+        float w = weights[qh * seq_len + t];
+        float v_val = bf16_to_f32(v[t * n_kv_heads * d_head + kv_group * d_head + tid]);
+        float prod = __fmul_rn(w, v_val);
+        acc = __fadd_rn(acc, prod);
     }
+
+    partials[qh * n_tiles * d_head + tile_idx * d_head + tid] = acc;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Kernel C: Merge tile partials via tree reduce
+//
+// Grid: n_q_heads blocks.  Block: padded_d threads.
+// Each thread tree-reduces its n_tiles partials (in registers).
+// Writes final output.
+// ═══════════════════════════════════════════════════════════════════
+__global__ void kernel_v_merge(
+    const float* __restrict__ partials,
+    float* __restrict__ output,
+    int n_q_heads,
+    int d_head,
+    int n_tiles,
+    int padded_tiles
+) {
+    int qh = blockIdx.x;
+    if (qh >= n_q_heads) return;
+
+    int tid = threadIdx.x;
+    if (tid >= d_head) return;
+
+    // Load tile partials into register array + identity padding
+    // Max supported: 64 tiles (seq_len up to 64 * max_tile_size)
+    float buf[64];
+    for (int t = 0; t < n_tiles; t++) {
+        buf[t] = partials[qh * n_tiles * d_head + t * d_head + tid];
+    }
+    for (int t = n_tiles; t < padded_tiles; t++) {
+        buf[t] = 0.0f;  // identity for sum
+    }
+
+    // Frozen binary tree reduction (same contract as tree_reduce_sum_f32)
+    for (int stride = padded_tiles / 2; stride >= 1; stride >>= 1) {
+        for (int i = 0; i < stride; i++) {
+            buf[i] = __fadd_rn(buf[i], buf[i + stride]);
+        }
+    }
+
+    output[qh * d_head + tid] = buf[0];
 }
 
 // ─── C API ───────────────────────────────────────────────────────
 
 extern "C" {
+
+// Default tile size for V aggregation. Protocol constant.
+#define DEFAULT_TILE_SIZE 128
 
 int deterministic_attention(
     const uint16_t* q_dev,
@@ -247,27 +293,74 @@ int deterministic_attention(
     int padded_seq = next_pow2(seq_len);
     int padded_reduce = (padded_d > padded_seq) ? padded_d : padded_seq;
 
-    // Threads = padded_d (same as v2). Softmax tree reductions over larger
-    // padded_seq are handled via stride loop: each thread processes multiple
-    // elements per reduction step. This avoids the occupancy penalty of
-    // launching max(padded_d, padded_seq) threads where most are idle in
-    // Steps 1 and 3.
-    int threads = padded_d;
-    int blocks = n_q_heads;
-    // smem: reduce_buf[padded_reduce] + scores[seq_len] + exp_scores[seq_len]
-    size_t smem_bytes = (padded_reduce + 2 * seq_len) * sizeof(float);
+    int tile_size = DEFAULT_TILE_SIZE;
+    int n_tiles = (seq_len + tile_size - 1) / tile_size;
+    int padded_tiles = next_pow2(n_tiles);
 
-    deterministic_attention_kernel<<<blocks, threads, smem_bytes>>>(
-        q_dev, k_dev, v_dev, output_dev, weights_dev,
-        n_q_heads, n_kv_heads, d_head, seq_len, inv_sqrt_d,
-        padded_d, padded_seq, padded_reduce
-    );
+    cudaError_t err;
 
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        fprintf(stderr, "CUDA kernel error: %s\n", cudaGetErrorString(err));
-        return -1;
+    // --- Kernel A: Scores + Softmax ---
+    {
+        int threads = padded_d;
+        int blocks = n_q_heads;
+        size_t smem_bytes = (padded_reduce + 2 * seq_len) * sizeof(float);
+
+        kernel_scores_softmax<<<blocks, threads, smem_bytes>>>(
+            q_dev, k_dev, weights_dev,
+            n_q_heads, n_kv_heads, d_head, seq_len, inv_sqrt_d,
+            padded_d, padded_seq, padded_reduce
+        );
+        err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            fprintf(stderr, "kernel_scores_softmax error: %s\n", cudaGetErrorString(err));
+            return -1;
+        }
     }
+
+    // --- Kernel B: Tiled V partial sums ---
+    float* partials_dev = nullptr;
+    {
+        size_t partials_bytes = (size_t)n_q_heads * n_tiles * d_head * sizeof(float);
+        err = cudaMalloc(&partials_dev, partials_bytes);
+        if (err != cudaSuccess) {
+            fprintf(stderr, "partials alloc error: %s\n", cudaGetErrorString(err));
+            return -1;
+        }
+
+        int threads = padded_d;
+        int blocks = n_q_heads * n_tiles;
+
+        kernel_v_tiles<<<blocks, threads>>>(
+            v_dev, weights_dev, partials_dev,
+            n_q_heads, n_kv_heads, d_head, seq_len, tile_size, n_tiles
+        );
+        err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            fprintf(stderr, "kernel_v_tiles error: %s\n", cudaGetErrorString(err));
+            cudaFree(partials_dev);
+            return -1;
+        }
+    }
+
+    // --- Kernel C: Merge tile partials ---
+    {
+        int threads = padded_d;
+        int blocks = n_q_heads;
+
+        kernel_v_merge<<<blocks, threads>>>(
+            partials_dev, output_dev,
+            n_q_heads, d_head, n_tiles, padded_tiles
+        );
+        err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            fprintf(stderr, "kernel_v_merge error: %s\n", cudaGetErrorString(err));
+            cudaFree(partials_dev);
+            return -1;
+        }
+    }
+
+    cudaFree(partials_dev);
+
     err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
         fprintf(stderr, "CUDA sync error: %s\n", cudaGetErrorString(err));

@@ -413,6 +413,7 @@ pub fn generate_key(cfg: &ModelConfig, model: &[LayerWeights], seed: [u8; 32]) -
         quant_block_size: None,
         attn_backend: None,
         attn_dtype: None,
+        o_proj_alpha: Vec::new(),
         rope_aware_replay: false,
         qkv_biases: Vec::new(),
         verification_profile: None,

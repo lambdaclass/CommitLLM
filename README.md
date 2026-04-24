@@ -36,12 +36,15 @@ The table below shows what the protocol verifies today and what remains open. "V
                           residual → next layer
    Nonlinear gates        SiLU, RMSNorm canonical replay  ✅ Verified
 
- Attention                                                 ❌ OPEN
-   f64 exact replay       Q·Kᵀ/√d → softmax → V          ✅ Token 0 only
-                          Arbitrary positions              ❌ FlashAttention
-                                                             bf16 diverges
-   Witnessed scores       GPU scores + anchoring           ❌ Tolerance breached
-   Deep prefix            Prefix KV attention replay       ❌ Not yet exercised
+ Attention (audit-only)                                   ⚠️  NOT VERIFIED
+   Arbitrary-position     softmax(QKᵀ/√d)·V output        ❌ Out of scope
+   Score anchoring        recompute QKᵀ/√d on challenged  ⚙️  Planned
+                          positions, compare to witnessed
+   KV provenance          opened K/V rows match committed ⚙️  Planned
+                          token positions / cache rows
+   Wiring                 causal mask / RoPE / GQA head   ⚙️  Planned
+                          mapping
+   Local replay smoke     token-0 exact attention replay   ✅ Token 0 only
 
  Decode
    Greedy                 argmax(logits) must match        ✅ Validated
@@ -58,7 +61,7 @@ The table below shows what the protocol verifies today and what remains open. "V
  ─────────────────────────────────────────────────────────────────────
 ```
 
-**The open problem is attention at arbitrary token positions.** GPU FlashAttention uses bf16 tiled accumulation that doesn't match any f64 replay the verifier can do. At token 0 (short KV cache), exact replay works perfectly. At later positions, the divergence is large enough that widening tolerance would make the check meaningless. The next accepted path is a FlashAttention/kernel-aligned witness with hard success criteria; if that fails, the clean fallback is deterministic attention kernels. See the [roadmap](roadmap.md) for details.
+**Arbitrary-position attention outputs are not verified in the shipped product.** GPU FlashAttention uses bf16 tiled accumulation that does not match any CPU f64/f32 replay the verifier can do within a meaningful tolerance. Every attempted production verification path — exact stock-kernel replay, tiled/LSE replay, stock-bounded certification, and deterministic kernels — is closed. The kept claim is narrower and honest: exact decode plus audited attention inputs and wiring. Stock-mode attention audits cover score anchoring, KV provenance, mask/RoPE/GQA wiring, and token-0 local replay smoke. See the [roadmap](roadmap.md) for the audit implementation plan.
 
 Everything else — embedding, all linear projections, bridge chain, decode, and all bindings — is independently verified with exact or information-theoretically sound checks on the supported path. For sampled decode, the kept exact path is `CapturedLogits`: capture the exact GPU logits, verify the exact sampled token, and Freivalds-bind those logits back to `lm_head`.
 
@@ -74,7 +77,7 @@ Everything else — embedding, all linear projections, bridge chain, decode, and
   - retained state: ~`501 KiB/token` (Llama), ~`594 KiB/token` (Qwen)
   - opened payload: ~`0.5–0.6 MiB` per challenged token
   - verifier CPU: two dot products per challenged token
-- Attention verification is limited to token-0 smoke checks; arbitrary-position attention is an open problem on stock GPU kernels
+- Arbitrary-position attention outputs are not verified in the shipped product; the kept stock-mode attention claim is audit-only (score anchoring, KV provenance, mask/RoPE/GQA wiring, token-0 local replay smoke)
 
 ## Protocol
 
@@ -89,12 +92,12 @@ Everything else — embedding, all linear projections, bridge chain, decode, and
    - Shell matmuls via Freivalds (all weight matrix families)
    - Exact INT8 bridge tensors by canonical recomputation
    - KV transcript Merkle proofs (when KV data is opened)
-   - Attention replay against committed post-attention output (token 0; arbitrary positions are open)
+   - Attention: token-0 exact replay as regression smoke, plus audited attention inputs/wiring (score anchoring, KV provenance, mask/RoPE/GQA); arbitrary-position attention outputs are not verified
    - Final-token tail from the captured residual
    - Exact sampled decode from captured GPU logits plus LM-head algebraic binding
    - Prompt, sampling manifest, and IO chain binding
 
-The protocol is commitment-bound end-to-end. Within that binding, large linear components are verified by verifier-secret, information-theoretically sound algebraic checks. Exact bridge tensors and supported nonlinear subcomputations are checked by canonical re-execution. Sampled decode correctness is checked by exact GPU-logit capture plus algebraic LM-head binding; cheaper replay-based paths remain useful for greedy decode where validated. Attention at arbitrary token positions is still open on stock GPU kernels — see the verification coverage table above. Unsupported semantics fail closed.
+The protocol is commitment-bound end-to-end. Within that binding, large linear components are verified by verifier-secret, information-theoretically sound algebraic checks. Exact bridge tensors and supported nonlinear subcomputations are checked by canonical re-execution. Sampled decode correctness is checked by exact GPU-logit capture plus algebraic LM-head binding; cheaper replay-based paths remain useful for greedy decode where validated. Arbitrary-position attention outputs are not verified on stock GPU kernels — the kept stock-mode attention claim is audit-only (score anchoring, KV provenance, mask/RoPE/GQA wiring, token-0 local replay smoke). Unsupported semantics fail closed.
 
 ## Try It
 
