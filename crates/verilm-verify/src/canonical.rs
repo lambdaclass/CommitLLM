@@ -2104,13 +2104,21 @@ fn anchor_scores_for_layer(
 ///
 /// Per-layer structural issues (incomplete KV coverage, shape mismatch) are
 /// hard-failed via `st` — those represent bad provider data in either mode.
+///
 /// Per-layer threshold breaches are hard-failed via `st` with
-/// `ScoreAnchorMismatch`.
+/// `ScoreAnchorMismatch` **only** in witnessed-score verification mode.
+/// In `AuditedInputsOnly` mode, `max_gap` is evidence, not a verification
+/// gate — we populate `score_anchor.max_gap` in the audit status and let
+/// the reader reason about it; the report must not fail on threshold.
 fn run_score_anchor_audit(ctx: &Ctx, st: &mut St) -> Option<ScoreAnchorResult> {
     let kv_entries = ctx.r.kv_entries.as_ref()?;
     let shell = ctx.r.shell_opening.as_ref()?;
     let witnessed_scores = ctx.r.witnessed_scores.as_ref()?;
     let threshold = ctx.key.score_anchor_threshold()?;
+    let is_audit_only = matches!(
+        ctx.key.attention_mode(),
+        verilm_core::types::AttentionVerificationMode::AuditedInputsOnly,
+    );
 
     let cfg = &ctx.key.config;
     let token_index = ctx.r.token_index as usize;
@@ -2186,20 +2194,22 @@ fn run_score_anchor_audit(ctx: &Ctx, st: &mut St) -> Option<ScoreAnchorResult> {
             None => stats.max_gap,
         });
 
-        st.check();
-        if stats.max_gap > threshold as f64 {
-            st.fail_ctx(
-                FailureCode::ScoreAnchorMismatch,
-                format!(
-                    "layer {}: witnessed score anchor gap {:.4} exceeds threshold {:.1}",
-                    layer_idx, stats.max_gap, threshold,
-                ),
-                FailureContext {
-                    layer: Some(layer_idx),
-                    token_index: Some(ctx.r.token_index),
-                    ..Default::default()
-                },
-            );
+        if !is_audit_only {
+            st.check();
+            if stats.max_gap > threshold as f64 {
+                st.fail_ctx(
+                    FailureCode::ScoreAnchorMismatch,
+                    format!(
+                        "layer {}: witnessed score anchor gap {:.4} exceeds threshold {:.1}",
+                        layer_idx, stats.max_gap, threshold,
+                    ),
+                    FailureContext {
+                        layer: Some(layer_idx),
+                        token_index: Some(ctx.r.token_index),
+                        ..Default::default()
+                    },
+                );
+            }
         }
     }
 
