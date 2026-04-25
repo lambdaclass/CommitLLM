@@ -609,10 +609,20 @@ pub fn build_audit_challenge(
 ///
 /// In the kept product (`AuditedInputsOnly`), arbitrary-position attention
 /// outputs are not verified. The structured sub-fields on
-/// [`AttentionStatus::AuditedInputsNotVerified`] are placeholders for
-/// individual audits (score anchoring, KV provenance, mask/RoPE/GQA wiring,
-/// local replay smoke) that are wired in later phases. Until those land, the
-/// status is emitted with all sub-fields `None`.
+/// [`AttentionStatus::AuditedInputsNotVerified`] are populated independently
+/// as evidence for the four sub-audits — score anchoring, KV provenance,
+/// mask/RoPE/GQA wiring, and local replay smoke — using the present /
+/// absent / populate rule: present-and-bad is a hard fail, absent-evidence
+/// is `None`, present-and-good populates the field.
+///
+/// **Last-generated-token witness scope.** The score-anchor and the
+/// causal-mask sub-audit (`wiring.mask_ok`) consume the prover-side
+/// witnessed pre-softmax scores. The current witness contract retains Q
+/// for the final decode step only, so these two audits run only when the
+/// audited token is the last generated token (`token_index = n_tokens
+/// - 1`). KV provenance, GQA, and RoPE-config audits do not depend on
+/// witnessed scores and apply to the full opened range. Local replay
+/// remains token-0 only.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum AttentionStatus {
@@ -631,8 +641,13 @@ pub enum AttentionStatus {
     NotChecked { reason: String },
 }
 
-/// Score-anchor audit result (recompute `Q·Kᵀ/√d` on challenged positions and
-/// compare against witnessed scores). Populated when score anchoring is wired.
+/// Score-anchor audit result (recompute `Q·Kᵀ/√d` on the audited token and
+/// compare against witnessed pre-softmax scores).
+///
+/// `max_gap` is reported as evidence in `AuditedInputsOnly`, not used as a
+/// hard verification gate. Witness scope is **last generated token only**
+/// under the current contract: the prover-side witness retains Q for the
+/// final decode step only.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ScoreAnchorAudit {
     pub checked: bool,
@@ -646,7 +661,15 @@ pub struct KvProvenanceAudit {
     pub checked: bool,
 }
 
-/// Wiring audit result (causal mask, RoPE / position IDs, GQA head mapping).
+/// Wiring audit result.
+///
+/// - `mask_ok` — causal-mask structural check on witnessed scores. **Last
+///   generated token only** (shares the score-witness scope).
+/// - `rope_ok` — RoPE config hash binding (`rope_theta` + `rope_scaling`)
+///   between the verifier key and the prover manifest. Independent of
+///   token index.
+/// - `gqa_ok` — GQA head mapping (Q heads, KV heads, `d_head`) match the
+///   verifier-key config. Independent of token index.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WiringAudit {
     pub mask_ok: Option<bool>,

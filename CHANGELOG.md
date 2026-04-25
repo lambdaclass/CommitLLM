@@ -4,6 +4,24 @@ This changelog tracks the kept canonical VeriLM protocol and its major implement
 
 Historical references below to “roadmap #N” refer to the pre-2026-03-30 roadmap numbering. On 2026-03-30 the roadmap was renumbered into a single linear open-items-only sequence.
 
+## 2026-04-25
+
+### Decided
+
+- **Audit-only stock-mode attention path frozen as shipped.** After the audited-inputs E2E went green on `llama-w8a8-audited` (2/2 prompts) and `qwen-w8a8-audited` (2/2 prompts) on Modal, the audit-only attention path is closed for now. The shipped claim is exact decode + audited attention inputs/wiring; arbitrary-position attention outputs are not verified.
+- **Score-witness contract is explicitly last-generated-token.** The prover-side score witness retains `Q` for the final decode step only, so the verifier's score-anchor sub-audit and the score-derived causal-mask wiring sub-audit run only when `token_index = n_tokens - 1`. KV provenance, GQA, and RoPE-config audits do not depend on witnessed scores and apply to the full opened range. Token-0 local replay remains a regression check only.
+- **Per-step `Q` retention is deferred.** Extending the score-anchor / causal-mask audits to arbitrary generated positions requires per-step `Q` retention on the prover side. That extension is a deferred follow-up; it is not part of the current shipped claim.
+
+### Verifier changes
+
+- **`run_score_anchor_audit` now treats `max_gap` as evidence in `AuditedInputsOnly`.** The threshold-breach hard-fail (`FailureCode::ScoreAnchorMismatch`) is gated on `!AuditedInputsOnly`. Structural errors (KV-coverage gaps, witnessed-scores shape mismatch, etc.) still hard-fail in both modes. This unblocks Llama under its inherited tight `score_anchor_threshold`, which would otherwise reject every layer in audit-only mode despite the audit being evidence rather than a verification gate.
+- **`AttentionStatus::AuditedInputsNotVerified` doc-comment, `AttentionVerificationMode::AuditedInputsOnly` doc-comment, `ScoreAnchorAudit` doc-comment, `WiringAudit` doc-comment, and `phase_audited_inputs_only` skipped-message** all spell out the last-generated-token witness scope rule and per-field token-index dependence.
+
+### Docs
+
+- **README, paper, roadmap, and CHANGELOG all carry the same shipped claim.** The status table, prose, protocol bullets, and paper §Step 5 / §The Attention Gap / Proposition 2 / Conclusion now state: exact decode (sampled decode via captured-logits + LM-head Freivalds binding); audited attention inputs/wiring (score anchor on the last generated token, KV provenance, GQA / RoPE-config / causal-mask wiring with the mask audit scoped to the last generated token, token-0 local replay smoke); arbitrary-position attention outputs are not verified.
+- **Paper revision (roadmap item 11a) applied.** §Step 5 renamed to "Attention Input Audit", Proposition 2 rewritten as the audit-only consistency proposition, §The Attention Gap reframes the FP16↔FP64 corridor as background evidence rather than a security claim, Table 1 / Table 2 / data lifecycle / audit walkthrough updated. The earlier "score witnessing" extension item is now reframed as "per-step `Q` retention" since score witnessing has shipped under the last-generated-token scope.
+
 ## 2026-04-20
 
 ### Measured

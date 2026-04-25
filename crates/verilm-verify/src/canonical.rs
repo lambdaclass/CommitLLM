@@ -2784,8 +2784,11 @@ fn phase_audited_inputs_only(ctx: &Ctx, st: &mut St) {
     });
     st.skipped.push(
         "attention: audit-only mode — arbitrary-position attention outputs \
-         are not verified (score anchoring, KV provenance, and wiring audits \
-         run when inputs present; local replay smoke not yet wired)"
+         are not verified. Score anchoring and the causal-mask wiring audit \
+         run only when the audited token is the last generated token \
+         (witness retains Q for the final decode step only); KV provenance, \
+         GQA, and RoPE-config audits run on the full opened range. Local \
+         replay smoke (token-0 only) is not wired here."
             .into(),
     );
 }

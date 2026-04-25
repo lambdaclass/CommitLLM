@@ -97,10 +97,24 @@ pub enum AttentionVerificationMode {
     WitnessedScores,
 
     /// Audit-only: arbitrary-position attention outputs are NOT verified.
-    /// The verifier instead audits attention inputs and wiring — score
-    /// anchoring, KV provenance, mask/RoPE/GQA checks, and local replay
-    /// smoke. The hot path reports status only; individual audits are
-    /// wired in subsequent phases (see roadmap items 13–15).
+    /// The verifier instead audits attention inputs and wiring:
+    ///
+    /// - **Score anchor** — recomputes `Q·Kᵀ/√d` from shell-verified Q and
+    ///   committed K and compares to witnessed pre-softmax scores.
+    ///   `max_gap` is reported as evidence; in this mode it is not used as
+    ///   a hard verification gate. **Last-generated-token only**: the
+    ///   prover-side witness retains Q for the final decode step only, so
+    ///   only `token_index = n_tokens - 1` matches the witness shape.
+    ///   Per-step Q retention is a deferred extension.
+    /// - **KV provenance** — opened K/V rows match committed token
+    ///   positions and cache/page boundaries (full opened range).
+    /// - **Wiring** — GQA head mapping, RoPE config hash binding, and
+    ///   causal-mask structure. The causal-mask audit is score-derived
+    ///   and inherits the same last-generated-token scope; GQA and RoPE
+    ///   apply to the full opened range.
+    /// - **Local replay smoke** — token-0 exact attention replay as a
+    ///   regression check, not a product attention claim.
+    ///
     /// No kernel modification required — works with stock FlashAttention.
     AuditedInputsOnly,
 

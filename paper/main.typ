@@ -53,7 +53,7 @@
         #text(weight: "bold")[Abstract — ]
         Large language models are increasingly used in settings where integrity matters, but users still lack technical assurance that a provider actually ran the claimed model, decode policy, and output behavior. Fingerprinting and statistical heuristics can provide signals, but not exact per-response verification; zero-knowledge proof systems provide stronger guarantees, but at prover costs that remain impractical for production LLM serving.
 
-        We present CommitLLM, a cryptographic commit-and-audit protocol for open-weight LLM inference. CommitLLM keeps the provider on the normal serving path and keeps verifier work fast and CPU-only (for Llama 70B, about 1.3 ms per challenged token under the measured 10-layer routine audit, and about 10 ms for a 1-token full audit) by combining commitment binding, direct audit, and randomized algebraic fingerprints, including Freivalds-style checks for large matrix products, rather than per-response proof generation or full re-execution. Its main costs are retained-state memory over the audit window and audit bandwidth, not per-response proving. In the current prototype, online tracing adds roughly 12--14% during generation; the larger commitment/finalization cost is measured separately, currently runs synchronously, and is a candidate for asynchronous deferral in production. The protocol is commitment-bound end-to-end. Within that binding, large linear layers are verified by verifier-secret, information-theoretically sound algebraic checks, quantization/dequantization boundaries and supported nonlinear subcomputations are checked by canonical re-execution, attention is verified by bounded approximate replay, and routine prefix-state provenance is statistical unless deep audit is used. Unsupported semantics fail closed. On the corrected replay path, the measured attention corridor is small on Qwen2.5-7B-W8A8 and Llama-3.1-8B-W8A8: at context lengths beyond 1k tokens, worst-case INT8 mismatch is single-digit ($L_"inf" = 8$ and $9$) and more than 99.8% of elements remain within one quantization bucket.
+        We present CommitLLM, a cryptographic commit-and-audit protocol for open-weight LLM inference. CommitLLM keeps the provider on the normal serving path and keeps verifier work fast and CPU-only (for Llama 70B, about 1.3 ms per challenged token under the measured 10-layer routine audit, and about 10 ms for a 1-token full audit) by combining commitment binding, direct audit, and randomized algebraic fingerprints, including Freivalds-style checks for large matrix products, rather than per-response proof generation or full re-execution. Its main costs are retained-state memory over the audit window and audit bandwidth, not per-response proving. In the current prototype, online tracing adds roughly 12--14% during generation; the larger commitment/finalization cost is measured separately, currently runs synchronously, and is a candidate for asynchronous deferral in production. The protocol is commitment-bound end-to-end. Within that binding, large linear layers are verified by verifier-secret, information-theoretically sound algebraic checks; quantization/dequantization boundaries and supported nonlinear subcomputations are checked by canonical re-execution; sampled decode is verified exactly via captured GPU logits plus an algebraic LM-head binding; and arbitrary-position attention outputs on stock GPU kernels are explicitly *not* verified. Stock-mode attention is instead audited from the inputs and wiring side: score anchoring against witnessed pre-softmax scores, KV provenance against committed cache rows, and GQA / RoPE-config / causal-mask wiring checks. Under the current witness contract the score-anchor and causal-mask audits are scoped to the last generated token. Routine prefix-state provenance is statistical unless deep audit is used. Unsupported semantics fail closed.
       ]
     ]
     #v(0.5em)
@@ -70,9 +70,9 @@ Open-weight LLM inference presents a trust problem: the client sends a prompt to
 
 Existing approaches to verifiable inference fall into two categories. Cryptographic proof systems and specialized verifiable-inference systems such as SafetyNets @ghodsi2017safetynets and zkCNN @liu2021zkcnn can prove arbitrary or restricted computations, but impose overhead that makes real-time LLM inference impractical. Trusted execution environments (TEEs) provide attestation @birkholz2023rats but require hardware trust assumptions and limit deployment flexibility.
 
-CommitLLM takes a different approach: a cryptographically bound sidecar commit-and-audit protocol that runs alongside unmodified GPU inference. The provider does not rewrite the model into a proving circuit, change the serving kernels, or generate a proof for every response; the normal serving path stays intact and the extra work is trace capture plus rare audit openings. CommitLLM borrows the cryptographic verification mindset of proof systems, but replaces full proof generation with commitment binding, direct audit, and cheap algebraic checks. The key insight is that INT8 quantized inference consists of operations that are either deterministic or canonically recomputable, and can be verified exactly. The only non-deterministic component is FP16/BF16 attention, which the protocol constrains from both sides without requiring exact reproduction.
+CommitLLM takes a different approach: a cryptographically bound sidecar commit-and-audit protocol that runs alongside unmodified GPU inference. The provider does not rewrite the model into a proving circuit, change the serving kernels, or generate a proof for every response; the normal serving path stays intact and the extra work is trace capture plus rare audit openings. CommitLLM borrows the cryptographic verification mindset of proof systems, but replaces full proof generation with commitment binding, direct audit, and cheap algebraic checks. The key insight is that INT8 quantized inference consists of operations that are either deterministic or canonically recomputable, and can be verified exactly. The only non-deterministic component on stock GPU kernels is FP16/BF16 attention. After every attempted production verification path for the attention interior was closed (exact stock-kernel replay, tiled / LSE replay, stock-bounded certification, and deterministic kernels), the kept claim is narrower and honest: arbitrary-position attention outputs are not verified, and attention is instead constrained from the inputs and wiring side.
 
-The protocol provides exact, approximate, statistical, and fail-closed guarantees in different parts of the pipeline. The honest decomposition is: exact verification everywhere outside the attention interior, approximate attention replay, and statistical prefix anchoring unless deep audit is used. This is stronger than ordinary operational spot-checking or replica agreement: the provider commits before learning the audit challenge, and opened regions must satisfy cryptographically bound algebraic checks.
+The protocol provides exact, audited-but-not-verified, statistical, and fail-closed guarantees in different parts of the pipeline. The honest decomposition is: exact verification everywhere outside the attention interior; on the attention interior, audited inputs/wiring with arbitrary-position outputs explicitly out of scope; and statistical prefix anchoring unless deep audit is used. This is stronger than ordinary operational spot-checking or replica agreement: the provider commits before learning the audit challenge, and opened regions must satisfy cryptographically bound algebraic checks.
 
 = System Model
 
@@ -99,7 +99,7 @@ CommitLLM is designed around three constraints:
 
 + *No serving-path changes.* The provider runs unmodified GPU inference. The only addition is a tracing layer that captures intermediates alongside normal execution; there is no proving circuit, proof generation pass, or required kernel rewrite on the serving path.
 + *Modest online overhead.* Each response carries a compact receipt binding trace commitments, deployment specs, transcript randomness, and token count. The measured online cost of tracing and hooks is currently about 12--14% across the tested 7B/8B/70B runs; heavier receipt finalization occurs after generation.
-+ *Client-side verification.* The client performs all verification using CPU-feasible operations (dot products, hash checks, and --- for attention replay --- matrix arithmetic scaling as $O(n^2)$ in sequence length).
++ *Client-side verification.* The client performs all verification using CPU-feasible operations (dot products, hash checks, and --- for the audit-only attention bracket --- score-anchor matrix arithmetic scaling as $O(n)$ at the audited token).
 
 #block(
   width: 100%,
@@ -108,9 +108,9 @@ CommitLLM is designed around three constraints:
   radius: 2pt,
 )[
   *Protocol guarantees at a glance.*
-  + *Exact.* Preprocessing, model identity, shell matmuls, bridge operations, the final-token tail, and decode/output replay.
+  + *Exact.* Preprocessing, model identity, shell matmuls, bridge operations, the final-token tail, sampled decode (via captured GPU logits plus LM-head Freivalds binding), and decode/output replay.
+  + *Audited but not verified (stock-mode attention).* Arbitrary-position attention outputs are explicitly not verified. The attention interior is instead constrained by audits on attention inputs and wiring: score anchoring against witnessed pre-softmax scores, KV provenance against committed cache rows, and GQA / RoPE-config / causal-mask wiring checks. Under the current witness contract the score-anchor and causal-mask audits are scoped to the last generated token (@sec-attention-gap).
   + *Statistical.* Prefix KV correctness under routine audit sampling ($k$ prefix positions checked).
-  + *Approximate.* Attention replay under the FP16$arrow.l.r$FP64 requantization corridor (@sec-attention-gap).
   + *Outside protocol scope.* Standard cryptographic assumptions, verifier-secret secrecy, no side-channel leakage of verifier secrets, and correct verifier execution.
 ]
 
@@ -119,7 +119,7 @@ CommitLLM is designed around three constraints:
 The final protocol uses four guarantee classes:
 
 + *Exact.* A property is cryptographically bound and then checked by information-theoretically sound algebraic verification or canonical recomputation with fully specified semantics.
-+ *Approximate.* The verifier independently replays the computation and constrains it tightly, but native FP16/BF16 execution is not bit-reproducible across hardware.
++ *Audited but not verified.* The protocol does not verify the property's value; instead, it commits to and audits the *inputs* and *wiring* that surround it. For stock-mode attention this means score anchoring (recomputing $Q K^T \/ sqrt(d)$ from shell-verified $Q$ and committed $K$ against witnessed pre-softmax scores), KV provenance, and GQA / RoPE-config / causal-mask wiring checks; arbitrary-position attention outputs are explicitly out of scope.
 + *Statistical.* Commitment binding is exact, but correctness of unopened positions depends on challenge sampling unless deep audit is used. This is a coverage-probability distinction, not a floating-point approximation.
 + *Fail-closed.* A feature is either replayed exactly or rejected explicitly; the verifier never silently accepts unsupported semantics.
 
@@ -141,7 +141,6 @@ The final protocol targets autoregressive decoder-only transformers with a commi
     [$c, ell$], [Number of challenged tokens; number of opened layers per token],
     [$m$], [Output dimension of the checked weight matrix (length of $r_j$)],
     [$k$], [Sampled prefix positions for KV provenance],
-    [$delta_"attn"$], [Maximum allowed INT8 absolute difference for attention replay],
     [$p$], [Prime modulus for Freivalds checks ($p = 2^(32) - 5$ in the current implementation); arithmetic in $bb(F)_p$],
   ),
   caption: [Notation],
@@ -153,7 +152,7 @@ CommitLLM's verification is structured in six layers. This section defines the t
 
 The *shell* is the non-attention path through each transformer layer: seven INT8 weight matrix multiplications ($W_q$, $W_k$, $W_v$, $W_o$, $W_"gate"$, $W_"up"$, $W_"down"$), the exact INT8 bridge tensors that feed later INT8 stages ($x_"attn"$ and $x_"ffn"$), the committed post-attention output $"attn_out_i8"$ that feeds $W_o$, and canonically recomputable operations such as Q/K/V dequantization, RoPE, RMSNorm, and SiLU. The shell includes nonlinear operations (RMSNorm, SiLU), but all exact shell operations are deterministic or canonically recomputable. Its exactness is a composition: information-theoretically sound algebraic checks (Freivalds @freivalds1979) on the weight matmuls, plus deterministic or canonical recomputation on the exact bridge operations.
 
-Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not bit-reproducible across hardware --- this is the only non-exact component. The final exact tail starts from a captured pre-final-norm residual after the last layer, applies final RMSNorm exactly, binds the LM head with Freivalds, computes logits exactly, and replays the decode/output policy.
+Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not bit-reproducible across hardware --- this is the only non-exact component, and arbitrary-position attention outputs are explicitly not verified in the kept protocol. The final exact tail starts from a captured pre-final-norm residual after the last layer, applies final RMSNorm exactly, binds the LM head with Freivalds, computes logits exactly, and replays the decode/output policy.
 
 The six layers are:
 
@@ -161,10 +160,10 @@ The six layers are:
 + *Shell verification (exact).* Information-theoretically sound Freivalds checks ($lt.eq 1\/p$ false-accept in the current field) on all shell weight matmuls, plus deterministic or canonical recomputation of the exact INT8 bridge tensors, Q/K/V dequantization, bias handling, RoPE, RMSNorm, and SiLU.
 + *KV provenance (statistical by default).* Merkle-committed per-token K,V history; sampled positions are shell-verified. Binding is exact; correctness of unsampled positions depends on sampling rate unless deep audit is used.
 + *Cross-layer consistency (structural).* Opening multiple layers on the same token creates algebraic coupling through the residual stream --- fake attention must stay consistent across all opened layers.
-+ *Attention replay (approximate).* The verifier recomputes attention from shell-verified Q and committed prefix K,V in FP64, quantizes to INT8, and compares. Limited by FP16$arrow.l.r$FP64 mismatch.
-+ *Final-token replay (exact / fail-closed).* The verifier starts from the captured pre-final-norm residual, checks the LM head with Freivalds, computes logits exactly, and replays the decode/output policy; unsupported semantics are rejected explicitly rather than silently accepted.
++ *Attention input audit (audited but not verified).* Arbitrary-position attention outputs are explicitly out of scope. The verifier audits attention inputs and wiring only: score anchoring, KV provenance, GQA / RoPE-config / causal-mask wiring, and a token-0 local replay smoke check (@sec-attention-gap).
++ *Final-token replay (exact / fail-closed).* The verifier starts from the captured pre-final-norm residual, checks the LM head with Freivalds, computes logits exactly, and replays the decode/output policy. Sampled decode is verified exactly via captured GPU logits plus the LM-head Freivalds binding; unsupported semantics are rejected explicitly rather than silently accepted.
 
-@fig-forward-pass traces the full forward pass for one output token. Each operation is labeled with its verification type: Freivalds-checked weight matmuls, canonically recomputable bridge operations, and the single non-exact point --- FP16 attention. The only non-replayable provider-side state is the per-layer `attn_out_i8` and its quantization scale, plus the captured pre-final-norm residual that anchors the exact final-token tail.
+@fig-forward-pass traces the full forward pass for one output token. Each operation is labeled with its verification type: Freivalds-checked weight matmuls, canonically recomputable bridge operations, and the single point that the protocol does not verify --- FP16/BF16 attention, which is instead bracketed by audits on its inputs and wiring. The only non-replayable provider-side state is the per-layer `attn_out_i8` and its quantization scale, plus the captured pre-final-norm residual that anchors the exact final-token tail.
 
 #figure(
   block(width: 100%, inset: (x: 4pt, y: 6pt))[
@@ -189,7 +188,7 @@ The six layers are:
       raw("  k = RoPE(add_bias(dequant(k_i32, ...)), pos)"), t[canonical],
       raw("  v = add_bias(dequant(v_i32, ...))"), t[canonical],
       sp,
-      raw("  attn = softmax(q @ k^T / sqrt(d)) @ v"), t[non-exact],
+      raw("  attn = softmax(q @ k^T / sqrt(d)) @ v"), t[audited inputs],
       raw("  attn_out_i8, sa = quantize(attn)"), t[*STORED*],
       sp,
       raw("  o_i32 = W_o @ attn_out_i8"), t[Freivalds],
@@ -212,7 +211,7 @@ The six layers are:
       raw("token = canonical_decode(logits_i32, seed, policy)"), t[exact / fail-closed],
     )
   ],
-  caption: [Annotated forward pass for one output token. Each operation is labeled with its verification type. The only non-exact stage is FP16 attention; the final-token tail is exact because it starts from the captured pre-final-norm residual.],
+  caption: [Annotated forward pass for one output token. Each operation is labeled with its verification type. The only stage the protocol does not verify is FP16/BF16 attention; instead the verifier audits its inputs (score anchor, KV provenance) and wiring (GQA, RoPE config, causal mask). The final-token tail is exact because it starts from the captured pre-final-norm residual.],
 ) <fig-forward-pass>
 
 #figure(
@@ -227,9 +226,14 @@ The six layers are:
       [Shell matmuls], [Freivalds], [Exact], [Seven shell matrix families],
       [Bridge operations], [Canonical recomputation], [Exact], [Requantization, residual, RMSNorm, RoPE, SiLU],
       [Prefix / KV provenance], [Merkle binding + sampled shell checks or deep audit], [Statistical / Exact], [Committed prefix state],
-      [Attention], [Independent replay against committed prefix/output], [Approximate], [Consistency with committed shell values],
+      [Attention (arbitrary position)], [Out of scope --- not verified], [Audited inputs only], [---],
+      [Score anchor (last gen. token)], [Recompute $Q K^T \/ sqrt(d)$ vs witnessed scores], [Audited input], [Witnessed pre-softmax scores],
+      [KV provenance (attention input)], [Opened K/V rows match committed cache rows], [Audited input], [Cache-row provenance],
+      [Wiring (GQA / RoPE / mask)], [Config-hash + structural mask check (mask is last-gen.-token)], [Audited input], [GQA layout, RoPE config, causal mask],
+      [Local replay smoke (token 0)], [Exact replay at token 0], [Regression check], [Token-0 attention only],
       [Final boundary], [Captured pre-final-norm residual], [Exact], [Start of the exact final-token tail],
       [LM head], [Freivalds + exact logits replay], [Exact], [Final linear map and logits],
+      [Sampled decode], [Captured GPU logits + LM-head Freivalds binding], [Exact], [Sampled token identity],
       [Decode policy], [Canonical replay or explicit rejection], [Exact / Fail-closed], [Sampler semantics and randomness],
       [Output policy], [Exact replay or explicit rejection], [Exact / Fail-closed], [Stopping and text-cleanup semantics],
     )
@@ -287,7 +291,7 @@ For each challenged token $t$ at each opened layer $i$, the provider opens the I
 
 + *Freivalds on each shell weight matrix.* For each of the 7 shell matrices, the verifier checks $v_j^((i)) dot x equiv r_j^T dot z space (mod p)$. Each check is two dot products in $bb(F)_p$ --- $O(n)$. If the provider used wrong weights, false-accept probability is $lt.eq 1\/p$ per matrix. The bound follows from the Schwartz--Zippel lemma: a nonzero linear form over $bb(F)_p$ vanishes on at most a $1\/p$ fraction of inputs.
 
-+ *Bridge tensors (exact).* Wherever an exact INT8 tensor feeds a later INT8 stage --- for example the committed $x_"attn"$ boundary and the FFN bridge tensors --- the verifier recomputes the canonical bridge from the opened accumulators, quantization scales, and residual-stream state. This prevents the provider from passing Freivalds on the INT32 accumulators while feeding fabricated INT8 bridge values into downstream checks. Q/K/V themselves are not separately bridged through committed $q_"i8"$/$k_"i8"$/$v_"i8"$ values in the canonical path; they are reconstructed by dequantization, bias application, and RoPE from the opened accumulators. The retained post-attention output $"attn_out_i8"$ is instead checked by the attention-replay layer below.
++ *Bridge tensors (exact).* Wherever an exact INT8 tensor feeds a later INT8 stage --- for example the committed $x_"attn"$ boundary and the FFN bridge tensors --- the verifier recomputes the canonical bridge from the opened accumulators, quantization scales, and residual-stream state. This prevents the provider from passing Freivalds on the INT32 accumulators while feeding fabricated INT8 bridge values into downstream checks. Q/K/V themselves are not separately bridged through committed $q_"i8"$/$k_"i8"$/$v_"i8"$ values in the canonical path; they are reconstructed by dequantization, bias application, and RoPE from the opened accumulators. The retained post-attention output $"attn_out_i8"$ is *not* re-derived here --- arbitrary-position attention outputs are out of scope; the attention input audit (Step 5) constrains $Q$, $K$, $V$, witnessed scores, and wiring instead.
 
 + *SiLU (exact / canonical).* In the toy path, INT8 inputs permit a 256-entry lookup table. In the production W8A8 path, the verifier canonically recomputes the scaled SiLU bridge from dequantized gate/up accumulators and checks the requantized result.
 
@@ -316,31 +320,36 @@ Commitment binding is exact (hash collision resistance). Correctness of unsample
 
 There is no separate proof object here; the consistency check comes from opening multiple layers and verifying the committed bridges between them. When the verifier opens layers $L$ and $L+1$ on the same token, fake attention at layer $L$ must produce a post-attention output that, after requantization and $W_o$, feeds into layer $L+1$'s RMSNorm consistently with the committed trace. Both sides of this boundary are shell-verified, so the adversary cannot fabricate a consistent bridge without matching the committed values exactly. The more layers opened, the tighter the constraint. In full-audit mode (all layers opened), fake attention at every layer must stay mutually consistent through the entire residual stream.
 
-=== Step 5: Attention Replay
+=== Step 5: Attention Input Audit <sec-attn-audit>
 
-This step combines the trusted $Q_t$ reconstructed in Step 2 with the commitment-verified prefix $K_(1..t)$, $V_(1..t)$ from Step 3. The verifier recomputes attention independently in FP64. Since the KV cache stores post-RoPE values, the verifier dequantizes directly and computes:
+Arbitrary-position attention outputs are explicitly *not* verified in the kept protocol. Every attempted production verification path for the attention interior --- exact stock-kernel replay, tiled / LSE replay, stock-bounded certification on FP16$arrow.l.r$FP64 corridors, and deterministic kernels --- failed to give a tight, kernel-portable, production-cost claim on stock GPU FlashAttention. The honest decomposition is therefore to bracket the attention block by audits on its *inputs* and *wiring* and leave the interior unverified.
 
-+ Scores: $Q_t dot K_j \/ sqrt(d)$ for all prefix positions $j$
-+ Softmax over scores
-+ Weighted sum: $sum alpha_j times V_j$
+This step combines the trusted $Q_t$ reconstructed in Step 2, the commitment-verified prefix $K_(1..t)$, $V_(1..t)$ from Step 3, and additional witness data captured by the prover during execution. The verifier runs four sub-audits.
 
-The verifier quantizes the result to INT8 using the quantization scales opened from the trace (committed in $R_T$) and compares element-wise against the committed post-attention output. A response passes if the maximum INT8 absolute difference is at most $delta_"attn"$; this tolerance must be calibrated empirically by measuring the FP16$arrow.l.r$FP64 requantization corridor on real model activations (see @sec-attention-gap). In the current implementation, this corridor is measured rather than assumed: on the corrected replay path it remains single-digit in INT8 space on both Qwen2.5-7B-W8A8 and Llama-3.1-8B-W8A8, with more than 99.8% of elements remaining within one quantization bucket.
++ *Score anchor.* The verifier recomputes $Q_t dot K_j \/ sqrt(d)$ for all prefix positions $j$ in deterministic f64 arithmetic from the shell-verified $Q_t$ and the committed $K_(1..t)$, and compares against the prover-side *witnessed pre-softmax scores* committed in $R_T$. The maximum absolute element-wise gap is reported as evidence; in audit-only mode it is not used as a hard verification gate. *Witness scope.* Under the current witness contract, the prover retains $Q$ for the *final decode step only*, so the score-anchor sub-audit applies only when the audited token is the last generated token ($t = N - 1$). Per-step $Q$ retention (full per-position score audit) is a deferred extension; see @sec-limitations.
 
-This pins the attention output to a specific computation over the committed values. Without it, the adversary could fabricate a plausible-looking but wrong attention output --- a local-window approximation, suppressed attention to specific positions, or a cheaper model's attention pattern --- as long as it satisfied cross-layer consistency.
++ *KV provenance.* For each opened layer $i$, the provider opens the $K$, $V$ values at all prefix positions $j < t$ with Merkle proofs against $R_"KV"$ (Step 3). Step 5 additionally checks that the opened cache rows match the committed token-position / cache-row mapping and respect page boundaries: the verifier checks structural cache-row provenance, and any mismatch fails the audit. This applies to the full opened range, not only the last generated token.
 
-*Limitations.* The replay proves consistency with the _committed_ prefix, not necessarily with true execution at every earlier token. Prefix KV values are commitment-verified (they match $R_"KV"$) but only statistically anchored to real computation via the sampled shell checks in Step 3. The replay also cannot match the GPU's FP16 attention exactly --- the verifier's FP64 reference will differ slightly near quantization bucket boundaries.
++ *Wiring (GQA / RoPE-config / causal mask).* The verifier checks three wiring properties: (a) GQA head mapping --- number of query heads, number of K/V heads, and per-head dimension --- matches the verifier-key configuration; (b) RoPE configuration is bound by hashing `rope_theta` and any `rope_scaling` block (e.g., Llama 3 long-context scaling) and comparing to the verifier-key hash; (c) the causal mask is structurally valid. The mask sub-audit is derived from the witnessed pre-softmax scores (same witness as the score anchor) and therefore inherits the same last-generated-token scope; GQA and RoPE-config audits are independent of token index.
+
++ *Local replay smoke (token 0).* As a regression check only, the verifier runs an exact replay at token 0 (where $Q$ has no prefix and softmax reduces to a one-hot). This is *not* a product attention claim and is not extended to arbitrary positions.
+
+This bracket pins down attention's inputs and wiring, but does not pin the attention output. The adversary could in principle fabricate a different post-attention output, as long as (a) it survives cross-layer consistency through $W_o$ and the residual stream into later opened layers (Step 4), (b) the prover-side score witness it commits is consistent with $Q_t dot K_j \/ sqrt(d)$ on the audited token, and (c) the surrounding wiring audits pass. The product claim is correspondingly narrower: stock-mode attention is *audited but not verified*, and any quantitative downstream argument must rest on cross-layer consistency, the input/wiring audits, and the rest of the exact pipeline (decode, LM head, sampled-token capture).
+
+*Limitations.* The audit constrains consistency with the *committed* prefix, not necessarily with true execution at every earlier token; prefix KV values are commitment-verified but only statistically anchored to real computation via the sampled shell checks in Step 3. The score-anchor and causal-mask sub-audits are also bound by the current witness scope (last generated token only) and would require per-step $Q$ retention to extend to arbitrary generated positions.
 
 === Step 6: Final-Token Replay
 
-The verifier now enters the exact final-token tail. The provider opens the captured pre-final-norm residual for the challenged token, together with the committed decode/output policy and the revealed transcript seed. The verifier then:
+The verifier now enters the exact final-token tail. The provider opens the captured pre-final-norm residual for the challenged token, together with the committed decode/output policy, the revealed transcript seed, and (in the kept sampled-decode path) the captured GPU logits used by the sampler. The verifier then:
 
 + Applies the final RMSNorm exactly using the committed model spec.
 + Quantizes into the LM-head input space canonically.
 + Checks the LM head with Freivalds and computes logits exactly.
++ For *sampled* decode, additionally Freivalds-binds the captured GPU logits back to `lp_hidden × lm_head_bf16`, then verifies that the sampler applied to those captured logits with the per-token seed reproduces the emitted token exactly. For *greedy* decode, cheaper validated paths (i32 exact-token-identity or LP-hidden bf16) remain acceptable where explicitly validated.
 + Replays the canonical decode policy using the committed decode spec and the per-token seed derived from the revealed transcript seed.
 + Verifies the chosen token and the output-policy behavior (EOS handling, stop strings, max/min stopping rules, and claimed text cleanup) exactly, or rejects the feature explicitly if the deployment claims an unsupported policy.
 
-This step is what makes the final-token boundary exact. The verifier must not derive the token from a hidden state reconstructed through many layers of approximate attention replay and then call the result exact.
+This step is what makes the final-token boundary exact. Sampled decode is verified exactly via the captured-logits binding, not derived from a hidden state reconstructed through many layers of unverified attention output.
 
 == Summary
 
@@ -355,9 +364,13 @@ This step is what makes the final-token boundary exact. The verifier must not de
     [Input embedding], [Table lookup (exact)],
     [$W_q, W_k, W_v$ (INT8)], [Freivalds],
     [INT8 bridge tensors ($x_"attn"$, $x_"ffn"$)], [Exact recomputation],
-    [`attn_out_i8` (committed post-attention output)], [Compared against attention replay],
+    [`attn_out_i8` (committed post-attention output)], [Retained as a commitment input; not re-derived],
     [$Q$, $K$, $V$ dequant + bias + RoPE], [Canonical recomputation],
-    [Attention], [Replay + cross-layer],
+    [Attention output (arbitrary position)], [Out of scope --- not verified],
+    [Score anchor (last gen. token)], [Recompute $Q K^T \/ sqrt(d)$ vs witnessed scores],
+    [KV provenance (attention input)], [Cache-row provenance vs commitments],
+    [Wiring (GQA / RoPE / mask)], [Config-hash + structural mask (mask is last-gen.-token)],
+    [Local replay smoke (token 0)], [Exact replay at token 0 only],
     [$W_o$ (INT8)], [Freivalds],
     [RMSNorm], [Canonical recomputation],
     [$W_"gate"$, $W_"up"$ (INT8)], [Freivalds],
@@ -365,22 +378,23 @@ This step is what makes the final-token boundary exact. The verifier must not de
     [$W_"down"$ (INT8)], [Freivalds],
     [Final boundary], [Captured pre-final-norm residual],
     [LM head], [Freivalds + exact logits replay],
+    [Sampled decode], [Captured GPU logits + LM-head Freivalds binding],
     [Decode policy], [Canonical replay or fail-closed rejection],
     [Output policy], [Exact replay or fail-closed rejection],
   ),
   caption: [Per-layer verification methods],
 ) <tab-verification-methods>
 
-== Audit Walkthrough: One Token, Two Layers
+== Audit Walkthrough: Last Generated Token, Two Layers
 
-Audit token $t = 47$ at layers 12 and 13 of a 70B model, sampling $k = 8$ prefix positions.
+Audit the last generated token $t = N - 1$ of a 70B model at layers 12 and 13, sampling $k = 8$ prefix positions for KV provenance.
 
-+ *Challenge.* Verifier sends $(t = 47, {12, 13})$.
-+ *Shell.* Provider opens trace at both layers from $R_T$. Verifier runs Freivalds on all 7 matrices per layer (28 dot products total), recomputes all bridges. Yields trusted $Q_(47)$, $K_(47)$, $V_(47)$ at both layers.
-+ *KV provenance.* Provider opens $K_(1..46)$, $V_(1..46)$ at both layers from $R_"KV"$. Verifier picks 8 random earlier positions, runs full shell verification at each, confirms committed $K$, $V$ match.
-+ *Cross-layer.* Post-attention output at layer 12 feeds into layer 13's RMSNorm --- both sides shell-verified, so boundary must match exactly.
-+ *Replay.* At each opened layer, the verifier recomputes attention in FP64 from shell-verified $Q_(47)$ and the commitment-verified prefix. Quantizes to INT8, compares against committed `attn_out_i8`. Passes if the maximum INT8 absolute difference is $lt.eq delta_"attn"$ at both layers.
-+ *Final token.* Provider opens the captured pre-final-norm residual and revealed transcript seed. Verifier applies final RMSNorm exactly, checks the LM head with Freivalds, recomputes logits exactly, replays the canonical decode policy, and confirms the chosen token and output policy.
++ *Challenge.* Verifier sends $(t = N - 1, {12, 13})$. The last-generated-token choice is required by the current witness contract for the score anchor and causal-mask sub-audits; KV provenance and the GQA / RoPE-config wiring sub-audits do not depend on token choice.
++ *Shell.* Provider opens trace at both layers from $R_T$. Verifier runs Freivalds on the applicable shell matrices per layer, recomputes all bridges. Yields trusted $Q_t$, $K_t$, $V_t$ at both layers.
++ *KV provenance.* Provider opens $K_(1..t-1)$, $V_(1..t-1)$ at both layers from $R_"KV"$. Verifier picks 8 random earlier positions, runs full shell verification at each, confirms committed $K$, $V$ match, and additionally checks structural cache-row / page-boundary provenance over the full opened range.
++ *Cross-layer.* Post-attention output at layer 12 feeds into layer 13's RMSNorm --- both sides shell-verified, so the residual-stream boundary must match exactly.
++ *Attention input audit.* At each opened layer, the verifier (a) recomputes $Q_t dot K_j \/ sqrt(d)$ in deterministic f64 for all prefix positions $j$ and compares against the prover-side witnessed pre-softmax scores (max element-wise gap reported as evidence; not a hard gate); (b) checks the structural causal mask against the witnessed scores; (c) verifies GQA head mapping and the RoPE-config hash. Arbitrary-position attention outputs are not verified at any layer.
++ *Final token (exact).* Provider opens the captured pre-final-norm residual, the captured GPU logits, and the revealed transcript seed. Verifier applies final RMSNorm exactly, checks the LM head with Freivalds, exactly binds the captured GPU logits via the LM-head check, replays the canonical decode policy on those logits, and confirms the chosen token and output policy.
 
 == Data Lifecycle
 
@@ -396,7 +410,8 @@ Audit token $t = 47$ at layers 12 and 13 of a 70B model, sampling $k = 8$ prefix
     [Spec commitment $M$], [Requantized INT8 at each bridge], [Opened intermediates at challenged positions],
     [Seed commitment $H(s)$], [`attn_out_i8` + quantization scales], [Full prefix $K$, $V$ at opened layers],
     [Token count $N$], [Captured pre-final-norm residual], [Opened final boundary state + revealed seed],
-    [], [Per-tensor quantization scales], [],
+    [], [Captured GPU logits (per generated token)], [Witnessed pre-softmax scores at last gen. token],
+    [], [Per-tensor quantization scales], [Captured GPU logits at challenged token],
   ),
   caption: [Data lifecycle: receipt (every response), retained state (RAM ring buffer, discarded after audit window), and audit openings (revealed only when challenged).],
 ) <tab-data-lifecycle>
@@ -427,9 +442,15 @@ A single audit of a single token suffices. The guarantee is unconditional --- it
 
 == Attention Manipulation
 
-*Proposition 2 (Attention replay bound).* _If attention replay with tolerance $delta_"attn"$ accepts, the committed post-attention output differs from the verifier's FP64 recomputation by at most $delta_"attn"$ in INT8 max absolute difference. The remaining gap is bounded by the empirically measured FP16$arrow.l.r$FP64 requantization corridor together with the KV sampling boundary._
+*Proposition 2 (Attention input audit).* _Arbitrary-position attention outputs are not verified. If the audit-only stock-mode attention path accepts, then on every audited (token, layer):_
 
-The shell locks the inputs ($Q$, $K$, $V$) and outputs (post-$W_o$) of every attention block. Manipulation that alters the INT8 output beyond this max-absolute-difference corridor --- local-window approximations, suppressed context, substituted patterns --- fails the replay. The remaining adversarial freedom is bounded by the corridor width and the KV sampling rate.
+_(i) the prover-side witnessed pre-softmax scores agree with the canonical $Q_t dot K_j \/ sqrt(d)$ computed in f64 from the shell-verified $Q_t$ and the committed $K_(1..t)$ on the audited token (with score-anchor and causal-mask audits scoped to $t = N - 1$ under the current witness contract);_
+
+_(ii) opened K/V cache rows match committed token-position / cache-row mappings on the full opened range;_
+
+_(iii) GQA head layout and the RoPE configuration hash match the verifier-key configuration._
+
+The shell locks the inputs ($Q$, $K$, $V$) and the output projection ($W_o$) of every attention block. Cross-layer consistency (Step 4) further forces any fabricated post-attention output to survive $W_o$ and the residual stream into all opened later layers. Within those constraints, the audit pins down the *score* (against witnessed scores), the *KV provenance*, and the *wiring*, but it does not pin down the attention output itself. The product claim is that stock-mode attention is *audited but not verified*: an adversary who fakes the attention output must additionally produce a witness-score story consistent with $Q K^T \/ sqrt(d)$ and survive $W_o$ + the cross-layer residual binding into later opened layers and the exact final-token tail.
 
 == Fabricated Prefix Context
 
@@ -453,15 +474,24 @@ The protocol does not assume honest provider hardware or honest provider runtime
 
 = The Attention Gap <sec-attention-gap>
 
-The shell is exactly verifiable because its operations are deterministic or canonically recomputable: INT8 matmuls are checked with information-theoretically sound Freivalds checks, while requantization, RoPE, SiLU, and RMSNorm are verified by exact or canonical recomputation. Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not bit-reproducible across hardware.
+The shell is exactly verifiable because its operations are deterministic or canonically recomputable: INT8 matmuls are checked with information-theoretically sound Freivalds checks, while requantization, RoPE, SiLU, and RMSNorm are verified by exact or canonical recomputation. Attention ($Q K^T$, softmax, $alpha V$) is computed in FP16/BF16, which is not bit-reproducible across hardware. Every attempted production verification path for this interior --- exact stock-kernel replay, tiled / LSE replay, stock-bounded certification on FP16$arrow.l.r$FP64 corridors, and deterministic kernels --- failed to give a tight, kernel-portable, production-cost claim on stock GPU FlashAttention. Earlier corridor measurements are reported below as background evidence about how stock FP16/BF16 attention behaves; they are *not* a protocol guarantee, since arbitrary-position attention outputs are no longer claimed to be verified.
 
-The protocol constrains the attention interior from both sides: inputs ($Q$, $K$, $V$) and outputs (post-$W_o$) are exactly verified by the shell. Attention replay directly checks consistency. Cross-layer constraints force fake attention to survive the residual stream.
+In the kept protocol, the attention interior is therefore *not* verified directly. The protocol constrains it from the input side instead. The shell exactly verifies $Q$, $K$, $V$ at challenged positions and $W_o$ on every layer. Step 5 (@sec-attn-audit) then runs four sub-audits on the attention block:
 
-The remaining adversarial freedom comes from two sources:
++ *Score anchor* against witnessed pre-softmax scores (last-generated-token only under the current witness contract).
++ *KV provenance* against committed cache rows (full opened range).
++ *Wiring* (GQA layout, RoPE config hash, structural causal mask --- mask sub-audit shares the score-witness scope).
++ *Local replay smoke* at token 0 only, as regression check.
 
-+ *FP16$arrow.l.r$FP64 replay mismatch.* The verifier's FP64 reference and the GPU's FP16/BF16 computation produce slightly different results. The *requantization corridor* is therefore characterized empirically in INT8 space by worst-case absolute-difference bounds together with diagnostic agreement statistics. On the corrected replay path, this corridor is now measured rather than hypothetical: for Qwen2.5-7B-W8A8 and Llama-3.1-8B-W8A8 we observe worst-case INT8 $L_"inf"$ of $8$ and $9$ respectively across six workloads at context lengths beyond 1k tokens, with first generated token max $= 5$ on both models and more than 99.8% of elements within one bucket. Small $L_"inf"$ and high agreement mean tight constraint; larger gaps mean more room.
+Cross-layer consistency (Step 4) further forces any fabricated post-attention output to survive $W_o$ and the residual stream into all opened later layers, and the exact final-token tail (Step 6, including captured-logits sampled-decode binding) closes the back end.
 
-+ *Statistical KV anchoring.* The prefix $K$, $V$ values used in attention replay are commitment-verified (they match $R_"KV"$) but only statistically anchored to real computation via sampled shell checks. Unsampled prefix positions are not independently verified, so the replay proves consistency with the _committed_ prefix, not necessarily with the true execution at every earlier token.
+The remaining adversarial freedom comes from three sources:
+
++ *Unverified attention output.* Arbitrary-position attention outputs are out of scope. An adversary's freedom here is only constrained by (a) cross-layer consistency through $W_o$ and the residual stream into opened later layers, (b) the score-anchor sub-audit on the last generated token, (c) the structural mask / wiring audits, and (d) the exact captured-logits sampled-decode binding at the final-token boundary. Translating these constraints into an explicit downstream output bound is open work.
+
++ *Witness scope.* Score anchoring and the causal-mask sub-audit currently apply only to the last generated token, because the prover-side witness retains $Q$ for the final decode step only. Extending these audits to arbitrary generated positions requires per-step $Q$ retention; KV provenance and the GQA / RoPE-config sub-audits already cover the full opened range and are independent of token index.
+
++ *Statistical KV anchoring.* The prefix $K$, $V$ values used in the score anchor are commitment-verified (they match $R_"KV"$) but only statistically anchored to real computation via sampled shell checks. Unsampled prefix positions are not independently verified, so the score-anchor sub-audit attests consistency with the _committed_ prefix, not necessarily with the true execution at every earlier token.
 
 #figure(
   text(size: 8pt)[
@@ -474,7 +504,7 @@ The remaining adversarial freedom comes from two sources:
       [Llama-3.1-8B#linebreak()W8A8], [6], [1165], [9], [5], [$gt 99.9%$],
     )
   ],
-  caption: [Measured attention requantization corridor on the corrected replay path. These numbers assume architecture-correct replay semantics, including Q/K/V bias handling and model-specific RoPE conventions/scaling. Measurements were collected on A100-80GB GPUs under vLLM eager mode.],
+  caption: [Background evidence on the FP16$arrow.l.r$FP64 corridor for stock GPU attention on Qwen2.5-7B-W8A8 and Llama-3.1-8B-W8A8. Reported here as context only; the kept protocol does not verify arbitrary-position attention outputs and therefore does not depend on this corridor as a security claim. Measurements assume architecture-correct replay semantics (Q/K/V bias handling, model-specific RoPE conventions/scaling) and were collected on A100-80GB GPUs under vLLM eager mode.],
 )
 
 = Provider Costs
@@ -565,35 +595,35 @@ Trusted execution environments (TEEs) and remote attestation provide another alt
     [ZK proofs], [100--1000$times$ prover], [Full computation correct], [None (math)], [Yes],
     [TEEs], [Attestation HW], [Claimed code ran on attested HW], [Hardware vendor], [Yes],
     [Redundant exec.], [2--3$times$ compute], [Outputs agree across replicas], [Honest majority], [No],
-    [CommitLLM], [$tilde$12--14% online + post-gen finalization + rare audits], [Claimed weights used (exact);\ attention consistent (approx.)], [Verifier key secrecy + verifier integrity], [Audit#linebreak()bundle],
+    [CommitLLM], [$tilde$12--14% online + post-gen finalization + rare audits], [Claimed weights used (exact);\ sampled decode exact;\ attention inputs/wiring audited (arbitrary-position outputs not verified)], [Verifier key secrecy + verifier integrity], [Audit#linebreak()bundle],
   ),
   caption: [Comparison of verifiable inference approaches.],
 )
 
-= Limitations and Extensions
+= Limitations and Extensions <sec-limitations>
 
-The protocol's practical viability no longer depends on whether the attention corridor exists at all: on the corrected Qwen and Llama paths it is small and stable. The remaining open questions are how broadly this corridor generalizes across additional model families and larger scales, how much it can be tightened by deeper audit objects, and what audit/storage policy providers will accept at production scale. Closing the attention gap entirely would require deterministic attention kernels or stronger proof systems, both of which violate the sidecar design constraint. The final protocol also assumes an autoregressive decoder-only architecture with the committed capture layout and architecture-correct replay semantics; broader architecture support requires additional schema and replay work but does not change the guarantee taxonomy.
+The kept protocol does *not* verify arbitrary-position attention outputs. Every attempted production path for that interior was closed (exact stock-kernel replay, tiled / LSE replay, stock-bounded certification on FP16$arrow.l.r$FP64 corridors, deterministic kernels), so the honest claim is the audit-only stock-mode attention path described in @sec-attn-audit. The remaining open questions are not whether a corridor exists --- corridor measurements appear in @sec-attention-gap as background only --- but how much the audit-only bracket can be tightened, what downstream output bound it actually implies through $W_o$ and the residual stream, and what audit/storage policy providers will accept at production scale. Closing the gap to verified arbitrary-position attention would require deterministic attention kernels or stronger proof systems, both of which violate the sidecar design constraint. The final protocol also assumes an autoregressive decoder-only architecture with the committed capture layout and architecture-correct replay semantics; broader architecture support requires additional schema and replay work but does not change the guarantee taxonomy.
 
-A full composed soundness theorem remains future work. The current protocol is commitment-bound end-to-end: large linear components are verified by verifier-secret, information-theoretically sound algebraic checks, supported nonlinear components by canonical replay, attention by bounded approximate replay, and routine KV provenance is statistical unless deep audit is used.
+A full composed soundness theorem remains future work. The current protocol is commitment-bound end-to-end: large linear components are verified by verifier-secret, information-theoretically sound algebraic checks; supported nonlinear components by canonical replay; sampled decode exactly via captured GPU logits plus the LM-head Freivalds binding; stock-mode attention is *audited but not verified* (score anchoring, KV provenance, GQA / RoPE-config / causal-mask wiring, plus token-0 local replay smoke); and routine KV provenance is statistical unless deep audit is used.
 
 Routine KV provenance is correspondingly weakest against sparse tampering: if an adversary corrupts only a few prefix positions, the per-audit detection probability under small-$k$ sampling can be low. The short audit window also creates a denial-of-audit surface if a provider can force responses past the retention horizon before a challenge arrives. In practice, these risks push deployments toward automated audits, explicit response-deadline policies, longer or durable retention for high-value responses, and deeper audit modes when sparse prefix manipulation is a concern.
 
-Two extensions could tighten the guarantees:
+Several extensions could tighten the guarantees:
 
-*Score witnessing.* In deep audit, the provider returns pre-softmax score witnesses for the opened layers and token, and the verifier compares them against the canonical $Q K^T \/ sqrt(d)$ reconstruction before continuing softmax from the witnessed scores. This aims to stop error propagation at the main nonlinear boundary without changing the routine path. We are actively implementing and measuring this extension.
+*Per-step Q retention (extending the score-anchor scope).* Under the current witness contract the prover retains $Q$ for the final decode step only, so the score-anchor and causal-mask sub-audits are scoped to the last generated token. Retaining per-step $Q$ would let the verifier audit pre-softmax scores at arbitrary generated positions without a sidecar redesign, at additional retained-state cost. This is the most direct way to widen the audit-only stock-mode attention claim while keeping the protocol architecture unchanged.
 
-*Output-conditioning analysis.* The shell already verifies $W_o$ exactly, but the current paper does not yet quantify how much adversarial freedom can remain after an attention perturbation survives the replay corridor and then flows through $W_o$. A layer-wise conditioning analysis would translate corridor width into an explicit downstream bound.
+*Output-conditioning analysis.* The shell already verifies $W_o$ exactly, but the current paper does not yet quantify how much adversarial freedom can remain after an unverified attention perturbation flows through $W_o$ and the residual stream into the next opened layer. A layer-wise conditioning analysis would translate the audit-only bracket into an explicit downstream output bound.
 
 *Stronger KV provenance.* The verifier can check all prefix positions simultaneously using random linear combinations: pick random scalars $alpha_1 dots alpha_n$ and check $v dot (sum alpha_i x_i) eq.quest r^T dot (sum alpha_i z_i)$. One check covers all $n$ positions with false-accept probability $lt.eq 1\/p$ (about $1\/(2^(32)-5)$ in the current field). This upgrades KV provenance from statistical sampling to exact weight verification at all positions. Cost: $tilde 4 times$ audit bandwidth, making it better suited as an optional deep audit mode.
 
-*Broader empirical matrix.* The current corridor measurements cover Qwen2.5-7B-W8A8 and Llama-3.1-8B-W8A8. Immediate next validation targets are one additional family (e.g., Mistral or Gemma) and one materially larger model, so that the tolerance and audit policy story is supported beyond the first two families.
+*Broader empirical matrix.* The current corridor measurements (reported as background in @sec-attention-gap) cover Qwen2.5-7B-W8A8 and Llama-3.1-8B-W8A8. Immediate next validation targets are one additional family (e.g., Mistral or Gemma) and one materially larger model, so the audit-only attention story and routine audit policy are supported beyond the first two families.
 
-*Formalization and broader coverage.* Ongoing follow-on work also includes Lean formalization of the core verification claims, validation on additional model families and larger checkpoints, stronger KV provenance, and $W_o$ conditioning to translate corridor width into tighter downstream bounds.
+*Formalization and broader coverage.* Ongoing follow-on work also includes Lean formalization of the core verification claims, validation on additional model families and larger checkpoints, stronger KV provenance, and $W_o$ conditioning to translate the audit-only attention bracket into tighter downstream output bounds.
 
 = Conclusion
 
-CommitLLM demonstrates that meaningful verification of LLM inference is possible without modifying the serving path or requiring expensive proof systems. The protocol's honest decomposition into exact, statistical, approximate, and fail-closed layers allows clients to understand precisely what is and is not guaranteed. The measured online serving overhead from tracing is currently about 12--14% across the tested 7B/8B/70B runs; heavier receipt finalization remains off the critical user-facing path, and on Llama 70B verifier cost is about 1.3 ms per challenged token under the measured 10-layer routine audit, rising to about 10 ms for a 1-token full audit over all 80 layers on a commodity CPU. On the corrected replay path, the measured attention corridor is already small on both Qwen and Llama, which means the central protocol architecture is no longer resting on a speculative empirical assumption.
+CommitLLM demonstrates that meaningful verification of LLM inference is possible without modifying the serving path or requiring expensive proof systems. The protocol's honest decomposition into exact, audited-but-not-verified, statistical, and fail-closed layers allows clients to understand precisely what is and is not guaranteed. Sampled decode is exact via captured GPU logits plus an algebraic LM-head binding; arbitrary-position attention outputs on stock GPU kernels are explicitly *not* verified, and stock-mode attention is bracketed by audits on its inputs and wiring (score anchoring, KV provenance, GQA / RoPE-config / causal-mask). Under the current witness contract the score-anchor and causal-mask sub-audits are scoped to the last generated token. The measured online serving overhead from tracing is currently about 12--14% across the tested 7B/8B/70B runs; heavier receipt finalization remains off the critical user-facing path, and on Llama 70B verifier cost is about 1.3 ms per challenged token under the measured 10-layer routine audit, rising to about 10 ms for a 1-token full audit over all 80 layers on a commodity CPU.
 
-The immediate next steps are to tighten an already strong attention story even further with score witnessing, continue the Lean formalization, quantify downstream freedom through $W_o$ conditioning, strengthen KV provenance, and extend the empirical matrix to additional families and larger models. Those are important for the strongest final security claim, but they are now follow-on work on top of a functioning protocol rather than rescue work for a broken design.
+The immediate next steps are to extend the score-witness contract to per-step $Q$ retention (widening the score-anchor and causal-mask scope beyond the last generated token), continue the Lean formalization, quantify downstream freedom through $W_o$ conditioning, strengthen KV provenance, reduce post-generation finalization overhead, and extend the empirical matrix to additional families and larger models. These are now incremental improvements on top of a functioning protocol rather than rescue work for a broken design.
 
 #bibliography("refs.bib", title: [References])
