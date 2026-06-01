@@ -5,7 +5,7 @@
 )
 
 #set text(font: "New Computer Modern", size: 9pt)
-#set page(margin: (x: 1.6cm, y: 1.8cm), numbering: "1", columns: 2)
+#set page(paper: "us-letter", margin: (x: 1.6cm, y: 1.8cm), numbering: "1", columns: 2)
 #set par(justify: true, leading: 0.58em, spacing: 0.8em)
 #set heading(numbering: "1.1")
 #set math.equation(numbering: "(1)")
