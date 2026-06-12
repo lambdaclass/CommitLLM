@@ -553,9 +553,9 @@ For the default audit mode ($S=1$ token, 10 routine layers), verifying one Llama
 
 == Storage
 
-Only the non-derivable retained state requires storage: post-attention INT8 outputs, the associated per-tensor quantization scales, and the captured pre-final-norm residual that anchors the exact final-token tail (everything else is re-derivable):
+Only the non-derivable retained trace state requires storage: post-attention INT8 outputs, the associated per-tensor quantization scales, and the captured pre-final-norm residual that anchors the exact final-token tail (everything else is re-derivable):
 
-This storage accounting is only for retained per-token trace state. The deployment commitment $M$ is computed and bound into the receipt at commit time; it is configuration metadata, not non-derivable trace state.
+This storage accounting covers only retained per-token trace state. It excludes sampled-decode evidence, which is stored separately when the `CapturedLogits` decode path is enabled. The deployment commitment $M$ is computed and bound into the receipt at commit time; it is configuration metadata, not non-derivable trace state.
 
 #figure(
   table(
@@ -569,9 +569,22 @@ This storage accounting is only for retained per-token trace state. The deployme
   caption: [Per-token storage for non-derivable intermediates],
 )
 
+Sampled decode adds a separate retained artifact: the exact GPU logits used by the sampler. These logits are committed for every generated token because the audit challenge is chosen after generation, but they are opened only for challenged tokens. On the measured captured-logits profiles, retained sampled-decode state is about $501$ KiB/token for Llama and $594$ KiB/token for Qwen, and audit bandwidth increases by roughly $0.5$--$0.6$ MiB per opened token.
+
+#figure(
+  table(
+    columns: (auto, auto, auto),
+    align: (left, center, center),
+    [*Profile*], [*Retained logits*], [*Opened payload*],
+    [Llama W8A8 captured-logits], [$tilde 501$ KiB/token], [$tilde 0.5$ MiB/challenged token],
+    [Qwen W8A8 captured-logits], [$tilde 594$ KiB/token], [$tilde 0.6$ MiB/challenged token],
+  ),
+  caption: [Additional sampled-decode retention for the captured-logits path. This is separate from the trace-state storage in the previous table.],
+)
+
 == Audit Window
 
-With a short audit window (1--2 minutes), traces fit in a RAM ring buffer with no disk I/O. For Llama 70B on 4$times$ H100, assuming an aggregate retained-state write rate of $tilde 1.3$ GB/s, a 2-minute window requires $tilde 156$ GB ($tilde 8%$ of 2 TB system RAM). Longer windows spill to NVMe or networked storage.
+With a short audit window (1--2 minutes), traces fit in a RAM ring buffer with no disk I/O. For Llama 70B on 4$times$ H100, assuming an aggregate trace-state write rate of $tilde 1.3$ GB/s, a 2-minute window requires $tilde 156$ GB ($tilde 8%$ of 2 TB system RAM). Captured-logits sampled decode adds $tilde 0.5$ MiB per generated token of retained logits on top of the $tilde 672$ KB/token trace state, raising the aggregate rate to $tilde 2.3$ GB/s and the 2-minute window to $tilde 270$ GB ($tilde 14%$). Longer windows spill to NVMe or networked storage.
 
 Short audit windows require automated auditing: the client's audit decision must be programmatic.
 
@@ -602,9 +615,11 @@ Trusted execution environments (TEEs) and remote attestation provide another alt
 
 = Limitations and Extensions <sec-limitations>
 
-The kept protocol does *not* verify arbitrary-position attention outputs. Every attempted production path for that interior was closed (exact stock-kernel replay, tiled / LSE replay, stock-bounded certification on FP16$arrow.l.r$FP64 corridors, deterministic kernels), so the honest claim is the audit-only stock-mode attention path described in @sec-attn-audit. The remaining open questions are not whether a corridor exists (corridor measurements appear in @sec-attention-gap as background only) but how much the audit-only bracket can be tightened, what downstream output bound it actually implies through $W_o$ and the residual stream, and what audit/storage policy providers will accept at production scale. Closing the gap to verified arbitrary-position attention would require deterministic attention kernels or stronger proof systems, both of which violate the sidecar design constraint. The final protocol also assumes an autoregressive decoder-only architecture with the committed capture layout and architecture-correct replay semantics; broader architecture support requires additional schema and replay work but does not change the guarantee taxonomy.
+The kept protocol does *not* verify arbitrary-position attention outputs. Every attempted production path for that interior was closed (exact stock-kernel replay, tiled / LSE replay, stock-bounded certification on FP16$arrow.l.r$FP64 corridors, deterministic kernels), so the honest claim is the audit-only stock-mode attention path described in @sec-attn-audit. The remaining open questions are not whether a corridor exists (corridor measurements appear in @sec-attention-gap as background only) but how much the audit-only bracket can be tightened, what downstream output bound it actually implies through $W_o$ and the residual stream, and what audit/storage policy providers will accept at production scale. Closing the gap to verified arbitrary-position attention would require either deterministic attention kernels, which change the serving path and violate the sidecar design constraint, or an interactive proof of the attention computation generated only for challenged tokens at audit time. The latter is compatible with the sidecar design but unexplored; we leave it as future work. The final protocol also assumes an autoregressive decoder-only architecture with the committed capture layout and architecture-correct replay semantics; broader architecture support requires additional schema and replay work but does not change the guarantee taxonomy.
 
 A full composed soundness theorem remains future work. The current protocol is commitment-bound end-to-end: large linear components are verified by verifier-secret, information-theoretically sound algebraic checks; supported nonlinear components by canonical replay; sampled decode exactly via captured GPU logits plus the LM-head Freivalds binding; stock-mode attention is *audited but not verified* (score anchoring, KV provenance, GQA / RoPE-config / causal-mask wiring, plus token-0 local replay smoke); and routine KV provenance is statistical unless deep audit is used.
+
+The residual attention hole is concrete, not merely semantic. In the audit-only red-team harness, post-capture mutation of the committed attention output is caught by the Merkle / bridge checks, but a *consistent* fake-$a$ substitution, where the adversary chooses a fake post-attention output and re-derives the downstream trace honestly, passes the audit-only verifier. In the initial A1 toy sweep, all 10/10 consistent fake-$a$ openings verified, and 4/10 also changed the emitted answer. This does not model the full production profile, which additionally audits witnessed scores, KV provenance, GQA / RoPE / mask wiring, and captured-logits decode; however, none of those checks re-derive arbitrary-position $"softmax"(Q K^T / sqrt(d)) V$, so the residual class remains in scope until attention itself is verified or the audit bracket is strengthened.
 
 Routine KV provenance is correspondingly weakest against sparse tampering: if an adversary corrupts only a few prefix positions, the per-audit detection probability under small-$k$ sampling can be low. The short audit window also creates a denial-of-audit surface if a provider can force responses past the retention horizon before a challenge arrives. In practice, these risks push deployments toward automated audits, explicit response-deadline policies, longer or durable retention for high-value responses, and deeper audit modes when sparse prefix manipulation is a concern.
 
