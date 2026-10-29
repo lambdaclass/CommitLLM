@@ -1,0 +1,50 @@
+{
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "seqlen": 512,
+  "seqs": 4,
+  "ppl": {
+    "ref": 13.697014695512431,
+    "stockbf16": 13.696692219058924,
+    "exactA": 13.698125868733527,
+    "int_16-16-16": 13.69764824098371
+  },
+  "vs_ref": {
+    "stockbf16": {
+      "kl_mean": 0.0003084510317421518,
+      "kl_p99": 0.0034234358463436365,
+      "kl_max": 0.08866434544324875,
+      "top1_agree": 0.9911937266588211
+    },
+    "exactA": {
+      "kl_mean": 0.000312112235405948,
+      "kl_p99": 0.0036878613755106926,
+      "kl_max": 0.09437146782875061,
+      "top1_agree": 0.9921721965074539
+    },
+    "int_16-16-16": {
+      "kl_mean": 1.17025989254671e-06,
+      "kl_p99": 1.4726653944308055e-05,
+      "kl_max": 0.00020795350428670645,
+      "top1_agree": 1.0
+    }
+  },
+  "v_clip_frac_max": 0.0,
+  "exactA_inexact_frac_mean": 0.00017080609781159085,
+  "bitexact": {
+    "int": {
+      "bits": [
+        16,
+        16,
+        16
+      ],
+      "rows_checked": 6,
+      "ref_mismatch": 0,
+      "tiled_mismatch": 0
+    },
+    "exactA": {
+      "rows_checked": 6,
+      "ref_mismatch": 0,
+      "tiled_mismatch": 0
+    }
+  }
+}

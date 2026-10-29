@@ -1,0 +1,72 @@
+{
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "seqlen": 1024,
+  "seqs": 8,
+  "ppl": {
+    "ref": 8.24386235680468,
+    "stockbf16": 8.23759335457273,
+    "exactA": 8.237749248174989
+  },
+  "vs_ref": {
+    "stockbf16": {
+      "kl_mean": 8.644081799502601e-05,
+      "kl_p99": 0.0009823903019423597,
+      "kl_max": 0.016701623797416687,
+      "top1_agree": 0.9959677457809448
+    },
+    "exactA": {
+      "kl_mean": 8.243230968218995e-05,
+      "kl_p99": 0.0009235288162017241,
+      "kl_max": 0.01245996356010437,
+      "top1_agree": 0.9958455562591553
+    }
+  },
+  "v_clip_frac_max": 0.0,
+  "exactA_inexact_frac_mean": 0.00015787972902866647,
+  "gen_first_divergence": {
+    "stockbf16": [
+      8,
+      24,
+      48,
+      48,
+      23
+    ],
+    "exactA": [
+      8,
+      24,
+      48,
+      48,
+      23
+    ]
+  },
+  "gen": {
+    "ref": [
+      "The capital of France is Paris.<|im_end|>",
+      "It looks like you've started writing a Python function to compute the nth Fibonacci number, but the function is incomplete. The Fibonacci sequence is defined as follows:\n\n- \\( F(0) = 0 \\)\n- \\( F(1)",
+      "The sky appears blue because the Earth's atmosphere scatters sunlight in all directions and blue light is scattered more than other colors because it travels as shorter, smaller waves. This scattering of blue light makes the sky appear blue to an observer on the",
+      "To find the average speed of the train, you can use the formula:\n\n\\[ \\text{Average Speed} = \\frac{\\text{Total Distance}}{\\text{Total Time}} \\]\n\nGiven that the train travels 120",
+      "Whispers in code,\nSecrets safe 'twixt night and dawn,\nSilent guards of thought.<|im_end|>"
+    ],
+    "stockbf16": [
+      "The capital of France is Paris.<|im_end|>",
+      "It looks like you've started writing a Python function to compute the nth Fibonacci number, but the function is incomplete. The `return` statement at the end is missing the expression that would calculate the Fibonacci number for `n`. Here's how",
+      "The sky appears blue because the Earth's atmosphere scatters sunlight in all directions and blue light is scattered more than other colors because it travels as shorter, smaller waves. This scattering of blue light makes the sky appear blue to an observer on the",
+      "To find the average speed of the train, you can use the formula:\n\n\\[ \\text{Average Speed} = \\frac{\\text{Total Distance}}{\\text{Total Time}} \\]\n\nGiven that the train travels 120",
+      "Whispers in code,\nSecrets safe 'twixt night and dawn,\nSilent guards of thought.<|im_end|>"
+    ],
+    "exactA": [
+      "The capital of France is Paris.<|im_end|>",
+      "It looks like you've started writing a Python function to compute the nth Fibonacci number, but the function is incomplete. The `return` statement at the end is missing the expression that would calculate the Fibonacci number for `n`. Here's how",
+      "The sky appears blue because the Earth's atmosphere scatters sunlight in all directions and blue light is scattered more than other colors because it travels as shorter, smaller waves. This scattering of blue light makes the sky appear blue to an observer on the",
+      "To find the average speed of the train, you can use the formula:\n\n\\[ \\text{Average Speed} = \\frac{\\text{Total Distance}}{\\text{Total Time}} \\]\n\nGiven that the train travels 120",
+      "Whispers in code,\nSecrets safe 'twixt night and dawn,\nSilent guards of thought.<|im_end|>"
+    ]
+  },
+  "bitexact": {
+    "exactA": {
+      "rows_checked": 6,
+      "ref_mismatch": 0,
+      "tiled_mismatch": 0
+    }
+  }
+}

@@ -1,0 +1,16 @@
+
+1. accuracy (512 wikitext tokens): ppl HF fp32 12.993 | exact spec 12.937 | top-1 agree 0.9569 | KL 0.0053
+
+== greedy
+[cpu] decode 4.7s, recompute 0.8s | root decode 62f95c774163d2e7 recompute 62f95c774163d2e7 | tokens re-derived equal: True | hidden-state mismatches decode vs recompute: (0, 1920)
+[mps] decode 13.6s, recompute 0.8s | root decode 62f95c774163d2e7 recompute 62f95c774163d2e7 | tokens re-derived equal: True | hidden-state mismatches decode vs recompute: (0, 1920)
+CPU vs MPS: tokens equal True | hidden-state mismatches (0, 1920)
+text: 'Once upon a time, in a world where robots were not only intelligent but also capable of learning, there lived a robot named Max. Max was a sleek and sleek robot, with a sleek and sleek'
+
+== sampled T=0.8
+[cpu] decode 5.1s, recompute 0.8s | root decode d5894d9cabb0ad15 recompute d5894d9cabb0ad15 | tokens re-derived equal: True | hidden-state mismatches decode vs recompute: (0, 1920)
+[mps] decode 11.4s, recompute 1.1s | root decode d5894d9cabb0ad15 recompute d5894d9cabb0ad15 | tokens re-derived equal: True | hidden-state mismatches decode vs recompute: (0, 1920)
+CPU vs MPS: tokens equal True | hidden-state mismatches (0, 1920)
+text: 'In a world where robots have evolved beyond their usual roles, a particularly unique and innovative robot named Alex was born. Alex was not merely a tool; he was a living being with its own unique abilities'
+
+V values clipped by static scale: 0
