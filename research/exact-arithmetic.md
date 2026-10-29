@@ -94,8 +94,14 @@ K needs more than 8 bits (Qwen K outliers), then Q. 8-bit V costs more with a st
 | Qwen2.5-0.5B, 512 | **Option A** | 13.6970 → 13.6981 | 3.1e-4 | 99.22% |
 | Qwen2.5-7B, 1k (8 seqs) | stock bf16 | 8.2439 → 8.2376 | 8.6e-5 | 99.60% |
 | Qwen2.5-7B, 1k (8 seqs) | **Option A** | 8.2439 → 8.2377 | 8.2e-5 | 99.58% |
+| Qwen2.5-7B, 4k (2 seqs) | stock bf16 | 6.5585 → 6.5580 | 2.2e-4 | 99.49% |
+| Qwen2.5-7B, 4k (2 seqs) | **Option A** | 6.5585 → 6.5585 | 2.2e-4 | 99.43% |
+| Llama-3.1-8B, 1k (8 seqs) | stock bf16 | 7.1302 → 7.1305 | 2.8e-5 | 99.84% |
+| Llama-3.1-8B, 1k (8 seqs) | **Option A** | 7.1302 → 7.1302 | 2.8e-5 | 99.83% |
+| Llama-3.1-8B, 4k (2 seqs) | stock bf16 | 7.2815 → 7.2823 | 2.8e-5 | 99.73% |
+| Llama-3.1-8B, 4k (2 seqs) | **Option A** | 7.2815 → 7.2814 | 2.9e-5 | 99.72% |
 
-"stock bf16" is a CPU emulation of FlashAttention numerics (bf16 Q/K/V, fp32 softmax, `P` cast to bf16 before `P·V`), not the real kernel and not full bf16 inference; only attention is swapped, the rest of the model runs in fp32. Samples are small (2–8 WikiText sequences, 5 generation prompts): these are near-parity signals, not a quality evaluation. Option A tracks stock bf16 almost exactly; on Qwen-7B its greedy generations first diverge from fp32 at the same token indices as stock (`[8, 24, 48, 48, 23]` of 48). The int16 variant is *more* accurate than stock bf16 because 16 bits per value is finer than bf16's 8-bit mantissa.
+"stock bf16" is a CPU emulation of FlashAttention numerics (bf16 Q/K/V, fp32 softmax, `P` cast to bf16 before `P·V`), not the real kernel and not full bf16 inference; only attention is swapped, the rest of the model runs in fp32. Samples are small (2–8 WikiText sequences, 5 generation prompts): these are near-parity signals, not a quality evaluation. Option A tracks stock bf16 almost exactly; on Qwen-7B and Llama-8B its greedy generations first diverge from fp32 at the same token indices as stock (`[8, 24, 48, 48, 23]` and `[8, 48, 48, 48, 14]` of 48). The int16 variant is *more* accurate than stock bf16 because 16 bits per value is finer than bf16's 8-bit mantissa.
 
 Raw outputs: [`exact-arithmetic/results/`](./exact-arithmetic/results/). The Qwen-7B 1k int16 run used an earlier final step (`f64` division instead of `f32`); all others use the spec as written.
 
@@ -143,7 +149,7 @@ Answers will not be token-identical to stock FlashAttention (no verifiable kerne
 3. **Decode policies and commitments.** The prototype covers greedy and full-vocabulary temperature sampling only. Top-k, top-p, repetition/logit processors and EOS handling need exact integer specs (with defined tie-breaking). The GPU hashing and Merkle commitment behind regenerate-on-challenge are neither implemented nor benchmarked; the prototype copies hidden states to the host and hashes there, so the claimed commit-cost savings are projected, not measured.
 4. **Bridge into attention.** Dequant, bias and RoPE between the INT8 GEMM and attention must follow the same elementwise spec (this is where the Qwen QKV gap lives).
 5. **KV provenance at scale.** Exact attention is only as good as the opened K/V rows. Checking all rows is cheap (one Freivalds per row), but the opening is ~16 MB per challenged layer at 4k context on Llama-8B; head sampling reduces it.
-6. **Accuracy breadth.** Option A on Llama-3.1-8B; contexts beyond 4k; real bf16 inference with the actual FlashAttention kernel as the baseline; downstream evals, not just perplexity/KL on a handful of sequences.
+6. **Accuracy breadth.** Contexts beyond 4k; real bf16 inference with the actual FlashAttention kernel as the baseline; downstream evals, not just perplexity/KL on a handful of sequences.
 
 ## 6. Reproduce
 

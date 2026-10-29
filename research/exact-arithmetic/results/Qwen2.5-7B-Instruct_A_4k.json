@@ -1,0 +1,33 @@
+{
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "seqlen": 4096,
+  "seqs": 2,
+  "ppl": {
+    "ref": 6.558451547009202,
+    "stockbf16": 6.557995756920125,
+    "exactA": 6.558518002755598
+  },
+  "vs_ref": {
+    "stockbf16": {
+      "kl_mean": 0.00022344129138218705,
+      "kl_p99": 0.0026772193668875843,
+      "kl_max": 0.02486077882349491,
+      "top1_agree": 0.9948717951774597
+    },
+    "exactA": {
+      "kl_mean": 0.00022422836082114372,
+      "kl_p99": 0.0027504259487614036,
+      "kl_max": 0.02516799606382847,
+      "top1_agree": 0.9942612946033478
+    }
+  },
+  "v_clip_frac_max": 0.0,
+  "exactA_inexact_frac_mean": 0.00016169239907391046,
+  "bitexact": {
+    "exactA": {
+      "rows_checked": 6,
+      "ref_mismatch": 0,
+      "tiled_mismatch": 0
+    }
+  }
+}

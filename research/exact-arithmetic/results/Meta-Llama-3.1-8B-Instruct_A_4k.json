@@ -1,0 +1,33 @@
+{
+  "model": "unsloth/Meta-Llama-3.1-8B-Instruct",
+  "seqlen": 4096,
+  "seqs": 2,
+  "ppl": {
+    "ref": 7.281490993659095,
+    "stockbf16": 7.28226183743329,
+    "exactA": 7.281413740167139
+  },
+  "vs_ref": {
+    "stockbf16": {
+      "kl_mean": 2.7846102966577746e-05,
+      "kl_p99": 0.0002186615383834578,
+      "kl_max": 0.00244511803612113,
+      "top1_agree": 0.9973137974739075
+    },
+    "exactA": {
+      "kl_mean": 2.8888091947010253e-05,
+      "kl_p99": 0.0002108207336277701,
+      "kl_max": 0.007626762613654137,
+      "top1_agree": 0.9971916973590851
+    }
+  },
+  "v_clip_frac_max": 0.0,
+  "exactA_inexact_frac_mean": 0.00010928822060426076,
+  "bitexact": {
+    "exactA": {
+      "rows_checked": 6,
+      "ref_mismatch": 0,
+      "tiled_mismatch": 0
+    }
+  }
+}

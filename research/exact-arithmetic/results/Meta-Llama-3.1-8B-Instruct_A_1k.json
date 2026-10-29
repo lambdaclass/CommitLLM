@@ -1,0 +1,72 @@
+{
+  "model": "unsloth/Meta-Llama-3.1-8B-Instruct",
+  "seqlen": 1024,
+  "seqs": 8,
+  "ppl": {
+    "ref": 7.130228591999782,
+    "stockbf16": 7.130507712759954,
+    "exactA": 7.130238260636727
+  },
+  "vs_ref": {
+    "stockbf16": {
+      "kl_mean": 2.7694761456587003e-05,
+      "kl_p99": 0.00020362438954180107,
+      "kl_max": 0.005548345856368542,
+      "top1_agree": 0.9984115362167358
+    },
+    "exactA": {
+      "kl_mean": 2.842130720637215e-05,
+      "kl_p99": 0.00022239458940020995,
+      "kl_max": 0.014028836973011494,
+      "top1_agree": 0.9982893466949463
+    }
+  },
+  "v_clip_frac_max": 0.0,
+  "exactA_inexact_frac_mean": 0.00010315701365470886,
+  "gen_first_divergence": {
+    "stockbf16": [
+      8,
+      48,
+      48,
+      48,
+      14
+    ],
+    "exactA": [
+      8,
+      48,
+      48,
+      48,
+      14
+    ]
+  },
+  "gen": {
+    "ref": [
+      "The capital of France is Paris.<|eot_id|>",
+      "The Fibonacci sequence is a series of numbers where a number is the addition of the last two numbers, starting with 0 and 1. Here's a Python function to calculate the nth Fibonacci number:\n\n```python\ndef fibonacci(n):\n   ",
+      "The sky appears blue because of a phenomenon called Rayleigh scattering, where shorter (blue) wavelengths of light are scattered more than longer (red) wavelengths by the tiny molecules of gases in the Earth's atmosphere. This scattering effect gives the sky",
+      "A: To find the average speed of the train, we need to divide the distance traveled by the time taken.\n\nDistance = 120 km\nTime = 1.5 hours\n\nAverage Speed = Distance / Time\nAverage Speed = ",
+      "Secret codes unfold\nHidden messages revealed slow\nSafety in the key<|eot_id|>"
+    ],
+    "stockbf16": [
+      "The capital of France is Paris.<|eot_id|>",
+      "The Fibonacci sequence is a series of numbers where a number is the addition of the last two numbers, starting with 0 and 1. Here's a Python function to calculate the nth Fibonacci number:\n\n```python\ndef fibonacci(n):\n   ",
+      "The sky appears blue because of a phenomenon called Rayleigh scattering, where shorter (blue) wavelengths of light are scattered more than longer (red) wavelengths by the tiny molecules of gases in the Earth's atmosphere. This scattering effect gives the sky",
+      "A: To find the average speed of the train, we need to divide the distance traveled by the time taken.\n\nDistance = 120 km\nTime = 1.5 hours\n\nAverage Speed = Distance / Time\nAverage Speed = ",
+      "Secret codes unfold\nHidden messages revealed slow\nSafety in the key<|eot_id|>"
+    ],
+    "exactA": [
+      "The capital of France is Paris.<|eot_id|>",
+      "The Fibonacci sequence is a series of numbers where a number is the addition of the last two numbers, starting with 0 and 1. Here's a Python function to calculate the nth Fibonacci number:\n\n```python\ndef fibonacci(n):\n   ",
+      "The sky appears blue because of a phenomenon called Rayleigh scattering, where shorter (blue) wavelengths of light are scattered more than longer (red) wavelengths by the tiny molecules of gases in the Earth's atmosphere. This scattering effect gives the sky",
+      "A: To find the average speed of the train, we need to divide the distance traveled by the time taken.\n\nDistance = 120 km\nTime = 1.5 hours\n\nAverage Speed = Distance / Time\nAverage Speed = ",
+      "Secret codes unfold\nHidden messages revealed slow\nSafety in the key<|eot_id|>"
+    ]
+  },
+  "bitexact": {
+    "exactA": {
+      "rows_checked": 6,
+      "ref_mismatch": 0,
+      "tiled_mismatch": 0
+    }
+  }
+}
