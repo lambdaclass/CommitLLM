@@ -31,6 +31,10 @@ import numpy as np
 import torch
 
 LOG2E = 1.4426950408889634
+# Input domain: row maxima are clamped up to ROW_MIN and must stay below ROW_MAX,
+# so every power-of-two scale (and sums of two of them) stays in the fp32
+# normal range. Rows below ROW_MIN are ~0 and behave identically after clamping.
+ROW_MIN, ROW_MAX = 2.0**-40, 2.0**40
 SPLIT = 20  # bits per half when emulating int64 matmul with float64 BLAS
 
 
@@ -38,10 +42,15 @@ def qmax(bits):
     return float(2 ** (bits - 1) - 1)
 
 
+def row_max(x):
+    m = x.abs().amax(-1, keepdim=True)
+    assert m.max().item() < ROW_MAX, "input outside the spec domain"
+    return m.clamp(min=ROW_MIN)
+
+
 def quant_rows(x, bits):
     """Symmetric per-row (last dim) quantization. Returns (ints as fp32, fp32 scale)."""
-    s = x.abs().amax(-1, keepdim=True) / qmax(bits)
-    s = torch.where(s == 0, torch.ones_like(s), s)
+    s = row_max(x) / qmax(bits)
     return torch.round(x / s).clamp_(-qmax(bits), qmax(bits)), s
 
 
@@ -56,11 +65,12 @@ def make_lut(lb, p):
 
 def exact_mm(a, b):
     """Exact int64 matmul of non-negative a (< 2^(2*SPLIT)) and small-int b,
-    via two float64 BLAS calls whose results stay < 2^53."""
+    via two float64 BLAS calls. Bounded a priori: every partial sum of every
+    call is at most 2^SPLIT * max|b| * K < 2^53."""
+    assert a.min().item() >= 0 and a.max().item() < 2 ** (2 * SPLIT)
+    assert 2**SPLIT * b.abs().max().item() * a.shape[-1] < 2**53
     lo = (a & ((1 << SPLIT) - 1)).double() @ b.double()
     hi = (a >> SPLIT).double() @ b.double()
-    for r in (lo, hi):
-        assert r.abs().max().item() < 2.0**53
     return (hi.round().long() << SPLIT) + lo.round().long()
 
 
@@ -87,12 +97,13 @@ def int_attention(q, k, v, scaling, offset, vs, bits=(16, 16, 16), lb=8, p=20,
     clip = ((v / vs).abs() > qmax(bits[2])).float().mean().item()
     kiT = ki.double().transpose(1, 2)
     skT = sk.transpose(1, 2)
+    assert qmax(bits[0]) * qmax(bits[1]) * q.shape[-1] < 2**53
+    assert 2**p * qmax(bits[2]) * nk < 2**63, "int64 range: context too long for widths"
     out = torch.empty_like(q)
     kpos = torch.arange(nk)
     for i0 in range(0, nq, qblock):
         i1 = min(nq, i0 + qblock)
-        S = qi[:, i0:i1].double() @ kiT
-        assert S.abs().max().item() < 2.0**53
+        S = qi[:, i0:i1].double() @ kiT  # exact: qmax^2 * d < 2^53 (asserted below)
         valid = kpos[None, :] <= (torch.arange(i0, i1)[:, None] + offset)
         e = int_weights(S, sq[:, i0:i1], skT, scaling, valid, lut, lb, p)
         E = e.sum(-1, keepdim=True)
@@ -132,8 +143,7 @@ def reference_row(q, k, v, vs, scaling, i, offset, bits=(16, 16, 16), lb=8, p=20
         return int(max(-m, min(m, np.round(x))))
 
     def quant_row(x, b):
-        s = f(np.abs(x).max() / f(qmax(b)))
-        s = f(1.0) if s == 0 else s
+        s = f(max(f(np.abs(x).max()), f(ROW_MIN)) / f(qmax(b)))
         return [clampq(f(xi / s), b) for xi in x], s
 
     lut = [round(2**p * 2 ** (-j / 2**lb)) for j in range(2**lb)]
@@ -177,8 +187,9 @@ LIMB = 16
 
 
 def pow2_rows(x, w):
-    """Per-row power-of-two scale so the row max uses w-1 magnitude bits."""
-    _, e = torch.frexp(x.abs().amax(-1, keepdim=True))
+    """Per-row power-of-two scale so the row max uses w-1 magnitude bits.
+    Row maxima are clamped to the spec domain (ROW_MIN), so zero rows get a scale."""
+    _, e = torch.frexp(row_max(x))
     k = e - w + 1
     xi = torch.round(torch.ldexp(x, -k)).clamp_(-qmax(w), qmax(w))
     return xi, k
@@ -190,14 +201,17 @@ def pow2_static(vmax, w):
 
 
 def exact_mm_signed(a, b):
-    """Exact int64 a @ b (|a|,|b| < 2^31) via 16-bit limbs and float64 BLAS."""
+    """Exact int64 a @ b (|a|,|b| < 2^31) via 16-bit limbs and float64 BLAS.
+    Every limb is < 2^16 in magnitude, so partial sums are < 2^32 * K < 2^53."""
+    assert a.abs().max().item() < 2**31 and b.abs().max().item() < 2**31
+    assert a.shape[-1] < 2**21
+
     def split(x):
         return [(x & 0xFFFF).double(), (x >> LIMB).double()]
     acc = None
     for i, ai in enumerate(split(a)):
         for j, bj in enumerate(split(b)):
             r = ai @ bj
-            assert r.abs().max().item() < 2.0**53
             part = r.round().long() << (LIMB * (i + j))
             acc = part if acc is None else acc + part
     return acc
@@ -235,6 +249,9 @@ def exact_attention(q, k, v, scaling, offset, kv, w=24, p=24, qblock=256):
     inexact = sum(((torch.ldexp(xi, s) != x).float().mean().item())
                   for xi, s, x in ((qi, kq, q), (ki, kk, k), (vi, kv, v))) / 3
     qi, kiT, vi = qi.long(), ki.long().transpose(1, 2), vi.long()
+    # int64 range: O_c = sum_t e_t * vi_tc <= 2^p * qmax(w) * nk. With p = w = 24
+    # this caps context at 2^16 keys; longer contexts need smaller p or wider sums.
+    assert 2**p * qmax(w) * nk < 2**63, "int64 range: context too long for widths"
     kkT = kk.transpose(1, 2)
     out = torch.empty_like(q)
     kpos = torch.arange(nk)
@@ -273,7 +290,7 @@ def reference_row_exact(q, k, v, kv, scaling, i, offset, w=24, p=24):
     m = 2 ** (w - 1) - 1
 
     def row(x):
-        e = int(np.frexp(np.abs(x).max())[1]) - w + 1
+        e = int(np.frexp(max(f(np.abs(x).max()), f(ROW_MIN)))[1]) - w + 1
         return [max(-m, min(m, int(np.round(np.ldexp(f(xi), -e))))) for xi in x], e
 
     lut = [round(2**p * 2 ** (-j / 2**HB)) for j in range(2**HB)]

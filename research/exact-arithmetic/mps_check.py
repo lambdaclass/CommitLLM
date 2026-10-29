@@ -61,6 +61,17 @@ def gpu_int_attention(q, k, v, scaling, vs, bits, lb=8, p=20):
     return ((O.float() / E.float()) * vs).cpu()
 
 
+def add_edge_cases(q, k, v):
+    """All-zero rows, subnormal entries, tiny and large rows."""
+    q[0, 3] = 0.0
+    k[1, 7] = 0.0
+    v[2, 11] = 0.0
+    k[3, 20, :8] = 1e-40          # subnormal fp32
+    q[4, 30] *= 1e-30             # tiny but normal (below ROW_MIN)
+    k[5, 40] *= 1e4               # large row
+    v[6, 50, :4] = 1e-41
+
+
 def main():
     torch.manual_seed(0)
     h, n, d = 8, 512, 128
@@ -70,6 +81,7 @@ def main():
     q = torch.randn(h, n, d) * 2.0
     k = torch.randn(h, n, d) * scale
     v = torch.randn(h, n, d)
+    add_edge_cases(q, k, v)
     vs = v.abs().amax(1, keepdim=True) * 2.0 / ia.qmax(bits[2])
     scaling = d ** -0.5
 
@@ -102,7 +114,7 @@ def frexp_exp(x):
 
 
 def gpu_pow2_rows(x, w):
-    k = frexp_exp(x.abs().amax(-1, keepdim=True)) - w + 1
+    k = frexp_exp(x.abs().amax(-1, keepdim=True).clamp(min=ia.ROW_MIN)) - w + 1
     return torch.round(x * exp2i(-k)).clamp_(-ia.qmax(w), ia.qmax(w)).long(), k
 
 
@@ -131,6 +143,7 @@ def main_exact():
     q = torch.randn(h, n, d) * 2.0
     k = torch.randn(h, n, d) * scale
     v = torch.randn(h, n, d)
+    add_edge_cases(q, k, v)
     kv = ia.pow2_static(v.abs().amax(1, keepdim=True) * 2.0, 24)
     scaling = d ** -0.5
     cpu, _ = ia.exact_attention(q, k, v, scaling, 0, kv)

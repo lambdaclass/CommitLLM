@@ -27,6 +27,9 @@ P_ATT, P_SIG, P_SAMPLE = 20, 24, 24                   # fixed-point exp output b
 FB, HB = 20, 12                                       # exp: fraction bits, LUT bits
 A_FRAC, N_FRAC, S_FRAC = 12, 20, 24                   # fraction bits of divisions
 LN2_LO = [round(l * math.log(2) * 2 ** (30 - FB)) for l in range(2 ** (FB - HB))]
+# Input domain: row maxima clamped up to ROW_MIN, must stay below ROW_MAX, so all
+# power-of-two scales (and sums/doubles of them) stay in the fp32 normal range.
+ROW_MIN, ROW_MAX = 2.0**-40, 2.0**40
 
 
 # ---- elementwise primitives (bit-level, identical on every IEEE device)
@@ -48,7 +51,9 @@ def qmax(w):
 
 def pow2_rows(x, w):
     """x == xi * 2^k with |xi| < 2^(w-1), per row, power-of-two scale."""
-    m = x.abs().amax(-1, keepdim=True).clamp(min=2.0**-100)
+    m = x.abs().amax(-1, keepdim=True)
+    assert m.max().item() < ROW_MAX, "input outside the spec domain"
+    m = m.clamp(min=ROW_MIN)
     k = frexp_exp(m) - w + 1
     return torch.round(x * exp2i(-k)).clamp(-qmax(w), qmax(w)).long(), k
 
@@ -122,6 +127,9 @@ class Exact:
 
     @staticmethod
     def limbs(x, n):
+        """Single-limb operands may be pre-converted fp32 (int8 weights);
+        multi-limb operands must be integer tensors."""
+        assert n == 1 or not x.is_floating_point()
         out = []
         for _ in range(n - 1):
             out.append((x & 255).float())

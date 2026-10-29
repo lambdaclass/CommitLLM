@@ -13,7 +13,7 @@ Every open dense-model gap in CommitLLM traces back to one seam: the provider co
 
 [`attention-gap.md`](./attention-gap.md) §1h already measured that every backend is bit-exact run-to-run on the prover; the mismatch is GPU-vs-CPU arithmetic, not randomness.
 
-**Fix:** make every reduction an *exact* integer sum. Integer addition is associative, so the result is independent of order, tiling, batching and hardware. All remaining steps are elementwise and are pinned to single IEEE fp32 ops (mul, add, convert, round-half-even) or integer ops, which every IEEE device computes identically.
+**Fix:** make every reduction an *exact* integer sum. Integer addition is associative, so the result is independent of order, tiling, batching and hardware. All remaining steps are elementwise and are pinned to single IEEE fp32 ops (mul, add, convert, round-half-even) or integer ops. Those are identical on every device **provided** the implementation honors the spec: no FMA contraction of separate mul/add steps, IEEE round-to-nearest-even division and conversion, and a defined subnormal policy. Lookup tables (RoPE `cos`/`sin`, the `exp` LUT) are part of the spec and must ship as canonical, hash-pinned bytes rather than be regenerated with a host `libm`; in these experiments both devices received tables generated once on the same host. The spec also fixes an **input domain**: per-row maxima are clamped up to `2^-40` and must stay below `2^40` (otherwise fail closed), so every power-of-two scale, and every sum of two of them, stays in the fp32 normal range. Without this, a tiny-but-normal row pushed a score scale below `2^-126` and the CPU (`ldexp`, gradual underflow) and GPU (bit-constructed powers of two) disagreed; with it, zero, subnormal, tiny and large rows are all bit-identical across devices (§3c).
 
 This is not the archived deterministic-attention kernel ([`docs/design/deterministic-attention-spec.md`](../docs/design/deterministic-attention-spec.md)). That kernel stayed in floating point and therefore had to freeze one reduction tree, forbid FMA and emulate `exp`; it measured `+230%` decode (`21.58 → 71.16 ms/token`, CHANGELOG). Exact integer sums need no fixed order, so a kernel keeps normal tiling and int8 tensor cores.
 
@@ -46,6 +46,7 @@ Keeps floating-point inputs; only the sums are exact (Kulisch / Ozaki style):
 - Dot products and `Σ e_t·v_t` are exact int64; on hardware they are int8-limb tensor-core products (int8×int8→int32 is exact).
 - `exp` is fixed point with ~fp32 accuracy (4096-entry LUT on the top fraction bits plus an integer linear term), weights carry 24 bits.
 - Result rounds once: `a = (f32(O) / f32(E)) · 2^kv`.
+- **Range bound.** `O_c ≤ 2^P · 2^(W−1) · n` must fit int64. With `P = W = 24` this caps context at `2^16` keys (an all-equal-score row at 65,537 keys overflows). Longer contexts need smaller `P` (e.g. `P = 16` → `2^24` keys), split accumulators, or wider sums. The int16 variant (`P = 20`, 16-bit V) is bounded at `2^28` keys. The scripts assert these bounds.
 
 ### 2c. Full exact model
 
@@ -65,33 +66,36 @@ Keeps floating-point inputs; only the sums are exact (Kulisch / Ozaki style):
 
 Reference: the same model with fp32 eager attention. WikiText-2 test, attention swapped only (§3a–3b).
 
-### 3a. Which widths matter (Qwen2.5-0.5B, quantized Q/K/V with float softmax, per-token V)
+### 3a. Which widths matter (Qwen2.5-0.5B, 4 × 512 tokens, quantized Q/K/V with float softmax, static per-channel V)
 
-| Q-K-V bits | top-1 agree | KL mean |
-|---|---|---|
-| 8-8-8 | 88.8% | 6.0e-2 |
-| 16-8-16 | 90.5% | 5.4e-2 |
-| 8-16-8 | 97.9% | 1.7e-3 |
-| 12-12-12 | 99.0% | 3.7e-4 |
-| 16-16-8 | 99.5% | 7.6e-5 |
-| 16-16-16 | 100% | 9.8e-7 |
+| Q-K-V bits | ppl (ref 13.6970) | KL mean | top-1 agree |
+|---|---|---|---|
+| 8-8-8 | 14.9159 | 5.9e-2 | 89.3% |
+| 16-8-16 | 14.7958 | 5.4e-2 | 90.5% |
+| 8-16-8 | 13.7110 | 2.5e-3 | 97.1% |
+| 16-16-8 | 13.7077 | 7.7e-4 | 98.4% |
+| 12-12-12 | 13.7049 | 3.7e-4 | 99.3% |
+| 16-16-16 | 13.6977 | 1.0e-6 | 100% |
+| 12-12-12, integer softmax | 13.7072 | 3.7e-4 | 99.2% |
+| 16-16-16, integer softmax | 13.6976 | 1.2e-6 | 100% |
 
-K needs more than 8 bits (Qwen K outliers); Q is next; V tolerates 8. The integer softmax itself adds no measurable error over float softmax at the same widths.
+K needs more than 8 bits (Qwen K outliers), then Q. 8-bit V costs more with a static per-channel scale than with per-token scales (an earlier per-token run gave 99.5% top-1 for 16-16-8). The integer softmax adds only a small error over float softmax at the same widths (here within noise; on Qwen2.5-7B at 4k, KL `1.3e-7 → 6.4e-7` and top-1 `100% → 99.98%`). Artifacts: `results/sweep_q05_v{8,12,16}.json`.
 
 ### 3b. Accuracy at scale
 
 | Model, context | Variant | ppl ref → variant | KL mean | top-1 agree |
 |---|---|---|---|---|
-| Qwen2.5-0.5B, 512 | int16 | 13.6970 → 13.6978 | 8.5e-6 | 99.95% |
+| Qwen2.5-0.5B, 512 | int16 | 13.6970 → 13.6976 | 1.2e-6 | 100% |
 | Qwen2.5-7B, 1k (8 seqs) | int16 | 8.2439 → 8.2441 | 4.0e-6 | 99.96% |
 | Qwen2.5-7B, 4k (2 seqs) | int16 | 6.5585 → 6.5585 | 6.0e-7 | 99.98% |
 | Llama-3.1-8B, 1k (8 seqs) | int16 | 7.1302 → 7.1302 | 3.0e-7 | 99.98% |
+| Llama-3.1-8B, 4k (2 seqs) | int16 | 7.2815 → 7.2810 | 1.2e-6 | 99.96% |
 | Qwen2.5-0.5B, 512 | stock bf16 | 13.6970 → 13.6967 | 3.1e-4 | 99.12% |
 | Qwen2.5-0.5B, 512 | **Option A** | 13.6970 → 13.6981 | 3.1e-4 | 99.22% |
 | Qwen2.5-7B, 1k (8 seqs) | stock bf16 | 8.2439 → 8.2376 | 8.6e-5 | 99.60% |
 | Qwen2.5-7B, 1k (8 seqs) | **Option A** | 8.2439 → 8.2377 | 8.2e-5 | 99.58% |
 
-"stock bf16" models FlashAttention numerics (bf16 Q/K/V, fp32 softmax, `P` cast to bf16 before `P·V`) without its order effects. Option A tracks stock bf16 almost exactly; on Qwen-7B its greedy generations first diverge from fp32 at the same token indices as stock (`[8, 24, 48, 48, 23]` of 48). The int16 variant is *more* accurate than stock bf16 because 16 bits per value is finer than bf16's 8-bit mantissa.
+"stock bf16" is a CPU emulation of FlashAttention numerics (bf16 Q/K/V, fp32 softmax, `P` cast to bf16 before `P·V`), not the real kernel and not full bf16 inference; only attention is swapped, the rest of the model runs in fp32. Samples are small (2–8 WikiText sequences, 5 generation prompts): these are near-parity signals, not a quality evaluation. Option A tracks stock bf16 almost exactly; on Qwen-7B its greedy generations first diverge from fp32 at the same token indices as stock (`[8, 24, 48, 48, 23]` of 48). The int16 variant is *more* accurate than stock bf16 because 16 bits per value is finer than bf16's 8-bit mantissa.
 
 Raw outputs: [`exact-arithmetic/results/`](./exact-arithmetic/results/). The Qwen-7B 1k int16 run used an earlier final step (`f64` division instead of `f32`); all others use the spec as written.
 
@@ -99,13 +103,13 @@ Raw outputs: [`exact-arithmetic/results/`](./exact-arithmetic/results/). The Qwe
 
 On real Q/K/V captured from the middle layer of each model, the vectorized spec equals (a) an independent per-row reimplementation in numpy fp32 + Python integers, keys visited one at a time, and (b) a two-pass evaluation over random tiles in random order: **0 mismatches** in every run (int16 and Option A).
 
-Cross-hardware, CPU vs Apple GPU (MPS), [`mps_check.py`](./exact-arithmetic/mps_check.py): the GPU computes integer dot products with 8-bit-limb fp32 matmuls (every partial sum an integer `< 2^24`), the way an int8 tensor-core kernel would; the CPU uses float64 BLAS.
+Cross-hardware, CPU vs Apple GPU (MPS), [`mps_check.py`](./exact-arithmetic/mps_check.py): the GPU computes integer dot products with 8-bit-limb fp32 matmuls (every partial sum an integer `< 2^24`), the way an int8 tensor-core kernel would; the CPU uses float64 BLAS. Inputs are random with outlier K channels plus edge cases: all-zero rows, subnormal entries, a row below the `2^-40` domain floor, and a large row. Output: `results/mps_check.txt`.
 
 | | bit-identical outputs |
 |---|---|
 | int16 integer attention | **100%** |
 | Option A | **100%** |
-| ordinary fp32 attention (control) | 43.3% |
+| ordinary fp32 attention (control) | 46.8% |
 
 ### 3d. Full exact model: regenerate-on-challenge
 
@@ -117,28 +121,29 @@ Cross-hardware, CPU vs Apple GPU (MPS), [`mps_check.py`](./exact-arithmetic/mps_
 | CPU vs MPS hidden states (position × layer) | 0 / 1920 differ | 0 / 1920 differ |
 | decode vs one-pass recompute, each device | 0 / 1920 differ | 0 / 1920 differ |
 | tokens re-derived from recompute | all equal | all equal |
-| SHA-256 root over all hidden states (4 runs) | `62f95c77…` | `d5894d9c…` |
+| SHA-256 over all hidden states, first 16 hex digits (4 runs) | `62f95c77…` | `d5894d9c…` |
 
-Recompute took `0.8 s` vs `4.7 s` for decode on CPU. Accuracy of the full spec (int8 weights, int16 activations) vs HF fp32 on 512 test tokens: ppl `12.99 → 12.94`, top-1 `95.7%`, KL `0.005`; the gap is the W8 weight quantization, not the exact arithmetic. Static V scales clipped 0 values.
+Recompute took `~0.9 s` vs `~4.4 s` for decode on CPU. Accuracy of the full spec (int8 weights, int16 activations) vs HF fp32 on 512 test tokens: ppl `12.99 → 12.94`, top-1 `95.7%`, KL `0.005`; this gap mixes W8 weights, A16 activations and the fixed-point norm/SiLU approximations; no matched W8A16 float baseline was run, so it is not attributed further. Static V scales clipped 0 values. The hash is one sequential SHA-256 used only to compare runs; it is not the commitment scheme, which needs a Merkle tree with per-`(token, layer)` openings (E4).
 
 ## 4. Protocol implications
 
 If the NVIDIA gates below pass:
 
-1. **Attention becomes verified, not audited.** The verifier recomputes any challenged `(token, layer)` attention output exactly on CPU from opened Q/K/V. The consistent fake-`a` forgery fails whenever its layer is opened.
-2. **No tolerances anywhere.** Any bit mismatch is evidence of cheating; no false positives.
-3. **Regenerate instead of retain.** Because decode and one-pass recompute are bit-identical, the provider can hash per-layer hidden states on GPU during serving, keep only `(prompt, params, seed, tokens, roots)`, and regenerate any trace on challenge. This replaces `CapturedLogits` retention (~500 KiB/token) and most of the commit/finalize cost (`55–100 ms/token`). Soundness is unchanged: the provider is still bound to roots before the challenge.
-4. **Generality.** MoE routing (top-k on exact router logits), speculative-decoding acceptance and FP8 inputs (small integers times powers of two) become deterministic by the same construction.
+1. **Attention becomes recomputable, not just audited.** The verifier recomputes any challenged `(token, layer)` attention output exactly on CPU from opened Q/K/V. This proves attention *relative to the opened Q/K/V*. Closing the fake-`a` hole also requires binding those inputs: the challenged Q and every opened K/V row must be tied to committed hidden states (Freivalds on `Wq/Wk/Wv` plus the exact bridge, E3), and those hidden states to the committed prefix. A K/V row whose provenance is only sampled can still be fabricated at unsampled positions; the detection probability of that has to be analyzed, not assumed.
+2. **No tolerances.** If the spec is implemented exactly (§1), an honest provider always matches, so any mismatch on a checked value is evidence of cheating.
+3. **Regenerate instead of retain.** Because decode and one-pass recompute are bit-identical, the provider can hash per-layer hidden states on GPU during serving, keep only `(prompt, params, seed, tokens, roots)`, and regenerate any trace on challenge. This would replace `CapturedLogits` retention (~500 KiB/token) and most of the commit/finalize cost (`55–100 ms/token`). Pre-challenge roots stop the provider from changing its story; they do not by themselves prove the committed trace is correct. Correctness still comes from the opened checks, so the soundness argument is the same commit-then-open one as today, with the same need to bind every transition a check relies on. A full write-up of this binding is a prerequisite for E4.
+4. **Generality.** MoE routing (top-k on exact router logits, with an explicit tie-break such as lowest expert index), speculative-decoding acceptance and FP8 inputs (small integers times powers of two) can be made deterministic by the same construction. None of these is implemented yet.
 
 Answers will not be token-identical to stock FlashAttention (no verifiable kernel can be); the bar is quality parity with bf16, which §3b shows.
 
 ## 5. Open questions
 
 1. **NVIDIA bit-exactness.** Only CPU vs Apple GPU is tested. Integer arithmetic makes this very likely, but a CUDA/Triton kernel must be checked against the CPU spec, built without FMA contraction for the fp32 steps.
-2. **Performance (go/no-go).** Unmeasured. Back-of-envelope: decode attention is memory-bound and reads the same bytes (bf16 or int16 cache), so `~+2–10%` on attention; exact softmax needs the row max before `exp` (score spill for decode, ~3% extra traffic). Prefill attention costs `~2–3×` tensor-core time (4 int8 MMAs per int16 MAC at 2× bf16 rate, plus a max pass), i.e. `~+6–20%` prefill at 4k context and `~+35–70%` at 32k for Llama-8B. Typical chat workloads: `~+3–10%` end to end. Int8 tensor-core throughput on newer parts (some Blackwell SKUs) must be checked.
-3. **Bridge into attention.** Dequant, bias and RoPE between the INT8 GEMM and attention must follow the same elementwise spec (this is where the Qwen QKV gap lives).
-4. **KV provenance at scale.** Exact attention is only as good as the opened K/V rows. Checking all rows is cheap (one Freivalds per row), but the opening is ~16 MB per challenged layer at 4k context on Llama-8B; head sampling reduces it.
-5. **Remaining accuracy runs.** Llama-3.1-8B at 4k and Option A on Llama-3.1-8B; long context beyond 4k; downstream evals, not just perplexity/KL.
+2. **Performance (go/no-go).** Unmeasured; rough accounting only. Decode attention is memory-bound and reads the same KV bytes (bf16 or int16 cache). Exact softmax needs the row max before `exp`; spilling fp32 scores costs a write plus a read per *query* head, about `6%` of the KV read for Llama-8B GQA (32 query vs 8 KV heads). Int8-limb products cost 4 MMAs per int16×int16 MAC for `Q·K`, and 6 for `e·V` with 20-bit weights (4 if weights are capped at 16 bits); Option A's 24-bit operands cost more (9 and 12). At int8's 2× bf16 rate, prefill `Q·K` and `e·V` cost roughly `2–3×` stock tensor-core time, plus a second `Q·K` pass for the max unless a cheap bounding pass is used, i.e. roughly `2.5–4×` stock attention time. For Llama-8B that is very roughly `+10–30%` prefill at 4k context and much more at 32k. Decode overhead is likely single-digit to low-double-digit percent on attention. These numbers are not reliable enough to plan on; E1 replaces them with measurements. Int8 tensor-core throughput on newer parts (some Blackwell SKUs) must also be checked.
+3. **Decode policies and commitments.** The prototype covers greedy and full-vocabulary temperature sampling only. Top-k, top-p, repetition/logit processors and EOS handling need exact integer specs (with defined tie-breaking). The GPU hashing and Merkle commitment behind regenerate-on-challenge are neither implemented nor benchmarked; the prototype copies hidden states to the host and hashes there, so the claimed commit-cost savings are projected, not measured.
+4. **Bridge into attention.** Dequant, bias and RoPE between the INT8 GEMM and attention must follow the same elementwise spec (this is where the Qwen QKV gap lives).
+5. **KV provenance at scale.** Exact attention is only as good as the opened K/V rows. Checking all rows is cheap (one Freivalds per row), but the opening is ~16 MB per challenged layer at 4k context on Llama-8B; head sampling reduces it.
+6. **Accuracy breadth.** Option A on Llama-3.1-8B; contexts beyond 4k; real bf16 inference with the actual FlashAttention kernel as the baseline; downstream evals, not just perplexity/KL on a handful of sequences.
 
 ## 6. Reproduce
 

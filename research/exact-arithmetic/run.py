@@ -117,21 +117,21 @@ def greedy(model, tok, prompt, n):
     return out[0, ids.shape[1]:].tolist()
 
 
-def bitexact_checks(qkv, vs, bits, n_rows=6, seed=0):
+def bitexact_checks(qkv, vs, bits, lb=8, p=20, n_rows=6, seed=0):
     """(1) vectorized spec == independent per-row reference (numpy fp32 + Python ints)
     (2) two-pass evaluation over random tiles in random order == vectorized result."""
     q, k, v, scaling, offset = qkv
     rng = random.Random(seed)
-    full, _ = ia.int_attention(q, k, v, scaling, offset, vs, bits)
+    full, _ = ia.int_attention(q, k, v, scaling, offset, vs, bits, lb=lb, p=p)
     h, nq, d = q.shape
     rows = [(rng.randrange(h), rng.randrange(nq)) for _ in range(n_rows)]
     mism_ref = 0
     for hh, i in rows:
         r = ia.reference_row(q[hh, i].numpy(), k[hh].numpy(), v[hh].numpy(),
-                             vs[hh, 0].numpy(), scaling, i, offset, bits)
+                             vs[hh, 0].numpy(), scaling, i, offset, bits, lb=lb, p=p)
         mism_ref += int(not np.array_equal(r, full[hh, i].numpy()))
 
-    lut = ia.make_lut(8, 20)
+    lut = ia.make_lut(lb, p)
     qi, sq = ia.quant_rows(q, bits[0])
     ki, sk = ia.quant_rows(k, bits[1])
     vi = ia.quant_static(v, vs, bits[2]).long()
@@ -149,7 +149,7 @@ def bitexact_checks(qkv, vs, bits, n_rows=6, seed=0):
         # pass 2: integer sums over tiles in another random order
         rng.shuffle(tiles)
         valid = torch.ones(1, n, dtype=torch.bool)
-        e = ia.int_weights(S, sq[hh, i][None], sk[hh, :n].T, scaling, valid, lut, 8, 20)[0]
+        e = ia.int_weights(S, sq[hh, i][None], sk[hh, :n].T, scaling, valid, lut, lb, p)[0]
         E = torch.zeros((), dtype=torch.int64)
         O = torch.zeros(d, dtype=torch.int64)
         for a, b in tiles:
@@ -157,8 +157,8 @@ def bitexact_checks(qkv, vs, bits, n_rows=6, seed=0):
             O += (e[a:b, None] * vi[hh, a:b]).sum(0)
         tiled = (O.float() / E.float()) * vs[hh, 0]
         mism_tile += int(not torch.equal(tiled, full[hh, i]))
-    return {"bits": bits, "rows_checked": n_rows, "ref_mismatch": mism_ref,
-            "tiled_mismatch": mism_tile}
+    return {"bits": bits, "lb": lb, "p": p, "rows_checked": n_rows,
+            "ref_mismatch": mism_ref, "tiled_mismatch": mism_tile}
 
 
 def bitexact_exact(qkv, kv, n_rows=6, seed=1):
@@ -278,9 +278,9 @@ def main():
     logits_for(model, chunks[0][:256])
     qkv = STATE["capture"]["qkv"]
     res["bitexact"] = {}
-    if STATE["vs"]:
-        bits = parse([v for v in variants if v.startswith("int_")][-1])[1]
-        res["bitexact"]["int"] = bitexact_checks(qkv, STATE["vs"][layer], bits)
+    for var in [v for v in variants if v.startswith("int_")]:
+        _, bits, kw = parse(var)
+        res["bitexact"][var] = bitexact_checks(qkv, STATE["vs"][layer], bits, **kw)
     if "exactA" in variants:
         res["bitexact"]["exactA"] = bitexact_exact(qkv, STATE["kv"][layer])
     print("bitexact:", res["bitexact"], flush=True)

@@ -1,0 +1,5 @@
+integer attention  CPU vs MPS: 100.0000% of outputs bit-identical, max |diff| 0
+float   attention  CPU vs MPS: 46.7510% of outputs bit-identical, max |diff| 1.67e-06
+integer vs float (accuracy):   max |diff| 0.00689
+Option A (bf16 + exact sums) CPU vs MPS: 100.0000% bit-identical, max |diff| 0
+Option A vs stock-bf16 numerics: max |diff| 0.0039

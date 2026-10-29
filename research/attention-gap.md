@@ -203,7 +203,7 @@ Run-to-run determinism:
 
 Script: `redteam/modal/measure_corridor_backends.py`
 
-**Addendum (2026-10-29).** Caveats 1, 3 and 4 disappear if every reduction is an exact integer sum: the result no longer depends on backend, kernel order or hardware, so CPU replay matches the GPU bit for bit. Measured on CPU vs Apple GPU (100% bit-identical attention outputs, vs 43% for ordinary fp32 attention) with lossless accuracy on Qwen2.5-7B and Llama-3.1-8B; NVIDIA is untested. See [`exact-arithmetic.md`](./exact-arithmetic.md).
+**Addendum (2026-10-29).** Caveats 1, 3 and 4 disappear if every reduction is an exact integer sum: the result no longer depends on backend, kernel order or hardware, so CPU replay matches the GPU bit for bit. Measured on CPU vs Apple GPU (100% bit-identical attention outputs, vs 43% for ordinary fp32 attention) with near-lossless accuracy on Qwen2.5-7B and Llama-3.1-8B (small samples); NVIDIA is untested. See [`exact-arithmetic.md`](./exact-arithmetic.md).
 
 ### 1i. Sidecar-to-verifier gap (GPU fp16 SDPA → Rust CPU f64 replay)
 
